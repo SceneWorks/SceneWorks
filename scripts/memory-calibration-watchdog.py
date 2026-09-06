@@ -17,10 +17,17 @@ A hard stop therefore has exactly THREE triggers:
   c. sampler faults that persist for `--telemetry-fault-window` of WALL CLOCK with no good sample.
 
 Every sampler failure path — a per-PID `footprint` timeout, a `footprint` non-zero exit, a parse
-failure, the aggregate telemetry deadline, and the host free-memory/swap probe — is routed through
-that one window (`tolerate_telemetry_fault`). None of them may escalate on its own: a false hard
-stop is a process-group SIGKILL through a live Metal command buffer, which is strictly worse for
-this host than a late stop.
+failure, the aggregate telemetry deadline, the host free-memory/swap probe, and the `/bin/ps`
+process-group census — is routed through that one window (`tolerate_telemetry_fault`). None of them
+may escalate on its own: a false hard stop is a process-group SIGKILL through a live Metal command
+buffer, which is strictly worse for this host than a late stop.
+
+The census is telemetry, not bookkeeping. `/bin/ps` is a source that can be slow or hang exactly
+like `/usr/bin/footprint`, so it carries the same per-probe budget and the same tolerance: a census
+that FAILS is an UNKNOWN view (the previous census stands), never evidence that the guarded root is
+gone. Only a SUCCESSFUL census that lacks the root, or `child.poll()` reporting the sentinel's exit,
+is loss of the guarded process. `monitor_failure` is reserved for an exception that is not a
+telemetry source failing at all — a genuine bug in this monitor.
 """
 
 from __future__ import annotations
@@ -71,6 +78,32 @@ TELEMETRY_TIMEOUT_SECONDS = 10.0
 # must comfortably exceed one full telemetry tick (`TELEMETRY_PROBE_BUDGETS` x the per-probe
 # budget) so a single slow tick can never consume the whole startup allowance.
 CHILD_ATTESTATION_TIMEOUT_SECONDS = 60.0
+# Per-probe budget for the `/bin/ps` process-group census. WHY it is the telemetry budget and not
+# the 1 s it used to hard-code: the census is a whole-system `ps` walk, and on this host under a
+# 100 GB Metal render it measured past a second — `bernini:q8:mlx` was SIGKILLed 85 minutes into a
+# steady 52 GB render, against a 94.8 GB ceiling, by a census that took longer than 1 s (sc-22738).
+# A census is a telemetry source exactly like `/usr/bin/footprint`, so it gets the same budget; the
+# budget exists to bound a HUNG probe, not a slow one. `guard` adopts the run's `--telemetry-timeout`
+# through `set_census_timeout`; the module default is what the sentinel subprocess and direct
+# callers use.
+CENSUS_TIMEOUT_SECONDS = TELEMETRY_TIMEOUT_SECONDS
+# Exceptions a telemetry SOURCE raises: the `ps` census, `/usr/bin/footprint`, `memory_pressure`,
+# `sysctl`, their parsers, and the aggregate staleness deadline. Enumerated so that anything else —
+# an AttributeError, a TypeError, a NameError — remains a monitor BUG and still fails closed through
+# `monitor_failure` instead of being absorbed by the telemetry tolerance.
+TELEMETRY_SOURCE_ERRORS = (
+    # `subprocess.TimeoutExpired` (a probe exceeded its budget) and every other failed probe launch
+    # or reap.
+    subprocess.SubprocessError,
+    # `/bin/ps` or `/usr/bin/footprint` could not be executed; `TimeoutError` (the aggregate
+    # staleness deadline) is an `OSError` subclass.
+    OSError,
+    # Non-zero probe exit or malformed payload, raised by the probes themselves. `RootTelemetryLost`
+    # is a subclass and is refused before this test is reached.
+    RuntimeError,
+    # `int()` and `json` parse failures over probe output; `json.JSONDecodeError` is a `ValueError`.
+    ValueError,
+)
 PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1"
 CAMPAIGN_ENTRY_PROVIDER_PHASES = (
     "common_load",
@@ -113,10 +146,27 @@ class Identity:
     started: str
 
 
-def process_identity(pid: int) -> Identity | None:
+def set_census_timeout(seconds: float) -> None:
+    """Adopt this run's per-probe telemetry budget as the census budget.
+
+    Called once by `guard`. The census functions read the module value at call time, so this
+    reaches `identity_is_live`, `OwnedGroup.refresh` and `root_pids` without threading a budget
+    through every signature.
+    """
+    global CENSUS_TIMEOUT_SECONDS
+    if seconds <= 0:
+        raise RuntimeError("census timeout must be positive")
+    CENSUS_TIMEOUT_SECONDS = seconds
+
+
+def census_budget(timeout: float | None) -> float:
+    return CENSUS_TIMEOUT_SECONDS if timeout is None else timeout
+
+
+def process_identity(pid: int, timeout: float | None = None) -> Identity | None:
     result = subprocess.run(
         ["/bin/ps", "-ww", "-p", str(pid), "-o", "pgid=,state=,lstart="],
-        capture_output=True, text=True, timeout=1, check=False,
+        capture_output=True, text=True, timeout=census_budget(timeout), check=False,
     )
     fields = result.stdout.strip().split(None, 2)
     if result.returncode != 0 or len(fields) != 3 or fields[1].startswith("Z"):
@@ -124,12 +174,12 @@ def process_identity(pid: int) -> Identity | None:
     return Identity(pid, int(fields[0]), fields[1], fields[2])
 
 
-def group_identities(pgid: int) -> list[Identity]:
+def group_identities(pgid: int, timeout: float | None = None) -> list[Identity]:
     probe = subprocess.Popen(
         ["/bin/ps", "-ww", "-axo", "pid=,pgid=,state=,lstart="],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    stdout, stderr = probe.communicate(timeout=1)
+    stdout, stderr = probe.communicate(timeout=census_budget(timeout))
     if probe.returncode != 0:
         raise RuntimeError(f"ps group census failed: {stderr.strip()}")
     members = []
@@ -146,7 +196,7 @@ def identity_is_live(identity: Identity) -> bool:
     return bool(current and current.pgid == identity.pgid and current.started == identity.started)
 
 
-def parent_pids(timeout: float = 1.0) -> dict[int, int]:
+def parent_pids(timeout: float | None = None) -> dict[int, int]:
     """pid → ppid for every live process, or `{}` when the census is unavailable.
 
     Used only to resolve the guarded ROOT process (the sentinel's one non-anchor child). An
@@ -156,7 +206,7 @@ def parent_pids(timeout: float = 1.0) -> dict[int, int]:
     try:
         result = subprocess.run(
             ["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True,
-            timeout=timeout, check=False,
+            timeout=census_budget(timeout), check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -497,6 +547,10 @@ class OwnedGroup:
         self.released = True
 
     def refresh(self) -> list[Identity]:
+        # This runs `/bin/ps` twice over, so it can time out like any other telemetry probe. Every
+        # caller inside the guard loop routes that failure through `tolerate_telemetry_fault`; a
+        # raised census is never an empty group.
+        #
         # Numeric PGID census is safe only while an exact launch-owned anchor proves the original
         # group still exists. The auxiliary anchor outlives a killed sentinel and cannot exit on
         # TERM/INT, closing the between-censuses descendant race without permitting PGID reuse.
@@ -642,6 +696,9 @@ def observe_group(
 
 
 def guard(args: argparse.Namespace) -> int:
+    # The census is a telemetry probe and takes this run's per-probe telemetry budget, not the 1 s
+    # that SIGKILLed a healthy 85-minute render (sc-22738).
+    set_census_timeout(args.telemetry_timeout)
     events = EventChain(args.event_file)
     attested_initial_memory_free_bytes = None
     if args.require_child_attestation:
@@ -880,19 +937,25 @@ def guard(args: argparse.Namespace) -> int:
 
         THE single escalation decision for every sampler failure path — a per-PID `footprint`
         timeout, a `footprint` non-zero exit, a parse failure, the aggregate telemetry deadline,
-        and the host free-memory/swap probe all arrive here. None of them may escalate on its own,
-        and no one of them may spend a budget the others share: only losing the guarded root
-        (`RootTelemetryLost`, which is not a sampling fault but the loss of the thing being
-        guarded) or a fault run that occupies `--telemetry-fault-window` of WALL CLOCK with no good
-        sample is telemetry loss.
+        the `/bin/ps` process-group census, and the host free-memory/swap probe all arrive here.
+        None of them may escalate on its own, and no one of them may spend a budget the others
+        share: only losing the guarded root (`RootTelemetryLost`, which is not a sampling fault but
+        the loss of the thing being guarded) or a fault run that occupies
+        `--telemetry-fault-window` of WALL CLOCK with no good sample is telemetry loss.
 
         A tolerated fault leaves the last good sample standing as the current reading, so the
         ceiling test never sees an unknown footprint.
+
+        An exception that is NOT a telemetry source failing is a bug in this monitor, not a fault
+        to absorb: it is re-raised here so it reaches the `monitor_failure` handler and still fails
+        closed.
         """
         nonlocal telemetry_faults, telemetry_fault_reason
         nonlocal telemetry_fault_since, telemetry_fault_history
         if isinstance(error, RootTelemetryLost):
             return False
+        if not isinstance(error, TELEMETRY_SOURCE_ERRORS):
+            raise error
         now = time.monotonic()
         telemetry_faults += 1
         if telemetry_fault_since is None:
@@ -930,6 +993,36 @@ def guard(args: argparse.Namespace) -> int:
         telemetry_fault_reason = None
         last_good_footprint = footprint
         last_good_pressure = pressure
+
+    # The most recent SUCCESSFUL census. A census that FAILS leaves this view standing: the guard's
+    # picture of the group is the last one it actually took, never an empty group.
+    last_live: list[Identity] = sorted(group.retained, key=lambda item: item.pid)
+
+    def observe_census(phase: str) -> tuple[list[Identity], bool, str | None]:
+        """The guard loop's group census, routed through the one telemetry tolerance.
+
+        Returns `(view, known, telemetry-loss reason)`. `known` is False when the census failed and
+        the fault was tolerated: the previous view is returned, and NO caller may read it as the
+        guarded root being gone. Root loss is only ever a SUCCESSFUL census that lacks it, or
+        `child.poll()` reporting an exit.
+        """
+        nonlocal last_live
+        try:
+            last_live = group.refresh()
+        except MonitorSignal:
+            raise
+        except Exception as error:
+            if tolerate_telemetry_fault(error, phase):
+                return last_live, False, None
+            return last_live, False, f"telemetry_lost:{type(error).__name__}:{error}"
+        return last_live, True, None
+
+    def pause_runtime() -> None:
+        sleep_seconds = args.sample_interval
+        if runtime_deadline is not None:
+            sleep_seconds = min(sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
     def bounded_telemetry_timeout() -> float:
         if runtime_deadline is None:
@@ -1158,11 +1251,16 @@ def guard(args: argparse.Namespace) -> int:
                     or f"runtime_at_or_above_{args.max_runtime_seconds}s"
                 )
                 break
-            live = group.refresh()
+            live, _, census_lost = observe_census("runtime")
+            if census_lost is not None:
+                hard_stop = census_lost
+                break
             status = group.child.poll()
             if status is not None and status < 0:
                 hard_stop = f"launch_sentinel_lost:status_{status}"
                 break
+            # An empty view can only come from a census that SUCCEEDED: a tolerated census failure
+            # returns the previous view, which is never empty while the group exists.
             if not live:
                 if attestation_stream is not None and not child_reported_done:
                     hard_stop = "child_exited_without_completion_attestation"
@@ -1170,8 +1268,16 @@ def guard(args: argparse.Namespace) -> int:
                 return status if status is not None else 0
             if status is not None:
                 # The census preceded poll; normal sentinel cleanup may have completed between
-                # those observations. Refresh before treating a positive status as a failure.
-                if not group.refresh():
+                # those observations. Refresh before treating a positive status as a failure — and
+                # decide nothing at all on a census that failed, which is an unknown view.
+                view, view_known, census_lost = observe_census("runtime")
+                if census_lost is not None:
+                    hard_stop = census_lost
+                    break
+                if not view_known:
+                    pause_runtime()
+                    continue
+                if not view:
                     if attestation_stream is not None and not child_reported_done:
                         hard_stop = "child_exited_without_completion_attestation"
                         break
@@ -1218,7 +1324,11 @@ def guard(args: argparse.Namespace) -> int:
                 failed_at_or_after_deadline = (
                     runtime_deadline is not None and time.monotonic() >= runtime_deadline
                 )
-                if not group.refresh() and group.child.poll() is not None:
+                # The exit check needs its own census, and that census is telemetry too: a failed one
+                # is an unknown view, never proof the group is gone — and never `monitor_failure`,
+                # which is what a bare `refresh()` raising inside this handler used to produce.
+                view, view_known, census_lost = observe_census("runtime")
+                if view_known and not view and group.child.poll() is not None:
                     return group.child.returncode
                 if failed_at_or_after_deadline:
                     hard_stop = (
@@ -1226,13 +1336,11 @@ def guard(args: argparse.Namespace) -> int:
                         or f"runtime_at_or_above_{args.max_runtime_seconds}s"
                     )
                     break
+                if census_lost is not None:
+                    hard_stop = census_lost
+                    break
                 if tolerate_telemetry_fault(error, "runtime"):
-                    sleep_seconds = args.sample_interval
-                    if runtime_deadline is not None:
-                        sleep_seconds = min(
-                            sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
-                    if sleep_seconds > 0:
-                        time.sleep(sleep_seconds)
+                    pause_runtime()
                     continue
                 hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
                 break
@@ -1280,11 +1388,7 @@ def guard(args: argparse.Namespace) -> int:
                         "event": "child_completed", "providerPhase": provider_phase,
                     })
                     attestation_stream.setblocking(False)
-            sleep_seconds = args.sample_interval
-            if runtime_deadline is not None:
-                sleep_seconds = min(sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
+            pause_runtime()
     except MonitorSignal as caught:
         hard_stop = f"monitor_signal_{signal.Signals(caught.signum).name}"
         exit_status = 128 + caught.signum

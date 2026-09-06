@@ -1435,6 +1435,265 @@ def outcome(n):
   pids.forEach(assertGone);
 });
 
+/**
+ * Drive the guard with a scripted `/bin/ps` process-group census. `censusOutcome` is the body of a
+ * Python `def census_outcome(n, state)` called with the 1-based census number: it returns to let the
+ * REAL census run, or raises. `footprintOutcome` is the same contract as `runWithScriptedFootprint`
+ * plus the shared `state`, so a test can make the census fail only at a chosen point in the tick.
+ * Everything else is production code — the real group, the real loop, the real escalation rule.
+ */
+async function runWithScriptedCensus(files, name, censusOutcome, options = {}) {
+  const {
+    mode = "hold", ceiling = 100, maxRuntimeSeconds = "1.5", timeoutMs = 20_000,
+    footprintOutcome = "def footprint_outcome(n, state): return 1",
+  } = options;
+  const launcher = `${files.program}.${name}.py`;
+  await writeFile(launcher, String.raw`import importlib.util, subprocess, sys, time
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+def census_timeout():
+    return subprocess.TimeoutExpired(
+        cmd=["/bin/ps", "-ww", "-axo", "pid=,pgid=,state=,lstart="], timeout=10.0)
+def footprint_timeout():
+    return subprocess.TimeoutExpired(cmd=["/usr/bin/footprint", "-p", "1"], timeout=10.0)
+state = {"census": 0, "samples": 0, "censusFaults": 0, "inFault": False}
+${censusOutcome}
+${footprintOutcome}
+real_group_identities = module.group_identities
+real_process_identity = module.process_identity
+# A slow or hung /bin/ps fails BOTH census probes: the whole-system group walk and the per-PID
+# identity check that OwnedGroup.refresh runs over its anchors first.
+def scripted_census(pgid, timeout=None):
+    state["census"] += 1
+    census_outcome(state["census"], state)
+    return real_group_identities(pgid, timeout)
+def scripted_identity(pid, timeout=None):
+    state["census"] += 1
+    census_outcome(state["census"], state)
+    return real_process_identity(pid, timeout)
+module.group_identities = scripted_census
+module.process_identity = scripted_identity
+class Footprint:
+    def sample(self, pids, timeout, required=()):
+        state["samples"] += 1
+        return footprint_outcome(state["samples"], state)
+module.DarwinFootprintSampler = Footprint
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", ${JSON.stringify(String(ceiling))},
+    "--max-runtime-seconds", ${JSON.stringify(String(maxRuntimeSeconds))},
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.2",
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--", "python3", ${JSON.stringify(files.program)}, ${JSON.stringify(mode)},
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+raise SystemExit(module.guard(module.parse_args()))
+`);
+  let status = 0;
+  try {
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
+  } catch (error) {
+    status = error.code;
+  }
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  return {
+    status,
+    events,
+    faults: events.filter((event) => event.event === "telemetry_fault"),
+    stopped: events.find((event) => event.event === "hard_stop") ?? null,
+  };
+}
+
+test("a census timeout during the runtime tick is a tolerated telemetry fault", async () => {
+  // sc-22738, measured 2026-09-06: `bernini:q8:mlx` rendered 85 minutes at a steady 52 GB against a
+  // 94.8 GB ceiling and was SIGKILLed by `monitor_failure:TimeoutExpired` from the whole-system
+  // `/bin/ps` census on a hard-coded 1 s budget. `ps` is a telemetry SOURCE like `/usr/bin/
+  // footprint`: a census that fails is an unknown view, never a monitor bug and never an empty
+  // group.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-timeout-tolerated", String.raw`
+def census_outcome(n, state):
+    # Well inside the runtime loop: the pre-release observation takes only the first sample.
+    if state["samples"] >= 3 and state["censusFaults"] < 3:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`);
+  assert.equal(result.status, 97);
+  // The guard rode the census outage out to its own wall-time ceiling — it neither failed as a
+  // monitor bug nor read the unknown view as a finished render.
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 3);
+  assert.ok(result.faults.every((event) => event.phase === "runtime"));
+  assert.ok(result.faults.every((event) => event.reason.startsWith("TimeoutExpired:/bin/ps")
+    || event.reason.startsWith("TimeoutExpired:Command '['/bin/ps'")),
+  `census fault reason was ${result.faults[0].reason}`);
+  assert.ok(result.faults.every((event) => event.lastGoodPhysicalFootprintBytes === 1),
+    "a tolerated census must keep the previous good sample as the current reading");
+  const samplesAfter = result.events.filter((event) =>
+    event.event === "sample" && event.eventSequence > result.faults.at(-1).eventSequence);
+  assert.ok(samplesAfter.length > 0, "the guard stopped sampling after the tolerated census fault");
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("a census timeout raised from the post-tick refresh paths is tolerated", async () => {
+  // The census inside `observe_group` was already covered by the tolerance; the `refresh()` calls
+  // around it were not — and the one inside the sampler-fault handler raised THROUGH that handler
+  // straight to `monitor_failure`. Fail the census only while a footprint fault is being handled,
+  // which is exactly that call.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-timeout-post-tick", String.raw`
+def census_outcome(n, state):
+    if state["inFault"]:
+        state["inFault"] = False
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, {
+    footprintOutcome: String.raw`
+def footprint_outcome(n, state):
+    if n == 4:
+        state["inFault"] = True
+        raise footprint_timeout()
+    return 1
+`,
+  });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 2, "one census fault and one footprint fault, both tolerated");
+  // The census fault is recorded FIRST even though the footprint failed first: it can only have
+  // come from the census the sampler-fault handler itself runs.
+  assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2]);
+  assert.match(result.faults[0].reason, /^TimeoutExpired:.*\/bin\/ps/);
+  assert.match(result.faults[1].reason, /^TimeoutExpired:.*footprint/);
+});
+
+test("a successful census that lacks the root stops at once, after tolerated census faults", async () => {
+  // Root-loss detection must survive the tolerance: a census that FAILS is unknown, but the first
+  // SUCCESSFUL one that no longer enumerates the group ends the guard immediately with the child's
+  // own status rather than riding the wall-time ceiling out.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-fault-then-root-gone", String.raw`
+def census_outcome(n, state):
+    if state["samples"] >= 2 and state["censusFaults"] < 2:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, { mode: "complete", maxRuntimeSeconds: "10" });
+  assert.equal(result.status, 0, "the completed group was reported through the child's own status");
+  assert.equal(result.stopped, null, "a completed group is not a hard stop");
+  assert.equal(result.faults.length, 2, "the census faults were tolerated, not escalated");
+});
+
+test("a census outage across the sentinel's exit defers instead of declaring a live group", async () => {
+  // The other half of "a failed census is unknown": once the sentinel reports a status, the guard
+  // re-censuses to tell normal cleanup from a failure. Reading a FAILED census there as the
+  // previous view would call the group live and hard-stop a run that simply finished — so the
+  // guard defers until a census succeeds. The outage here spans the sentinel's exit and then
+  // clears.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-outage-over-exit", String.raw`
+start = time.monotonic()
+def census_outcome(n, state):
+    if 0.15 < time.monotonic() - start < 1.2:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, { mode: "complete", maxRuntimeSeconds: "10" });
+  assert.equal(result.status, 0, "the completed group was reported through the child's own status");
+  assert.equal(result.stopped, null,
+    "an unknown census while the sentinel exits must not become launch_sentinel_failed_with_live_group");
+  assert.ok(result.faults.length > 0, "the census outage was never recorded");
+});
+
+test("an exception that is not a telemetry source stays a monitor failure", async () => {
+  // The tolerance absorbs telemetry SOURCES, enumerated in TELEMETRY_SOURCE_ERRORS. A bug in the
+  // monitor itself must still fail closed as `monitor_failure`, never be ridden out as a fault.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "monitor-bug", String.raw`
+def outcome(n):
+    if n == 2: raise AttributeError("monitor bug")
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "monitor_failure:AttributeError:monitor bug");
+  assert.equal(result.faults.length, 0, "a monitor bug must not be recorded as a telemetry fault");
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("the process-group census carries the per-probe telemetry budget, not a hard-coded second", async () => {
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+# The census is a telemetry probe: it takes the telemetry budget, never the 1 s that SIGKILLed a
+# healthy 85-minute render.
+assert module.CENSUS_TIMEOUT_SECONDS == module.TELEMETRY_TIMEOUT_SECONDS, module.CENSUS_TIMEOUT_SECONDS
+assert module.CENSUS_TIMEOUT_SECONDS >= 10.0, module.CENSUS_TIMEOUT_SECONDS
+budgets = []
+class Recorder:
+    TimeoutExpired = subprocess.TimeoutExpired
+    SubprocessError = subprocess.SubprocessError
+    PIPE = subprocess.PIPE
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    @staticmethod
+    def run(command, **kwargs):
+        budgets.append(kwargs["timeout"])
+        return Recorder.Completed()
+    class Popen:
+        pid = -1
+        returncode = 0
+        def __init__(self, command, **kwargs): pass
+        def communicate(self, timeout=None):
+            budgets.append(timeout)
+            return ("", "")
+module.subprocess = Recorder
+def census_budgets():
+    budgets.clear()
+    module.process_identity(1)
+    module.group_identities(1)
+    module.parent_pids()
+    return list(budgets)
+assert census_budgets() == [10.0, 10.0, 10.0], budgets
+# Every census reads the run's adopted budget, so --telemetry-timeout reaches identity_is_live,
+# OwnedGroup.refresh and root_pids without a per-call argument.
+module.set_census_timeout(0.75)
+assert census_budgets() == [0.75, 0.75, 0.75], budgets
+# The enumerated telemetry sources are the ones the probes actually raise.
+for error in [subprocess.TimeoutExpired(cmd=["/bin/ps"], timeout=1.0), OSError("ps"),
+              TimeoutError("aggregate"), RuntimeError("ps group census failed"),
+              ValueError("malformed")]:
+    assert isinstance(error, module.TELEMETRY_SOURCE_ERRORS), error
+for error in [AttributeError("bug"), TypeError("bug"), NameError("bug"), KeyError("bug")]:
+    assert not isinstance(error, module.TELEMETRY_SOURCE_ERRORS), error
+print("census budget is the telemetry budget")
+`]);
+  assert.match(probe.stdout, /census budget is the telemetry budget/);
+});
+
+test("a guard run adopts its --telemetry-timeout as the census budget", async () => {
+  const files = await fixture();
+  await writeFile(files.telemetry, "1\n");
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+assert module.CENSUS_TIMEOUT_SECONDS == 10.0, module.CENSUS_TIMEOUT_SECONDS
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", "100", "--max-runtime-seconds", "0.5",
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.37",
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--telemetry-file", ${JSON.stringify(files.telemetry)}, "--allow-synthetic-telemetry",
+    "--", "python3", ${JSON.stringify(files.program)}, "hold",
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+module.guard(module.parse_args())
+assert module.CENSUS_TIMEOUT_SECONDS == 0.37, module.CENSUS_TIMEOUT_SECONDS
+print("census budget adopted from the run")
+`], { timeout: 20_000 });
+  assert.match(probe.stdout, /census budget adopted from the run/);
+});
+
 test("the ceiling still stops on the first good sample that breaches it after tolerated faults", async () => {
   const files = await fixture();
   const result = await runWithScriptedFootprint(files, "breach-after-faults", String.raw`
