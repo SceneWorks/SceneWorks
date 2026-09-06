@@ -2463,6 +2463,51 @@
       "overallAllocatorEnvelopeBytes": 52598843702
     },
     {
+      "id": "sana_1600m:mlx:q8:base:base:sana-base-q8-mlx-full-ladder-v1-resident:imc-72d8be0139fb6a8b37d8",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "provider": "sana_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json",
+        "sha256": "cca5ed1b8e9a1473981890dfafe91d16662c3d387331478fac60b6666c3f5f69",
+        "recordId": "imc-72d8be0139fb6a8b37d8",
+        "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
+        "loaderClosureDigest": "0b8d808ed4f970880ae03bef4b47b26fdeac4f1374f5f74add451f9727eb7e84"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4175528,
+        "denoise": 7211557272,
+        "decode": 20650883012
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4175528,
+        "denoise": 9810281080,
+        "decode": 53650711564
+      },
+      "overallAllocatorEnvelopeBytes": 53650711564
+    },
+    {
       "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
@@ -5223,17 +5268,6 @@
       "route": "sana_1600m",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_1600m:mlx:q8",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "mlx",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
