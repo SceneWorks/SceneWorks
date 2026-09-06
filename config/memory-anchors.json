@@ -2097,7 +2097,7 @@
       "overallAllocatorEnvelopeBytes": 42048946176
     },
     {
-      "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
+      "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-73a0ce2270695ffa49e6",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
       "route": "qwen_image",
@@ -2109,7 +2109,7 @@
       "mode": "text_to_image",
       "overlay": null,
       "referenceCount": 0,
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "measuredRegime": {
         "decodeTiled": false,
         "transformerWindowed": false,
@@ -2117,11 +2117,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-d314058df6e188459f3b",
-        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-        "loaderClosureDigest": "6be4fdf7bfd948a62bb216200f62cc53d56a9cc1c7d1e497da90a0f7a76c2774"
+        "path": "docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json",
+        "sha256": "f25d79cb2160f2485ef0b759cb0fa97072d192b261652d68a018d871525c9840",
+        "recordId": "imc-73a0ce2270695ffa49e6",
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "loaderClosureDigest": "7440706fd376b4aa618d9a77fed1ab528d111c315d9be27cfc7889de14fe09ec"
       },
       "geometry": {
         "width": 1024,
@@ -2130,16 +2130,17 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 43908,
-        "denoise": 57110329232,
-        "decode": 63204334376
+        "conditioning": 16596985144,
+        "denoise": 57110265632,
+        "decode": 63425368972
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 44088,
-        "denoise": 63560766632,
-        "decode": 63204334376
+        "conditioning": 19061129276,
+        "denoise": 64068115752,
+        "decode": 63425368972
       },
-      "overallAllocatorEnvelopeBytes": 69654771776
+      "overallAllocatorEnvelopeBytes": 70383219092,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
