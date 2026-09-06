@@ -1315,6 +1315,7 @@ export function validateProviderPhaseTimeline(events, {
       current = { sequence, name: expectedName };
     } else if ([
       "started", "sample", "child_attested", "child_completed", "hard_stop", "terminated",
+      "telemetry_fault",
     ].includes(event.event) && (!Object.hasOwn(event, "providerPhase")
       || !isDeepStrictEqual(event.providerPhase, current))) {
       fail("SC-20216 watchdog event is not bound to the latest authenticated provider phase");
@@ -1339,7 +1340,11 @@ export function validateCampaignEntryFailureEvents(
   const terminatedIndex = events.findIndex((event) => event.event === "terminated");
   const attestedIndex = events.findIndex((event) => event.event === "child_attested");
   const allowedEvents = new Set([
+    // `telemetry_fault` is a TOLERATED sampling tick (a group member raced its own exit, or the
+    // sampler timed out): the guard records it and keeps sampling. Only the guarded root's loss
+    // or a fault run reaching the tolerance becomes a `hard_stop`.
     "started", "sample", "child_attested", "provider_phase", "hard_stop", "terminated",
+    "telemetry_fault",
   ]);
   const samples = events.filter((event) => event.event === "sample");
   if (started.length !== 1 || hardStops.length !== 1 || terminated.length !== 1

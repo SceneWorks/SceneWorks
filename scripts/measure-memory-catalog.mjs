@@ -1819,22 +1819,26 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
 /**
  * The two ceilings the guard runs with, derived from the probe and the incident:
  *
- * * `maxFootprintBytes` — the guarded group's physical-footprint hard stop — is the SMALLEST of
- *   the device wired ceiling the probe resolved (when the adapter reports one), the incident
- *   footprint less the unified reserve, and host memory less the unified reserve. The wired limit
- *   is host POLICY (`SCENEWORKS_MLX_WIRED_LIMIT_BYTES` / `iogpu.wired_limit_mb` /
- *   `kern.memorystatus_wired_mem_limit` / MLX's default), and raising it raises the kill line up to
- *   host RAM; the incident term is what keeps the ceiling under 96,970,084,480 bytes whatever the
- *   host policy says (sc-22738 review).
+ * * `maxFootprintBytes` — the guarded group's physical-footprint hard stop — is the SMALLER of the
+ *   incident footprint less the unified reserve and host memory less the unified reserve. The
+ *   incident term is what keeps the kill line under 96,970,084,480 bytes on any host large enough
+ *   to reach it (sc-22738 review).
  * * `minMemoryFreeBytes` — the whole-host free floor — is the unified reserve, an ABSOLUTE OS
  *   reserve independent of the wired limit. The watchdog compares it against `memory_pressure`'s
  *   whole-host free reading, which the guarded group's own footprint reduces: a floor of
  *   `memoryBytes − wiredLimitBytes` would have turned the per-group ceiling into a cap on TOTAL
  *   host use and killed a group at the ceiling less the host baseline (sc-22738 review).
+ *
+ * `wiredLimitBytes` is NOT a term in either ceiling. It is a Metal-buffer ceiling; the watchdog
+ * samples the kernel's `phys_footprint`, which counts every non-Metal page the process owns too,
+ * so the two quantities are not comparable. On this 128 GiB host the wired limit (87,044,670,532)
+ * as a hard stop killed `flux2_dev:bf16` at 87,140,069,928 bytes and 660 s — an anchor the same
+ * host had already rendered to completion unguarded. The probe still reports and records it (it is
+ * how the MLX lane's own admission reasons about device memory); it is advisory here, never a kill
+ * line (sc-22738, measured 2026-09-06).
  */
-export function watchdogCeilings({ memoryBytes, wiredLimitBytes }) {
+export function watchdogCeilings({ memoryBytes }) {
   const bounds = [LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - UNIFIED_RESERVE_BYTES, memoryBytes - UNIFIED_RESERVE_BYTES];
-  if (wiredLimitBytes !== undefined) bounds.push(wiredLimitBytes);
   return { maxFootprintBytes: Math.min(...bounds), minMemoryFreeBytes: UNIFIED_RESERVE_BYTES };
 }
 
@@ -1847,8 +1851,8 @@ export function watchdogCeilings({ memoryBytes, wiredLimitBytes }) {
  * second and terminates the whole group the instant it reaches the ceiling, before the host
  * watchdog can panic.
  *
- * Both ceilings are DERIVED (`watchdogCeilings`) from the adapter's probe and the incident, never
- * chosen here. No wall-time ceiling: a runtime-complete video anchor runs six renders, and time is
+ * Both ceilings are DERIVED (`watchdogCeilings`) from the adapter's probed host memory and the
+ * incident, never chosen here; the probe's wired limit is validated but is not a kill line. No wall-time ceiling: a runtime-complete video anchor runs six renders, and time is
  * not the hazard this guard exists for. Darwin-only by construction — the footprint sampler is
  * `/usr/bin/footprint`.
  */
@@ -1859,7 +1863,7 @@ export function watchdogGuard({ hardware, eventFile }) {
     if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) fail("watchdog guard needs a positive hardware.wiredLimitBytes");
     if (wiredLimitBytes > memoryBytes) fail("watchdog guard: wired ceiling above host memory");
   }
-  const { maxFootprintBytes, minMemoryFreeBytes } = watchdogCeilings({ memoryBytes, wiredLimitBytes });
+  const { maxFootprintBytes, minMemoryFreeBytes } = watchdogCeilings({ memoryBytes });
   if (maxFootprintBytes <= 0) fail(`watchdog guard: no positive footprint ceiling on a ${memoryBytes}-byte host`);
   return [
     // This runner's own tool, resolved against ITS checkout: the guard is not an artifact of the

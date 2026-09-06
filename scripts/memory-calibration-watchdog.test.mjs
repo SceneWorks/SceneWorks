@@ -181,7 +181,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 class Footprint:
-    def sample(self, pids, timeout): return 1
+    def sample(self, pids, timeout, required=()): return 1
 class Pressure:
     def __init__(self, host_memory_bytes): self.index = 0
     def sample(self, timeout):
@@ -259,7 +259,7 @@ spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCH
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 state = {"samples": 0, "failed": False, "delayed": False}
 class Footprint:
-    def sample(self, pids, timeout):
+    def sample(self, pids, timeout, required=()):
         state["samples"] += 1
         if state["samples"] == 1: return 1
         state["failed"] = True
@@ -988,8 +988,9 @@ module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module;
 identity = module.process_identity(os.getpid())
 class Group:
     def refresh(self): return [identity]
+    def root_pids(self, live): return [identity.pid]
 class Footprint:
-    def sample(self, pids, timeout): time.sleep(0.06); return 1
+    def sample(self, pids, timeout, required=()): time.sleep(0.06); return 1
 class Pressure:
     def sample(self, timeout): time.sleep(0.06); return module.HostPressure(90, 900, 900)
 try: module.observe_group(Group(), Footprint(), Pressure(), 0.1)
@@ -1114,28 +1115,132 @@ print("stale identity refused")
   assert.match(probe.stdout, /stale identity refused/);
 });
 
-test("footprint parser requires exact PID parity and sums a complete multi-PID sample", async () => {
+test("footprint parser sums the survivors and refuses only foreign, duplicate or empty telemetry", async () => {
+  // sc-22738, measured 2026-09-06: a real MLX capture spawns and reaps compiler/`xcrun` helpers
+  // constantly, so PIDs enumerated by the group census routinely exit before `footprint` reads
+  // them. Treating that as a PID-set mismatch SIGKILLed live renders (`krea_2_raw:bf16` at 274 s
+  // with missing=[16262, 39495], `krea_2_raw:q4` at 167 s with missing=[40001]).
   const probe = await execFileAsync("python3", ["-c", String.raw`
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+parse = module.DarwinFootprintSampler.parse_processes
 payload = {"processes": [
     {"pid": 11, "auxiliary": {"phys_footprint": 40}},
     {"pid": 22, "auxiliary": {"phys_footprint": 60}},
 ]}
-assert module.DarwinFootprintSampler.parse_processes([11, 22], payload) == 100
-for mutated in [
-    {"processes": payload["processes"][:1]},
-    {"processes": [payload["processes"][0], payload["processes"][0]]},
-    {"processes": [*payload["processes"], {"pid": 33, "auxiliary": {"phys_footprint": 1}}]},
+assert parse([11, 22], payload) == 100
+assert parse([11, 22], payload, [11, 22]) == 100
+# A tracked PID that vanished between the census and the sample is DROPPED, and the survivors are
+# summed: the sample proceeds, the next tick re-enumerates the group.
+assert parse([11, 22], {"processes": payload["processes"][:1]}) == 40
+assert parse([11, 22, 33], payload, [22]) == 100
+for mutated, required in [
+    ({"processes": [payload["processes"][0], payload["processes"][0]]}, ()),
+    ({"processes": [*payload["processes"], {"pid": 33, "auxiliary": {"phys_footprint": 1}}]}, ()),
+    ({"processes": []}, ()),
 ]:
     try:
-        module.DarwinFootprintSampler.parse_processes([11, 22], mutated)
+        parse([11, 22], mutated, required)
     except RuntimeError:
         pass
     else:
-        raise AssertionError("partial, duplicate, or extra PID telemetry was accepted")
-print("exact footprint PID set required")
+        raise AssertionError("duplicate, foreign, or empty PID telemetry was accepted")
+# Losing the guarded ROOT is telemetry loss, and it is its own category so the tolerance cannot
+# swallow it.
+try:
+    parse([11, 22], {"processes": payload["processes"][1:]}, [11])
+except module.RootTelemetryLost:
+    pass
+else:
+    raise AssertionError("the guarded root vanishing from its own sample was accepted")
+assert issubclass(module.RootTelemetryLost, RuntimeError)
+print("survivor sum with root parity required")
 `]);
-  assert.match(probe.stdout, /exact footprint PID set required/);
+  assert.match(probe.stdout, /survivor sum with root parity required/);
+});
+
+test("a transient child exiting mid-sample is tolerated; the guarded root vanishing is not", async () => {
+  // The end-to-end shape of the same defect, through `observe_group` and the guard loop: the
+  // census enumerates a helper that exits before the sampler reads it. `required` carries only the
+  // guarded root, so the tick proceeds on the survivors.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+root = module.Identity(101, 100, "S", "root")
+helper = module.Identity(202, 100, "S", "helper")
+class Group:
+    def refresh(self): return [root, helper]
+    def root_pids(self, live): return [root.pid]
+class Footprint:
+    """The transient helper exits between the census and the sample."""
+    def sample(self, pids, timeout, required=()):
+        assert list(required) == [root.pid], required
+        payload = {"processes": [{"pid": root.pid, "auxiliary": {"phys_footprint": 7}}]}
+        return module.DarwinFootprintSampler.parse_processes(pids, payload, required)
+live, footprint, pressure, _ = module.observe_group(Group(), Footprint(), None, 1.0)
+assert footprint == 7, footprint
+assert [item.pid for item in live] == [root.pid, helper.pid]
+class RootGone:
+    def sample(self, pids, timeout, required=()):
+        payload = {"processes": [{"pid": helper.pid, "auxiliary": {"phys_footprint": 7}}]}
+        return module.DarwinFootprintSampler.parse_processes(pids, payload, required)
+try:
+    module.observe_group(Group(), RootGone(), None, 1.0)
+except module.RootTelemetryLost:
+    pass
+else:
+    raise AssertionError("the guarded root vanishing from its sample did not stop the guard")
+print("transient child tolerated, root loss stops")
+`]);
+  assert.match(probe.stdout, /transient child tolerated, root loss stops/);
+});
+
+test("a transient sampling fault is re-enumerated; a persistent one is telemetry loss", async () => {
+  const files = await fixture();
+  const launcher = `${files.program}.transient-fault.py`;
+  // Two consecutive failed ticks then a recovery, followed by a permanent failure: the guard rides
+  // out the first run (no hard stop, no SIGKILL of a live render) and stops only once a fault run
+  // reaches the tolerance.
+  await writeFile(launcher, String.raw`import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+assert module.TELEMETRY_FAULT_TOLERANCE == 3
+state = {"samples": 0}
+class Footprint:
+    def sample(self, pids, timeout, required=()):
+        state["samples"] += 1
+        if state["samples"] in (2, 3) or state["samples"] >= 5:
+            raise RuntimeError("transient_source_failure")
+        return 1
+module.DarwinFootprintSampler = Footprint
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", "100", "--max-runtime-seconds", "30",
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.2",
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--", "python3", ${JSON.stringify(files.program)}, "hold",
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+raise SystemExit(module.guard(module.parse_args()))
+`);
+  let status = 0;
+  try {
+    await execFileAsync("python3", [launcher], { timeout: 20_000 });
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 97);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  const faults = events.filter((event) => event.event === "telemetry_fault");
+  assert.deepEqual(faults.map((event) => event.consecutiveFaults), [1, 2, 1, 2],
+    "two tolerated ticks, a recovery that resets the run, then two more");
+  assert.ok(faults.every((event) => event.reason === "RuntimeError:transient_source_failure"));
+  const samplesAfterFirstFault = events.filter((event) =>
+    event.event === "sample" && event.eventSequence > faults[0].eventSequence);
+  assert.ok(samplesAfterFirstFault.length > 0, "the guard kept sampling across the tolerated run");
+  const stopped = events.find((event) => event.event === "hard_stop");
+  assert.match(stopped.reason, /^telemetry_lost:RuntimeError:transient_source_failure$/);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
 });
