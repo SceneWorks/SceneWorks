@@ -28,6 +28,21 @@ unix_path() {
   fi
 }
 
+# `file://` URL of a local directory, in the ONE spelling Git for Windows accepts.
+#
+# Git parses a `file://` URL itself rather than handing it to the OS, and on Windows it only
+# recognises a drive path in the MIXED form with a leading slash -- `file:///D:/dir`. Neither the
+# unix form (`file:///d/dir`, no such path to Windows) nor the native form (`file://D:\dir`, the
+# backslashes read as a host) resolves. `cygpath -m` is exactly that mixed spelling; on macOS the
+# unix path is already absolute, so `file://` + the path is the whole answer.
+file_url() {
+  if command -v cygpath >/dev/null 2>&1; then
+    printf 'file:///%s' "$(cygpath -m "$1")"
+  else
+    printf 'file://%s' "$1"
+  fi
+}
+
 # One path segment, exactly the shape `measure-memory-catalog.mjs --campaign` accepts. Validated
 # here as well because it is interpolated into a branch name and a directory name.
 require_campaign() {
