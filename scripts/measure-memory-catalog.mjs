@@ -304,6 +304,16 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
   z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
   krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
+  // sc-22735. The UNDISTILLED Krea 2 base is a separate engine provider (`krea_2_raw`) served by
+  // the same two crates as Turbo (`mlx-gen-krea` / `candle-gen-krea`) off its OWN tiered rehost, so
+  // it gets its own env family: a raw plan satisfied by Turbo weights would re-label Turbo's peaks
+  // as the true-CFG base model's, the `z_image` / `z_image_turbo` split for the same reason.
+  krea_2_raw: { env: "KREA_RAW", repo: "SceneWorks/krea-2-raw-mlx", arms: ["mlx", "candle"] },
+  // sc-22735. The VIDEO member of the family, and MLX-ONLY: `mlx-gen-krea-realtime` is the only
+  // engine that registers it, the worker's video route table has no candle arm for it, and every
+  // manifest download is `platforms: ["macos"]`. The tier root is the `<tier>/` subdir of the one
+  // rehost, the same shape as every other tiered family here.
+  krea_realtime_14b: { env: "KREA_REALTIME", repo: "SceneWorks/krea-realtime-14b-mlx", arms: ["mlx"] },
   // sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`)
   // on both lanes, each with its own independently pinned tiered rehost. These rows are keyed by
   // MODEL id rather than provider id — `classifyAnchor` prefers a model-keyed family — because the
