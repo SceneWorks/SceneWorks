@@ -548,6 +548,24 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * Rows are keyed by PROVIDER by default; sc-22734 adds MODEL-keyed rows (which must declare their
  * `provider`) for the case where several catalog models ride one engine id but ship their own
  * independently pinned artifacts. See `familyFor`.
+ *
+ * ## What is NOT in this table, and why that is not a gap (sc-22738)
+ *
+ * STRICT-CONTROL OVERLAY PROVIDERS — `z_image_control`, `z_image_turbo_control`,
+ * `krea_2_turbo_control` and their siblings in `SHIPPED_CONTROL_WEIGHTS`
+ * (`crates/sceneworks-core/src/control_weights.rs`) — are engine ids for a base catalog entry
+ * loaded WITH a ControlNet attached. They ship no tiered downloads because they are not manifest
+ * models at all, so they can never be one of epic 22723 E1's `<modelId>:<tier>:<backend>` cells and
+ * `--list` has nothing to ask about them. `config/inference-provider-closures.json` declares four
+ * such lanes and those declarations must STAY — production control renders load under the `_control`
+ * provider id and their route currency is graded per (backend, provider) — so the closure table and
+ * this table are DELIBERATELY not in bijection. `scripts/stale-lane-report.mjs` reports them under
+ * their own heading (`shippedControlOverlayProviders`) rather than as "uncapturable".
+ *
+ * `arms` is bound to the Rust dispatch by `every declared adapter arm is a provider that lane's
+ * adapter really dispatches` (scripts/measure-memory-catalog.test.mjs): a declared arm with no
+ * `match provider` arm behind it reds, so `no_adapter_arm` is derived from the adapter and not from
+ * this table's spelling.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },

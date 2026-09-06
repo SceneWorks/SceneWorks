@@ -469,8 +469,9 @@ pub(crate) fn load_for_model_with(
 /// registrations, whose contract builders are themselves weights-free.
 ///
 /// The planned rung is exactly what `memory-calibration-harness.mjs` `planAnchor` sends: the row's
-/// own `rung` when it states one, else the lane default from `ANCHOR_STRATEGY` (mlx `resident`,
-/// candle `staged_residency`). A change to either side that this does not follow is a red here.
+/// own `rung` when it states one, else the lane default. That default is not respelled here
+/// (sc-22738) — both sides read `config/anchor-lane-default-strategy.json`, so a change to either
+/// side that this does not follow is a red here.
 #[cfg(all(
     test,
     any(
@@ -491,11 +492,22 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
     // else out of the entry.
     let anchors = plan["anchors"].as_object().expect("plan anchors object");
     let registry = media();
-    let lane_default_rung = match lane {
-        "mlx" => "resident",
-        "candle" => "staged_residency",
-        other => panic!("unknown lane {other}"),
-    };
+    // sc-22738: the lane default is READ, never respelled. `memory-calibration-harness.mjs`'s
+    // `ANCHOR_STRATEGY` — the composition `planAnchor` applies to every row with no `strategy`
+    // override — is built from this same file, so a change to the JS default reaches this walk
+    // instead of leaving it asserting a rung the plan no longer captures at. Fail-closed: an absent
+    // lane or a non-string rung panics rather than falling back to a default nothing declared.
+    let lane_defaults: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../config/anchor-lane-default-strategy.json"
+    ))
+    .expect("anchor lane default strategy parses");
+    let lane_default_rung = lane_defaults["lanes"][lane]["rung"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("config/anchor-lane-default-strategy.json declares no rung for lane {lane}")
+        })
+        .to_owned();
+    let lane_default_rung = lane_default_rung.as_str();
     let mut checked = 0_usize;
     let mut overridden = 0_usize;
     let mut forced = 0_usize;

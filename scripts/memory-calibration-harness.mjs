@@ -1402,15 +1402,44 @@ export function evidenceSemantics(record, revisions) {
  * effective rung to be `resident` exactly when the model's manifest lane block declares a
  * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
  * architecture does not force.
+ *
+ * ## Where the values live (sc-22738)
+ *
+ * NOT here. `crates/sceneworks-worker/src/inference_runtime.rs` walks this same plan and asks each
+ * row's contract to `validate_selection` the rung it will be captured at, and it used to RESPELL
+ * these two defaults in Rust (`lane_default_rung`: mlx -> "resident", candle -> "staged_residency")
+ * with nothing binding the two spellings — a lane default changed here would have left the Rust
+ * walk asserting the OLD rung and still green. Both sides now read
+ * `config/anchor-lane-default-strategy.json`, the Rust one through `include_str!`, so a change to
+ * the composition is a change to one file and reds the walk unless the contracts follow.
+ *
+ * Read synchronously at module load and fail-closed: a missing lane, rung or engaged-rung list
+ * throws here rather than degrading to a default composition no law authorized.
  */
-export const ANCHOR_STRATEGY = Object.freeze({
-  mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
-  candle: Object.freeze({
-    rung: "staged_residency",
-    engagedRungs: Object.freeze(["resident", "staged_residency"]),
-    parameters: Object.freeze({}),
-  }),
-});
+export const ANCHOR_LANE_DEFAULT_STRATEGY_PATH = "config/anchor-lane-default-strategy.json";
+
+function loadAnchorStrategy() {
+  const declared = JSON.parse(
+    readFileSync(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  ).lanes;
+  const lanes = {};
+  for (const backend of ["mlx", "candle"]) {
+    const entry = declared?.[backend];
+    if (typeof entry?.rung !== "string" || !Array.isArray(entry.engagedRungs) || entry.engagedRungs.length === 0) {
+      fail(
+        `${ANCHOR_LANE_DEFAULT_STRATEGY_PATH} declares no usable default composition for the ${backend} lane`,
+      );
+    }
+    lanes[backend] = Object.freeze({
+      rung: entry.rung,
+      engagedRungs: Object.freeze([...entry.engagedRungs]),
+      parameters: Object.freeze({}),
+    });
+  }
+  return Object.freeze(lanes);
+}
+
+export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
 const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;

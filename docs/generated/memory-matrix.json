@@ -154,12 +154,12 @@
       {
         "id": "minimax_h3",
         "epic": 17137,
-        "reason": "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all"
+        "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       },
       {
         "id": "minimax_h3_ref",
         "epic": 17137,
-        "reason": "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all"
+        "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
     "anchors": 15,

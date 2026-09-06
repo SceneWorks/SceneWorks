@@ -7,11 +7,14 @@ import { fileURLToPath } from "node:url";
 
 import { digestOccurrences, recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
+import { PROVIDER_FAMILIES } from "./measure-memory-catalog.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import {
   CAPTURABILITY_SOURCE,
   MARGIN_SOURCE,
+  OVERLAY_PROVIDER_SOURCE,
   SOURCE_PATHS,
+  shippedControlOverlayProviders,
   adapterCapturableProviders,
   buildStaleLaneReport,
   evidenceBindings,
@@ -130,6 +133,10 @@ function fixtureFrom({
   // Every provider the fixtures declare has an arm BY DEFAULT, so pre-sc-18212 expectations (an
   // unmeasured lane is "pending capture") keep holding; capturability tests override these.
   adapterSources = { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta", "gamma"]) },
+  // sc-22738: the strict-control overlay partition is derived from this table. The fixture default
+  // declares one overlay id no fixture lane uses, so the partition is empty here and the pre-sc-22738
+  // expectations (an armless lane is "uncapturable") keep holding; overlay tests override it.
+  controlWeightsSource = controlWeightsSourceFor(["fixture_only_control"]),
 }) {
   return {
     liveDigests: new Map(lanes),
@@ -141,7 +148,20 @@ function fixtureFrom({
     manifestBody: JSON.stringify({ models }, null, 2),
     plan,
     adapterSources,
+    controlWeightsSource,
   };
+}
+
+/** A `SHIPPED_CONTROL_WEIGHTS` table in the exact shape `shippedControlOverlayProviders` parses. */
+function controlWeightsSourceFor(engineIds) {
+  return [
+    "pub const SHIPPED_CONTROL_WEIGHTS: &[ShippedControlWeight] = &[",
+    ...engineIds.map(
+      (id) =>
+        `    ShippedControlWeight { engine_id: "${id}", repo: "org/repo", file: "f.safetensors", revision: "0" },`,
+    ),
+    "];",
+  ].join("\n");
 }
 
 /**
@@ -505,16 +525,25 @@ test("the real corpus report is internally consistent, whatever the corpus curre
   // ABSENT, which E8 forbids CI from failing on. The derivation directly above (missingLanes is
   // exactly the not-covered lanes, computed from the same three gates) is unchanged and still
   // grades the data that IS present.
-  // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
-  // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
-  // second, cross-cutting membership.
+  // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable") —
+  // or, since sc-22738, in `overlayProviderLanes` when the provider is a strict-control overlay,
+  // which is a SCOPE partition rather than an adapter-work one. Measured armless lanes stay in the
+  // staleness partition and appear in one of those two lists as a second, cross-cutting membership.
+  const armless = [...report.uncapturableLanes, ...report.overlayProviderLanes].filter(
+    (lane) => lane.status === "uncapturable",
+  );
   const all = [
     ...report.staleLanes,
     ...report.currentLanes,
     ...report.unmeasuredLanes,
-    ...report.uncapturableLanes.filter((lane) => lane.status === "uncapturable"),
+    ...armless,
   ];
   const universe = [...all, ...report.undeclaredLanes];
+  assert.equal(
+    new Set(all.map((lane) => lane.lane)).size,
+    all.length,
+    "the four measurement partitions are disjoint",
+  );
 
   assert.equal(all.length, report.totals.declaredLanes);
   assert.equal(all.length, sources.liveDigests.size);
@@ -523,7 +552,7 @@ test("the real corpus report is internally consistent, whatever the corpus curre
     report.totals.staleLanes +
       report.totals.currentLanes +
       report.totals.unmeasuredLanes +
-      report.uncapturableLanes.filter((lane) => lane.status === "uncapturable").length,
+      armless.length,
   );
   assert.equal(report.totals.staleBindings, all.reduce((sum, lane) => sum + lane.bindings.stale, 0));
   assert.equal(report.totals.staleRecords, all.reduce((sum, lane) => sum + lane.records.stale, 0));
@@ -565,10 +594,32 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       `${lane.lane} capturable flag matches the parsed adapter arms`,
     );
   }
+  // sc-22738: the armless population splits in two. A strict-control overlay provider is reported
+  // as out of the E1 cell universe rather than as adapter work, and the two lists together are
+  // still exactly the lanes with no arm — nothing may fall out of both.
+  const overlayLanes = new Set(report.capturability.overlayProviderLanes);
+  assert.deepEqual(
+    universe
+      .filter((lane) => !lane.capturable && !overlayLanes.has(lane.lane))
+      .map((lane) => lane.lane)
+      .sort(),
+    [...report.capturability.uncapturableLanes].sort(),
+    "the uncapturable list is exactly the armless lanes that are not overlay providers",
+  );
+  assert.deepEqual(
+    report.overlayProviderLanes.map((lane) => lane.lane).sort(),
+    [...overlayLanes].sort(),
+    "the overlay-lane objects and the cross-cutting id list agree",
+  );
   assert.deepEqual(
     universe.filter((lane) => !lane.capturable).map((lane) => lane.lane).sort(),
-    [...report.capturability.uncapturableLanes].sort(),
-    "the uncapturable list is exactly the lanes without an arm",
+    [
+      ...new Set([
+        ...report.capturability.uncapturableLanes,
+        ...universe.filter((lane) => !lane.capturable && overlayLanes.has(lane.lane)).map((lane) => lane.lane),
+      ]),
+    ].sort(),
+    "every armless lane is reported under exactly one of the two headings",
   );
   for (const lane of report.unmeasuredLanes) {
     assert.ok(lane.capturable, `${lane.lane} is pending capture, so an adapter arm must exist`);
@@ -1234,4 +1285,112 @@ test("the human report separates pending capture from uncapturable, and prints t
   assert.match(text, /CAPTURE/);
   assert.match(text, /NO ARM/, "an armless stale lane is flagged in the ranked table");
   assert.ok(text.includes(CAPTURABILITY_SOURCE));
+});
+
+// sc-22738 (feature-end round 1). The strict-control OVERLAY partition.
+//
+// `config/inference-provider-closures.json` declares four lanes whose provider is a ControlNet
+// overlay of a base catalog entry — `candle:krea_2_turbo_control`, `candle:z_image_control`,
+// `mlx:krea_2_turbo_control`, `mlx:z_image_turbo_control`. None of them is a manifest model, so none
+// can ever be an epic 22723 E1 `<modelId>:<tier>:<backend>` cell and `measure-memory-catalog.mjs
+// --list` correctly never asks about them. Three of the four have no adapter arm, and the report
+// used to grade those "uncapturable" — telling the reader adapter work was outstanding for a lane
+// that is out of scope by construction. The declarations must STAY: production control renders load
+// under these provider ids and their route currency is graded per (backend, provider).
+test("strict-control overlay providers are reported as out of scope, not as uncapturable", async () => {
+  const sources = await loadSources();
+  const report = buildStaleLaneReport(sources);
+  const catalogIds = new Set(sources.manifest.models.map((model) => model.id));
+
+  // The partition is derived from the production allow-list, not from a list kept here.
+  assert.deepEqual(
+    report.capturability.overlayProviders,
+    [
+      ...shippedControlOverlayProviders(
+        sources.controlWeightsSource,
+        sources.manifest,
+        SOURCE_PATHS.controlWeights,
+      ),
+    ],
+  );
+  assert.ok(
+    report.capturability.overlayProviders.length > 0,
+    "the control allow-list still names at least one non-catalog overlay engine",
+  );
+  for (const provider of report.capturability.overlayProviders) {
+    assert.ok(!catalogIds.has(provider), `${provider} is a catalog model, not an overlay provider`);
+  }
+  // `sdxl` is an engine_id in the SAME table and IS a catalog model; it must never be partitioned
+  // out, or a real tiered lane could leave the uncapturable grading through this door.
+  assert.ok(catalogIds.has("sdxl"));
+  assert.ok(!report.capturability.overlayProviders.includes("sdxl"));
+
+  // Every declared closure lane whose provider is an overlay lands under the overlay heading, and
+  // none of them is graded uncapturable.
+  const declaredOverlay = [...sources.liveDigests.keys()]
+    .filter((lane) =>
+      report.capturability.overlayProviders.includes(lane.split(":").slice(1).join(":")),
+    )
+    .sort();
+  assert.ok(declaredOverlay.length > 0, "the closure table still declares an overlay-provider lane");
+  assert.deepEqual(report.capturability.overlayProviderLanes.slice().sort(), declaredOverlay);
+
+  // …and the partition is the RIGHT one, judged from three sources the report does not consult
+  // together: a declared closure lane is outside the E1 cell universe exactly when its provider is
+  // neither a manifest model (so `--list` can key no `<modelId>:<tier>:<backend>` cell on it) nor
+  // any `PROVIDER_FAMILIES` engine provider (so no anchor can name it). Without this the case would
+  // only check the derivation against itself: dropping `z_image_control` from
+  // `SHIPPED_CONTROL_WEIGHTS` would move `candle:z_image_control` back under "uncapturable" and
+  // every self-referential assertion above would still hold.
+  const familyProviders = new Set(
+    Object.entries(PROVIDER_FAMILIES).map(([key, family]) => family.provider ?? key),
+  );
+  assert.deepEqual(
+    declaredOverlay,
+    [...sources.liveDigests.keys()]
+      .filter((lane) => {
+        const provider = lane.split(":").slice(1).join(":");
+        return !catalogIds.has(provider) && !familyProviders.has(provider);
+      })
+      .sort(),
+    "the overlay partition must be exactly the declared lanes no E1 cell can ever key on",
+  );
+  for (const lane of declaredOverlay) {
+    assert.ok(
+      !report.capturability.uncapturableLanes.includes(lane),
+      `${lane} is an overlay provider and must not be graded uncapturable`,
+    );
+  }
+  assert.equal(report.totals.overlayProviderLanes, report.overlayProviderLanes.length);
+
+  const text = formatReport(report);
+  assert.match(
+    text,
+    /STRICT-CONTROL OVERLAY PROVIDERS — OUT OF THE E1 CELL UNIVERSE, not uncapturable/,
+  );
+  assert.ok(text.includes(OVERLAY_PROVIDER_SOURCE));
+  for (const lane of declaredOverlay) assert.ok(text.includes(lane), `${lane} is printed`);
+});
+
+// The derivation fails CLOSED: it may never quietly yield an empty partition, which would put the
+// overlay lanes back under "uncapturable" without anything saying so.
+test("the overlay-provider derivation refuses a table it cannot read", () => {
+  const manifest = { models: [{ id: "sdxl" }] };
+  assert.throws(
+    () => shippedControlOverlayProviders("// the table moved", manifest, "x.rs"),
+    /SHIPPED_CONTROL_WEIGHTS is no longer a parseable table/,
+  );
+  assert.throws(
+    () =>
+      shippedControlOverlayProviders(
+        "pub const SHIPPED_CONTROL_WEIGHTS: &[ShippedControlWeight] = &[\n];",
+        manifest,
+        "x.rs",
+      ),
+    /names no engine_id at all/,
+  );
+  assert.throws(
+    () => buildStaleLaneReport({ ...twoLaneFixture(), controlWeightsSource: undefined }),
+    /SHIPPED_CONTROL_WEIGHTS is no longer a parseable table/,
+  );
 });
