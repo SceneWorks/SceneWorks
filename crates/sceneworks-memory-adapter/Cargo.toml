@@ -20,6 +20,11 @@ mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "563c44
 mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
 mlx-gen-krea-realtime = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
+# sc-22738: the Mage arm reads the pinned provider's OWN fit model
+# (`mlx_gen_mage::memory::generation_peak_gb`) to build the admission budget that provider requires
+# a caller to present, rather than restating the engine's measured anchors in the adapter — the
+# same reason sc-22736 added the Wan/SCAIL-2 crates to the candle lane.
+mlx-gen-mage = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
 mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
 mlx-gen-instantid = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
 mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "563c44e1652043bf8bd018de79cadadc393f91f2", optional = true }
@@ -47,7 +52,7 @@ sceneworks-core = { path = "../sceneworks-core" }
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
+mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
 candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-wan", "dep:runtime-cuda"]
 
 [[bin]]

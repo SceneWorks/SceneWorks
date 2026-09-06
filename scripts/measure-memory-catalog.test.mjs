@@ -58,11 +58,16 @@ import {
   guardsCapture,
   probeAdapter,
   watchdogGuard,
+  MINIMAX_UPSTREAM_ROOT_FILES,
+  MINIMAX_TEXT_ENCODER_CONFIG,
+  MINIMAX_TIER_DIT_FILES,
+  requiredFilesFor,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
   LTX25_LANE_PROVIDERS,
+  planAnchor,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -83,6 +88,16 @@ function fakeModels() {
       id: "minimax_h3",
       downloads: [
         { repo: "SceneWorks/minimax-h3-mlx", revision: REVISION, variant: "q4", files: ["q4/transformer/*"] },
+        { repo: "MiniMaxAI/MiniMax-H3", revision: UPSTREAM, coRequisite: true, files: ["vae/*"] },
+      ],
+    },
+    // The reference entry is its own catalog model on the same engine id, and it stages the tier
+    // tree at every tier (`transformer_ref/` ships only in the rehost) while still loading the
+    // dense upstream root — so it resolves through its OWN manifest downloads.
+    {
+      id: "minimax_h3_ref",
+      downloads: [
+        { repo: "SceneWorks/minimax-h3-mlx", revision: REVISION, variant: "bf16", files: ["bf16/transformer_ref/*"] },
         { repo: "MiniMaxAI/MiniMax-H3", revision: UPSTREAM, coRequisite: true, files: ["vae/*"] },
       ],
     },
@@ -156,6 +171,28 @@ function fakeModels() {
       ],
     },
   ];
+}
+
+/**
+ * Stage everything the pinned MiniMax-H3 loader opens for `tier`, in the two roots it opens them
+ * in. Written from the same declarations `classifyAnchor` probes, so a file added to either
+ * declaration is staged here with no edit — the tests that want a COMPLETE install say so by
+ * calling this, and the one that wants a specific hole omits exactly that file.
+ */
+async function stageMinimaxFiles(hub, tier, { omit = [] } = {}) {
+  const roots = [
+    [snapshotPath(hub, "SceneWorks/minimax-h3-mlx", REVISION, tier),
+      requiredFilesFor({ all: MINIMAX_TIER_DIT_FILES, q4: [MINIMAX_TEXT_ENCODER_CONFIG], q8: [MINIMAX_TEXT_ENCODER_CONFIG] }, tier)],
+    [snapshotPath(hub, "MiniMaxAI/MiniMax-H3", UPSTREAM),
+      requiredFilesFor({ all: MINIMAX_UPSTREAM_ROOT_FILES, bf16: [MINIMAX_TEXT_ENCODER_CONFIG] }, tier)],
+  ];
+  for (const [root, files] of roots) {
+    for (const file of files) {
+      if (omit.includes(file)) continue;
+      await mkdir(path.join(root, path.dirname(file)), { recursive: true });
+      await writeFile(path.join(root, file), "{}\n");
+    }
+  }
 }
 
 async function fakeHub(layout) {
@@ -287,6 +324,11 @@ test("classification: runnable anchors carry the adapter env family and the cano
     ["MiniMaxAI/MiniMax-H3", UPSTREAM],
     ["SceneWorks/ltx-2.5-mlx", REVISION],
   ]);
+  // sc-22738: a MiniMax cell is runnable only when the files the pinned loader opens are actually
+  // there — the two DiT partitions and the packed text encoder in the tier root, and the six dense
+  // documents in the upstream one. A bare directory tree is what this host really had, and what
+  // `--list` used to call runnable.
+  await stageMinimaxFiles(hub, "q4");
   const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
   const qwen = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
   assert.equal(qwen.status, "runnable");
@@ -311,6 +353,71 @@ test("classification: runnable anchors carry the adapter env family and the cano
   const missingTier = await classifyAnchor("qwen_image:q8:mlx", { provider: "qwen_image" }, context);
   assert.equal(missingTier.status, "weights_missing");
   assert.match(missingTier.reason, /q8 on this host/);
+});
+
+// sc-22738. The campaign lost a booked `minimax_h3:bf16:mlx` capture to
+// `read …/models--MiniMaxAI--MiniMax-H3/snapshots/<rev>/text_encoder: No such file or directory`.
+// `--list` had called the cell runnable because the upstream probe asked only whether the snapshot
+// DIRECTORY existed — and the dense tree staged on that host holds `vae/`, `audio_vae/`,
+// `tokenizer/` and `FL2VA/` but no `text_encoder/`. The loader's reads are declared now, per tier,
+// in both roots, so an incomplete mirror is refused by name before anything is scheduled.
+test("a minimax cell whose snapshot is missing a file the loader opens is weights_missing, by name", async () => {
+  const layout = [
+    ["SceneWorks/minimax-h3-mlx", REVISION, "q4"],
+    ["SceneWorks/minimax-h3-mlx", REVISION, "bf16"],
+    ["MiniMaxAI/MiniMax-H3", UPSTREAM],
+  ];
+  const planned = { provider: "minimax_h3" };
+
+  // The exact host condition: everything but the dense text encoder. bf16 takes its TE from the
+  // upstream root, so bf16 is refused — and q4 takes its own from the tier root, so q4 is NOT.
+  const holed = await fakeHub(layout);
+  await stageMinimaxFiles(holed, "q4");
+  await stageMinimaxFiles(holed, "bf16", { omit: [MINIMAX_TEXT_ENCODER_CONFIG] });
+  const context = (hub) => ({ models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() });
+  const refused = await classifyAnchor("minimax_h3:bf16:mlx", planned, context(holed));
+  assert.equal(refused.status, "weights_missing", refused.reason);
+  assert.match(refused.reason, /text_encoder\/config\.json/);
+  assert.ok(
+    refused.reason.includes(snapshotPath(holed, "MiniMaxAI/MiniMax-H3", UPSTREAM)),
+    `the refusal names the root it probed: ${refused.reason}`,
+  );
+  const unaffected = await classifyAnchor("minimax_h3:q4:mlx", planned, context(holed));
+  assert.equal(unaffected.status, "runnable", unaffected.reason);
+
+  // The reference entry rides the same declarations — it stages the tier tree at every tier and
+  // still loads the dense root — so its bf16 cell is refused for the same missing file.
+  const ref = await classifyAnchor("minimax_h3_ref:bf16:mlx", planned, context(holed));
+  assert.equal(ref.status, "weights_missing", ref.reason);
+  assert.match(ref.reason, /text_encoder\/config\.json/);
+
+  // Each declared file, one at a time: dropping ANY of them refuses the cell, and no single one of
+  // them is load-bearing for the others. A blanket "the snapshot is there" probe passes all of these.
+  for (const file of [...MINIMAX_UPSTREAM_ROOT_FILES, MINIMAX_TEXT_ENCODER_CONFIG]) {
+    const hub = await fakeHub(layout);
+    await stageMinimaxFiles(hub, "bf16", { omit: [file] });
+    const row = await classifyAnchor("minimax_h3:bf16:mlx", planned, context(hub));
+    assert.equal(row.status, "weights_missing", `${file}: ${row.reason}`);
+    assert.ok(row.reason.includes(file), `${file}: ${row.reason}`);
+  }
+  for (const file of [...MINIMAX_TIER_DIT_FILES, MINIMAX_TEXT_ENCODER_CONFIG]) {
+    const hub = await fakeHub(layout);
+    await stageMinimaxFiles(hub, "q4", { omit: [file] });
+    const row = await classifyAnchor("minimax_h3:q4:mlx", planned, context(hub));
+    assert.equal(row.status, "weights_missing", `${file}: ${row.reason}`);
+    assert.ok(row.reason.includes(file), `${file}: ${row.reason}`);
+  }
+
+  // And a COMPLETE install is still runnable on both tiers, with the same env family as before.
+  const whole = await fakeHub(layout);
+  await stageMinimaxFiles(whole, "q4");
+  await stageMinimaxFiles(whole, "bf16");
+  for (const tier of ["q4", "bf16"]) {
+    const row = await classifyAnchor(`minimax_h3:${tier}:mlx`, planned, context(whole));
+    assert.equal(row.status, "runnable", `${tier}: ${row.reason}`);
+    assert.equal(row.env.SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT, snapshotPath(whole, "MiniMaxAI/MiniMax-H3", UPSTREAM));
+    assert.equal(row.env.SCENEWORKS_MINIMAX_H3_ROOT, snapshotPath(whole, "SceneWorks/minimax-h3-mlx", REVISION, tier));
+  }
 });
 
 test("the z-image family: the base model has its own env family, and the edit alias loads the Turbo artifact", async () => {
@@ -2134,6 +2241,52 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
         "dump surface, delete readDeclaredStrategySupport rather than leaving an unexercised source",
     );
   }
+});
+
+/**
+ * sc-22738. The composition a row plans and the CONTROLS it carries are one claim, and the
+ * campaign's first full MLX walk proved they were never checked together: `planAnchor` emits
+ * `strategy.parameters: {}` for every row, while `crates/…/bin/mlx_ltx25.rs` demanded
+ * `attentionChunkSize` unconditionally, so all three `ltx_2_5:*:mlx` cells refused before a weight
+ * was read — the arm still spoke epic 18755's ladder sweep, which sc-22505 replaced with one anchor
+ * at the lane default rung.
+ *
+ * The law, both directions, derived from the manifest rather than a list: the request the harness
+ * builds must carry EXACTLY the parameters the model's own lane block declares for the rungs its
+ * planned composition engages, and nothing for a rung it does not engage. `resident` and
+ * `staged_residency` declare no controls, so today every row is `{}` — and a row that ever plans a
+ * parameterized rung must ship those parameters or this reds. The engine enforces the same
+ * symmetry (`attention_chunk_size requires chunk_attention=true`), which is why volunteering a
+ * control is as wrong as omitting one.
+ */
+test("a planned anchor carries exactly the controls its engaged rungs declare", async () => {
+  const plan = await readPlan();
+  const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  // The wire spells the component lowercase; the manifest spells the engine's enum variant.
+  const wire = (parameter, value) =>
+    parameter === "transformerWindowComponent" ? String(value).toLowerCase() : value;
+  let checked = 0;
+  for (const key of Object.keys(plan.anchors)) {
+    const { modelId, backend } = anchorParts(key);
+    const model = models.get(modelId);
+    if (!model) continue;
+    const declared = model[backend]?.memoryStrategyCapabilities ?? {};
+    const planned = planAnchor(plan, key);
+    const expected = {};
+    for (const rung of planned.strategy.engagedRungs) {
+      for (const [parameter, value] of Object.entries(declared[rung]?.parameters ?? {})) {
+        expected[parameter] = wire(parameter, value);
+      }
+    }
+    assert.deepEqual(
+      planned.strategy.parameters,
+      expected,
+      `${key}: plans rung ${planned.strategy.rung} engaging ${JSON.stringify(planned.strategy.engagedRungs)}, ` +
+        `so the manifest's ${backend}.memoryStrategyCapabilities requires exactly ${JSON.stringify(expected)}`,
+    );
+    checked += 1;
+  }
+  assert.ok(checked > 0, "no plan row was judged against the manifest's declared controls");
 });
 
 // sc-22736. The third source read three ways: the shipped shape yields per-rung support, a file

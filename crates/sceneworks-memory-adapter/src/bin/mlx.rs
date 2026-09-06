@@ -2,9 +2,10 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    GenerationMemory, LoadPhase, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity,
-    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase,
-    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    ComponentPrecisionFloor, GenerationMemory, LoadPhase, MemoryBudget, MemoryCacheState,
+    MemoryCalibrationIdentity, MemoryGeometry, MemoryMode, MemoryNumericTier,
+    MemoryOptimizationAuthority, MemoryPhase, MemoryProviderContract, MemoryRunContext,
+    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
@@ -11251,6 +11252,58 @@ fn is_mage_weights_free_fingerprint(fingerprint: &str) -> bool {
         || fingerprint == "mage-flow-mlx-shared-ladder-2026-08-03-v1"
 }
 
+/// The component precision floors the LOADED provider actually promotes at the selected tier.
+///
+/// [`planned_selection`] cannot carry these and does not try: it parses a plan row before any
+/// provider exists, while the floor table is a property of the engine build. The pinned engine
+/// compares the caller's *selected* tier against the tier it *loaded* including those promotions
+/// (`gen_core::standard_memory_strategy_safety_check`: "selected tier … does not match loaded
+/// tier", built from `mlx-gen-mage`'s `quant::active_component_precision_floors`), so a caller must
+/// re-state the descriptor's declaration filtered to the floors active at this tier — which is
+/// exactly what the worker does before it admits a request (`mlx_fit_gate.rs`
+/// `active_component_floors`, whose filter this mirrors). Mage promotes its Qwen3-VL text encoder
+/// and the transformer head to Q8 on the q4 tier and nothing anywhere else; every other MLX arm's
+/// descriptor declares no floors at all, so this stays `&[]` for them.
+fn active_component_floors(
+    declared: &'static [ComponentPrecisionFloor],
+    selected: Option<Quant>,
+) -> &'static [ComponentPrecisionFloor] {
+    match selected {
+        Some(selected) if declared.iter().any(|floor| floor.applies_to(selected)) => declared,
+        _ => &[],
+    }
+}
+
+/// The admission budget the pinned Mage provider requires a caller to present, as
+/// `(required_total_peak_bytes, resident_credit_bytes)`.
+///
+/// Mage is the only MLX provider that cross-checks the caller's declared peak against its OWN fit
+/// model (`model.rs` `request_context_error`): whatever the caller does NOT declare in
+/// `predicted_peak_bytes` is credited as already-resident, and that credit must fit both the
+/// contract's resident envelope and the budget's committed snapshot. The placeholder peak of `1`
+/// every other arm passes therefore claims the entire model as resident credit against a committed
+/// snapshot of zero, and is refused before a single step runs. So the capture declares the pair the
+/// worker declares (`mlx_fit_gate.rs`: committed bytes are the live resident snapshot, the
+/// predicted peak is the request's incremental demand above them) and the engine's own weights-free
+/// test builds verbatim (`model.rs`
+/// `resident_safety_recomputes_peak_and_binds_calibration_identity`: committed = the contract's
+/// resident bytes, predicted = the modelled total minus them).
+///
+/// The total comes from the provider's own `memory::generation_peak_gb` rather than a copy of its
+/// measured anchors, so a re-measured tier in a later pin moves this with it.
+fn mage_admission_budget(
+    contract: &MemoryProviderContract,
+    tier: Option<Quant>,
+    width: u32,
+    height: u32,
+) -> (u64, u64) {
+    let required_total_peak_bytes =
+        ((mlx_gen_mage::memory::generation_peak_gb(tier, width, height, 1) * 1_000_000_000.0)
+            .round() as u64)
+            .saturating_add(contract.auxiliary_resident_bytes());
+    (required_total_peak_bytes, contract.total_resident_bytes())
+}
+
 /// The plan row must name the production identity this cell's loaded generator publishes —
 /// checked against the weights-free table BEFORE the load, so a row still carrying the retired
 /// single string (or a conformance string) fails in milliseconds rather than after a
@@ -11512,6 +11565,7 @@ fn mage_run_context(
     height: u32,
     total_bytes: u64,
     predicted_peak_bytes: u64,
+    committed_bytes: u64,
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
@@ -11537,9 +11591,13 @@ fn mage_run_context(
             reference_count: u32::from(arm.edit),
         },
         overlay: None,
+        // The generator is already loaded when this context is built, so its resident bytes are
+        // charged to the snapshot and `predicted_peak_bytes` is the request's INCREMENTAL demand
+        // above them — the currency `MemoryBudget::fits` documents and the one Mage's own
+        // peak/credit cross-check reads (see [`mage_admission_budget`]).
         budget: MemoryBudget {
             total_bytes,
-            committed_bytes: 0,
+            committed_bytes,
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 0,
         },
@@ -11604,6 +11662,18 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         .media()
         .load(arm.provider, &spec)
         .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    // The plan names a tier; the LOADED provider decides which of its components it holds ABOVE
+    // that tier, and the request must carry those promotions or the shared tier check refuses it
+    // (see [`active_component_floors`]).
+    let mut selection = selection;
+    selection.tier.component_precision_floors = active_component_floors(
+        generator
+            .descriptor()
+            .capabilities
+            .component_precision_floors,
+        selection.tier.quant,
+    );
+    let selection = selection;
     let contract = generator
         .memory_strategy_contract()
         .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.provider))?;
@@ -11645,6 +11715,8 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let (required_total_peak_bytes, resident_credit_bytes) =
+        mage_admission_budget(contract, selection.tier.quant, width, height);
     let context = mage_run_context(
         arm,
         selection,
@@ -11652,7 +11724,8 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         width,
         height,
         hardware_bytes,
-        1,
+        required_total_peak_bytes.saturating_sub(resident_credit_bytes),
+        resident_credit_bytes,
     );
 
     let conditioning = Cell::new(PhaseMemory {
@@ -11695,14 +11768,40 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
 
+    // What was just measured must fit inside the total this provider modelled for the request; a
+    // measured peak ABOVE it means the engine's own fit model under-predicts this cell, and the
+    // capture says so instead of recording the number under an admission that never covered it.
+    if predicted > required_total_peak_bytes {
+        return Err(format!(
+            "measured Mage-Flow peak {predicted} exceeds the pinned provider's own modelled total \
+             {required_total_peak_bytes} for {width}x{height} at {tier}"
+        ));
+    }
+    // Exact fit in the provider's own currency: capacity for exactly the committed snapshot plus
+    // the admitted incremental demand, and not one byte less. Restating the measured peak as the
+    // demand here would be a different claim from the one the request was admitted under — Mage
+    // credits every byte the caller does not declare against its resident envelope, so the admitted
+    // pair is what an exact budget has to be built from (see [`mage_admission_budget`]).
     let mut exact = context.clone();
-    exact.predicted_peak_bytes = predicted;
-    exact.budget.total_bytes = predicted;
+    exact.budget.total_bytes = exact
+        .budget
+        .required_total_bytes(exact.predicted_peak_bytes);
     if !matches!(
         generator.memory_strategy_safety_check(&exact),
         MemorySafetyDecision::Accept
     ) {
         return Err("Mage-Flow provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut one_byte_short = exact.clone();
+    one_byte_short.budget.total_bytes = one_byte_short.budget.total_bytes.saturating_sub(1);
+    if !matches!(
+        generator.memory_strategy_safety_check(&one_byte_short),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(
+            "Mage-Flow provider accepted a budget one byte short of the admitted request"
+                .to_owned(),
+        );
     }
     let mut unknown = context.clone();
     unknown.budget.total_bytes = 0;
@@ -12398,6 +12497,7 @@ mod mage_tests {
                 MAGE_EDGE,
                 1_024,
                 1,
+                0,
             );
             let expected = if arm.edit {
                 MemoryMode::Edit
@@ -12411,6 +12511,195 @@ mod mage_tests {
             assert!(!context.has_phases);
             assert!(!context.use_pid);
             assert_eq!(context.load_shape, LoadShape::EagerMaterialization);
+        }
+    }
+
+    /// The pinned provider's own weights-free memory registration, per member, in `MAGE_ARMS`
+    /// order. Pairing them by index is only safe because the test below re-asserts each pair's
+    /// `provider_id` against the arm row, so a re-ordered table cannot silently drive one member's
+    /// context through another member's predicate.
+    const MAGE_MEMORY_REGISTRATIONS: [(
+        mlx_gen_mage::MageVariant,
+        &mlx_gen::gen_core::MemoryRegistration,
+    ); 6] = [
+        (
+            mlx_gen_mage::MageVariant::Rl,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION,
+        ),
+        (
+            mlx_gen_mage::MageVariant::Base,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION_BASE,
+        ),
+        (
+            mlx_gen_mage::MageVariant::Turbo,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION_TURBO,
+        ),
+        (
+            mlx_gen_mage::MageVariant::Edit,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT,
+        ),
+        (
+            mlx_gen_mage::MageVariant::EditBase,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT_BASE,
+        ),
+        (
+            mlx_gen_mage::MageVariant::EditTurbo,
+            &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT_TURBO,
+        ),
+    ];
+
+    /// Refusals that come from the LIVE MLX wired-memory budget rather than from the request.
+    ///
+    /// `mlx-gen-mage`'s resident rung resolves `production_safe_budget_gb()` from the process's
+    /// current MLX limits, which sibling arms in this binary deliberately move (`set_memory_limit`)
+    /// and a busy host shrinks — the 768² q4 cell has been observed refused at a 7.30 GB live
+    /// budget in a shared test process. That is process state, not a caller claim, so the baseline
+    /// tolerates exactly these three reasons and nothing else.
+    fn is_live_budget_refusal(reason: &str) -> bool {
+        reason.contains("unified-memory limit is unavailable")
+            || reason.contains("max-buffer probe is unavailable")
+            || reason.contains("exceeding the safe wired-memory budget")
+    }
+
+    fn mage_registration_spec(tier: &str) -> LoadSpec {
+        let spec = LoadSpec::new(WeightsSource::Dir(mage_temp_root("registration")));
+        match resident_selection(tier).tier.quant {
+            Some(quant) => spec.with_quant(quant),
+            None => spec,
+        }
+    }
+
+    /// The request context every Mage capture is admitted under, built exactly as
+    /// [`run_mage_provider`] builds it, for one member and tier against a weights-free contract.
+    fn mage_admitted_context(
+        arm: MageArm,
+        variant: mlx_gen_mage::MageVariant,
+        tier: &str,
+    ) -> (mlx_gen::gen_core::MemoryProviderContract, MemoryRunContext) {
+        let quant = resident_selection(tier).tier.quant;
+        let contract = mlx_gen_mage::model::memory_strategy_contract(arm.provider, quant);
+        let mut selection = resident_selection(tier);
+        selection.tier.component_precision_floors = active_component_floors(
+            mlx_gen_mage::descriptor_for(variant)
+                .capabilities
+                .component_precision_floors,
+            quant,
+        );
+        let calibration = contract
+            .calibration
+            .clone()
+            .expect("the weights-free Mage contract publishes a conformance identity");
+        let (required, credit) = mage_admission_budget(&contract, quant, MAGE_EDGE, MAGE_EDGE);
+        let context = mage_run_context(
+            arm,
+            selection,
+            &calibration,
+            MAGE_EDGE,
+            MAGE_EDGE,
+            required
+                .saturating_add(credit)
+                .saturating_add(1_000_000_000),
+            required.saturating_sub(credit),
+            credit,
+        );
+        (contract, context)
+    }
+
+    /// sc-22738: the capture's request context is admitted by the PINNED provider's own safety
+    /// predicate, for all six members at all three tiers, and each of the three things the campaign
+    /// got wrong is refused by name.
+    ///
+    /// The campaign's every Mage anchor died here, not in a render: the arm declared the
+    /// placeholder peak of `1` against a committed snapshot of `0`, which asks Mage to credit its
+    /// entire model as already-resident memory nobody had charged, and the q4 cells additionally
+    /// declared a bare Q4 tier against a provider that holds its text encoder and transformer head
+    /// at Q8. Both are caller-side claims, so both are asserted here — weights-free, through the
+    /// provider's own registered predicate rather than a restatement of it.
+    #[test]
+    fn every_member_and_tier_is_admitted_by_the_pinned_providers_own_safety_predicate() {
+        for (arm, (variant, registration)) in MAGE_ARMS.iter().zip(MAGE_MEMORY_REGISTRATIONS) {
+            assert_eq!(
+                registration.provider_id, arm.provider,
+                "the registration table is out of order with MAGE_ARMS"
+            );
+            for tier in ["bf16", "q4", "q8"] {
+                let spec = mage_registration_spec(tier);
+                let (contract, context) = mage_admitted_context(*arm, variant, tier);
+                let key = format!("{}:{tier}", arm.provider);
+                // Every REQUEST-context rule must admit this pair. The resident rung then resolves
+                // the host's live wired-memory budget, and that number is not a property of the
+                // request: it is MLX process state, which sibling arms in this same test binary
+                // move with `set_memory_limit`, so an assertion on it would pass or fail by test
+                // order. The three mutations below fire inside the request-context rules — ahead of
+                // that branch — which is what keeps this baseline honest.
+                match (registration.safety_check)(&spec, &contract, &context) {
+                    MemorySafetyDecision::Accept => {}
+                    MemorySafetyDecision::Reject { reason } => assert!(
+                        is_live_budget_refusal(&reason),
+                        "{key}: the pinned provider refused the capture's own request context: \
+                         {reason}"
+                    ),
+                }
+
+                // The peak/credit pair the campaign got wrong: a placeholder peak asks the
+                // provider to credit everything it did not see against an uncharged snapshot.
+                let mut placeholder = context.clone();
+                placeholder.predicted_peak_bytes = 1;
+                placeholder.budget.committed_bytes = 0;
+                let MemorySafetyDecision::Reject { reason } =
+                    (registration.safety_check)(&spec, &contract, &placeholder)
+                else {
+                    panic!("{key}: a placeholder peak of 1 was admitted");
+                };
+                assert!(
+                    reason.contains("is inconsistent with provider total"),
+                    "{key}: {reason}"
+                );
+
+                // The tier the campaign got wrong: the selected tier must carry exactly the
+                // promotions the loaded provider applies — neither fewer nor more.
+                let declared = mlx_gen_mage::descriptor_for(variant)
+                    .capabilities
+                    .component_precision_floors;
+                let mut crossed_floors = context.clone();
+                crossed_floors.selection.tier.component_precision_floors =
+                    if context.selection.tier.component_precision_floors.is_empty() {
+                        declared
+                    } else {
+                        &[]
+                    };
+                let MemorySafetyDecision::Reject { reason } =
+                    (registration.safety_check)(&spec, &contract, &crossed_floors)
+                else {
+                    panic!(
+                        "{key}: a tier carrying the wrong component precision floors was admitted"
+                    );
+                };
+                assert!(
+                    reason.contains("does not match loaded tier"),
+                    "{key}: {reason}"
+                );
+
+                // And the per-variant route gate, on the predicate rather than on the arm's own
+                // table: an edit member never admits a text-to-image request, or the reverse.
+                let mut crossed_mode = context.clone();
+                crossed_mode.mode = if arm.edit {
+                    MemoryMode::TextToImage
+                } else {
+                    MemoryMode::Edit
+                };
+                crossed_mode.has_reference = !arm.edit;
+                crossed_mode.geometry.reference_count = u32::from(!arm.edit);
+                let MemorySafetyDecision::Reject { reason } =
+                    (registration.safety_check)(&spec, &contract, &crossed_mode)
+                else {
+                    panic!("{key}: the opposite request mode was admitted");
+                };
+                assert!(
+                    reason.contains("does not match") && reason.contains(arm.provider),
+                    "{key}: {reason}"
+                );
+            }
         }
     }
 }
@@ -15803,7 +16092,34 @@ fn run_ltx_with_admission(
             "result": "passed",
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
         },
-        "output": {
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+            "executed",
+            [],
+            diagnostic_measurements,
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    // sc-22738. The `output` descriptor belongs to the CAMPAIGN CARRIERS and to nothing else.
+    //
+    // A calibration fragment becomes a `records[]` member verbatim (the harness spreads it —
+    // `capturePlannedCase`'s `{ ...fragment }`), and `memory-calibration.schema.json`'s record is
+    // `additionalProperties: false` with no `output` property: every committed video record —
+    // `docs/generated/ltx-mlx-video-sc-18808.json` included — publishes the same four facts as
+    // `renderedFrames` / `outputFps` / `audioTrackDecoded` / `latentTemporalDepth` diagnostic
+    // measurements, which is where the harness and the derivations read them from. Emitting the
+    // block on an ordinary capture therefore does not enrich the record, it makes the bundle
+    // unschedulable — `schema validation failed: $.records[0].output: unexpected property`, AFTER
+    // the render, which is the most expensive place in the system to fail.
+    //
+    // The campaign entries are not calibration records: `run_ltx_campaign_entry` and
+    // `run_ltx_bounded_campaign_entry` stamp their own `_campaignEntry` / `_boundedCampaignEntry`
+    // keys (which the record schema would reject just as flatly) and their fragments are consumed
+    // by `validate_ltx_campaign_entry_fragment` / `validate_ltx_bounded_campaign_fragment`, which
+    // cross-check `/output/*` AGAINST the diagnostics of the same run. That redundancy is the whole
+    // point of the carrier check, so it is kept exactly where it is read.
+    if !matches!(admission, LtxRunAdmission::Ordinary) {
+        fragment["output"] = json!({
             "frames": geometry.frames,
             "fps": fps,
             "audio": {
@@ -15813,15 +16129,8 @@ fn run_ltx_with_admission(
                 "channels": audio.channels,
             },
             "firstFrameNondegenerate": true,
-        },
-        "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
-            "executed",
-            [],
-            diagnostic_measurements,
-        ),
-        "capturedAt": protocol::captured_at(),
-    });
+        });
+    }
     protocol::settle_plain_overlay_scenario(request, &mut fragment, LTX_PLAIN_EXECUTION_PATH)?;
     Ok(fragment)
 }
@@ -17417,19 +17726,6 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(member, tier),
         },
-        "output": {
-            "frames": geometry.frames,
-            "fps": fps,
-            "videoLatentFrames": geometry.video_latent_frames,
-            "audioLatentFrames": geometry.audio_latent_frames,
-            "audio": {
-                "present": true,
-                "samples": audio.samples,
-                "sampleRate": audio.sample_rate,
-                "channels": audio.channels,
-            },
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:minimax-h3-joint-av",
             "executed",
@@ -17461,6 +17757,17 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("videoLatentFrames", "count", u64::from(geometry.video_latent_frames)),
                 ("audioLatentFrames", "count", u64::from(geometry.audio_latent_frames)),
+                // sc-22738. The render receipts, in the ONE place the record schema has for them.
+                // They were a top-level `output` object until the catalog campaign proved the
+                // record is `additionalProperties: false` and rejected the whole bundle after the
+                // render; `docs/generated/ltx-mlx-video-sc-18808.json` is the committed precedent
+                // for publishing them here, under these names.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
+                ("audioTrackDecoded", "count", 1),
+                ("audioSamples", "count", audio.samples),
+                ("audioSampleRate", "count", u64::from(audio.sample_rate)),
+                ("audioChannels", "count", u64::from(audio.channels)),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
                 ("textEncoderFromTierTree", "count", u64::from(artifact.text_encoder_source == MINIMAX_TIERED_TEXT_ENCODER)),
                 ("stagedDitBytes", "bytes", staged_dit_bytes),
@@ -18389,12 +18696,6 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(arm, tier),
         },
-        "output": {
-            "modelId": arm.model_id,
-            "frames": geometry.frames,
-            "fps": fps,
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:bernini-dual-expert",
             "executed",
@@ -18426,6 +18727,11 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
                 ("stagedTierBytes", "bytes", staged_tier_bytes),
+                // sc-22738: the render receipts, published as measurements rather than as a
+                // top-level `output` object the record schema rejects. The member this record is
+                // filed under is `target.modelId`, so the dropped `output.modelId` is not lost.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
             ],
         ),
         "capturedAt": protocol::captured_at(),
@@ -20398,14 +20704,6 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
         },
-        "output": {
-            "frames": geometry.frames,
-            "fps": fps,
-            "latentFrames": geometry.latent_frames,
-            "autoregressiveBlocks": geometry.autoregressive_blocks,
-            "audio": { "present": false },
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:krea-realtime-{}", tier),
             "executed",
@@ -20437,6 +20735,12 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("latentFrames", "count", u64::from(geometry.latent_frames)),
                 ("autoregressiveBlocks", "count", u64::from(geometry.autoregressive_blocks)),
+                // sc-22738: the render receipts, published as measurements rather than as a
+                // top-level `output` object the record schema rejects. This route decodes no audio
+                // track, so `audioTrackDecoded` is a measured 0 rather than an absent claim.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
+                ("audioTrackDecoded", "count", 0),
                 ("loadSpecCarriesQuant", "count", u64::from(spec.quantize.is_some())),
                 ("stagedTierBytes", "bytes", staged_tier_bytes),
             ],
