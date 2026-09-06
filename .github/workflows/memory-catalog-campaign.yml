@@ -1,0 +1,294 @@
+# Manually-triggered memory-anchor measurement campaign (sc-22738, epic 22723).
+#
+# `scripts/measure-memory-catalog.mjs` walks every anchor the plan declares for ONE backend on ONE
+# host and COMMITS each measurement as it lands (capture -> check -> ingest -> extract -> stamp ->
+# matrix -> commit). It refuses a detached HEAD and a dirty tree, and it asserts BOTH checkouts stay
+# clean and stable for the whole walk. This workflow is the on-demand way to run that walk on the
+# self-hosted GPU boxes instead of tying up an interactive shell for a day.
+#
+# WHY DISPATCH-ONLY, AND WHY IT GATES NOTHING. Per FEATURE_DEVELOPMENT.md's "Gate teardown"
+# (2026-08-15/16, sc-19758 / sc-19751), measurement runs ONCE at epic end or on explicit request --
+# never per code change. There is deliberately no `push:`, no `pull_request:` and no `schedule:`
+# here, so this workflow can never become a required check and can never be selected as one: a
+# `workflow_dispatch`-only workflow reports no context on any PR.
+#
+# WHAT IT PRODUCES. A NEW branch `story/<campaign>-<backend>-campaign-<run_id>` carrying one commit
+# per measured anchor, pushed as the walk proceeds (never only at the end), plus a work-dir artifact
+# with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
+# back into the dispatched `ref` when the branch has commits. Nothing is merged automatically.
+#
+# THE SCARCE RESOURCE IS THE GPU, NOT THE RUNNER. Each job takes a job-level `concurrency` group
+# keyed on (backend, runner) with `cancel-in-progress: false`, so two campaigns can never share one
+# box's GPU: the second dispatch queues behind the first rather than fighting it for unified memory
+# (MLX) or VRAM (CUDA).
+name: Memory catalog campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "Which lane to walk. mlx runs on a Mac, candle on the Windows CUDA box."
+        required: true
+        type: choice
+        options:
+          - mlx
+          - candle
+        default: mlx
+      campaign:
+        description: "Campaign id -- one path segment, e.g. sc-22738. Names the evidence prefix, the work dir and the branch."
+        required: true
+        type: string
+        default: sc-22738
+      anchors:
+        description: "Optional comma-separated anchor keys (<model>:<tier>:<backend>). Empty walks every planned anchor for the backend."
+        required: false
+        type: string
+        default: ""
+      models:
+        description: "Optional space-separated model ids to restrict the walk to. Empty means every model."
+        required: false
+        type: string
+        default: ""
+      skip_current:
+        description: "Skip anchors already current at the pinned inference revision (--skip-current)."
+        required: false
+        type: boolean
+        default: true
+      hf_cache_roots:
+        description: >-
+          Optional extra Hugging Face hub roots, one per line or ';'-separated. Empty falls back
+          to $SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE on the runner, then this lane's default:
+          /Volumes/Models/huggingface/hub for mlx (either Mac), E:\huggingface\hub for candle
+          (the Windows CUDA box).
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Branch to walk from. The campaign branch is cut from this ref and the PR targets it."
+        required: true
+        type: string
+        default: feature/sc-22723-memory-anchor-measurability
+      runner_label:
+        description: >-
+          Which Mac the mlx lane runs on (ignored for candle). `rw-krea` is the SECOND Mac
+          (nax-macos-2); `nax` is Michael's dev Mac (nax-macos), which is also the app repo's
+          ordinary PR runner. Both label sets were verified against the runners that actually served
+          recent jobs -- see the runbook note before changing either.
+        required: true
+        type: choice
+        options:
+          - "rw-krea (nax-macos-2, the second Mac)"
+          - "nax (nax-macos, the dev Mac)"
+        default: "rw-krea (nax-macos-2, the second Mac)"
+      push_every:
+        description: "Push the campaign branch once this many new anchor commits have landed. 1 pushes after every anchor."
+        required: false
+        type: string
+        default: "1"
+
+# `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. No other secret is
+# needed or read by this workflow.
+permissions:
+  contents: write
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CAMPAIGN: ${{ inputs.campaign }}
+  BASE_REF: ${{ inputs.ref }}
+  PUSH_EVERY: ${{ inputs.push_every }}
+  ANCHORS_INPUT: ${{ inputs.anchors }}
+  MODELS_INPUT: ${{ inputs.models }}
+  SKIP_CURRENT: ${{ inputs.skip_current }}
+  HF_CACHE_INPUT: ${{ inputs.hf_cache_roots }}
+
+jobs:
+  mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    name: mlx catalog campaign
+    # `rw-krea` and `nax` are the two macOS label sets verified as carried by a live runner
+    # (nax-macos-2 and nax-macos respectively). A label NO runner carries does not fail the
+    # dispatch -- the job queues silently until the run is cancelled -- so this is a closed choice
+    # rather than a free-text label.
+    runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
+    concurrency:
+      group: memory-catalog-campaign-mlx-${{ startsWith(inputs.runner_label, 'nax') && 'nax' || 'rw-krea' }}
+      cancel-in-progress: false
+    # The full MLX walk is ~147 anchors of real GPU renders and the harness imposes no per-anchor
+    # timeout, so this is deliberately a two-day ceiling rather than a measured budget: the ceiling
+    # exists to stop a WEDGED job holding the box forever, and every anchor that finished before a
+    # timeout has already been committed and pushed.
+    timeout-minutes: 2880
+    env:
+      # Survives actions/checkout's `clean: true` between jobs on this persistent box, and keeps the
+      # ~30-40 GB of build output out of the checkout the harness asserts is clean.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+      CARGO_NET_OFFLINE: "true"
+      BACKEND: mlx
+      DEFAULT_HF_CACHE: /Volumes/Models/huggingface/hub
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # The campaign pushes a NEW branch. A shallow clone cannot do that ("shallow update not
+          # allowed"), and the harness reads history to decide what is already current.
+          fetch-depth: 0
+
+      - name: Cut the campaign branch
+        id: branch
+        run: bash scripts/ci/memory-catalog/branch.sh
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      # No `npm ci`: every script this campaign runs imports only node built-ins and sibling
+      # scripts/ modules, and an install would be one more thing that can dirty the box.
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+
+      - name: Fetch prebuilt MLX (sc-21382)
+        # Same step as macos-mlx.yml: pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache
+        # miss. Exit 1 means "no prebuilt published for this mlx-rs rev", which is a slow source
+        # build rather than an error; anything else is fatal.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+
+      - name: Build the MLX memory adapter
+        run: |
+          cargo build --release --locked -p sceneworks-memory-adapter \
+            --features mlx --bin memory-mlx-adapter
+          echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
+
+      - name: Clone the pinned inference revision
+        run: bash scripts/ci/memory-catalog/inference.sh
+
+      - name: Plan the walk
+        run: bash scripts/ci/memory-catalog/plan.sh
+
+      - name: Walk the catalog
+        id: walk
+        run: bash scripts/ci/memory-catalog/run.sh
+
+      - name: Push whatever landed
+        # ALWAYS. A cancelled or timed-out walk has already committed every anchor it finished; this
+        # is the step that makes sure those commits leave the box.
+        if: ${{ always() }}
+        run: bash scripts/ci/memory-catalog/push.sh
+
+      - name: Upload the campaign work dir
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.campaign }}-mlx-campaign-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Open the results PR
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/memory-catalog/pr.sh
+
+  candle:
+    if: ${{ inputs.backend == 'candle' }}
+    name: candle catalog campaign
+    # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
+    # choice here: both Windows runners are processes on ONE box.
+    runs-on: [self-hosted, Windows, X64, cuda]
+    concurrency:
+      group: memory-catalog-campaign-candle-cuda
+      cancel-in-progress: false
+    # Shorter than the MLX ceiling because the candle plan is a smaller set of anchors, but still a
+    # day: same reasoning -- a wedge ceiling, not a measured budget.
+    timeout-minutes: 1440
+    env:
+      # Native sm_120 (Blackwell) -- this runner IS the RTX PRO 6000 box, same as windows-candle.yml.
+      CUDA_COMPUTE_CAP: "120"
+      # The runbook keeps exactly one device visible on the CUDA capture host; the harness's own
+      # preflight refuses the walk when this is unset.
+      CUDA_VISIBLE_DEVICES: "1"
+      CARGO_NET_OFFLINE: "true"
+      BACKEND: candle
+      DEFAULT_HF_CACHE: 'E:\huggingface\hub'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Cut the campaign branch
+        id: branch
+        run: bash scripts/ci/memory-catalog/branch.sh
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Makes this box build against the REAL rustup toolchain bin rather than the fragile
+      # %USERPROFILE%\.cargo\bin proxies (sc-13166). Same composite action every candle lane uses.
+      - name: Prepare the Rust toolchain
+        uses: ./.github/actions/prepare-rust-runner
+
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+
+      - name: Build the candle memory adapter
+        # cmd + vcvars64 + NVCC_CCBIN is how every CUDA compile on this box is spelled; candle-gen's
+        # cuda feature invokes nvcc, which needs the host compiler on PATH.
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          if errorlevel 1 exit /b 1
+          echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
+
+      - name: Clone the pinned inference revision
+        run: bash scripts/ci/memory-catalog/inference.sh
+
+      - name: Plan the walk
+        run: bash scripts/ci/memory-catalog/plan.sh
+
+      - name: Walk the catalog
+        id: walk
+        run: bash scripts/ci/memory-catalog/run.sh
+
+      - name: Push whatever landed
+        if: ${{ always() }}
+        run: bash scripts/ci/memory-catalog/push.sh
+
+      - name: Upload the campaign work dir
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.campaign }}-candle-campaign-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Open the results PR
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/memory-catalog/pr.sh
