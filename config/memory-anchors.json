@@ -1601,6 +1601,51 @@
       "overallAllocatorEnvelopeBytes": 92080257780
     },
     {
+      "id": "lens_turbo:mlx:bf16:base:base:lens-turbo-bf16-mlx-shared-ladder-v1:imc-9faaaa1095d39acaba6f",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
+        "sha256": "195a8a2e8c1e92a8fbf9ee794702881e210a12b57194d4f0cbd3c348e286761f",
+        "recordId": "imc-9faaaa1095d39acaba6f",
+        "calibrationFingerprint": "lens-turbo-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "213dfce2a17723f9ee0a9921a612d2cdd8de570936f7ac4afc2b01781e2b1cbf"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 82594659020,
+        "denoise": 40682436932,
+        "decode": 59897983184
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 138455483208,
+        "denoise": 96542179252,
+        "decode": 118792189608
+      },
+      "overallAllocatorEnvelopeBytes": 141488865444
+    },
+    {
       "id": "ltx_2_3:mlx:q8:base:base:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1:imc-5aff3e74b46b30fb797c",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
@@ -3844,17 +3889,6 @@
       "route": "lens_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:mlx:bf16",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
