@@ -1232,17 +1232,58 @@ only way to check (`gh api /orgs/SceneWorks/actions/runners` 403s without `admin
 before assuming `rw-krea` is still the second Mac, and remember that a label no runner carries does
 not fail the dispatch: the job queues silently until the run is cancelled.
 
-**What the job does.** Checks out `ref` at full depth, cuts a NEW branch
-`story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on the current branch and refuses a
-detached HEAD, and this keeps it off `feature/*` and `main`), builds the release adapter
-(`--features mlx --bin memory-mlx-adapter`, or `--features candle --bin memory-candle-adapter` under
-`vcvars64`), clones inference at the pin into a sibling of the workspace, prints the `--list` table
-as the job summary, runs `--dry-run`, then walks for real with `--work-dir` under `$RUNNER_TEMP`.
+**What the job does.** Checks out `ref` shallowly (`fetch-depth: 1` — nothing in the campaign reads
+history beyond HEAD, and a full clone of this repo's 2+ GiB pack was costing 27+ minutes on the
+Windows box), cuts a NEW branch `story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on
+the current branch and refuses a detached HEAD, and this keeps it off `feature/*` and `main`),
+prepares the inference clone, builds the release adapter (`--features mlx --bin memory-mlx-adapter`,
+or `--features candle --bin memory-candle-adapter` under `vcvars64`), prints the `--list` table as
+the job summary, runs `--dry-run`, then walks for real with `--work-dir` under `$RUNNER_TEMP`.
+
+**Inference is fetched ONCE, shallow, into a clone that outlives the job.** The campaign used to
+download the ~650 MB inference repo twice per dispatch — once by `cargo fetch --locked` (the
+workspace pins `candle-kernels` at a `SceneWorks/inference` rev and `.cargo/config.toml` sets
+`git-fetch-with-cli = true`) and once by `scripts/ci/memory-catalog/inference.sh`. On the Windows
+CUDA box that was fatal rather than merely slow: run 34044786385 sat 70 minutes at ~150 KB/s inside
+cargo's fetch, died with `fetch-pack: unexpected disconnect`, and started over.
+
+So `inference.sh` now runs **before** `cargo fetch` and does the only network fetch of that repo the
+job makes:
+
+- **Persistent.** The clone lives at `$INFERENCE_CLONE_DIR` — `D:\memory-catalog-inference` on the
+  CUDA box (set in the job env; `D:` is where that runner already keeps its per-runner caches),
+  `$HOME/memory-catalog-inference` on the Macs (the script's default, because a job-level `env:`
+  cannot expand `$HOME`). Not under `$GITHUB_WORKSPACE` or `$RUNNER_TEMP`: both are wiped between
+  jobs, which is what made every dispatch re-pull the repo. A directory that is not a clone of
+  `SceneWorks/inference` is discarded and re-initialised rather than fetched into.
+- **Shallow, and only the revisions this walk needs.** `git fetch --depth 1` for the pin **plus**
+  every revision `node scripts/anchor-loader-closure.mjs --anchor-revisions` prints — the harness
+  runs `--stamp-anchors` per anchor, which digests each packaged anchor's loader closure at *its
+  own* record's (or attested) inference revision, generally older than the pin and not necessarily
+  on any branch tip. That flag exists to be this fetch list, derived from the same store the
+  stamping walks, so the two cannot drift. All the missing revisions go in ONE fetch, so the server
+  deltas their trees against each other instead of sending one full tree apiece; the fetch retries
+  five times with backoff, because the observed failure is a dropped transfer, not a bad revision.
+- **Cargo reads the clone, not github.com.** The step exports `GIT_CONFIG_COUNT=1` /
+  `GIT_CONFIG_KEY_0=url.file://<clone>.insteadOf` / `GIT_CONFIG_VALUE_0=https://github.com/SceneWorks/inference`
+  into `$GITHUB_ENV`, git's own env-config channel (git ≥ 2.31). It has to be the environment and
+  not `git config --global`: the `git-fetch-with-cli` path spawns git with an empty `HOME` and
+  `GIT_CONFIG_NOSYSTEM=1` for this public repo (sc-17879), so no config *file* is read at all. The
+  rewrite is git-level, so `Cargo.lock` and the cargo db name still key on the github.com URL —
+  only the bytes' origin changes. `cargo fetch` emits one benign warning, `rejected
+  refs/commit/<pin> because shallow roots are not allowed to be updated`; the commit still lands.
+
+Measured on a Mac against the live remote: 11 revisions, 35 s and a 513 MB `.git` on a cold clone,
+0 s and no fetch on the second run, `cargo fetch --locked` exit 0 both times with the pin present in
+`$CARGO_HOME/git/db/inference-*`. The other git dependencies (mlx-rs, mlx-c, candle) are untouched
+by the single rewrite and still fetch from their own remotes.
 
 **The inference pin is derived, never typed.** The job reads `pub const INFERENCE_PIN` out of
 `crates/sceneworks-memory-adapter/src/lib.rs` — the same constant `compiledInferencePin()` reads —
 and hard-fails unless the clone's HEAD equals it and the tree is clean. `npm run bump:inference`
-moves both at once; this workflow needs no edit on a pin bump and writes to no pin site.
+moves both at once; this workflow needs no edit on a pin bump and writes to no pin site. A pin bump
+simply adds one revision to the next run's fetch list; everything already in the persistent clone is
+reused.
 
 **Partial results survive.** The walk runs in the background while a poller pushes the branch every
 `push_every` landed anchor commits, and a further `if: always()` push runs after success, failure,
