@@ -1367,6 +1367,51 @@
       "overallAllocatorEnvelopeBytes": 77999200642
     },
     {
+      "id": "kolors:mlx:q8:base:base:kolors-q8-mlx-shared-ladder-v1:imc-f57be7aa4ddecc3bd8d3",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/kolors-q8-mlx-evidence.json",
+        "sha256": "4f75b537c70b30b9d6b8449c36d1bee836de749f9edc66d247a41c0389d65094",
+        "recordId": "imc-f57be7aa4ddecc3bd8d3",
+        "calibrationFingerprint": "kolors-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "fb7c2818072023fc9ff9cc2917758f822d2a0cbd844f425639dd7152e80fd183"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13056955744,
+        "denoise": 13320838948,
+        "decode": 28483736072
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23175193754,
+        "denoise": 24007705742,
+        "decode": 81717838466
+      },
+      "overallAllocatorEnvelopeBytes": 81717838466
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -3408,17 +3453,6 @@
           "vramGbByTier": "30.4"
         }
       }
-    },
-    {
-      "id": "analytic:kolors:mlx:q8",
-      "modelId": "kolors",
-      "modelFamily": "kolors",
-      "route": "kolors",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:krea_2_raw:candle:bf16",
