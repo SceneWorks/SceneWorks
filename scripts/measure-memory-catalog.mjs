@@ -402,6 +402,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   ideogram_4_turbo: {
     env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
   // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
   // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
   // 8-step distill), each carrying a base id and two infographic finetunes.
