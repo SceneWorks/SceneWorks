@@ -17591,6 +17591,28 @@ fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeometry), Stri
     Ok((arm, geometry))
 }
 
+/// The target's declared reference count, defaulting to zero when the plan omits the field.
+///
+/// [`bernini_target`] has already refused any non-zero value by name, so on every cell this arm
+/// can plan the answer is `0` — but the arm's admission decision READS it rather than assuming it,
+/// so a reference-carrying member added later cannot silently inherit a decision taken for the
+/// reference-free one.
+fn bernini_reference_count(request: &Value) -> Result<u32, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            return value
+                .as_u64()
+                .and_then(|count| u32::try_from(count).ok())
+                .ok_or_else(|| format!("planned.target.{field} must fit u32"));
+        }
+    }
+    Ok(0)
+}
+
 /// Bind the fixture to the member, the planned tier and the full rendered geometry, recovering the
 /// cadence and the seed. Like MiniMax-H3's, this arm's `fps` has exactly one legal value, so the
 /// fixture cannot declare a cadence the engine would refuse.
@@ -17720,59 +17742,57 @@ fn bernini_load_spec_at(
     })
 }
 
-/// The admission context for the Bernini safety scenarios.
+/// Whether this capture asks Bernini's memory admission ANYTHING — the worker's own decision,
+/// mirrored (sc-22738).
 ///
-/// `mode` IS AN EVIDENCE KEY: gen-core's `standard_memory_strategy_safety_check` matches
-/// `context.mode.as_key()` against each adopted decode-geometry record's own mode, so a probe run
-/// under one spelling cannot answer a request asked under another. The two members ask under the
-/// two keys their runtime funnels use — `video_admission` types the video route's `text_to_video`
-/// through `memory_mode_from_mode_key` (which maps every non-canonical key to
-/// [`MemoryMode::Other`]), and the still route asks under the canonical
-/// [`MemoryMode::TextToImage`].
-fn bernini_context(
-    arm: BerniniArm,
-    selection: MemorySelection,
-    calibration: &MemoryCalibrationIdentity,
-    fingerprint: &str,
-    geometry: BerniniGeometry,
-    total_bytes: u64,
-    predicted_peak_bytes: u64,
-) -> MemoryRunContext {
-    MemoryRunContext {
-        selection,
-        optimization_authority: MemoryOptimizationAuthority::Calibrated,
-        calibration_abi: calibration.abi,
-        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
-        // call site passes `calibration.fingerprint`.
-        calibration_fingerprint: fingerprint.to_owned(),
-        load_shape: calibration.load_shape,
-        mode: if arm.model_id == BERNINI_IMAGE_MODEL_ID {
-            MemoryMode::TextToImage
-        } else {
-            MemoryMode::Other(arm.mode.to_owned())
-        },
-        has_reference: false,
-        use_pid: false,
-        has_phases: true,
-        geometry: MemoryGeometry {
-            width: geometry.width,
-            height: geometry.height,
-            batch: 1,
-            frames: geometry.frames,
-            reference_count: 0,
-        },
-        overlay: None,
-        budget: MemoryBudget {
-            total_bytes,
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        predicted_peak_bytes,
-        cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-22737@{}", protocol::INFERENCE_PIN),
-    }
+/// `crates/sceneworks-worker/src/video_admission.rs#bernini_memory_attempt` is the predicate that
+/// decides whether a Bernini request is a memory-optimization attempt at all: the request must
+/// name the video catalog entry AND either ask one of the four reference-carrying video routes or
+/// carry at least one reference. For a reference-free `text_to_video` it answers `false`, so
+/// production never treats such a request as one Bernini admission has an opinion about — no
+/// `MemoryRunContext` is built for it and the provider's safety check is never called on it. The
+/// still member is even further from that seam: `image_jobs/bernini.rs` passes `None`/`None` for
+/// `memory`/`memory_strategy_context` on the MLX lane unconditionally ("The MLX still lane has no
+/// shared Candle memory evaluation, so the honest values are `None`/`None`"), so `frames == 1`
+/// Bernini renders resident with no memory context on every path.
+///
+/// The engine agrees from the other side: `mlx-gen-bernini`'s `memory_strategy::safety_check`
+/// route gate admits exactly the reference-carrying video routes and refuses everything else by
+/// name, and gen-core runs that gate unconditionally. sc-22737 probed the anchor's own
+/// reference-free surface anyway, and all six `bernini*:*:mlx` anchors died on the first probe —
+/// after a full dual-expert weight load — with "admission rejected a fitting probe budget".
+///
+/// So the arm skips the probe exactly where the worker skips the context. It does NOT present a
+/// synthetic reference-carrying surface to make the gate answer: that would measure an admission
+/// decision the product never makes for this request, and the anchor would then carry an admission
+/// characterization no shipped path exercises.
+///
+/// This is a decision, not a constant: it is computed from the resolved member and the target's
+/// reference count so a future reference-carrying Bernini anchor cannot inherit the skip silently.
+fn bernini_probes_admission(model_id: &str, mode: &str, reference_count: u32) -> bool {
+    model_id == BERNINI_VIDEO_MODEL_ID
+        && (matches!(
+            mode,
+            "video_to_video"
+                | "reference_to_video"
+                | "reference_video_to_video"
+                | "multi_video_to_video"
+        ) || reference_count > 0)
 }
+
+/// What the record says about the admission scenarios it did not run, and why. Stated once and
+/// carried into every `not_run` reason, the lifecycle blocker and the diagnostics.
+const BERNINI_ADMISSION_BLOCKER: &str = concat!(
+    "reference-free Bernini has NO admission surface in production: ",
+    "`video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video ",
+    "request and the MLX still lane passes no memory context at all, so the worker builds no ",
+    "MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s ",
+    "route gate admits only the reference-carrying video routes. This arm therefore asks the ",
+    "admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget ",
+    "and stale-evidence scenarios are unexecuted rather than answered on a surface production ",
+    "never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and ",
+    "claims nothing about any optimized rung or admission decision"
+);
 
 /// The measured request.
 ///
@@ -17931,57 +17951,25 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
 
-    // Admission mutation hygiene BEFORE the expensive load, through the provider's OWN registered
-    // check: it must accept a fitting request (so the two rejections below are not a blanket
-    // refusal), reject an unknown/zero budget, and reject a mutated calibration fingerprint.
+    // The arm's admission decision, taken the way the WORKER takes it (sc-22738): see
+    // [`bernini_probes_admission`]. On every cell this arm can plan the answer is `false` — the
+    // reference-free ladder has no admission surface on either side of the seam — so no probe
+    // context is built, nothing is asked of the provider's safety check, and the render below runs
+    // resident exactly as production runs it. The record says so rather than claiming an admission
+    // result it never obtained.
     //
-    // Through `loaded_safety_check` and not the crate-private `safety_check`: the public entry
-    // point is the one the loaded generator's own check delegates to, and it takes the snapshot's
-    // expert depth so a rung-4 plan row would be gated on the real block count. `trunk_blocks() / 2`
-    // is the engine's OWN declared per-expert depth (`trunk_blocks() == 2 * expert_blocks()`),
-    // derived from the public symbol rather than written as a literal. On this arm's resident
-    // anchor the depth is never consulted — `check_loaded_expert_depth` runs only when the contract
-    // engages bounded transformer residency — so passing the declared value asserts nothing the
-    // load has not already proven.
-    let expert_blocks = runtime_macos::providers::bernini::memory_strategy::trunk_blocks() / 2;
-    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        runtime_macos::providers::bernini::memory_strategy::loaded_safety_check(
-            BERNINI_PROVIDER,
-            spec,
-            &contract,
-            &bernini_context(
-                arm,
-                selection,
-                calibration,
-                fingerprint,
-                geometry,
-                total_bytes,
-                predicted,
-            ),
-            expert_blocks,
-        )
-    };
-    if !matches!(
-        safety(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(
-            "Bernini admission rejected a fitting probe budget; the scenario rejections below \
-             would be a blanket refusal, not evidence"
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        safety(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("Bernini admission accepted an unknown/zero memory budget".to_owned());
-    }
-    if !matches!(
-        safety("stale-bernini-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("Bernini admission accepted stale calibration evidence".to_owned());
+    // A `true` answer would mean the plan reached this arm with a reference-carrying Bernini
+    // target, which `bernini_target` has already refused BY NAME: such a request seals a different
+    // evidence identity and needs its own capture, not a probe synthesized here. It is refused
+    // rather than assumed away.
+    let reference_count = bernini_reference_count(request)?;
+    if bernini_probes_admission(arm.model_id, arm.mode, reference_count) {
+        return Err(format!(
+            "{}: production WOULD build a Bernini memory context for this surface, but this arm \
+             measures only the reference-free ladder; a reference-carrying anchor seals its own \
+             evidence identity and needs its own capture",
+            arm.model_id
+        ));
     }
 
     let generator = registry
@@ -18102,36 +18090,10 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             overall.active
         ));
     }
-    // Probe 4 of 4, on the LOADED generator and against the measured evidence.
-    let exact_fit = bernini_context(
-        arm,
-        selection,
-        calibration,
-        &calibration.fingerprint,
-        geometry,
-        predicted,
-        predicted,
-    );
-    if !matches!(
-        generator.memory_strategy_safety_check(&exact_fit),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err("Bernini admission rejected an exact-fit calibrated budget".to_owned());
-    }
-    // THE EXACT-FIT ACCEPT IS NOT SELF-VALIDATING: the same loaded generator must REJECT a zero
-    // budget, or its accept is a blanket accept rather than admission evidence.
-    let mut unknown_budget = exact_fit.clone();
-    unknown_budget.budget.total_bytes = 0;
-    if !matches!(
-        generator.memory_strategy_safety_check(&unknown_budget),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err(
-            "the loaded Bernini generator accepted a zero/unknown budget, so its exact-fit accept \
-             is a blanket accept rather than admission evidence"
-                .to_owned(),
-        );
-    }
+    // The post-render exact-fit probe is skipped for the SAME reason the pre-load ones are: it
+    // derives the decision the worker derives, and no context means no probe. Asking the loaded
+    // generator to admit a synthetic reference-carrying budget here would price an admission
+    // decision this request never triggers, and the receipt would carry it as though it did.
 
     // Warm repeat determinism + cleanup bounds on this exact loaded provider.
     clear_cache();
@@ -18195,15 +18157,28 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
         return Err("Bernini output mutation did not breach the determinism envelope".to_owned());
     }
 
-    let lifecycle_blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. The pinned provider does register begin_request, so they are implementable — ",
-        "they are not run here, and this record claims nothing about them"
+    let lifecycle_blocker = format!(
+        concat!(
+            "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+            "provider; it opens no memory-strategy request scope and injects no calibration ",
+            "fault, so the scoped cancellation and authorized-error scenarios and their recovery ",
+            "renders are unexecuted. The pinned provider does register begin_request, so they are ",
+            "implementable — they are not run here, and this record claims nothing about them. ",
+            // sc-22738: stated in the same breath as the lifecycle exclusion because it is the
+            // same kind of claim — what this record deliberately does NOT say.
+            "Additionally: {}"
+        ),
+        BERNINI_ADMISSION_BLOCKER
     );
+    let lifecycle_blocker = lifecycle_blocker.as_str();
+    // GATED, not `runtime_complete` (sc-22738). Runtime activation is exactly the claim that the
+    // provider's admission gate accepted an exact-fit budget and rejected the two mutations, and
+    // this capture asked it nothing — because production asks it nothing for this request. The
+    // MEASUREMENT is unaffected and is carried in full: `observedMemory` and `predictedPeakBytes`
+    // are the resident-load prices this anchor exists to publish, and `extract-memory-anchors.mjs`
+    // reads them off this record exactly as it reads them off a runtime-complete one.
     let mut fragment = json!({
-        "status": "runtime_complete",
+        "status": "gated",
         "strategy": strategy,
         // From the CONTRACT's own calibration identity, never copied from the plan (sc-16482).
         "loadShape": load_shape_key(calibration.load_shape),
@@ -18214,9 +18189,9 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
         },
         "sweep": minimax_complete_sweep(request)?,
         "scenarios": [
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed", "reason": "the registered Bernini admission check rejected a zero/unknown budget before load" },
-            { "name": "stale_evidence", "result": "passed", "reason": "the registered Bernini admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "exact_fit", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
+            { "name": "unknown_budget", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
+            { "name": "stale_evidence", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
             { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -27939,6 +27914,320 @@ mod bernini_tests {
         assert_eq!(
             planned, expected,
             "every member has one planned MLX row per shipped tier"
+        );
+    }
+
+    /// The WORKER's `bernini_memory_attempt`, constructed out of the worker's own source rather
+    /// than restated here (sc-22738).
+    ///
+    /// A second hand-written copy of the predicate would agree with the arm by construction and
+    /// prove nothing — the whole claim under test is that the arm and PRODUCTION take the same
+    /// decision, so the production side has to come from production. `sceneworks-worker` is not a
+    /// dependency of this crate (and making the whole worker a dev-dependency to reach one private
+    /// `fn` would be a build-time cost out of all proportion), so the predicate is read off
+    /// `crates/sceneworks-worker/src/video_admission.rs` at test time — the same workspace-source
+    /// technique `every_cited_workspace_source_path_exists` uses. A worker that widens its admitted
+    /// route list therefore widens this test's expectation with it.
+    struct WorkerBerniniAttempt {
+        /// The one catalog id the worker's predicate names.
+        model_id: String,
+        /// The video routes it admits without a reference.
+        modes: Vec<String>,
+        /// Whether any non-zero reference count alone makes it an attempt.
+        any_reference: bool,
+    }
+
+    impl WorkerBerniniAttempt {
+        fn read() -> Self {
+            fn quoted(source: &str) -> Vec<String> {
+                source
+                    .split('"')
+                    .skip(1)
+                    .step_by(2)
+                    .map(str::to_owned)
+                    .collect()
+            }
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("the workspace root is two levels above this crate");
+            let path = root.join("crates/sceneworks-worker/src/video_admission.rs");
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let start = source
+                .find("fn bernini_memory_attempt(")
+                .expect("the worker still defines bernini_memory_attempt");
+            let open = source[start..].find('{').expect("the predicate has a body") + start;
+            let end = source[open..].find("\n}\n").expect("the body closes") + open;
+            let body = &source[open..end];
+            // The axes this extraction knows how to evaluate. A predicate that starts reading
+            // another one must be re-read here rather than silently half-modelled.
+            for axis in [
+                "reference_shape",
+                "lane",
+                "tier",
+                "overlay",
+                "fps",
+                "frames",
+            ] {
+                assert!(
+                    !body.contains(axis),
+                    "bernini_memory_attempt now reads `{axis}`, which this extraction does not \
+                     model: {body}"
+                );
+            }
+            let model_clause = &body[body
+                .find("request.model_id ==")
+                .expect("the predicate still binds a catalog id")..];
+            let model_id = quoted(model_clause)
+                .first()
+                .cloned()
+                .expect("the catalog id is a string literal");
+            let mode_clause = &body[body
+                .find("request.mode,")
+                .expect("the predicate still matches on the request mode")..];
+            let modes = quoted(&mode_clause[..mode_clause.find(')').expect("the match closes")]);
+            let any_reference = body.contains("request.reference_count > 0");
+            assert!(!model_id.is_empty());
+            assert!(
+                modes.len() > 1 && {
+                    let mut unique = modes.clone();
+                    unique.sort();
+                    unique.dedup();
+                    unique.len() == modes.len()
+                },
+                "the extracted route list is degenerate: {modes:?}"
+            );
+            assert!(
+                any_reference,
+                "the reference-count disjunct is gone from bernini_memory_attempt: {body}"
+            );
+            Self {
+                model_id,
+                modes,
+                any_reference,
+            }
+        }
+
+        fn decides(&self, model_id: &str, mode: &str, reference_count: u32) -> bool {
+            model_id == self.model_id
+                && (self.modes.iter().any(|admitted| admitted == mode)
+                    || (self.any_reference && reference_count > 0))
+        }
+    }
+
+    /// sc-22738. THE decision this fix is about: for every planned `mlx:bernini*` cell the arm's
+    /// answer to "does this capture ask Bernini's admission gate anything?" must be the answer
+    /// PRODUCTION gives for the same request shape.
+    ///
+    /// sc-22737 asked the gate on the anchor's own reference-free surface, which
+    /// `mlx-gen-bernini`'s route gate refuses by name, and all six anchors died with "admission
+    /// rejected a fitting probe budget" after a full dual-expert weight load. The remedy is not a
+    /// surface that makes the gate answer — production never presents one for this request — it is
+    /// to skip the probe exactly where production skips the context.
+    ///
+    /// The agreement is checked well past today's six cells: over the worker's whole admitted route
+    /// list, both catalog members and both reference counts, so a worker that adds a route cannot
+    /// leave the arm's mirror behind.
+    #[test]
+    fn the_arms_admission_decision_is_the_workers_for_every_planned_bernini_cell() {
+        let worker = WorkerBerniniAttempt::read();
+        for arm in BERNINI_ARMS {
+            for tier in BERNINI_TIERS {
+                let label = format!("{}:{tier}:mlx", arm.model_id);
+                let request = request(arm, tier);
+                let (resolved, _) = bernini_target(&request).expect("the fixture is this arm's");
+                let reference_count =
+                    bernini_reference_count(&request).expect("the fixture declares a count");
+                assert_eq!(
+                    bernini_probes_admission(resolved.model_id, resolved.mode, reference_count),
+                    worker.decides(resolved.model_id, resolved.mode, reference_count),
+                    "{label}: the arm and the worker disagree about whether this request has an \
+                     admission surface at all"
+                );
+                // And today that shared answer is NO — the fixture is reference-free on both
+                // members, so the capture prices the resident load and asks the gate nothing.
+                assert_eq!(reference_count, 0, "{label}");
+                assert!(
+                    !bernini_probes_admission(resolved.model_id, resolved.mode, reference_count),
+                    "{label}: a reference-free Bernini capture must not probe admission"
+                );
+            }
+        }
+        // The mirror, not just the six cells: every route the worker admits, every route it does
+        // not, both members, with and without a reference.
+        let modes: Vec<&str> = worker
+            .modes
+            .iter()
+            .map(String::as_str)
+            .chain(["text_to_video", "text_to_image", "image_to_video"])
+            .collect();
+        for arm in BERNINI_ARMS {
+            for mode in &modes {
+                for reference_count in [0, 1, 4] {
+                    assert_eq!(
+                        bernini_probes_admission(arm.model_id, mode, reference_count),
+                        worker.decides(arm.model_id, mode, reference_count),
+                        "{}/{mode}/refs={reference_count}: the arm's mirror of \
+                         bernini_memory_attempt has drifted",
+                        arm.model_id
+                    );
+                }
+            }
+        }
+
+        // …and the arm ACTS on that decision. The predicate above is only the answer; a body that
+        // still called the provider's admission gate, or a record that still claimed the three
+        // admission scenarios passed, would be the sc-22737 defect wearing the sc-22738 predicate.
+        // The measured render needs real weights and cannot run here, so the body is read the way
+        // `every_receipt_builder_is_bound_to_its_lane_prediction_wrapper` reads its bindings.
+        let source = include_str!("mlx.rs");
+        let start = source
+            .find("\nfn run_bernini(")
+            .expect("the arm still exists");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the arm's body closes")];
+        assert!(
+            !body.contains("safety_check"),
+            "the Bernini arm asks the provider's admission gate something again; production asks \
+             it nothing for a reference-free request"
+        );
+        assert!(
+            body.contains("\"status\": \"gated\""),
+            "a capture that ran no admission probe cannot file a runtime-activating record"
+        );
+        for scenario in ["exact_fit", "unknown_budget", "stale_evidence"] {
+            assert!(
+                body.contains(&format!(
+                    "{{ \"name\": \"{scenario}\", \"result\": \"not_run\", \"reason\": \
+                     BERNINI_ADMISSION_BLOCKER }}"
+                )),
+                "the {scenario} scenario must be reported unexecuted, with the reason production \
+                 gives for it"
+            );
+        }
+        assert!(
+            BERNINI_ADMISSION_BLOCKER.contains("reference-free Bernini has NO admission surface")
+                && BERNINI_ADMISSION_BLOCKER.contains("prices the RESIDENT load"),
+            "the record must state why it ran no probe and what it does price: \
+             {BERNINI_ADMISSION_BLOCKER}"
+        );
+    }
+
+    /// The load spec the arm builds for a tier, minus the snapshot, against a path that does not
+    /// exist: `weights_free_memory_strategy_contract` charges zero measured bytes and falls back to
+    /// the architecture defaults for an unreadable root, so this stays a CPU test with no weights
+    /// and no Metal.
+    fn probe_spec(selection: &MemorySelection) -> LoadSpec {
+        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from(
+            "/nonexistent/sc-22738/bernini",
+        )))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+        if let Some(quant) = selection.tier.quant {
+            spec = spec.with_quant(quant);
+        }
+        spec
+    }
+
+    /// sc-22738. The other half of the claim: the arm skips the probe because THIS REQUEST has no
+    /// admission surface, not because the seam is broken or unreachable.
+    ///
+    /// A reference-carrying V2V request — one source clip, its `provider_video_mode:v2v` axis, the
+    /// single-phase trajectory Bernini actually runs, one of the frame counts both sides admit — is
+    /// a request production DOES build a context for (`bernini_memory_attempt` answers true) and
+    /// the engine's own `loaded_safety_check` accepts. The surface is spelled here, in the test,
+    /// rather than in the arm: it is the fixture of this seam exercise, and an arm that carried it
+    /// would be able to present it for a request that has no reference — which is exactly the
+    /// defect this story removes.
+    #[test]
+    fn a_reference_carrying_bernini_request_would_build_a_context_the_engine_admits() {
+        /// The provider task axis the engine's route gate requires for V2V, and the axis
+        /// `video_admission.rs#bernini_surface_is_exact` expects alongside `video_to_video`.
+        const V2V_OVERLAY: &str = "provider_video_mode:v2v";
+        const V2V_MODE: &str = "video_to_video";
+        /// V2V carries exactly one source clip.
+        const V2V_REFERENCE_COUNT: u32 = 1;
+        /// One of the frame counts both gates admit (45 / 61 / 77).
+        const V2V_FRAMES: u32 = 45;
+
+        let worker = WorkerBerniniAttempt::read();
+        assert!(
+            worker.decides(BERNINI_VIDEO_MODEL_ID, V2V_MODE, V2V_REFERENCE_COUNT),
+            "the worker must build a memory context for a reference-carrying V2V request, or the \
+             arm's skip is not a property of the request"
+        );
+
+        let (width, height) = advertised();
+        let selection =
+            planned_selection(&request(BERNINI_VIDEO_ARM, "q4")).expect("the fixture plans a rung");
+        let spec = probe_spec(&selection);
+        let contract = engine::weights_free_memory_strategy_contract(engine::FULL_ID, &spec)
+            .expect("the pinned crate publishes a weights-free contract");
+        let calibration = contract
+            .calibration
+            .clone()
+            .expect("the weights-free contract carries a calibration identity");
+        let context = |overlay: Option<&str>| MemoryRunContext {
+            selection,
+            optimization_authority: MemoryOptimizationAuthority::Calibrated,
+            calibration_abi: calibration.abi,
+            calibration_fingerprint: calibration.fingerprint.clone(),
+            load_shape: calibration.load_shape,
+            mode: MemoryMode::Other(V2V_MODE.to_owned()),
+            has_reference: true,
+            use_pid: false,
+            // Phase-resolved evidence is not a multi-phase request modifier; the worker's own
+            // `MemoryRunContext` literal carries this false and Bernini runs a single-phase denoise.
+            has_phases: false,
+            geometry: MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: V2V_FRAMES,
+                reference_count: V2V_REFERENCE_COUNT,
+            },
+            overlay: overlay.map(str::to_owned),
+            budget: MemoryBudget {
+                total_bytes: 137_438_953_472,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            predicted_peak_bytes: 1,
+            cache_state: MemoryCacheState::Cold,
+            evidence_revision: format!("sc-22738@{}", protocol::INFERENCE_PIN),
+        };
+        let expert_blocks = engine::trunk_blocks() / 2;
+        let check = |context: &MemoryRunContext| {
+            engine::loaded_safety_check(engine::FULL_ID, &spec, &contract, context, expert_blocks)
+        };
+        assert!(
+            matches!(
+                check(&context(Some(V2V_OVERLAY))),
+                MemorySafetyDecision::Accept
+            ),
+            "the engine refused a reference-carrying V2V request it admits in production: {:?}",
+            check(&context(Some(V2V_OVERLAY)))
+        );
+        // The accept is not blanket: the same gate rejects the same request without the provider
+        // task axis, and rejects the reference-free surface sc-22737 probed.
+        assert!(
+            matches!(check(&context(None)), MemorySafetyDecision::Reject { .. }),
+            "a V2V request with no provider task axis must stay a rejection"
+        );
+        let mut reference_free = context(Some(V2V_OVERLAY));
+        reference_free.has_reference = false;
+        reference_free.geometry.reference_count = 0;
+        reference_free.mode = MemoryMode::Other(BERNINI_VIDEO_ARM.mode.to_owned());
+        reference_free.overlay = None;
+        assert!(
+            matches!(check(&reference_free), MemorySafetyDecision::Reject { .. }),
+            "the reference-free surface this arm renders must stay outside Bernini admission — it \
+             is why the arm asks the gate nothing"
         );
     }
 }
