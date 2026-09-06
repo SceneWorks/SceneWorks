@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b06bbd1e8f3e61dca12bd22f9afed295f673ab4506e0e6429d86355ca6e15c42",
+    "sceneWorksRevision": "source-tree:8d02d0d1782d3cf9c629f45020c6e3ab8dd478c8f3d064d8b382a8398d22ebc6",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "978098480768a37438f7b44474f655943db4ee3869f16267c0db8958b6029119"
+        "sha256": "cd13f35e8c51b190277718eca168c8c017e9d066ca9b59e3346556234b62ed1c"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "04092d57d1f1ba5c9c2e7e9789d5af07eb0100878f60419c8849e430ea6e9b41"
+        "sha256": "cbb134ffd73ba5d044bae77af7164a7708efab80172271406c52b50e9b941c82"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1273,
-    "elidedCells": 7992,
+    "publishedCells": 1277,
+    "elidedCells": 7988,
     "elidedByState": {
-      "Implemented": 3618,
+      "Implemented": 3614,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 58,
-    "analyticOnlyCells": 279,
-    "anchoredCells": 810,
+    "anchors": 59,
+    "analyticOnlyCells": 278,
+    "anchoredCells": 814,
     "staleAnchors": 7,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5641,6 +5641,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 4
+    },
+    {
+      "id": "sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+      "modelId": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 4
@@ -13380,12 +13398,11 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 6,
-      "published": 4,
-      "elided": 2,
+      "published": 6,
+      "elided": 0,
       "implemented": 6,
       "states": {
-        "Anchored": 4,
-        "Implemented": 2
+        "Anchored": 6
       }
     },
     {
@@ -13393,12 +13410,11 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 4,
-      "elided": 2,
+      "published": 6,
+      "elided": 0,
       "implemented": 6,
       "states": {
-        "Anchored": 4,
-        "Implemented": 2
+        "Anchored": 6
       }
     },
     {
@@ -60681,6 +60697,194 @@
       }
     },
     {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:image_to_image:none:resident",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15523,
+      "owningModelStory": 15491,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:image_to_image:none:staged_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15523,
+      "owningModelStory": 15491,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:resident",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15523,
+      "owningModelStory": 15491,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:staged_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15523,
+      "owningModelStory": 15491,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:mlx:q8:base:base:sana-sprint-q8-mlx-full-ladder-v1-resident:imc-a7c979b0875e3f2ac96c"
+          }
+        ]
+      }
+    },
+    {
       "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:candle:bf16:character_image:identity:bounded_decode",
       "modelId": "sensenova_u1_8b_fast",
       "resolvedRoute": "sensenova_u1_8b_fast",
@@ -84554,7 +84758,11 @@
       "sana_sprint_1600m:sana_sprint_1600m:mlx:q4:image_to_image:none:resident",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:q4:image_to_image:none:staged_residency",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:q4:text_to_image:none:resident",
-      "sana_sprint_1600m:sana_sprint_1600m:mlx:q4:text_to_image:none:staged_residency"
+      "sana_sprint_1600m:sana_sprint_1600m:mlx:q4:text_to_image:none:staged_residency",
+      "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:image_to_image:none:resident",
+      "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:image_to_image:none:staged_residency",
+      "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:resident",
+      "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:staged_residency"
     ],
     "scail2_14b": [],
     "sd3_5_large": [],
