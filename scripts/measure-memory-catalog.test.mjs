@@ -59,6 +59,7 @@ import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
   LTX25_LANE_PROVIDERS,
+  planAnchor,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -2130,6 +2131,52 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
         "dump surface, delete readDeclaredStrategySupport rather than leaving an unexercised source",
     );
   }
+});
+
+/**
+ * sc-22738. The composition a row plans and the CONTROLS it carries are one claim, and the
+ * campaign's first full MLX walk proved they were never checked together: `planAnchor` emits
+ * `strategy.parameters: {}` for every row, while `crates/…/bin/mlx_ltx25.rs` demanded
+ * `attentionChunkSize` unconditionally, so all three `ltx_2_5:*:mlx` cells refused before a weight
+ * was read — the arm still spoke epic 18755's ladder sweep, which sc-22505 replaced with one anchor
+ * at the lane default rung.
+ *
+ * The law, both directions, derived from the manifest rather than a list: the request the harness
+ * builds must carry EXACTLY the parameters the model's own lane block declares for the rungs its
+ * planned composition engages, and nothing for a rung it does not engage. `resident` and
+ * `staged_residency` declare no controls, so today every row is `{}` — and a row that ever plans a
+ * parameterized rung must ship those parameters or this reds. The engine enforces the same
+ * symmetry (`attention_chunk_size requires chunk_attention=true`), which is why volunteering a
+ * control is as wrong as omitting one.
+ */
+test("a planned anchor carries exactly the controls its engaged rungs declare", async () => {
+  const plan = await readPlan();
+  const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  // The wire spells the component lowercase; the manifest spells the engine's enum variant.
+  const wire = (parameter, value) =>
+    parameter === "transformerWindowComponent" ? String(value).toLowerCase() : value;
+  let checked = 0;
+  for (const key of Object.keys(plan.anchors)) {
+    const { modelId, backend } = anchorParts(key);
+    const model = models.get(modelId);
+    if (!model) continue;
+    const declared = model[backend]?.memoryStrategyCapabilities ?? {};
+    const planned = planAnchor(plan, key);
+    const expected = {};
+    for (const rung of planned.strategy.engagedRungs) {
+      for (const [parameter, value] of Object.entries(declared[rung]?.parameters ?? {})) {
+        expected[parameter] = wire(parameter, value);
+      }
+    }
+    assert.deepEqual(
+      planned.strategy.parameters,
+      expected,
+      `${key}: plans rung ${planned.strategy.rung} engaging ${JSON.stringify(planned.strategy.engagedRungs)}, ` +
+        `so the manifest's ${backend}.memoryStrategyCapabilities requires exactly ${JSON.stringify(expected)}`,
+    );
+    checked += 1;
+  }
+  assert.ok(checked > 0, "no plan row was judged against the manifest's declared controls");
 });
 
 // sc-22736. The third source read three ways: the shipped shape yields per-rung support, a file
