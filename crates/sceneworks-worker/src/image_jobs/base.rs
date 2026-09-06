@@ -10342,6 +10342,15 @@ fn candle_quant_for_resolved_tier(
     //     `quantize` would request a second on-the-fly quantization and the provider refuses it;
     //   * the pinned candle-gen-flux descriptor, which advertises `supported_quants: []` and
     //     rejects a nonempty `LoadSpec.quantize` outright.
+    //   * sc-22732: the two Ideogram 4 routes. `candle-gen-ideogram`'s descriptor advertises
+    //     `supported_quants: [Q4, Q8]` so this A/B tier toggle engages, but its exact directory
+    //     route — `IdeogramLoadReceipt::capture` -> `validate_load_shape`, on the PRODUCTION
+    //     `load`/`load_turbo` path, not a test-only one — refuses a spec whose `quantize` is
+    //     `Some(_)` by name ("exact Ideogram directory route requires precision=Bf16 and
+    //     quantize=None") and proves the tier off the packed safetensors headers instead. Sending
+    //     the resolved quant therefore failed every candle Ideogram q4/q8 load at the loader; the
+    //     artifact is the authority on the tier, so the load instruction stays empty and the
+    //     resolved bits still reach the recipe.
     // Keep the load instruction empty while retaining the resolved artifact bits for the recipe
     // and later telemetry. This is deliberately narrower than `!supports_quant`: other descriptors
     // with an empty list are dense-only and must not acquire a packed-tier receipt.
@@ -10355,6 +10364,8 @@ fn candle_quant_for_resolved_tier(
             | "sd3_5_medium"
             | "flux_schnell"
             | "flux_dev"
+            | "ideogram_4"
+            | "ideogram_4_turbo"
     ) {
         return (None, resolved_bits);
     }
@@ -10418,6 +10429,12 @@ mod candle_resolved_tier_contract_tests {
         std::fs::write(transformer.join("config.json"), config).expect("tier config");
     }
 
+    /// sc-22732: `ideogram_4` / `ideogram_4_turbo` join the list. Their descriptor advertises
+    /// `supported_quants: [Q4, Q8]`, so without the carve-out this function answered
+    /// `(Some(Quant::Q4), Some(4))` at q4 — and `candle-gen-ideogram`'s production
+    /// `IdeogramLoadReceipt::capture` -> `validate_load_shape` refuses `quantize: Some(_)` by name,
+    /// so every candle Ideogram q4/q8 load failed at the loader. The artifact proves the tier; the
+    /// request knob never does.
     #[test]
     fn packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
         for model in [
@@ -10427,6 +10444,8 @@ mod candle_resolved_tier_contract_tests {
             "sd3_5_large",
             "sd3_5_large_turbo",
             "sd3_5_medium",
+            "ideogram_4",
+            "ideogram_4_turbo",
         ] {
             for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
                 let request = ImageRequest::from_payload(
