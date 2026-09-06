@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
 // capture plans, so the inventory below reads them directly.
@@ -237,11 +242,96 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     workflow,
     /Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/,
   );
-  assert.match(workflow, /Join-Path \$env:RUNNER_TEMP 'cargo-home'/);
-  assert.match(
-    workflow,
-    /Add-Content -Path \$env:GITHUB_ENV -Value "CARGO_HOME=\$jobCargoHome"/,
-  );
+  for (const [name, suffix] of [["candle-worker", ""], ["imported-nvfp4-worker-smoke", " for the imported NVFP4 smoke"]]) {
+    const job = workflowJob(workflow, name);
+    const setup = workflowStep(job, "Set up Node for Cargo cache selection");
+    const select = workflowStep(job, `Isolate Cargo dependency checkout${suffix}`);
+    const fetchStep = workflowStep(job, `Fetch the pinned inference release${name === "candle-worker" ? "" : " for the imported NVFP4 smoke"}`);
+    assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+    assert.match(setup, /node-version: 22/);
+    assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
+    assert.match(select, /node scripts\/select-windows-cargo-cache\.mjs/);
+    assert.match(select, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+    assert.doesNotMatch(select.split("\n").filter(line => !/^\s*#/.test(line)).join("\n"), /RUNNER_TEMP|USERPROFILE|continue-on-error/);
+    assert.match(fetchStep, /CARGO_NET_OFFLINE: "false"/);
+    assert.match(fetchStep, /run: cargo fetch --locked/);
+  }
+});
+
+test("Windows Cargo cache preserves only the matching service cache and remains stable across jobs", () => {
+  const root = "C:\\tools";
+  const caches = new Set();
+  for (let i = 1; i <= 4; i++) {
+    const runnerName = `cuda-windows${i === 1 ? "" : `-${i}`}`;
+    const cargoHome = `D:\\cargo-home-${i}`;
+    const selected = selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache: root });
+    assert.equal(selected.mode, "service-cache"); assert.equal(selected.cache, cargoHome);
+    caches.add(selected.cache);
+    assert.deepEqual(selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache: root }), selected);
+  }
+  assert.equal(caches.size, 4);
+});
+
+test("Windows Cargo cache rejects another listener's cache and shared or missing homes", () => {
+  for (const cargoHome of [undefined, "", "C:\\Users\\runner\\.cargo", "D:\\cargo-home-1", "relative", "\\\\server\\share", "D:\\cargo-home-2\nINJECT=value"]) {
+    const selected = selectWindowsCargoCache({ runnerName: "cuda-windows-2", cargoHome, runnerToolCache: "C:\\tools" });
+    assert.equal(selected.mode, "listener-cache");
+    assert.equal(selected.cache, "C:\\tools\\SceneWorks\\cargo\\cuda-windows-2");
+  }
+  const first = selectWindowsCargoCache({ runnerName: "cuda-windows", runnerToolCache: "C:\\tools" });
+  const second = selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache: "C:\\tools" });
+  assert.notEqual(first.cache, second.cache);
+});
+
+test("Windows Cargo cache fails closed on malformed listener or persistent root", () => {
+  for (const runnerName of [undefined, "", "../cuda", "cuda/windows", "cuda\\windows", "cuda\nHOME=shared", "a".repeat(65)]) {
+    assert.throws(() => selectWindowsCargoCache({ runnerName, runnerToolCache: "C:\\tools" }), /safe listener/);
+  }
+  for (const runnerToolCache of [undefined, "", "relative", "C:relative", "C:\\tools\\..\\shared", "C:\\tools.\\child", "C:\\tools\nOTHER=value", "\\\\server\\share"]) {
+    assert.throws(() => selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache }), /safe listener/);
+  }
+});
+
+test("Windows Cargo cache accepts repeated exact LF and CRLF lock sources, rejects ambiguous or malformed identity", () => {
+  const sha = "a".repeat(40), other = "b".repeat(40);
+  const line = `source = "git+https://github.com/SceneWorks/inference?rev=${sha}#${sha}"`;
+  for (const newline of ["\n", "\r\n"]) assert.equal(lockedInferenceRevision(`${line}${newline}${line}${newline}`), sha);
+  for (const lock of ["", line.replace(`#${sha}`, `#${other}`), `${line}\n${line.replaceAll(sha, other)}`, `${line}\nsource = "git+https://github.com/SceneWorks/inference?branch=main"`]) {
+    assert.throws(() => lockedInferenceRevision(lock), /one exact inference/);
+  }
+});
+
+test("Windows Cargo cache directory guard preserves content and rejects linked or non-directory paths", async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-guard-"));
+  try {
+    const cache = path.join(root, "listener", "cargo");
+    await ensurePhysicalCargoCache(cache);
+    await writeFile(path.join(cache, "preserve"), "existing cache");
+    await ensurePhysicalCargoCache(cache);
+    assert.equal(await readFile(path.join(cache, "preserve"), "utf8"), "existing cache");
+    const file = path.join(root, "file"); await writeFile(file, "preserve");
+    await assert.rejects(() => ensurePhysicalCargoCache(path.join(file, "child")), /physical persistent/);
+    const link = path.join(root, "linked"); await symlink(cache, link, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(() => ensurePhysicalCargoCache(path.join(link, "child")), /physical persistent/);
+    assert.equal(await readFile(file, "utf8"), "preserve");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit from empty or unrelated caches", async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-git-"));
+  const git = promisify(execFile);
+  try {
+    assert.equal(await cachedInferenceRevision(root, "a".repeat(40)), false);
+    const db = path.join(root, "git", "db", "inference-123abc");
+    await mkdir(db, { recursive: true });
+    await git("git", ["init", "--bare", db]);
+    const empty = path.join(root, "empty"); await writeFile(empty, "");
+    const tree = (await git("git", ["--git-dir", db, "hash-object", "-t", "tree", "-w", empty])).stdout.trim();
+    assert.equal(await cachedInferenceRevision(root, tree), false);
+    const commit = (await git("git", ["--git-dir", db, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgSign=false", "commit-tree", tree, "-m", "fixture"])).stdout.trim();
+    assert.equal(await cachedInferenceRevision(root, commit), true);
+    assert.equal(await cachedInferenceRevision(root, "a".repeat(40)), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Windows Krea provisioning accepts supported newer Python 3 runtimes", async () => {
