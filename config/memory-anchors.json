@@ -823,6 +823,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux_dev:mlx:q8:base:base:flux1-dev-q8-mlx-shared-ladder-v1:imc-97db74fece6196ab893e",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json",
+        "sha256": "d0d1e3f2f94db38624a06a72fe0181ad92ed642dae25079c4f71d8140e10b315",
+        "recordId": "imc-97db74fece6196ab893e",
+        "calibrationFingerprint": "flux1-dev-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d7c4be259300301df9135f56ca83a70d5e31de752718418914de607ff00be6ae"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1051952,
+        "denoise": 19851875028,
+        "decode": 33297170664
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1054044,
+        "denoise": 24948250420,
+        "decode": 75405173600
+      },
+      "overallAllocatorEnvelopeBytes": 75405173600,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2370,17 +2416,6 @@
           "vramGbByTier": "31.8"
         }
       }
-    },
-    {
-      "id": "analytic:flux_dev:mlx:q8",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:flux_schnell:candle:q4",
