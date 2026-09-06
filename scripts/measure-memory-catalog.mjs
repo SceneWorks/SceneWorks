@@ -507,6 +507,66 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
 
 /**
+ * What `mlx_gen_minimax_h3::model::load` opens in the UPSTREAM snapshot root, at the pinned
+ * revision (`crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs`), read off the loader rather
+ * than guessed from the manifest's download globs.
+ *
+ * `spec.weights` for BOTH MiniMax entries is the dense `MiniMaxAI/MiniMax-H3` snapshot — only the
+ * DiT and (at q4/q8) the text encoder are redirected onto the rehost — and the loader probes these
+ * six documents under it before it will build the generator. `FL2VA/audio_vae` carries the audio
+ * VAE's constructor arguments, which the repackaged root config does not.
+ *
+ * sc-22738 declares them because the campaign found the hard way what an undeclared read costs:
+ * this host holds a `MiniMaxAI/MiniMax-H3` snapshot with `FL2VA/`, `audio_vae/`, `tokenizer/` and
+ * `vae/` and NO `text_encoder/`, `--list` called `minimax_h3:bf16:mlx` runnable, and the booked
+ * capture died on `read …/text_encoder: No such file or directory` before it rendered anything.
+ */
+export const MINIMAX_UPSTREAM_ROOT_FILES = Object.freeze([
+  "vae/config.json",
+  "audio_vae/config.json",
+  "tokenizer/tokenizer.json",
+  "FL2VA/audio_vae/config.json",
+  "FL2VA/audio_vae/config.yaml",
+  "FL2VA/audio_vae/metadata.json",
+]);
+
+/**
+ * The text encoder's config, wherever the tier puts it.
+ *
+ * The TE's tier is DERIVED from the DiT's rather than being a free axis (`mlx.rs`
+ * `minimax_text_encoder_source`, and the manifest's three `componentId: "text_encoder"`
+ * co-requisite rows): `q4`/`q8` stage `<tier>/text_encoder` from the rehost, `bf16` takes the dense
+ * `text_encoder/` from the upstream root. So the SAME probe is declared against two different roots
+ * depending on the tier — which is exactly what the per-tier form of a required-file declaration is
+ * for, and why one flat list could not express it.
+ */
+export const MINIMAX_TEXT_ENCODER_CONFIG = "text_encoder/config.json";
+
+/**
+ * The two DiT partitions the loader probes inside the resolved tier root: the base one, and
+ * `transformer_ref/` — which is probed as the base partition's SIBLING at load time for EVERY
+ * entry, not only for `minimax_h3_ref`, because `ref2va` is a first-class task of the engine.
+ */
+export const MINIMAX_TIER_DIT_FILES = Object.freeze([
+  "transformer/config.json",
+  "transformer_ref/config.json",
+]);
+
+/**
+ * The files a required-file declaration demands for `tier`.
+ *
+ * A declaration is either a flat list (every tier needs the same files — the SenseNova `_fast`
+ * marker) or a per-tier object `{ all, q4, q8, bf16 }` whose `all` entry applies to every tier and
+ * whose tier entry is added on top. Absent is the empty list: a family that declares nothing keeps
+ * classifying exactly as it did.
+ */
+export function requiredFilesFor(declaration, tier) {
+  if (!declaration) return [];
+  if (Array.isArray(declaration)) return declaration;
+  return [...(declaration.all ?? []), ...(declaration[tier] ?? [])];
+}
+
+/**
  * The shared Mage-Flow text-encoder + VAE rehost (sc-22733). Declared once and referenced by all six
  * Mage family rows: it is the SAME repository and the SAME revision for every variant and both
  * lanes, and both adapters read it through one `SCENEWORKS_MAGE_FLOW_COMPONENTS_*` family. The
@@ -760,10 +820,29 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // fact stageable from the upstream snapshot alone — wrong in the direction that hides work.
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx", "candle"],
-    upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
+    upstream: {
+      env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3",
+      // sc-22738: what the load READS in this root, per tier. `bf16` adds the dense text encoder,
+      // which is the file this host does not hold and which the classifier called runnable.
+      requiredFiles: { all: MINIMAX_UPSTREAM_ROOT_FILES, bf16: [MINIMAX_TEXT_ENCODER_CONFIG] },
+    },
+    // The two DiT partitions live in the tier root on every rehost-backed cell, and `q4`/`q8` take
+    // the packed text encoder from it as well (`bf16` takes the dense one from upstream above).
+    requiredTierFiles: {
+      all: MINIMAX_TIER_DIT_FILES,
+      q4: [MINIMAX_TEXT_ENCODER_CONFIG],
+      q8: [MINIMAX_TEXT_ENCODER_CONFIG],
+    },
     artifacts: {
       candle: {
-        bf16: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3", layout: "flat" },
+        // The one cell whose tier root IS the upstream snapshot root: everything the load opens is
+        // in that flat tree, so the DiT partitions are required THERE. The text encoder and the
+        // root documents are already covered by the `upstream` declaration above, which probes the
+        // same directory — declaring them twice would only duplicate the reason string.
+        bf16: {
+          env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3", layout: "flat",
+          requiredTierFiles: MINIMAX_TIER_DIT_FILES,
+        },
       },
     },
     // The reference entry stages the tier tree at EVERY tier, on both lanes, because
@@ -1327,7 +1406,10 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // LoRA at load and the resident shape is not the one the anchor prices. Nine `_fast` MLX cells
   // would therefore hard-fail at capture with an identity mismatch, hours into a booked session,
   // over a fact this probe can read in a millisecond. Classified by name instead.
-  const requiredTierFiles = artifact.requiredTierFiles ?? family.requiredTierFiles ?? [];
+  // sc-22738 generalized the declaration from a flat list to a per-tier one: MiniMax-H3's text
+  // encoder is packed inside the tier root at q4/q8 and taken from the dense upstream root at bf16,
+  // so which file a root must carry depends on the tier being classified.
+  const requiredTierFiles = requiredFilesFor(artifact.requiredTierFiles ?? family.requiredTierFiles, parts.tier);
   const missingTierFiles = [];
   for (const file of requiredTierFiles) {
     try {
@@ -1392,6 +1474,24 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.roots.push({ label: "upstream root", path: upstreamRoot ?? snapshotPath(hubs[0], family.upstream.repo, upstream.revision) });
     if (!upstreamRoot) {
       return { ...row, status: "weights_missing", reason: `no ${family.upstream.repo}@${upstream.revision.slice(0, 8)} snapshot on this host` };
+    }
+    // sc-22738. A PRESENT snapshot is not a complete one. The dense MiniMax-H3 tree staged on the
+    // capture host carried `vae/`, `audio_vae/`, `tokenizer/` and `FL2VA/` but no `text_encoder/`,
+    // and because this branch only asked whether the snapshot directory existed, `--list` reported
+    // `minimax_h3:bf16:mlx` runnable and the booked capture died on the missing directory instead.
+    // The declared files are the ones the pinned loader opens under this root, so an incomplete
+    // mirror is `weights_missing` — named file by file — exactly like an absent one.
+    const missingUpstream = [];
+    for (const file of requiredFilesFor(family.upstream.requiredFiles, parts.tier)) {
+      try {
+        if (!(await stat(path.join(upstreamRoot, file))).isFile()) missingUpstream.push(file);
+      } catch { missingUpstream.push(file); }
+    }
+    if (missingUpstream.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.upstream.repo} snapshot ${upstreamRoot} is missing ${missingUpstream.join(", ")}, which the pinned loader opens under the snapshot root`,
+      };
     }
     row.env[`SCENEWORKS_${family.upstream.env}_REPOSITORY`] = family.upstream.repo;
     row.env[`SCENEWORKS_${family.upstream.env}_REVISION`] = upstream.revision;

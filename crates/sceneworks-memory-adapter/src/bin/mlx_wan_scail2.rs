@@ -957,12 +957,6 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.loadability_fingerprint(tier),
         },
-        "output": {
-            "frames": geometry.frames,
-            "fps": output_fps,
-            "referenceCount": arm.carrier.reference_count(),
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:{}-video", arm.slug),
             "executed",
@@ -988,6 +982,11 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("renderedFrames", "count", u64::from(geometry.frames)),
                 ("renderedFps", "count", u64::from(output_fps)),
+                // sc-22738. The carrier's reference count was the one fact the dropped top-level
+                // `output` object published that these measurements did not: the record schema is
+                // `additionalProperties: false`, so the object made the whole bundle unschedulable
+                // after the render. It is a measurement now, beside the frames and fps receipts.
+                ("referenceCount", "count", u64::from(arm.carrier.reference_count())),
             ],
         ),
         "capturedAt": protocol::captured_at(),
