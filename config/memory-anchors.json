@@ -2189,7 +2189,7 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
-      "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+      "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
       "route": "qwen_image",
@@ -2201,19 +2201,19 @@
       "mode": "text_to_image",
       "overlay": null,
       "referenceCount": 0,
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "measuredRegime": {
-        "decodeTiled": true,
+        "decodeTiled": false,
         "transformerWindowed": false,
         "staged": false,
-        "attentionChunked": true
+        "attentionChunked": false
       },
       "source": {
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-8f110511b0f85d15f72f",
+        "path": "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+        "sha256": "2d253197b425bec3288a94c4947d0cdfa4321e633f849dc9680b07810df0b40b",
+        "recordId": "imc-4a54665d0b486438f652",
         "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
-        "loaderClosureDigest": "a4c2f95fa9a88b6a31fb6233e467506065a72510852a806bb0610644ca24e620"
+        "loaderClosureDigest": "7440706fd376b4aa618d9a77fed1ab528d111c315d9be27cfc7889de14fe09ec"
       },
       "geometry": {
         "width": 1024,
@@ -2222,16 +2222,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 43908,
-        "denoise": 37540957244,
-        "decode": 40204028976
+        "conditioning": 16596985144,
+        "denoise": 37768842364,
+        "decode": 44357563148
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 44088,
-        "denoise": 41428488872,
-        "decode": 40204028976
+        "conditioning": 19061129276,
+        "denoise": 42930276484,
+        "decode": 44357563148
       },
-      "overallAllocatorEnvelopeBytes": 44091560604,
+      "overallAllocatorEnvelopeBytes": 49518997268,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {

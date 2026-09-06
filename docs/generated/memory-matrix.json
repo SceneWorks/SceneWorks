@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f6b8294fde058384a16a8b8c901293a62f2172f75cd65d3a0848ac26e2756d59",
+    "sceneWorksRevision": "source-tree:0001ca6f394f655938f175568a0f0beec5561b9fdf3c7812caca74b1026bbbad",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "15e68af74425311ff031697b3e3e560fb1236aeb0c4e98b6b7fc875e543dfa23"
+        "sha256": "ad8fc7f05f5ab60d384151d352e93e823342ea67f49b2d0a68ffb4759168f090"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "335925a6fcbf40573b55ffe457a42dabc9202a3e62a7e4a5602f2cb93a5b4316"
+        "sha256": "d63fe481db7441b12f49b9eeeaca4f3d0b74b76264b031fbb405cf7db414ee3c"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -165,7 +165,7 @@
     "anchors": 50,
     "analyticOnlyCells": 287,
     "anchoredCells": 706,
-    "staleAnchors": 8,
+    "staleAnchors": 7,
     "attestedAnchors": 5,
     "fullModels": 0
   },
@@ -5484,7 +5484,7 @@
       "cells": 12
     },
     {
-      "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+      "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
       "modelId": "qwen_image",
       "backend": "mlx",
       "tier": "q8",
@@ -5496,8 +5496,8 @@
         "frames": 1,
         "fps": null
       },
-      "source": "docs/generated/memory-calibration-evidence.json",
-      "current": false,
+      "source": "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 12
     },
@@ -53716,10 +53716,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -53737,7 +53737,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -53770,10 +53770,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -53791,7 +53791,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -53839,10 +53839,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -53860,7 +53860,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -53904,10 +53904,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -53925,7 +53925,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -53981,10 +53981,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54002,7 +54002,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54029,10 +54029,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54050,7 +54050,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54083,10 +54083,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54104,7 +54104,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54152,10 +54152,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54173,7 +54173,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54217,10 +54217,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54238,7 +54238,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54294,10 +54294,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54315,7 +54315,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54342,10 +54342,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54363,7 +54363,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }
@@ -54396,10 +54396,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+        "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
         "tier": "q8",
-        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
-        "current": false,
+        "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -54417,7 +54417,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f"
+            "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4a54665d0b486438f652"
           }
         ]
       }

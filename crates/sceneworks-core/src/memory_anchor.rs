@@ -276,6 +276,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         "docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json"),
     ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json"),
+    ),
 ];
 
 // ---------------------------------------------------------------------------------------------
