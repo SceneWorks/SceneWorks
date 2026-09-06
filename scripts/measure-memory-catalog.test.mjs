@@ -7,7 +7,9 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  OUT_OF_MATRIX_CATALOG_ENTRIES,
   parseBackendTierOverrides,
+  parseInternalCandleVideoRoutes,
   parseRouteRegistryLaneTiers,
 } from "./generate-memory-matrix.mjs";
 import {
@@ -1833,6 +1835,188 @@ test("the wan candle dense leg binds the upstream snapshot flat and unpinned", a
       assert.match(mlx.repo, /^SceneWorks\/.*-mlx$/, `${id}:${tier}:mlx`);
       assert.equal(mlx.layout, "tiered", `${id}:${tier}:mlx`);
     }
+  }
+});
+
+// sc-22737. Bernini: ONE engine provider (`bernini`) serves the video entry `bernini` and the still
+// entry `bernini_image` — twelve cells over both lanes. The MLX lane opens the per-tier
+// `SceneWorks/bernini-mlx` rehost; the Candle lane opens the untiered `SceneWorks/bernini` bundle
+// whose tier subdirs live inside it (see `laneHasTierBundle`). Bernini VIDEO is Candle-routed OFF
+// THE MODEL ID, ahead of the generic `candle_video_engine_id` arm
+// (`crates/sceneworks-worker/src/video_jobs/mod.rs#resolve_candle_video_route` →
+// `CandleVideoRoute::Bernini` → `generate_candle_bernini`), which is why the generator — and so the
+// routed-lane set `shippedTieredCells` reads — lists both lanes for it.
+test("the bernini family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["bernini", "bernini_image"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  const expected = family.flatMap((id) =>
+    ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
+  );
+  assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// `ltx_2_3 claims q4 and q8 on candle, and bf16 only on mlx` derives the five-cell key set from the
+// manifest and the worker's Candle tier resolver; this is the other half of the claim — every one
+// of those five cells is planned, armed and closed over.
+test("ltx_2_3 is measurable on every shipped tier of every routed lane", async () => {
+  const cells = (await shippedTieredCells()).filter((cell) => cell.modelId === "ltx_2_3");
+  assert.equal(cells.length, 5, "the five-cell set the sibling case derives");
+  const gaps = (await measurabilityGaps()).filter((gap) => gap.modelId === "ltx_2_3");
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22737. MiniMax-H3 is the one family `shippedTieredCells` cannot see: `generate-memory-matrix.mjs`
+// subtracts `minimax_h3` / `minimax_h3_ref` from the matrix universe (`OUT_OF_MATRIX_CATALOG_ENTRIES`
+// — the MLX resolver is a prefix predicate the generator cannot enumerate), and the gap set is keyed
+// off the matrix's routed lanes. Epic 22723 E2 names `--list` as the oracle, so the family is asked
+// there directly. Both lanes are DERIVED from the worker's dispatch, through the same
+// `parseInternalCandleVideoRoutes` read the generator makes — it throws if the Candle
+// `CandleVideoRoute::MiniMaxH3` arm (`video_jobs/mod.rs#resolve_candle_video_route`) or the shared
+// `minimax_h3_engine_id` resolver both lanes consult is gone — the tier axis from the manifest, and
+// every (member, tier, lane) must be planned and classify runnable / weights_missing.
+test("the minimax-h3 family is measurable on every shipped tier of every routed lane, through --list", async () => {
+  const family = ["minimax_h3", "minimax_h3_ref"];
+  // The subtraction is recorded, never silent: the family is absent from the gap universe BECAUSE
+  // it is listed there. If the generator ever admits it, the sibling gap cases take over.
+  assert.deepEqual([...OUT_OF_MATRIX_CATALOG_ENTRIES.keys()].sort(), family);
+  assert.equal((await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length, 0);
+  const routed = parseInternalCandleVideoRoutes(
+    await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/mod.rs"), "utf8"),
+    await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs"), "utf8"),
+  );
+  assert.deepEqual([...routed.keys()].sort(), family, "both entries ride the one engine id on both lanes");
+  const models = await readManifestModels();
+  const expected = [];
+  for (const id of family) {
+    const tiers = [...new Set(
+      (models.find((model) => model.id === id)?.downloads ?? [])
+        .filter((download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant))
+        .map((download) => download.variant),
+    )].sort();
+    assert.deepEqual(tiers, ["bf16", "q4", "q8"], `${id} ships three tiers`);
+    for (const tier of tiers) for (const backend of ["candle", "mlx"]) expected.push(`${id}:${tier}:${backend}`);
+  }
+  expected.sort();
+  const plan = await readPlan();
+  assert.deepEqual(
+    Object.keys(plan.anchors).filter((key) => family.includes(anchorParts(key).modelId)).sort(),
+    expected,
+    "every (member, tier, lane) has exactly one plan anchor",
+  );
+  const rows = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    const run = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+    for (const row of run.rows) rows.set(row.key, row);
+  }
+  const gaps = expected
+    .filter((key) => !["runnable", "weights_missing"].includes(rows.get(key)?.status))
+    .map((key) => `${key} ${rows.get(key)?.status ?? "unclassified"} ${rows.get(key)?.reason ?? ""}`);
+  assert.deepEqual(gaps, [], "--list must classify every MiniMax-H3 cell as measurable");
+});
+
+// sc-22737. The plan's fingerprints for the three video families are the one claim a capture cannot
+// re-derive on a host with no weights, so each row is bound here to the (route, tier, lane) shape
+// its lane's engine mints — as sd3.5 and mage-flow are above — and the Rust adapters refuse a plan
+// row naming anything else BEFORE the load (`ltx_calibration_fingerprint`,
+// `minimax_calibration_fingerprint`, `bernini_calibration_fingerprint` in `mlx.rs`, and their
+// candle twins):
+//
+// * Bernini — `bernini-image-<tier>-<lane>-dual-expert-ladder-v1`. The route token is the FULL
+//   pipeline's (`mlx-gen-bernini` `calibration_route(FULL_ID)` → `image`; the renderer-only sibling
+//   mints `renderer`), and both catalog entries load that pipeline, so the two entries share each
+//   (tier, lane) identity and are told apart by their own (modelId, mode) key.
+// * LTX-2.3 — MLX `sc-20772-ltx-2-3-<tier>-mlx-memory-ladder-v2`, except that the engine's
+//   CALIBRATED tier keeps the retained bare key `sc-20772-ltx-2-3-mlx-memory-ladder-v2`; Candle
+//   `sc-20772-ltx-2-3-candle-<tier>-i2v-v1` under the distilled engine id.
+// * MiniMax-H3 — MLX `minimax-h3-<tier>-mlx-staged-joint-av-eager-abi3-v1` with the same bare
+//   exception (`minimax-h3-mlx-staged-joint-av-eager-abi3-v1`); Candle
+//   `minimax-h3-<tier>-candle-staged-joint-av-v1`. Both entries load ONE `LoadSpec`
+//   (`video_jobs/minimax_h3.rs` stages the base `transformer` even for a ref2va job; the engine
+//   resolves `transformer_ref` per render), so the loaded contract publishes one identity per
+//   (tier, lane) and the two entries' rows must carry the SAME key.
+//
+// WHICH tier keeps the bare key is the engines' `CALIBRATED_TIER`, bound byte-for-byte by the
+// adapter's own tests; here it is held as a SHAPE — exactly one bare MLX member per family, every
+// other member tokened with its own tier — and as the literal tier in the case below when an
+// inference checkout is reachable.
+const LTX_MLX_BARE_KEY = "sc-20772-ltx-2-3-mlx-memory-ladder-v2";
+const MINIMAX_MLX_BARE_KEY = "minimax-h3-mlx-staged-joint-av-eager-abi3-v1";
+
+async function videoFamilyBareTiers() {
+  const plan = await readPlan();
+  const shipped = await shippedTieredCells();
+  const rows = (predicate) => Object.entries(plan.anchors).filter(([key, row]) => predicate(anchorParts(key), row));
+  const keys = (entries) => entries.map(([key]) => key).sort();
+  const bare = { ltx_2_3: [], minimax_h3: [] };
+
+  const bernini = rows(({ modelId }) => ["bernini", "bernini_image"].includes(modelId));
+  assert.deepEqual(keys(bernini), shipped.filter((cell) => ["bernini", "bernini_image"].includes(cell.modelId)).map((cell) => cell.key).sort());
+  for (const [key, row] of bernini) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, "bernini", key);
+    assert.equal(row.calibrationFingerprint, `bernini-image-${tier}-${backend}-dual-expert-ladder-v1`, key);
+    assert.equal(row.mode, modelId === "bernini" ? "text_to_video" : "text_to_image", key);
+    assert.equal(row.geometry.frames, modelId === "bernini" ? 49 : 1, key);
+  }
+
+  const ltx = rows(({ modelId }) => modelId === "ltx_2_3");
+  assert.deepEqual(keys(ltx), shipped.filter((cell) => cell.modelId === "ltx_2_3").map((cell) => cell.key).sort());
+  for (const [key, row] of ltx) {
+    const { tier, backend } = anchorParts(key);
+    if (backend === "candle") {
+      assert.equal(row.provider, "ltx_2_3_distilled", key);
+      assert.equal(row.calibrationFingerprint, `sc-20772-ltx-2-3-candle-${tier}-i2v-v1`, key);
+    } else {
+      assert.equal(row.provider, "ltx_2_3", key);
+      if (row.calibrationFingerprint === LTX_MLX_BARE_KEY) bare.ltx_2_3.push(tier);
+      else assert.equal(row.calibrationFingerprint, `sc-20772-ltx-2-3-${tier}-mlx-memory-ladder-v2`, key);
+    }
+  }
+  assert.equal(bare.ltx_2_3.length, 1, "exactly one MLX LTX-2.3 tier keeps the engine's retained bare key");
+
+  const minimax = rows(({ modelId }) => ["minimax_h3", "minimax_h3_ref"].includes(modelId));
+  assert.equal(minimax.length, 12, "two members x three tiers x two lanes");
+  for (const [key, row] of minimax) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, "minimax_h3", key);
+    assert.equal(row.mode, modelId === "minimax_h3" ? "text_to_video" : "reference_to_video", key);
+    if (backend === "candle") {
+      assert.equal(row.calibrationFingerprint, `minimax-h3-${tier}-candle-staged-joint-av-v1`, key);
+    } else if (row.calibrationFingerprint === MINIMAX_MLX_BARE_KEY) {
+      if (modelId === "minimax_h3") bare.minimax_h3.push(tier);
+    } else {
+      assert.equal(row.calibrationFingerprint, `minimax-h3-${tier}-mlx-staged-joint-av-eager-abi3-v1`, key);
+    }
+    // One loaded provider, one identity per (tier, lane): the reference entry's row carries the
+    // base entry's key, never a partition-tokened one the contract cannot publish.
+    const sibling = plan.anchors[`${modelId === "minimax_h3" ? "minimax_h3_ref" : "minimax_h3"}:${tier}:${backend}`];
+    assert.ok(sibling, `${key} has its sibling entry planned`);
+    assert.equal(sibling.calibrationFingerprint, row.calibrationFingerprint, `${key}: the two entries share the loaded identity`);
+  }
+  assert.equal(bare.minimax_h3.length, 1, "exactly one MLX MiniMax-H3 tier keeps the engine's retained bare key");
+  return bare;
+}
+
+test("every planned bernini, ltx_2_3 and minimax-h3 fingerprint is one its lane's engine can mint", async () => {
+  await videoFamilyBareTiers();
+});
+
+// The literal half of the bare-key claim, read off the pinned engines when a checkout is reachable
+// (CI always supplies one — see `skipWithoutRoutes`): the one bare MLX row per family is the tier
+// the engine's `CALIBRATED_TIER` names, so a re-tiered engine reds the plan here as well as in
+// the adapter's own tests.
+test("the bare MLX LTX-2.3 and MiniMax-H3 plan rows are the engines' calibrated tiers", { skip: skipWithoutRoutes }, async () => {
+  const bare = await videoFamilyBareTiers();
+  for (const [family, crate] of [
+    ["ltx_2_3", "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs"],
+    ["minimax_h3", "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs"],
+  ]) {
+    const source = await readFile(path.join(process.env.INFERENCE_REPO, crate), "utf8");
+    const calibrated = /pub const CALIBRATED_TIER: &str = "([a-z0-9]+)";/.exec(source)?.[1];
+    assert.ok(calibrated, `${crate} declares CALIBRATED_TIER`);
+    assert.deepEqual(bare[family], [calibrated], `${family}: the bare MLX row is the engine's calibrated tier`);
   }
 });
 

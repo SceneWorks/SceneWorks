@@ -1211,7 +1211,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
+      "calibrationFingerprint": "minimax-h3-q4-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-mlx-q4-576x320-f124-fps24-seed17137"
     },
     "minimax_h3:q8:mlx": {
@@ -1226,7 +1226,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
+      "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-mlx-q8-576x320-f124-fps24-seed17137"
     },
     "pulid_flux_dev:bf16:candle": {
