@@ -48,3 +48,33 @@ workflow run id/attempt, two inventory artifacts, and four native-hook logs.
 Every artifact entry supplies a relative `path` and `sha256`; the controller
 rejects missing files, symlinks, duplicate tuples, and byte drift, then copies
 the checked bytes into the terminal receipt closure.
+
+## Resuming upstream setup downloads
+
+Windows provisioning retains the exact official Torch 2.7.1+cu128 CPython 3.12
+wheel under `D:\sceneworks-terminal\upstream-wheel-cache\2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30`.
+Only this owned cache is used; temporary pip fragments are not searched or
+adopted. Curl resumes the `.whl.part` byte offset. A full SHA-256 match is
+required before publishing `.whl` and passing that local wheel to pip.
+A complete but unrenamed partial is verified without another request. Bad
+complete partials are retained as `.rejected-<id>` evidence; a corrupt published
+wheel fails closed rather than being silently replaced.
+
+Acquisition and the first pip install share the existing 150-minute setup
+budget. The remaining dependency stage retains its 60-minute bound. Transfer
+interruption releases the owned guard and keeps partial bytes; the next
+ordinary provision can resume. This changes no model execution or acceptance
+limits and does not establish a network throughput guarantee.
+
+A hard external job termination may leave `.download-owner/owner.json` in that
+exact checksum directory. A second process refuses the guard. Before manual
+recovery, establish that the owning workflow is terminal and both recorded
+`pid` and `child_pid` are absent using process IDs and names only. An existing
+PID, missing child PID, malformed owner record, or uncertain process identity
+is not authorization to remove the guard. Preserve the record for diagnosis
+and resolve that uncertainty first; do not kill a process or sweep cache files.
+With both owners confirmed absent, re-read the record and require its token
+to be unchanged, check that the guard is an ordinary directory containing only
+`owner.json`, then remove only that file and the now-empty guard directory.
+Keep `.whl.part`, verified `.whl`, and rejected evidence. Retry provisioning
+through the existing workflow; it rechecks the cache and resumes safely.

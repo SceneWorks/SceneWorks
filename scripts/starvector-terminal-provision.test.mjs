@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -11,7 +12,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, downloadTransportCodes, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { acquireResumableWheel, UPSTREAM_TORCH_WHEEL, assemblePreflight, assembleWeights, downloadExact, downloadTransportCodes, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1259,4 +1260,126 @@ test("upstream pip resets progress for a smaller second wheel without masking a 
   assert.equal(events.at(-1).event, "completed");
   assert.equal(events.at(-1).last_transfer.bytes, 10);
   assert.equal(events.at(-1).last_transfer.total_bytes, 10);
+});
+
+
+async function wheelFixture(handler) {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-wheel-resume-"));
+  const bytes = Buffer.alloc(128 * 1024, 65), requests = [];
+  const server = createServer((req, res) => { requests.push(req.headers.range ?? null); handler(req, res, bytes, requests.length); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const wheel = { filename: "fixture.whl", url: `http://127.0.0.1:${server.address().port}/fixture.whl`, sha256: digest(bytes), byteSize: bytes.length };
+  const cache = path.join(root, "upstream-wheel-cache", wheel.sha256), final = path.join(cache, wheel.filename), partial = `${final}.part`;
+  return { root, wheel, bytes, requests, cache, final, partial, async close() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); } };
+}
+function serveWheel(req, res, bytes) {
+  const offset = req.headers.range ? Number(/^bytes=(\d+)-$/.exec(req.headers.range)[1]) : 0;
+  res.writeHead(offset ? 206 : 200, { "Content-Length": bytes.length - offset, ...(offset ? { "Content-Range": `bytes ${offset}-${bytes.length - 1}/${bytes.length}` } : {}) });
+  res.end(bytes.subarray(offset));
+}
+const quietWheel = { emit() {} };
+
+test("wheel acquisition resumes interrupted HTTP bytes, verifies identity and then reuses without a request", async () => {
+  const f = await wheelFixture((req, res, bytes, count) => {
+    if (count === 1) {
+      res.writeHead(200, { "Content-Length": bytes.length }); res.write(bytes.subarray(0, 32768));
+      setTimeout(() => res.destroy(), 80);
+    } else serveWheel(req, res, bytes);
+  });
+  try {
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /interrupted/);
+    const prefix = await readFile(f.partial); assert.equal(prefix.length, 32768);
+    assert.equal(await lstat(path.join(f.cache, ".download-owner")).catch(() => null), null);
+    assert.equal(await acquireResumableWheel(f.root, f.wheel, quietWheel), f.final);
+    assert.deepEqual(await readFile(f.final), f.bytes);
+    assert.deepEqual(f.requests, [null, "bytes=32768-"]);
+    await acquireResumableWheel(f.root, f.wheel, quietWheel);
+    assert.equal(f.requests.length, 2);
+  } finally { await f.close(); }
+});
+
+test("wheel HTTP errors and ignored ranges preserve an existing valid prefix", async () => {
+  for (const status of [403, 500, 200]) {
+    const f = await wheelFixture((_req, res, bytes) => { res.writeHead(status, { "Content-Length": bytes.length }); res.end(status === 200 ? bytes : Buffer.alloc(bytes.length, 66)); });
+    try {
+      await mkdir(f.cache, { recursive: true }); await writeFile(f.partial, f.bytes.subarray(0, 32768));
+      await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /interrupted/);
+      assert.deepEqual(await readFile(f.partial), f.bytes.subarray(0, 32768));
+      assert.equal(await lstat(f.final).catch(() => null), null);
+    } finally { await f.close(); }
+  }
+});
+
+test("completed partial publishes without network; corrupted final fails without overwrite", async () => {
+  const f = await wheelFixture((_req, res) => res.end());
+  try {
+    await mkdir(f.cache, { recursive: true }); await writeFile(f.partial, f.bytes);
+    await acquireResumableWheel(f.root, f.wheel, quietWheel);
+    assert.equal(f.requests.length, 0);
+    await writeFile(f.final, Buffer.alloc(f.bytes.length, 66));
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /published wheel cache checksum/);
+    assert.equal(f.requests.length, 0); assert.equal((await readFile(f.final))[0], 66);
+  } finally { await f.close(); }
+});
+
+test("wrong wheel checksum is preserved separately and never published or resumed again", async () => {
+  const f = await wheelFixture((req, res, bytes, count) => serveWheel(req, res, count === 1 ? Buffer.alloc(bytes.length, 66) : bytes));
+  try {
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /checksum mismatch/);
+    assert.equal(await lstat(f.final).catch(() => null), null);
+    assert.equal(await lstat(f.partial).catch(() => null), null);
+    const rejected = (await readdir(f.cache)).filter(name => name.includes('.rejected-'));
+    assert.equal(rejected.length, 1); assert.equal((await readFile(path.join(f.cache, rejected[0])))[0], 66);
+    await acquireResumableWheel(f.root, f.wheel, quietWheel);
+    assert.deepEqual(f.requests, [null, null]);
+  } finally { await f.close(); }
+});
+
+test("timeout retains partial, closes its curl child, releases ownership, and permits the next resume", async () => {
+  let ready;
+  const received = new Promise(resolve => { ready = resolve; });
+  const f = await wheelFixture((req, res, bytes, count) => {
+    if (count === 1) { res.writeHead(200, { "Content-Length": bytes.length }); res.write(bytes.subarray(0, 32768)); ready(); }
+    else serveWheel(req, res, bytes);
+  });
+  try {
+    const pending = acquireResumableWheel(f.root, f.wheel, { ...quietWheel, timeoutMs: 3000 });
+    const rejected = assert.rejects(pending, /interrupted/);
+    await received;
+    const owner = JSON.parse(await readFile(path.join(f.cache, ".download-owner/owner.json")));
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /already has an owner/);
+    await rejected;
+    assert.throws(() => process.kill(owner.child_pid, 0), /ESRCH/);
+    assert.equal(await lstat(path.join(f.cache, ".download-owner")).catch(() => null), null);
+    assert.equal((await readFile(f.partial)).length, 32768);
+    await acquireResumableWheel(f.root, f.wheel, quietWheel);
+    assert.deepEqual(f.requests, [null, "bytes=32768-"]);
+  } finally { await f.close(); }
+});
+
+test("wheel cache refuses stale unknown ownership and linked cache files", async () => {
+  const f = await wheelFixture((_req, res) => res.end());
+  try {
+    const guard = path.join(f.cache, ".download-owner"); await mkdir(guard, { recursive: true });
+    await writeFile(path.join(guard, "owner.json"), JSON.stringify({ token: "stale-fixture", pid: 2147483647, child_pid: null }));
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /already has an owner/);
+    assert.equal(f.requests.length, 0);
+    await rm(guard, { recursive: true });
+    const outside = path.join(f.root, "outside"); await writeFile(outside, "preserve"); await link(outside, f.partial);
+    await assert.rejects(() => acquireResumableWheel(f.root, f.wheel, quietWheel), /ordinary unlinked/);
+    assert.equal(await readFile(outside, "utf8"), "preserve");
+  } finally { await f.close(); }
+});
+
+test("persistent exact wheel is installed locally within the shared CUDA budget", async () => {
+  const lock = JSON.parse(await readFile("release/starvector-terminal-upstream-lock-v1.json", "utf8"));
+  assert.equal(UPSTREAM_TORCH_WHEEL.sha256, "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30");
+  assert.equal(UPSTREAM_TORCH_WHEEL.filename, "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl");
+  let clock = 0; const calls = [];
+  await installUpstreamPackages("python", lock, async (...args) => calls.push(args), { now: () => clock, acquireWheel: async budget => { assert.equal(budget, 9000000); clock = 6000000; return "/fixture/verified.whl"; } });
+  assert.ok(calls[0][1].includes("/fixture/verified.whl")); assert.ok(!calls[0][1].includes("torch==2.7.1+cu128"));
+  assert.equal(calls[0][2].timeout, 3000000); assert.equal(calls[1][2].timeout, 3600000);
+  let installs = 0; clock = 0;
+  await assert.rejects(() => installUpstreamPackages("python", lock, async () => installs++, { now: () => clock, acquireWheel: async () => { clock = 9000000; return "/fixture/verified.whl"; } }), /budget exhausted/);
+  assert.equal(installs, 0);
 });

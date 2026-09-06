@@ -4,7 +4,7 @@
 // service, invokes a model, writes an install receipt, or claims a campaign.
 import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
@@ -595,16 +595,95 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
   });
 }
 
-export async function installUpstreamPackages(python, lock, execute = runUpstreamPip) {
+// Official cu128 index SHA256; exact Windows CPython 3.12 wheel. This cache is
+// setup-only and independent of the native inference pin or model receipts.
+export const UPSTREAM_TORCH_WHEEL = Object.freeze({
+  filename: "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl",
+  url: "https://download-r2.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl",
+  sha256: "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30",
+  byteSize: 3273024349,
+});
+
+export async function acquireResumableWheel(hostRoot, wheel, { timeoutMs = 150 * 60 * 1000, curl = process.platform === "win32" ? "curl.exe" : "curl", emit = console.log } = {}) {
+  const url = new URL(wheel.url);
+  if (!SHA256.test(wheel.sha256) || !/^[A-Za-z0-9_.+-]+\.whl$/.test(wheel.filename) || !Number.isSafeInteger(wheel.byteSize) || wheel.byteSize < 1 || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "127.0.0.1"))) die("invalid exact wheel acquisition input");
+  const root = path.join(hostRoot, "upstream-wheel-cache", wheel.sha256);
+  await ensureTerminalPhysicalDirectory(hostRoot, root);
+  const final = path.join(root, wheel.filename), partial = `${final}.part`, guard = path.join(root, ".download-owner");
+  try { await mkdir(guard); } catch (error) { if (error.code === "EEXIST") die("wheel cache already has an owner; verify recorded owner and child have exited before guarded recovery"); throw error; }
+  const ownerPath = path.join(guard, "owner.json"), token = randomUUID();
+  const owner = { token, pid: process.pid, child_pid: null };
+  try { await writeFile(ownerPath, JSON.stringify(owner), { flag: "wx" }); } catch (error) { await rmdir(guard).catch(() => {}); throw error; }
+  const regular = async file => {
+    const info = await lstat(file).catch(error => error.code === "ENOENT" ? null : Promise.reject(error));
+    if (info && (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)) die("wheel cache requires ordinary unlinked files");
+    return info;
+  };
+  const report = value => emit(JSON.stringify({ kind: "upstream-wheel-acquisition", ...value }));
+  const publish = async () => {
+    if (await fileSha256(partial) !== wheel.sha256) {
+      // Preserve rejected evidence without making the next attempt resume bytes
+      // that cannot possibly become this immutable wheel.
+      await rename(partial, `${partial}.rejected-${randomUUID()}`);
+      die("downloaded wheel checksum mismatch; rejected bytes retained separately");
+    }
+    await rename(partial, final); report({ event: "verified", bytes: wheel.byteSize }); return final;
+  };
+  let heartbeat;
+  try {
+    const complete = await regular(final);
+    if (complete) {
+      if (complete.size !== wheel.byteSize || await fileSha256(final) !== wheel.sha256) die("published wheel cache checksum mismatch");
+      report({ event: "reused", bytes: complete.size }); return final;
+    }
+    const prior = await regular(partial);
+    if (prior?.size > wheel.byteSize) die("partial wheel exceeds exact expected size");
+    if (prior?.size === wheel.byteSize) return await publish();
+    const start = Date.now();
+    report({ event: "started", resume_bytes: prior?.size ?? 0, total_bytes: wheel.byteSize, timeout_seconds: timeoutMs / 1000 });
+    const args = ["--disable", "--silent", "--fail", "--continue-at", "-", "--proto", url.protocol === "https:" ? "=https" : "=http", "--connect-timeout", "30", "--max-time", String(timeoutMs / 1000), "--speed-limit", "1", "--speed-time", "300", "--retry", "0", "--max-filesize", String(wheel.byteSize), "--output", partial, "--url", wheel.url];
+    // No raw curl output is reflected: proxy or authentication errors may contain
+    // private host configuration. Only numeric outcome and owned-file size escape.
+    const pending = execFile(curl, args, { timeout: timeoutMs + 5000, maxBuffer: 64 * 1024 });
+    pending.catch(() => {});
+    owner.child_pid = pending.child?.pid ?? null;
+    try { await writeFile(ownerPath, JSON.stringify(owner)); } catch (error) { pending.child?.kill(); await pending.catch(() => {}); throw error; }
+    heartbeat = setInterval(() => {
+      regular(partial).then(info => report({ event: "waiting", bytes: info?.size ?? 0, total_bytes: wheel.byteSize, elapsed_seconds: Math.floor((Date.now() - start) / 1000) })).catch(() => {});
+    }, 30000);
+    let failure;
+    try { await pending; } catch (error) { failure = error; }
+    clearInterval(heartbeat);
+    const received = await regular(partial);
+    if (received?.size === wheel.byteSize) return await publish();
+    if (failure) {
+      const code = Number.isInteger(failure.code) ? failure.code : null;
+      report({ event: "interrupted", curl_exit_code: code, retained_bytes: received?.size ?? 0 });
+      die(`wheel acquisition interrupted (curl exit ${code}); verified ownership released and partial retained`);
+    }
+    die("wheel acquisition ended with an incomplete body; partial retained");
+  } finally {
+    clearInterval(heartbeat);
+    const observed = await json(ownerPath);
+    if (observed.token !== token) die("wheel owner token changed before release");
+    await rm(ownerPath); await rmdir(guard);
+  }
+}
+
+export async function installUpstreamPackages(python, lock, execute = runUpstreamPip, { acquireWheel, now = Date.now } = {}) {
   if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");
   // pip's timeout is a socket timeout, independent of the bounded process time.
   // Do not restart a failed multi-gigabyte install or discard its reusable cache.
   const base = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "raw", "--timeout", "120", "--retries", "3"];
+  const cudaStarted = now();
+  const torchWheel = acquireWheel ? await acquireWheel(150 * 60 * 1000) : null;
+  const cudaRemaining = 150 * 60 * 1000 - (acquireWheel ? now() - cudaStarted : 0);
+  if (cudaRemaining <= 0) die("CUDA setup budget exhausted; any verified wheel remains cached");
   // Run 33997430725 transferred 1.60 of 3.27 GB in 60 minutes with continuous
   // progress. Allow 150 minutes for the CUDA wheel stage; the independent
   // five-minute no-progress watchdog still stops a stalled acquisition.
   const bounds = { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 };
-  await execute(python, [...base, "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], { ...bounds, timeout: 150 * 60 * 1000 });
+  await execute(python, [...base, "--index-url", lock.torch_index_url, torchWheel ?? `torch==${lock.required_packages.torch}`, `torchvision==${lock.required_packages.torchvision}`], { ...bounds, timeout: cudaRemaining });
   await execute(python, [...base, ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], bounds);
 }
 
@@ -618,7 +697,8 @@ export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, asse
   const pipVersion = (await execFile(oraclePython, ["-c", "import importlib.metadata; print(importlib.metadata.version('pip'))"], { timeout: 30_000 })).stdout.trim();
   if (!/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(pipVersion)) die("upstream pip version probe returned an invalid version");
   console.log(JSON.stringify({ kind: "upstream-package-installer", pip_version: pipVersion, resume_configured: false }));
-  await installUpstreamPackages(oraclePython, lock);
+  if (lock.required_packages.torch !== "2.7.1+cu128") die("persistent wheel must match the exact locked Torch version");
+  await installUpstreamPackages(oraclePython, lock, runUpstreamPip, { acquireWheel: timeoutMs => acquireResumableWheel(hostRoot, UPSTREAM_TORCH_WHEEL, { timeoutMs }) });
   const { validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
   // Authenticated component configs are provisioned separately with immutable
   // repository/revision/hash metadata; never synthesize missing backbone defaults.
