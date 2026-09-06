@@ -596,6 +596,51 @@
       "overallAllocatorEnvelopeBytes": 61956089480
     },
     {
+      "id": "flux2_klein_9b_kv:mlx:bf16:base:base:flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1:imc-c441fee704d9060e69eb",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
+        "sha256": "dce71ac110e607a20747201c68d410d75821ac2f774a63078d92407b4cac21cc",
+        "recordId": "imc-c441fee704d9060e69eb",
+        "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1",
+        "loaderClosureDigest": "b08a46f7b8f4464a67f1a4811858fdd8dd6065dc9e7da672d8275d5f8af59f4e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15138041888,
+        "denoise": 37327446232,
+        "decode": 43978656160
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15138043936,
+        "denoise": 45088810660,
+        "decode": 74658817928
+      },
+      "overallAllocatorEnvelopeBytes": 74658817928
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2072,17 +2117,6 @@
       "route": "flux2_klein_9b",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b_kv:mlx:bf16",
-      "modelId": "flux2_klein_9b_kv",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "mlx",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
