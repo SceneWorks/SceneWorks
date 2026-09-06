@@ -507,6 +507,36 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
 
 /**
+ * The files the InstantID identity stack must carry, per staged directory (sc-22738).
+ *
+ * `SCENEWORKS_INSTANTID_WEIGHTS` is a bundle DIRECTORY and `SCENEWORKS_INSTANTID_CONTROLNET` an
+ * IdentityNet directory, and the adapter refuses each by name when a file is absent
+ * (`lib.rs` `instantid_identity_bundle_at` over `INSTANTID_IDENTITY_BUNDLE_FILES`, and
+ * `instantid_controlnet_dir` over `INSTANTID_CONTROLNET_WEIGHT_FILE`). `--list` asked only whether
+ * the two directories existed, so a half-staged identity stack classified `runnable` and the
+ * capture died on the missing file — the same shape of miss the Qwen Lightning LoRA cost. Bound to
+ * those Rust constants by a test rather than restated, so neither list can drift alone.
+ */
+export const INSTANTID_IDENTITY_BUNDLE_FILES = Object.freeze([
+  "ip-adapter.safetensors",
+  "scrfd_10g.safetensors",
+  "arcface_iresnet100.safetensors",
+]);
+export const INSTANTID_CONTROLNET_WEIGHT_FILE = "diffusion_pytorch_model.safetensors";
+
+/**
+ * The stage-two official refinement LoRA both LTX-2.5 arms attach, relative to the SNAPSHOT root
+ * (sc-22738) — `mlx_ltx25.rs` `DEV_ADAPTER` and `candle.rs` `LTX25_DISTILL_LORA_RELATIVE_PATH`,
+ * which are the same string and are bound to this one by a test. It sits BESIDE the
+ * `<variant>/<tier>` load root rather than inside it, so nothing the tier probe reads can see it.
+ */
+export const LTX25_DEV_REFINEMENT_LORA = "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors";
+
+/** The stock enhancer co-requisite the MLX LTX-2.5 arm requires beside the load root
+ *  (`mlx_ltx25.rs` `load_artifact`); the Candle arm never opens it. */
+export const LTX25_ENHANCER_DIR = "enhancer";
+
+/**
  * What `mlx_gen_minimax_h3::model::load` opens in the UPSTREAM snapshot root, at the pinned
  * revision (`crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs`), read off the loader rather
  * than guessed from the manifest's download globs.
@@ -701,7 +731,12 @@ export const PROVIDER_FAMILIES = Object.freeze({
   instantid_realvisxl: {
     provider: "instantid", env: "INSTANTID_REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"],
     components: SDXL_COMPONENTS,
-    stagedEnv: ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"],
+    // Each staged directory declares the files the adapter opens INSIDE it (sc-22738): a directory
+    // that exists but is half-staged is exactly as unloadable as an absent one.
+    stagedEnv: [
+      { env: "SCENEWORKS_INSTANTID_WEIGHTS", files: INSTANTID_IDENTITY_BUNDLE_FILES },
+      { env: "SCENEWORKS_INSTANTID_CONTROLNET", files: [INSTANTID_CONTROLNET_WEIGHT_FILE] },
+    ],
   },
   flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
   // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
@@ -855,11 +890,25 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
   // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
   // and both are declared here because the plan row's `provider` is what selects the family.
-  ltx_2_5: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"] },
+  // `requiredSnapshotEntries` (sc-22738) are what each arm opens BESIDE `<variant>/<tier>`: the
+  // official stage-two refinement LoRA the dev variant attaches on both lanes, and — MLX only —
+  // the stock enhancer co-requisite `load_artifact` demands of every load. Neither is inside the
+  // load root, so the snapshot probe above cannot see them; without these an anchor whose planned
+  // cases include the dev variant classified `runnable` and failed after the booked session opened.
+  ltx_2_5: {
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"],
+    requiredSnapshotEntries: [
+      { path: LTX25_DEV_REFINEMENT_LORA },
+      { path: LTX25_ENHANCER_DIR, dir: true },
+    ],
+  },
   // The Candle arm loads LTX-2.5 under its own engine id (candle.rs `LTX25_ID`, `candle-gen-ltx`
   // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
   // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
-  ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"] },
+  ltx_2_5_distilled: {
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"],
+    requiredSnapshotEntries: [{ path: LTX25_DEV_REFINEMENT_LORA }],
+  },
   // The turnkey still family (sc-22732). Five catalog models over three engine crates, each a plain
   // reference-free text-to-image route with its text encoder, transformer and decoder packed inside
   // the per-tier snapshot — so one root is the whole load and no `upstream` or `bundle` is needed.
@@ -1308,6 +1357,15 @@ export function snapshotPath(hub, repo, revision, ...rest) {
   return path.join(hub, `models--${repo.replaceAll("/", "--")}`, "snapshots", revision, ...rest);
 }
 
+/** Whether `candidate` is a readable regular file (a symlink into the HF blob store counts). */
+async function isFile(candidate) {
+  try {
+    return (await stat(candidate)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function firstExistingDirectory(candidates) {
   for (const candidate of candidates) {
     try {
@@ -1376,6 +1434,20 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     const snapshot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.repo, download.revision)));
     row.roots.push({ label: "ltx25 snapshot", path: snapshot ?? snapshotPath(hubs[0], family.repo, download.revision) });
     if (!snapshot) return { ...row, status: "weights_missing", reason: `no ${family.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+    const missingSnapshot = [];
+    for (const entry of family.requiredSnapshotEntries ?? []) {
+      const candidate = path.join(snapshot, entry.path);
+      const present = entry.dir
+        ? (await firstExistingDirectory([candidate])) !== null
+        : await isFile(candidate);
+      if (!present) missingSnapshot.push(entry.path);
+    }
+    if (missingSnapshot.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.repo} snapshot ${snapshot} is missing ${missingSnapshot.join(", ")}, which the ${backend} arm opens beside the load root`,
+      };
+    }
     row.ltx25SnapshotRoot = snapshot;
     row.physical = false;
     return row;
@@ -1564,12 +1636,23 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // An identity stack the worker fetches on first use rather than declaring as a manifest download
   // has nothing for the harness to resolve, so the operator stages it and names it here. An unset
   // or absent path is `weights_missing` — the host simply lacks the artifact — not a gap.
-  for (const name of family.stagedEnv ?? []) {
+  for (const staging of family.stagedEnv ?? []) {
+    const name = staging.env;
     const staged = process.env[name];
     const root = staged ? await firstExistingDirectory([staged]) : null;
     row.roots.push({ label: `staged ${name}`, path: staged ?? `(${name} unset)` });
     if (!root) {
       return { ...row, status: "weights_missing", reason: `${name} is unset or names no directory on this host` };
+    }
+    const missingStaged = [];
+    for (const file of staging.files ?? []) {
+      if (!(await isFile(path.join(root, file)))) missingStaged.push(file);
+    }
+    if (missingStaged.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${name} directory ${root} is missing ${missingStaged.join(", ")}, which the adapter arm opens under it`,
+      };
     }
     row.env[name] = root;
   }
@@ -1581,6 +1664,19 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.roots.push({ label: "side artifact", path: sideRoot ?? snapshotPath(hubs[0], side.repo, side.revision) });
     if (!sideRoot) {
       return { ...row, status: "weights_missing", reason: `no ${side.repo}@${side.revision.slice(0, 8)} snapshot on this host` };
+    }
+    // sc-22738. A PRESENT snapshot is not the pinned FILE. The Lightning snapshot staged on this
+    // capture host holds the 8-step distill and NOT the pinned 4-step one the arm joins
+    // (mlx.rs / candle.rs `qwen_edit_lightning_adapter`, `protocol::QWEN_EDIT_LIGHTNING_FILE`), so
+    // asking only whether the snapshot directory existed reported all three
+    // `qwen_image_edit_2511_lightning` cells runnable and every booked capture died on
+    // `the Lightning distill LoRA is not at …`. The declared file IS the one the arm opens, so an
+    // incomplete mirror is `weights_missing` — named — exactly like an absent one.
+    if (side.file && !(await isFile(path.join(sideRoot, side.file)))) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${side.repo} snapshot ${sideRoot} is missing ${side.file}, which the adapter arm attaches as this member's distill LoRA`,
+      };
     }
     row.env[`SCENEWORKS_${side.env}_REPOSITORY`] = side.repo;
     row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
