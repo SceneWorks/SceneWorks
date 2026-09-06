@@ -5870,6 +5870,7 @@ mod tests {
             anchors: vec![z_image_q4_anchor()],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         }
     }
 
@@ -6842,6 +6843,7 @@ mod tests {
             anchors: vec![foreign],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         };
         let absent_cell = z_image_fixture_floors(
             CandleLadderAnchors {
@@ -7394,6 +7396,7 @@ mod tests {
             // (sc-22510) is not read by it.
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         };
         // Every guard of `candle_image_anchor` -- identity and loader-closure currency -- applies
         // to whatever store it is handed since sc-22666 (the per-store scope split went with the
@@ -7466,6 +7469,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![mutated],
             };
             for candidate in floors(Some(&mutated_store)) {
@@ -7491,6 +7495,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![rotated],
             };
             for candidate in floors(Some(&rotated_store)) {
@@ -7551,6 +7556,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![relabelled],
             };
             for candidate in floors(Some(&relabelled_store)) {
@@ -7586,6 +7592,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![foreign],
             };
             let foreign_floors = synthesize_estimate_floors(
