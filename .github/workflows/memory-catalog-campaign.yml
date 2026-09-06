@@ -55,7 +55,11 @@ on:
         type: boolean
         default: true
       hf_cache_roots:
-        description: "Optional extra Hugging Face hub roots, one per line or ';'-separated. Empty falls back to $SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE on the runner, then this lane's documented default."
+        description: >-
+          Optional extra Hugging Face hub roots, one per line or ';'-separated. Empty falls back
+          to $SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE on the runner, then this lane's default:
+          /Volumes/Models/huggingface/hub for mlx (either Mac), E:\huggingface\hub for candle
+          (the Windows CUDA box).
         required: false
         type: string
         default: ""
