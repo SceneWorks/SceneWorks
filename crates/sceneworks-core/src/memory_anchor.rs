@@ -288,6 +288,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json"),
     ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json"),
+    ),
 ];
 
 // ---------------------------------------------------------------------------------------------
