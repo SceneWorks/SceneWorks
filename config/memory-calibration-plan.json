@@ -4451,7 +4451,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-candle-bf16-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-candle-bf16-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3:q4:candle": {
       "provider": "minimax_h3",
@@ -4466,7 +4472,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-candle-q4-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-candle-q4-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3:q8:candle": {
       "provider": "minimax_h3",
@@ -4481,7 +4493,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-candle-q8-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-candle-q8-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3_ref:bf16:candle": {
       "provider": "minimax_h3",
@@ -4496,7 +4514,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-ref-candle-bf16-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-ref-candle-bf16-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3_ref:bf16:mlx": {
       "provider": "minimax_h3",
@@ -4526,7 +4550,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-ref-candle-q4-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-ref-candle-q4-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3_ref:q4:mlx": {
       "provider": "minimax_h3",
@@ -4556,7 +4586,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
-      "fixture": "minimax-h3-ref-candle-q8-576x320-f124-fps24-seed22737"
+      "fixture": "minimax-h3-ref-candle-q8-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "minimax_h3_ref:q8:mlx": {
       "provider": "minimax_h3",

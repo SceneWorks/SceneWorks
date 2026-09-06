@@ -16207,9 +16207,32 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
 //     `production_calibration_fingerprint` then reads the tier back out of the renderer/planner
 //     manifests and the safetensors headers — which is what makes the published identity a claim
 //     about the bytes on disk rather than about the plan row.
-/// The engine provider id, READ off the pinned crate: `mlx-gen-bernini` keys its calibration route
-/// on this exact id (`calibration_route(FULL_ID)`), so spelling it here would let the two drift.
-const BERNINI_PROVIDER: &str = runtime_macos::providers::bernini::memory_strategy::FULL_ID;
+/// The engine provider id. Spelled as a LITERAL because the dispatch arm below is parsed out of
+/// this source by `stale-lane-report.mjs#adapterCapturableProviders`, which resolves an arm only to
+/// a bare literal or to a `const NAME: &str = "…";` — a const bound to an engine path is a value it
+/// cannot read, and it refuses to guess rather than reporting this lane as having no Bernini arm.
+///
+/// The literal is still not a transcription that can drift: the const assertion below compares it,
+/// byte for byte at COMPILE time, against the id `mlx-gen-bernini` keys its calibration route on
+/// (`calibration_route(FULL_ID)`). A rename in the engine fails the build here instead of silently
+/// mis-dispatching, which is the property reading `FULL_ID` directly was buying.
+const BERNINI_PROVIDER: &str = "bernini";
+const _: () = {
+    let ours = BERNINI_PROVIDER.as_bytes();
+    let engine = runtime_macos::providers::bernini::memory_strategy::FULL_ID.as_bytes();
+    assert!(
+        ours.len() == engine.len(),
+        "BERNINI_PROVIDER no longer spells mlx-gen-bernini's memory_strategy::FULL_ID"
+    );
+    let mut index = 0;
+    while index < ours.len() {
+        assert!(
+            ours[index] == engine[index],
+            "BERNINI_PROVIDER no longer spells mlx-gen-bernini's memory_strategy::FULL_ID"
+        );
+        index += 1;
+    }
+};
 /// The video catalog entry (`VideoModelCaps::new("bernini", …)`).
 const BERNINI_VIDEO_MODEL_ID: &str = "bernini";
 /// The still catalog entry, which loads [`BERNINI_PROVIDER`] with `frames == 1`.

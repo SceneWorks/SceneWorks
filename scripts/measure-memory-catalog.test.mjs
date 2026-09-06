@@ -1702,7 +1702,8 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
   // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
   // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
-  // not know fails here until the dump is regenerated at a pin that ships the contract.
+  // not know falls through to the THIRD source below, and fails here if that one cannot speak
+  // either.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
     const dump = JSON.parse(
@@ -1720,6 +1721,59 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     if (surfaces.length === 0) return null;
     return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
   };
+
+  // sc-22737: the THIRD derived source, and the one that actually speaks for Candle SCAIL-2. At the
+  // 8a65db2a pin `candle-gen-scail2` registers a memory STRATEGY and a resident-only witness but no
+  // surface RESOLVER, so it publishes no `memoryContracts[]` entry at all and `dumpRefusesDefault`
+  // returns `null` for every scail2 row — the dump cannot be regenerated into an answer, because
+  // there is no contract at that pin to dump.
+  //
+  // The residency a Candle VIDEO route loads under is not the engine's to choose anyway: the WORKER
+  // picks it, in `video_jobs/candle.rs::candle_video_offload_policy`, which names the `Sequential`
+  // (staged) engine ids explicitly and returns `Resident` for everything else. A route the worker
+  // only ever loads `Resident` has no staged composition for an anchor to be measured in, so its
+  // plan row must override to `resident` — exactly the SenseNova argument, sourced from the worker
+  // instead of the manifest.
+  //
+  // Both halves are checked-in SceneWorks sources that exist for scail2: the Sequential id list is
+  // read out of the worker's own Rust, and modelId → engine ids out of the runtime capability dump.
+  // Neither is a curated list here, so adding a route to `Sequential`, or retiring one, moves this
+  // requirement on its own. `every` rather than `some`: a model whose modes route to BOTH a staged
+  // and a resident engine (`wan_2_2` → `wan2_2_ti2v_5b` + `wan_vace`) can still be measured staged,
+  // so it is not exempt and keeps the lane default — which is what those rows plan.
+  const candleVideoSource = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/candle.rs"),
+    "utf8",
+  );
+  const sequentialArm = candleVideoSource.match(
+    /fn candle_video_offload_policy\(engine_id: &str\) -> OffloadPolicy \{\s*match engine_id \{\s*([^=]*?)=>\s*\{?\s*OffloadPolicy::Sequential/,
+  );
+  assert.ok(sequentialArm, "candle_video_offload_policy no longer spells its Sequential arm as a literal id list");
+  const sequentialEngineIds = new Set([...sequentialArm[1].matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
+  assert.ok(sequentialEngineIds.size > 0, "the Sequential arm names at least one engine id");
+  const runtimeCandle = JSON.parse(
+    await readFile(path.join(ROOT, "config/engine-capabilities/runtime/capabilities.candle.json"), "utf8"),
+  );
+  const candleVideoEngineIds = new Map();
+  for (const row of runtimeCandle.videoModelMappings ?? []) {
+    const ids = candleVideoEngineIds.get(row.modelId) ?? new Set();
+    for (const id of row.engineIds ?? []) ids.add(id);
+    candleVideoEngineIds.set(row.modelId, ids);
+  }
+  const workerLoadsResidentOnly = (backend, anchor, modelId) => {
+    if (backend !== "candle") return null;
+    // Strictly a LAST resort, and only where the dump is silent because the provider registered no
+    // contract at all. A provider the dump DOES know keeps the dump as its single authority: if it
+    // records no surface at this (tier, load shape) — Bernini's candle contract is published only
+    // at `eager_materialization`, while its plan rows are `deferred_materialization` — that silence
+    // is the dump's answer and must not be overwritten by a coarser worker-side fact.
+    if (dumps.get(backend).has(anchor.provider)) return null;
+    const ids = candleVideoEngineIds.get(modelId);
+    // Not a candle video model at all: this source has no opinion, so the caller keeps `null` and
+    // the assertion below still fires for an override with no evidence anywhere.
+    if (!ids || ids.size === 0) return null;
+    return [...ids].every((id) => !sequentialEngineIds.has(id));
+  };
   let overridden = 0;
   let candleExempt = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
@@ -1733,15 +1787,18 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
     const contractRefusesDefault =
       !manifestExempt && fallbackForDump === "staged_residency"
-        ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump)
+        ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) ??
+          workerLoadsResidentOnly(backend, anchor, modelId)
         : false;
     if (anchor.strategy && !manifestExempt && fallbackForDump === "staged_residency") {
       assert.notEqual(
         contractRefusesDefault,
         null,
         `${key}: overrides the lane default but config/engine-capabilities/capabilities.${backend}.json ` +
-          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape}; regenerate the ` +
-          "dump at a pin that ships the contract (cargo run -p sceneworks-worker --bin dump-engine-capabilities)",
+          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape}, and ${modelId} is ` +
+          "not a candle video model whose residency video_jobs/candle.rs::candle_video_offload_policy " +
+          "decides; either regenerate the dump at a pin that ships the contract (cargo run -p " +
+          "sceneworks-worker --bin dump-engine-capabilities) or drop the override",
       );
     }
     const exempt = manifestExempt || contractRefusesDefault === true;

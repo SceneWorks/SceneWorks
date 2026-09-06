@@ -1249,8 +1249,18 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   // does every candle LTX-2.5 cell, whose contract likewise implements no `staged_residency`
   // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
   // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
+  //
+  // sc-22737 adds MiniMax-H3's six candle rows (both catalog entries, three tiers each) on exactly
+  // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
+  // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
+  // contract does not implement.
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  for (const key of ["bf16", "q4", "q8"].flatMap((tier) => [`scail2_14b:${tier}:candle`, `ltx_2_5:${tier}:candle`])) {
+  for (const key of ["bf16", "q4", "q8"].flatMap((tier) => [
+    `scail2_14b:${tier}:candle`,
+    `ltx_2_5:${tier}:candle`,
+    `minimax_h3:${tier}:candle`,
+    `minimax_h3_ref:${tier}:candle`,
+  ])) {
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
   }
@@ -1258,6 +1268,8 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
   assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
     "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
+    "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
+    "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
     "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
   ]);
 });
