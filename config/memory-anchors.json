@@ -961,6 +961,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux_schnell:mlx:q8:base:base:flux1-schnell-q8-mlx-shared-ladder-v1:imc-128e5df63efad3abfed4",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json",
+        "sha256": "915dc5c6dea6fb48c74105da44e4e88ca3745aaf37ced7cd3bdbe8339420d1f5",
+        "recordId": "imc-128e5df63efad3abfed4",
+        "calibrationFingerprint": "flux1-schnell-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "5893ce67cbe6188ab3438c026f82cc3c3772d4c774ba891ced77349fd397f1df"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 264480,
+        "denoise": 19726271500,
+        "decode": 33281798688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 265536,
+        "denoise": 23741211220,
+        "decode": 74715741312
+      },
+      "overallAllocatorEnvelopeBytes": 74715741312,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2553,17 +2599,6 @@
           "abi": "1"
         }
       }
-    },
-    {
-      "id": "analytic:flux_schnell:mlx:q8",
-      "modelId": "flux_schnell",
-      "modelFamily": "flux",
-      "route": "flux1_schnell",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:ideogram_4:candle:bf16",
