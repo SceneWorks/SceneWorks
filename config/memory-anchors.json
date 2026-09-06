@@ -1052,6 +1052,51 @@
       "overallAllocatorEnvelopeBytes": 127896868204
     },
     {
+      "id": "ideogram_4:mlx:q4:base:base:ideogram-4-q4-mlx-shared-ladder-v1:imc-5af7256940f9fe25b7d4",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json",
+        "sha256": "58e5cdc2bc2429f2e7aae344960b685605ca4faff83985a3b5a7c4fea8adc43f",
+        "recordId": "imc-5af7256940f9fe25b7d4",
+        "calibrationFingerprint": "ideogram-4-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "be223b1bca1506ea73bfe33f72a2ea8aa173909260fc936ae9d7b4290302f7a5"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 20328537148,
+        "denoise": 20394309204,
+        "decode": 33514258332
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 28847925828,
+        "denoise": 28914097240,
+        "decode": 85685943744
+      },
+      "overallAllocatorEnvelopeBytes": 85685943744
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2710,17 +2755,6 @@
           "sequentialPeakGb": "50"
         }
       }
-    },
-    {
-      "id": "analytic:ideogram_4:mlx:q4",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:ideogram_4:mlx:q8",
