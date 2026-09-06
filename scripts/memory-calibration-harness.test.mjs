@@ -1082,6 +1082,52 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
 // packages/memory-anchor-plan.schema.json, not a review convention, so it is asserted against the
 // schema itself and against the checked-in plan the capture commands read.
 // -----------------------------------------------------------------------------------------------
+// sc-22734. The per-anchor `strategy` override: a plan row may name its own single composition,
+// for a provider whose contract classifies the lane default as StructurallyNotApplicable (SenseNova
+// on candle). It stays a single composition — a rung GRID is still unwritable — and a row without
+// one still takes `ANCHOR_STRATEGY[backend]`.
+test("a plan row's strategy override replaces the lane default, and is still one composition", () => {
+  const key = "fixture_model:q4:candle";
+  const defaulted = planAnchor(anchorPlanFixture(key), key);
+  assert.deepEqual(defaulted.strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+
+  const override = { rung: "resident", engagedRungs: ["resident"] };
+  const overridden = anchorPlanFixture(key, { strategy: override });
+  assert.equal(validatePlan(overridden), overridden);
+  assert.deepEqual(planAnchor(overridden, key).strategy, { ...override, parameters: {} });
+  // …and the override changes the case identity, so an overridden capture can never be mistaken
+  // for a default-composition one.
+  assert.notEqual(planAnchor(overridden, key).logicalCaseId, defaulted.logicalCaseId);
+
+  // The MLX row of the same shape is unchanged by an override that names the lane default.
+  const mlxKey = "fixture_model:q4:mlx";
+  assert.deepEqual(
+    planAnchor(anchorPlanFixture(mlxKey, { strategy: override }), mlxKey).strategy,
+    planAnchor(anchorPlanFixture(mlxKey), mlxKey).strategy,
+  );
+
+  // A grid, an unknown rung, a missing member and a stray parameter block are all unwritable.
+  for (const strategy of [
+    { rung: "resident" },
+    { engagedRungs: ["resident"] },
+    { rung: "sequential", engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident", "resident"] },
+    { rung: "resident", engagedRungs: [] },
+    { rung: ["resident", "staged_residency"], engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident"], parameters: { decodeTileEdge: 512 } },
+  ]) {
+    assert.throws(
+      () => validatePlan(anchorPlanFixture(key, { strategy })),
+      /anchor plan is invalid/,
+      JSON.stringify(strategy),
+    );
+  }
+});
+
 test("the anchor plan schema cannot express a duplicate cell or any sweep", async () => {
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   assert.equal(validatePlan(plan), plan);
