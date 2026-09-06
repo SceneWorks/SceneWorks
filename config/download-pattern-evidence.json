@@ -1757,10 +1757,10 @@
       ]
     },
     {
-      "key": "SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8",
+      "key": "SceneWorks/flux2-klein-9b-kv-mlx@bbf22de8d654789de3b177632d2e283cc4f77729",
       "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-      "revision": "406265beebe141024a06e24038c3713cf7af87d8",
-      "resolvedSha": "406265beebe141024a06e24038c3713cf7af87d8",
+      "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
+      "resolvedSha": "bbf22de8d654789de3b177632d2e283cc4f77729",
       "servedRepo": "SceneWorks/flux2-klein-9b-kv-mlx",
       "gated": false,
       "files": [
@@ -1822,10 +1822,10 @@
       ]
     },
     {
-      "key": "SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023",
+      "key": "SceneWorks/flux2-klein-9b-mlx@1902693279fcfb828919370dfac2b8922d99499a",
       "repo": "SceneWorks/flux2-klein-9b-mlx",
-      "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
-      "resolvedSha": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+      "revision": "1902693279fcfb828919370dfac2b8922d99499a",
+      "resolvedSha": "1902693279fcfb828919370dfac2b8922d99499a",
       "servedRepo": "SceneWorks/flux2-klein-9b-mlx",
       "gated": false,
       "files": [

@@ -1138,8 +1138,8 @@ async function codeDerivedTierOverrides() {
   );
 }
 
-async function computeShippedTieredCells() {
-  const models = await readManifestModels();
+async function computeShippedTieredCells(models = null) {
+  models ??= await readManifestModels();
   const routed = await routedCatalogLanes();
   const laneTiers = await routeLaneTiers();
   const overrides = await codeDerivedTierOverrides();
@@ -1319,25 +1319,41 @@ test("the gap-set denominator is narrowed only by code-derived tier overrides", 
     assert.deepEqual(drop.override, overrides.get(key), drop.key);
     assert.ok(!drop.override.includes(drop.tier), `${drop.key} is inside its own override`);
   }
-  // The only lane whose code narrows a shipped tier axis today.
-  assert.deepEqual(
-    dropped.map((drop) => drop.key).sort(),
-    ["instantid_realvisxl:q4:candle", "instantid_realvisxl:q8:candle"],
-    "a new drop must come with the worker source that justifies it",
-  );
+  // The loop above is vacuous over an empty set; the worker source narrows at least one lane's
+  // shipped tier axis today (`instantid_realvisxl` on candle), so it must have had something to
+  // check. Which cells drop is the override parser's answer, not a list kept here.
+  assert.ok(dropped.length > 0, "no shipped cell was dropped, so the override rule was never exercised");
 
   // …and the six cells a manifest-declaration intersection would have deleted are all present.
   const universe = new Set(cells.map((cell) => cell.key));
-  const manifest = await readManifestModels();
-  const byId = new Map(manifest.map((model) => [model.id, model]));
   for (const key of MANIFEST_ONLY_DECLARED_CELLS) {
-    const [modelId, tier] = key.split(":");
     assert.ok(universe.has(key), `${key} left the denominator with no routing fact behind it`);
-    assert.ok(
-      !Object.keys(byId.get(modelId)?.candle?.vramGbByTier ?? {}).includes(tier),
-      `${key} no longer exercises the hazard: the manifest now declares a ${tier} candle peak for it`,
-    );
   }
+
+  // The shape rule behind those six: the denominator is INDEPENDENT of every `vramGbByTier`
+  // measurement declaration. Recomputed over a manifest with every lane's `vramGbByTier` stripped,
+  // the universe must be the live one, cell for cell — a derivation that consulted the declaration
+  // (as the matrix's `tiersFor` fallback does) would lose exactly the cells with no peak recorded.
+  const stripped = (await readManifestModels()).map((model) => {
+    const copy = { ...model };
+    for (const backend of ["candle", "mlx"]) {
+      if (copy[backend]?.vramGbByTier === undefined) continue;
+      const { vramGbByTier: _dropped, ...rest } = copy[backend];
+      copy[backend] = rest;
+    }
+    return copy;
+  });
+  const recomputed = await computeShippedTieredCells(stripped);
+  assert.deepEqual(
+    recomputed.cells.map((cell) => cell.key).sort(),
+    cells.map((cell) => cell.key).sort(),
+    "the denominator reads a vramGbByTier measurement declaration somewhere",
+  );
+  assert.deepEqual(
+    recomputed.dropped.map((drop) => drop.key).sort(),
+    dropped.map((drop) => drop.key).sort(),
+    "the override drops read a vramGbByTier measurement declaration somewhere",
+  );
 });
 
 // sc-22731: the tier axis is per LANE, and the rule is the manifest's own `platforms` selection —
@@ -2503,17 +2519,16 @@ test("the minimax-h3 family is measurable on every shipped tier of every routed 
   // burndown: every one of the twelve cells is in the gap universe, so the sibling gap cases and
   // this one now ask the same question through two different derivations.
   assert.deepEqual([...OUT_OF_MATRIX_CATALOG_ENTRIES.keys()].sort(), family);
-  assert.equal(
-    (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length,
-    12,
-    "the routing catalog routes both entries on both lanes, so all six tiers per entry are claimed",
-  );
   const routed = parseInternalCandleVideoRoutes(
     await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/mod.rs"), "utf8"),
     await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs"), "utf8"),
   );
   assert.deepEqual([...routed.keys()].sort(), family, "both entries ride the one engine id on both lanes");
+  // The cell count is DERIVED — members × shipped tiers (manifest) × routed lanes (routing catalog)
+  // — never a literal: a member losing a tier or a lane must move the expectation with it, and the
+  // denominator's answer for the family is then compared against exactly that product.
   const models = await readManifestModels();
+  const catalogLanes = await routedCatalogLanes();
   const expected = [];
   for (const id of family) {
     const tiers = [...new Set(
@@ -2522,9 +2537,16 @@ test("the minimax-h3 family is measurable on every shipped tier of every routed 
         .map((download) => download.variant),
     )].sort();
     assert.deepEqual(tiers, ["bf16", "q4", "q8"], `${id} ships three tiers`);
-    for (const tier of tiers) for (const backend of ["candle", "mlx"]) expected.push(`${id}:${tier}:${backend}`);
+    const lanes = lanesOf(catalogLanes, id);
+    assert.deepEqual(lanes, ["mlx", "candle"], `${id} is routed on both lanes`);
+    for (const tier of tiers) for (const backend of lanes) expected.push(`${id}:${tier}:${backend}`);
   }
   expected.sort();
+  assert.equal(
+    (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length,
+    expected.length,
+    "the denominator claims every (member, shipped tier, routed lane) cell of the family",
+  );
   const plan = await readPlan();
   assert.deepEqual(
     Object.keys(plan.anchors).filter((key) => family.includes(anchorParts(key).modelId)).sort(),

@@ -521,6 +521,12 @@ mod lens_base_q4_mlx_smoke;
 // never quantizes its T5, so no denseTextEncoderTier). hd/flash share this crate + layout.
 #[cfg(all(test, target_os = "macos"))]
 mod chroma1_base_q4_mlx_smoke;
+// Real-weight MLX smoke for the FLUX.2 Klein 9B q4 worker lane (sc-22765 / sc-22760). Test-only +
+// macOS-only; resolves the manifest's pinned rehost revision in the HF cache, asserts the router's
+// dense-TE decisions (`q4/` tier, load Quant None) and loads `flux2_klein_9b` on the RAW cache tier
+// path — the exact load the worker refused before the inference + rehost pin bump.
+#[cfg(all(test, target_os = "macos"))]
+mod flux2_klein_9b_q4_mlx_smoke;
 // Real-weight MLX smoke for the PiD 2K/4K output tier (epic 7840, sc-10054). Test-only + macOS-only;
 // drives the REAL `pid_output_tier` + `pid_effective_dims` mapping then renders z_image_turbo through
 // `crate::inference_runtime::load(...).with_pid(pid_flux, gemma)` + `use_pid`, asserting `pidTarget:"2k"` yields a 2048²

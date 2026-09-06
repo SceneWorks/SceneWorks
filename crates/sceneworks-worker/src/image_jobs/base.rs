@@ -1738,7 +1738,7 @@ const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
     "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str =
-    "acf05e8d5103838baba6a5e32dc91d6997a56023";
+    "1902693279fcfb828919370dfac2b8922d99499a";
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3344,7 +3344,7 @@ async fn ensure_ideogram_tier_present(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_quant(request: &ImageRequest, tier_dir: Option<&Path>) -> (Option<Quant>, Option<i64>) {
+pub(crate) fn resolve_quant(request: &ImageRequest, tier_dir: Option<&Path>) -> (Option<Quant>, Option<i64>) {
     resolve_quant_gated(request, nvfp4_host_eligible(), tier_dir)
 }
 
