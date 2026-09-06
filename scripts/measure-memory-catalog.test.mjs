@@ -54,7 +54,9 @@ import {
   readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
+  CANARY_DRIVEN_CELLS,
 } from "./measure-memory-catalog.mjs";
+import { BOUNDED_CAMPAIGN_ENTRY_SPECS } from "./run-ltx-safety-canary.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
@@ -1220,6 +1222,11 @@ async function computeMeasurabilityGaps() {
   for (const cell of await shippedTieredCells()) {
     const row = rows.get(cell.key);
     const status = row?.status ?? (plan.anchors[cell.key] ? "unclassified" : "no_plan_anchor");
+    // sc-22738: a cell whose CAPTURE is delegated to another declared driver is measured, not
+    // missing — but only through that exact refusal. Any other status for the same key is still a
+    // gap, and `the canary-driven LTX-2.3 MLX cells are refused for the adapter's own reason`
+    // re-derives the delegation from the adapter and the driver so this cannot become a register.
+    if (status === "harness_unsupported" && CANARY_DRIVEN_CELLS.has(cell.key)) continue;
     if (!["runnable", "weights_missing"].includes(status)) {
       gaps.push({ ...cell, status, reason: row?.reason ?? `${PLAN_PATH} declares no anchor ${cell.key}` });
     }
@@ -2494,6 +2501,76 @@ test("the bernini family is measurable on every shipped tier of every routed lan
 // `ltx_2_3 claims q4 and q8 on candle, and bf16 only on mlx` derives the five-cell key set from the
 // manifest and the worker's Candle tier resolver; this is the other half of the claim — every one
 // of those five cells is planned, armed and closed over.
+// sc-22738. The campaign found this the expensive way: three anchors, three model-load-free
+// failures, one per tier — `SC-18946 row is missing required _measurementSafety; refusing before
+// model load`. The plan row cannot fix that. `packages/schemas/memory-anchor-plan.schema.json` is
+// `additionalProperties: false`, so no anchor can carry a `_measurementSafety` block at all, and
+// the block is only the FIRST field the refusal reads: the arm routes the harness's one action
+// (`run` — `memory-calibration-harness.mjs` sends no other) to `LtxRunAdmission::Ordinary`, whose
+// entire body is `refuse_unsafe_ltx_capture`, and that function has no `Ok` return on any geometry.
+//
+// So the classification must say so BEFORE the campaign spends a capture on it, and the delegation
+// must be re-derived from both ends every run: the adapter's unconditional refusal, and the driver
+// that does measure these cells. Neither half alone is enough — an adapter that starts admitting
+// ordinary runs must red this, and a driver that stops declaring a tier must red it too.
+test("the canary-driven LTX-2.3 MLX cells are refused for the adapter's own reason, not spent on", async () => {
+  const adapter = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
+  // 1. The generic runner sends exactly one provider action for a capture.
+  assert.deepEqual(
+    [...harness.matchAll(/action: "(\w+)",\n\s*planned/g)].map((match) => match[1]),
+    ["run"],
+    "the harness's capture action moved; the delegation below reads the wrong dispatch arm",
+  );
+  // 2. `run` reaches the ordinary admission, and the ordinary admission is a refusal with no exit.
+  assert.match(
+    adapter,
+    /LtxRunAdmission::Ordinary => \{\s*refuse_unsafe_ltx_capture\(request, tier, geometry, &selection\)\?/,
+    "the MLX LTX-2.3 ordinary admission no longer routes to refuse_unsafe_ltx_capture",
+  );
+  const refusal = adapter.slice(adapter.indexOf("fn refuse_unsafe_ltx_capture("));
+  assert.ok(refusal.startsWith("fn refuse_unsafe_ltx_capture("), "the refusal function was renamed");
+  const body = refusal.slice(0, refusal.indexOf("\n}\n") + 3);
+  assert.doesNotMatch(
+    body,
+    /\bOk\(/,
+    "refuse_unsafe_ltx_capture can now succeed; these cells belong to the harness again and this " +
+      "delegation must be deleted rather than kept",
+  );
+  // 3. Both directions against the PLAN, because either alone is a false green: a delegated cell
+  //    that is not planned delegates nothing, and a planned MLX LTX-2.3 cell the driver does not
+  //    declare would be spent on a capture that cannot succeed. The driver's per-tier declarations
+  //    are the delegated set's only source, so dropping a tier there reds HERE — mutation-checked —
+  //    rather than quietly returning that cell to a runner whose every run of it fails.
+  const plan = await readPlan();
+  assert.deepEqual(
+    Object.keys(plan.anchors).filter((key) => key.startsWith("ltx_2_3:") && key.endsWith(":mlx")).sort(),
+    [...CANARY_DRIVEN_CELLS.keys()].sort(),
+    "a planned MLX LTX-2.3 cell that scripts/run-ltx-safety-canary.mjs does not declare, or vice versa",
+  );
+  assert.equal(
+    CANARY_DRIVEN_CELLS.size,
+    Object.keys(BOUNDED_CAMPAIGN_ENTRY_SPECS).length,
+    "the delegated set lost a tier the driver still declares",
+  );
+  // 4. …and every one of them is a real plan anchor that `--list` refuses by that name.
+  const { rows } = await planRun({ backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  for (const key of CANARY_DRIVEN_CELLS.keys()) {
+    assert.ok(plan.anchors[key], `${key} is delegated but not planned`);
+    const row = byKey.get(key);
+    assert.equal(row.status, "harness_unsupported", `${key}: ${row.reason}`);
+    assert.match(row.reason, /SC-19642/, key);
+    assert.match(row.reason, /run-ltx-safety-canary\.mjs/, key);
+  }
+  // The Candle sibling rides the same family name and is NOT delegated: the refusal is per cell.
+  assert.equal(byKey.has("ltx_2_3:q4:candle"), false, "the mlx run lists no candle row");
+  const candle = await planRun({ backend: "candle", anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+  for (const row of candle.rows.filter((entry) => entry.modelId === "ltx_2_3")) {
+    assert.notEqual(row.status, "harness_unsupported", `${row.key} inherited the mlx delegation`);
+  }
+});
+
 test("ltx_2_3 is measurable on every shipped tier of every routed lane", async () => {
   const cells = (await shippedTieredCells()).filter((cell) => cell.modelId === "ltx_2_3");
   assert.equal(cells.length, 5, "the five-cell set the sibling case derives");

@@ -32,6 +32,7 @@ import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir } from "nod
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { BOUNDED_CAMPAIGN_ENTRY_SPECS } from "./run-ltx-safety-canary.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/memory-calibration-plan.json";
@@ -1239,6 +1240,39 @@ async function firstExistingDirectory(candidates) {
 }
 
 /**
+ * sc-22738. The MLX LTX-2.3 cells this generic runner may NOT drive, and the driver that owns them.
+ *
+ * `memory-calibration-harness.mjs capture` sends exactly one action — `run` — and the adapter's
+ * LTX-2.3 arm routes `run` to `LtxRunAdmission::Ordinary`, whose whole body is
+ * `refuse_unsafe_ltx_capture`: an SC-19642 pre-load refusal with no `Ok` return on any geometry.
+ * The catalog campaign therefore never reached a model load for these three anchors — it reached
+ * the first field of that refusal (`SC-18946 row is missing required _measurementSafety`) and burnt
+ * one failed capture per tier. Supplying that block cannot help, twice over: the anchor plan schema
+ * is `additionalProperties: false` so a plan row cannot carry it at all, and the block is only the
+ * refusal's FIRST field — a row that satisfies it still terminates in the refusal itself.
+ *
+ * The refusal is not a defect. At the anchor geometry (768x512, f121) the arm's own
+ * incident-calibrated projection for the lane-default composition is 97_906_593_920 B, ABOVE the
+ * 96_970_084_480 B physical footprint the q4 f305 incident reached before the host watchdog
+ * panicked, and this runner offers no containment: the footprint watchdog is an external,
+ * nonce-authenticated socket that only `scripts/run-ltx-safety-canary.mjs` provides.
+ *
+ * That driver is what measures these cells, per tier, through the private `bounded_campaign_entry`
+ * action — same geometry, bounded decode 192/64, inside a 53_347_146_863 B footprint ceiling on its
+ * own contained volume. The delegated set is DERIVED from that driver's own per-tier declarations,
+ * so a tier it stops declaring becomes an ordinary measurability gap here rather than a silent one.
+ */
+export const CANARY_DRIVEN_CELLS = Object.freeze(new Map(
+  Object.values(BOUNDED_CAMPAIGN_ENTRY_SPECS).map((spec) => [
+    `ltx_2_3:${spec.tier}:mlx`,
+    `the MLX LTX-2.3 arm refuses every ordinary harness run before model load (SC-19642); ` +
+      `${spec.story} measures this cell through scripts/run-ltx-safety-canary.mjs --profile ` +
+      `${spec.profile} (${spec.identity}), which is the only path carrying the external footprint ` +
+      `watchdog this runner cannot provide`,
+  ]),
+));
+
+/**
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
@@ -1258,6 +1292,13 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // deleting the branch and the parameter together; that would make the next unbindable provider
   // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
+  // sc-22738: the same refusal for a cell whose CAPTURE belongs to another driver — see
+  // `CANARY_DRIVEN_CELLS`. Keyed on the cell, not the family, because the `ltx_2_3` family's Candle
+  // sibling is driven here normally; and asserted against the plan's provider so a future row that
+  // reuses the key for some other engine cannot inherit the delegation.
+  if (planned.provider === "ltx_2_3" && CANARY_DRIVEN_CELLS.has(key)) {
+    return { ...row, status: "harness_unsupported", reason: CANARY_DRIVEN_CELLS.get(key) };
+  }
   // sc-22729: the same refusal, scoped to ONE lane and DERIVED. A model whose engine cannot seal an
   // artifact identity for it on a lane is not a missing arm and not a missing declaration — the arm
   // exists and the plan declares the cell — so it reports the engine-side reason rather than

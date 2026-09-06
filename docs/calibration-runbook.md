@@ -821,6 +821,17 @@ SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
 # memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+# 🔴 The catalog campaign CANNOT capture ltx_2_3:*:mlx (sc-22738). The harness's only action is
+# `run`, the arm routes `run` to `LtxRunAdmission::Ordinary`, and that admission is
+# `refuse_unsafe_ltx_capture` — an SC-19642 pre-load refusal with no Ok return on any geometry
+# (at 768x512xf121 its own incident-calibrated projection is 97.9 GB, above the 96.97 GB the q4
+# f305 incident reached before the host watchdog panicked). No plan row can satisfy it: the
+# anchor-plan schema is additionalProperties:false, so it cannot carry `_measurementSafety`, and
+# that block is only the refusal's first field. These three cells are measured by
+# `scripts/run-ltx-safety-canary.mjs --profile bounded-campaign-entry{,-q8,-bf16}` — same
+# geometry, bounded decode 192/64, inside the external 53.35 GB footprint watchdog on its own
+# contained volume — which is a host-exclusive night run, never part of a catalog sweep.
+# `measure-memory-catalog.mjs --list` reports them `harness_unsupported` for exactly that reason.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
