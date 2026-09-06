@@ -2746,3 +2746,114 @@ test("every checked-in capture invocation names a declared anchor", async () => 
     );
   }
 });
+
+// sc-22738. The MLX catalog campaign lost a MiniMax-H3 q4 render to
+// `schema validation failed: $.records[0].output: unexpected property`: the adapter's video arms
+// had grown a top-level `output` descriptor, and `capturePlannedCase` spreads the provider fragment
+// into the record VERBATIM (`{ ...fragment }`), so every key an arm invents is a record property.
+// `$defs.record` is `additionalProperties: false`, and the render is already paid for by the time
+// the bundle is validated — the most expensive place in the system to learn the shape is wrong.
+//
+// Two tests, because there are two claims. This one drives the REAL validator over a REAL record
+// and proves the schema forbids the property rather than that some transcription of it does.
+test("the real validator refuses a record that carries an output descriptor", () => {
+  const record = runtimeComplete();
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
+
+  const withOutput = structuredClone(record);
+  withOutput.output = { frames: 121, fps: 24, firstFrameNondegenerate: true };
+  assert.throws(
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [withOutput] }),
+    /\$\.records\[0\]\.output: unexpected property/,
+  );
+});
+
+/**
+ * Every calibration record fragment the adapters build, keyed by `<bin>:<enclosing fn>`.
+ *
+ * The idiom is uniform across both adapters and is what makes this readable without a Rust parser:
+ * a record arm opens `let mut fragment = json!({` at four spaces, closes at `});` at four spaces,
+ * and its top-level keys are the eight-space `"name":` lines between. A payload that is NOT a
+ * calibration record — the LTX safety/product canaries, the campaign entries and the bounded
+ * carrier proof, which `main()` dispatches under their own actions and which legitimately carry
+ * `output` and `_campaignEntry` — is returned as `Ok(json!({…}))` and never binds `fragment`, so
+ * the idiom excludes them. The signature filter below is the belt to that suspenders: a fragment
+ * is only judged against the record schema if it carries the four keys every capture record has.
+ */
+async function adapterRecordFragments() {
+  const bins = ["mlx.rs", "mlx_ltx25.rs", "mlx_wan_scail2.rs", "candle.rs", "candle_wan_scail2.rs"];
+  const fragments = new Map();
+  for (const bin of bins) {
+    const lines = (await readFile(
+      fileURLToPath(new URL(`../crates/sceneworks-memory-adapter/src/bin/${bin}`, import.meta.url)),
+      "utf8",
+    )).split("\n");
+    let fn = null;
+    for (let i = 0; i < lines.length; i += 1) {
+      const declaration = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z0-9_]+)/.exec(lines[i]);
+      if (declaration) fn = declaration[1];
+      if (!/^ {4}let (?:mut )?fragment = json!\(\{$/.test(lines[i])) continue;
+      const keys = [];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (/^ {4}\}\);$/.test(lines[j])) break;
+        const key = /^ {8}"([A-Za-z_]+)":/.exec(lines[j]);
+        if (key) keys.push(key[1]);
+      }
+      fragments.set(`${bin}:${fn}`, keys);
+    }
+  }
+  return fragments;
+}
+
+// The second claim: no shipped arm emits such a property today, MiniMax-H3 and the four other video
+// arms included. Universally quantified over the arms the sources actually contain — a new arm is
+// covered with no edit here — with the five video arms named so the check cannot go quietly vacuous.
+test("every adapter calibration record fragment carries only properties the record schema allows", async () => {
+  const schema = JSON.parse(await readFile(
+    fileURLToPath(new URL("../packages/schemas/memory-calibration.schema.json", import.meta.url)),
+    "utf8",
+  ));
+  const record = schema.$defs.record;
+  assert.equal(record.additionalProperties, false, "an open record would make this test prove nothing");
+  // `sourceCapture` is the one fragment key that is NOT a record property by design: the harness
+  // lifts it into `sourceSessions` and deletes it before the record is assembled.
+  const allowed = new Set([...Object.keys(record.properties), "sourceCapture"]);
+  // The keys every capture record carries. A `fragment` without all four is a different payload
+  // (the InstantID arms' legacy `memory` shape), and judging it against this schema would be wrong.
+  const signature = ["status", "artifact", "observedMemory", "scenarios"];
+
+  const fragments = await adapterRecordFragments();
+  const judged = [];
+  for (const [arm, keys] of fragments) {
+    if (!signature.every((key) => keys.includes(key))) continue;
+    judged.push(arm);
+    const forbidden = keys.filter((key) => !allowed.has(key));
+    assert.deepEqual(forbidden, [], `${arm} emits record properties the schema rejects: ${forbidden}`);
+    assert.equal(new Set(keys).size, keys.length, `${arm} repeats a record property`);
+  }
+
+  for (const arm of [
+    "mlx.rs:run_minimax_h3",
+    "mlx.rs:run_bernini",
+    "mlx.rs:run_krea_realtime",
+    "mlx.rs:run_ltx_with_admission",
+    "mlx_wan_scail2.rs:run",
+    "mlx_ltx25.rs:run",
+  ]) {
+    assert.ok(judged.includes(arm), `${arm} is a video record arm this check must cover`);
+  }
+  assert.ok(judged.length >= 18, `too few record arms recognized (${judged.length}) — the idiom moved`);
+
+  // The other half of the same decision: the LTX CAMPAIGN carriers keep their `output` descriptor,
+  // because `validate_ltx_campaign_entry_fragment` cross-checks `/output/*` against the diagnostics
+  // of the same run. It is published for the campaign admissions and for nothing else.
+  const mlx = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(
+    mlx,
+    /if !matches!\(admission, LtxRunAdmission::Ordinary\) \{\n\s+fragment\["output"\] = json!\(\{/,
+    "the LTX campaign carrier must still publish the output descriptor its own validator reads",
+  );
+});
