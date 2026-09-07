@@ -6573,6 +6573,51 @@ fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
 }
 
+/// The FLUX.2 arm's lifecycle blockers: the standing scope blocker, plus a warm-repeat retention
+/// FINDING when the post-cleanup allocator reading exceeds the clean warm bound.
+///
+/// sc-22738 (measured 2026-09-06): `flux2_klein_9b:q8:mlx` rendered correctly and was then thrown
+/// away, because a retention over this bound used to `return Err` and discard the whole capture.
+/// The reading was real — 30,189,746,856 active against a 24,981,289,616-byte clean warm cleanup
+/// plus a 709,354,919-byte tolerance, so 5,208,457,240 bytes over — but it is EVIDENCE, not a
+/// reason to refuse, for three reasons:
+///
+/// * The measured phase peaks this record ships come from the FIRST render on a freshly loaded
+///   generator — the production cold path. Renders two and three only feed the repeat comparison,
+///   so what they retain cannot corrupt the numbers the record actually claims.
+/// * The record already declares `warm_repeat` (and `cancel`/`error`) `not_run`, and says the
+///   cleanup bounds are "attested in quality and diagnostics instead". Refusing on a bound the
+///   record does not claim discarded the very diagnostics that were supposed to carry it: the one
+///   observation of this event survived only as a truncated line in a campaign log.
+/// * Production would retain it too. A cell whose warm repeat retains 5 GB is a fact about the
+///   engine that admission should see, not a capture to re-roll until it comes out clean.
+///
+/// The bound is NOT weakened — `lifecycleWarmRepeatPostCleanupActive`, its clean twin and the
+/// tolerance are all still measured and emitted, and an overage now lands in `blockers` under the
+/// cell's own name — so a retention is louder in the store than it was as a dropped capture.
+///
+/// Scoped to this arm deliberately: it is the only one that measured a positive retention. Across
+/// the 43 captures the same campaign committed, 42 report the warm and clean readings EQUAL TO THE
+/// BYTE and the 43rd is 50 MB *below* its clean twin, so on every other arm the refusal has never
+/// fired and there is nothing to re-characterize.
+fn flux2_lifecycle_blockers(
+    model_id: &str,
+    lifecycle_blocker: &str,
+    bounds: LifecycleMemoryBounds,
+    warm_post_cleanup: AllocatorState,
+) -> Vec<String> {
+    let mut blockers = vec![lifecycle_blocker.to_owned()];
+    if !bounds.allows_retained(warm_post_cleanup) {
+        blockers.push(format!(
+            "{model_id} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {:?} plus {} bytes; recorded as measured evidence rather than \
+             discarding the capture, whose peaks come from the cold first render",
+            bounds.clean_post_cleanup, bounds.tolerance_bytes,
+        ));
+    }
+    blockers
+}
+
 /// The LTX-2.3 twin of [`flux2_quality_passes`], over the LTX-named thresholds so an `mlx:ltx_2_3`
 /// receipt's numbers trace to an LTX constant.
 fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
@@ -7267,14 +7312,8 @@ fn run_flux2(request: &Value) -> Result<Value, String> {
         ));
     }
     clear_cache();
+    // Recorded, not refused — see `flux2_lifecycle_blockers` for why this reading is evidence.
     let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
-             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            arm.model_id, cleanup_bounds.tolerance_bytes,
-        ));
-    }
     let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
     if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
         return Err(format!(
@@ -7348,7 +7387,12 @@ fn run_flux2(request: &Value) -> Result<Value, String> {
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:{}-resident", arm.slug),
             "executed",
-            [lifecycle_blocker.to_owned()],
+            flux2_lifecycle_blockers(
+                arm.model_id,
+                lifecycle_blocker,
+                cleanup_bounds,
+                warm_post_cleanup,
+            ),
             [
                 ("preRungActiveAfterClear", "bytes", pre_rung_active),
                 ("preRungCacheAfterClear", "bytes", pre_rung_cache),
@@ -23407,6 +23451,120 @@ mod sana_chroma_tests {
 mod flux2_tests {
     use super::*;
     use mlx_gen::gen_core::MemoryStrategySupport;
+
+    /// sc-22738: a warm-repeat retention over the clean warm bound is RECORDED, not refused — and
+    /// the recording has to survive into the blocker list, because that list is the only place the
+    /// overage is named. Both halves are asserted here: the bound still discriminates (a reading
+    /// inside it adds nothing, one byte over on either axis adds a finding), and the finding
+    /// actually reaches the blockers the record ships.
+    ///
+    /// The over-bound case is the real `flux2_klein_9b:q8:mlx` reading from the 2026-09-06 MLX
+    /// walk, scaled nowhere: the campaign's own numbers, so a future reader can match the finding
+    /// text against the log line that motivated this.
+    #[test]
+    fn a_flux2_warm_retention_over_the_bound_is_recorded_as_a_blocker_not_refused() {
+        let scope = "scope blocker";
+        let clean = AllocatorState {
+            active: 1_000,
+            cache: 200,
+        };
+        let bounds = LifecycleMemoryBounds::from_clean_warm(10_000, clean);
+        assert_eq!(bounds.tolerance_bytes, 200);
+
+        // Inside the bound on both axes: the standing scope blocker and nothing else.
+        let within = flux2_lifecycle_blockers(
+            "flux2_klein_9b",
+            scope,
+            bounds,
+            AllocatorState {
+                active: 1_200,
+                cache: 400,
+            },
+        );
+        assert_eq!(
+            within,
+            vec![scope.to_owned()],
+            "a retention inside the bound must add no finding"
+        );
+
+        // One byte over on EITHER axis is a finding, so neither axis can be dropped unnoticed.
+        for over in [
+            AllocatorState {
+                active: 1_201,
+                cache: 400,
+            },
+            AllocatorState {
+                active: 1_200,
+                cache: 401,
+            },
+        ] {
+            let blockers = flux2_lifecycle_blockers("flux2_klein_9b", scope, bounds, over);
+            assert_eq!(
+                blockers.len(),
+                2,
+                "a retention above the bound must be recorded beside the scope blocker: {blockers:?}"
+            );
+            assert_eq!(blockers[0], scope, "the scope blocker must stay first");
+            let finding = &blockers[1];
+            assert!(
+                finding.contains("flux2_klein_9b"),
+                "the finding must name the cell: {finding}"
+            );
+            // The tolerance is asserted through its OWN phrase, not a bare "200": the clean
+            // cleanup's cache is also 200, so a loose substring check stayed green when the
+            // tolerance was replaced by a literal zero (caught by mutation M4).
+            assert!(
+                finding.contains("active: 1000") && finding.contains("plus 200 bytes"),
+                "the finding must carry the clean warm cleanup and the tolerance: {finding}"
+            );
+        }
+
+        // The measured klein q8 event itself: 5,208,457,240 bytes over a 709,354,919-byte
+        // tolerance. It is recorded, and the capture is NOT refused — the whole point of sc-22738.
+        let measured = LifecycleMemoryBounds::from_clean_warm(
+            35_467_745_964,
+            AllocatorState {
+                active: 24_981_289_616,
+                cache: 0,
+            },
+        );
+        assert_eq!(measured.tolerance_bytes, 709_354_919);
+        let blockers = flux2_lifecycle_blockers(
+            "flux2_klein_9b",
+            scope,
+            measured,
+            AllocatorState {
+                active: 30_189_746_856,
+                cache: 0,
+            },
+        );
+        assert_eq!(
+            blockers.len(),
+            2,
+            "the measured klein q8 retention is a finding"
+        );
+        assert!(
+            blockers[1].contains("active: 30189746856")
+                && blockers[1].contains("active: 24981289616")
+                && blockers[1].contains("plus 709354919 bytes"),
+            "{:?}",
+            blockers[1]
+        );
+
+        // ...and the clean rerun of that same anchor, which retained nothing, stays quiet.
+        assert_eq!(
+            flux2_lifecycle_blockers(
+                "flux2_klein_9b",
+                scope,
+                measured,
+                AllocatorState {
+                    active: 24_981_289_616,
+                    cache: 0,
+                },
+            ),
+            vec![scope.to_owned()],
+        );
+    }
 
     /// sc-18808 added the still geometry: `validate_flux2_target` now refuses a non-still target
     /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
