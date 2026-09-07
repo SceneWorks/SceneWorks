@@ -1245,8 +1245,9 @@ Flag notes, all from the `capture` arm of `main`:
 
 #### What each anchor's run can END as (`measure-memory-catalog.mjs`)
 
-One row per outcome the walk reports in its summary table and its `summary-*.json`. The first four
-are SUCCESS — the walk's exit code is 2 only if some anchor ended outside this group's first four:
+One row per outcome the walk reports in its summary table and its `summary-*.json`. The first five
+are NOT walk failures — the walk's exit code is 2 only if some anchor ended outside this group's
+first five:
 
 | outcome | what happened | tree |
 |---|---|---|
@@ -1254,7 +1255,8 @@ are SUCCESS — the walk's exit code is 2 only if some anchor ended outside this
 | `committed_exceeded` | the render ENDED AT A CEILING — the footprint watchdog hard-stopped it, or Metal refused this process's submissions at the host's wired limit — and that landed as a **measured lower bound** (sc-22738) through the same ingest path | one commit |
 | `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
 | `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
-| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop nor a wired-limit refusal (or is one the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
+| `artifact_unsupported` | the pinned engine's production loader refused the shipped artifact (sc-22738) — the row carries the loader's own `unsupported:` sentence verbatim; **no evidence, no bound, no commit** | clean |
+| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
 
@@ -1378,6 +1380,61 @@ So: **one refusal is a bound; two consecutive refusals halt the walk.** The seco
 `capture_failed`, records nothing, and sets `state.halt` naming the reboot, which makes the run exit
 non-zero after the summary. Reboot the host, then re-run the walk — the first anchor's bound is
 already committed and its cell will classify `exceeded_current`, so the walk resumes past it.
+
+#### A THIRD non-failure: the pinned engine refuses the shipped artifact (`artifact_unsupported`)
+
+Neither of the two ceilings above. The adapter never finished loading: `catalog.media().load(...)`
+— the same call the worker makes through `crates/sceneworks-worker/src/inference_runtime.rs` —
+returned a gen-core `Unsupported`, and the arm printed it as
+
+```
+load real <provider> <tier> provider: unsupported: <the engine's own sentence>
+```
+
+`artifactUnsupported()` in `measure-memory-catalog.mjs` matches exactly that line and puts the
+engine's sentence on the anchor row. Nothing is recorded: no capture bundle, no `exceededBounds`
+entry, no commit, no touch of `config/memory-anchors.json`. A load that never completed measured
+nothing and exceeded nothing, so there is no inequality to write down — the row states only that
+this cell does not load at this pin.
+
+It does not fail the walk. The alternative — exiting 2 — would red every campaign until somebody
+re-hosts a model, while telling the operator nothing they can act on. The walk prints a dedicated
+block after the summary table naming each refused anchor and its reason, so the finding is loud
+without being a build break.
+
+**Re-running does not help.** Only a new rehost revision (a manifest pin bump) or an engine change
+(an inference pin bump) can move one of these cells, and either event stales the closure digest, so
+the cell simply becomes capturable again on its own.
+
+##### Open: two rehosts the pinned engine refuses (measured 2026-09-06, pin `3b922bac6094e06f98bb2598a6d6fe10dc92739e`)
+
+For the artifact owner. Neither is fixed here — this walk does not modify artifacts.
+
+| cell(s) | repo @ revision | file / key | the engine's check |
+|---|---|---|---|
+| `wan_2_2_i2v_14b:q4:mlx` (and `:q8:mlx`, same shape) | `SceneWorks/wan2.2-i2v-a14b-mlx` @ `c6c78617` | `q4/high_noise_model.safetensors` (and `low_noise_model.safetensors`, and both under `q8/`) — `head.head.weight` ships **dense BF16 `[64, 5120]`** with no `head.head.scales` / `head.head.biases` | `gen_core::wan_i2v_memory::packed_transformer_bytes` demands `.scales` for **every** 2-D `.weight` in a packed tier |
+| `wan_2_2:{bf16,q4,q8}:mlx` | `SceneWorks/wan2.2-ti2v-5b-mlx` @ `bb1b0552` | `<tier>/config.json` carries an extra **`"max_area": 901120`** key; every other key and value matches the canonical preset exactly | `mlx_gen_wan::memory_strategy::canonical_config` compares the parsed JSON for **exact equality** with `WanModelConfig::wan22_ti2v_5b().to_json()`, which stopped emitting `max_area` in sc-12308 |
+
+Two different postures, and they are worth telling apart before anyone edits a repo:
+
+- **TI2V-5B blocks production.** `mlx-gen-wan/src/model.rs:465` calls `contract_for_loaded(spec)`
+  unconditionally in `load()` and propagates its error, and `supported_load_surface` is TRUE for a
+  plain dir / bf16 / Resident / Eager request with no controls — i.e. an ordinary TI2V-5B job. All
+  three tiers therefore fail to load in the app on this host, not only under the capture arm. The
+  `max_area` value itself is correct (`MAX_AREA_5B` = 1280×704) and the loader no longer reads the
+  key; it is inert data that an exact-equality check rejects. Fix is a one-key rehost, or teaching
+  `canonical_config` to ignore a legacy `max_area`.
+- **I2V-A14B does NOT block production, only measurement.** The packed accounting is reached
+  through `i2v_memory_strategy::prepare`, which `model.rs:2217` runs only when
+  `spec.prepared_file_pins().is_prepared()`. No SceneWorks video route prepares file pins —
+  `crates/sceneworks-worker/src/paths.rs:346` (`prepare_load_spec_with_file_pins`) has image-lane
+  callers only — so a production Wan job skips the seal, loads fine, and gets no calibration
+  identity. The capture arm prepares pins on purpose (that is what reaches the calibrated path), so
+  it is the only caller that sees the refusal. Note also that the sibling
+  `SceneWorks/wan2.2-t2v-a14b-mlx` @ `991eb255` leaves `head.head` dense in exactly the same way, so
+  this is the rehost pipeline's standing convention rather than one bad build — and gen-core's own
+  second pass in `packed_transformer_bytes` already prices a dense residual tensor correctly. The
+  first loop just refuses before that pass can run.
 
 ### 6a-bis. The whole catalog on a runner — `memory-catalog-campaign.yml` (sc-22738)
 

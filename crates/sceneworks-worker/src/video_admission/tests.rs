@@ -694,6 +694,132 @@ impl gen_core::Generator for FixtureGenerator {
     }
 }
 
+/// A generator whose declared strategy admits only the request shapes the pinned MLX Krea Realtime
+/// gate admits (`mlx-gen-krea-realtime/src/memory_strategy.rs:686-694` at inference `3b922bac6`):
+/// `image_to_video`/`video_to_video` carrying exactly one reference, and every other request mode
+/// refused by name. Bernini and SCAIL-2 refuse other shapes the same way; this fixture stands for
+/// the class, not for one model id.
+struct ShapeGatedGenerator {
+    inner: FixtureGenerator,
+}
+
+fn shape_gated_generator(contract: Option<MemoryProviderContract>) -> ShapeGatedGenerator {
+    ShapeGatedGenerator {
+        inner: fixture_generator(contract),
+    }
+}
+
+impl gen_core::Generator for ShapeGatedGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.inner.descriptor()
+    }
+
+    fn validate(&self, request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+        self.inner.validate(request)
+    }
+
+    fn generate(
+        &self,
+        request: &gen_core::GenerationRequest,
+        on_progress: &mut dyn FnMut(gen_core::Progress),
+    ) -> gen_core::Result<gen_core::GenerationOutput> {
+        self.inner.generate(request, on_progress)
+    }
+
+    fn memory_strategy_contract(&self) -> Option<&MemoryProviderContract> {
+        self.inner.memory_strategy_contract()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        match (context.mode.as_key(), context.geometry.reference_count) {
+            ("image_to_video" | "video_to_video", 1) => gen_core::MemorySafetyDecision::Accept,
+            _ => gen_core::MemorySafetyDecision::Reject {
+                reason: "crossed resident request mode".to_owned(),
+            },
+        }
+    }
+}
+
+fn shape_gate_contract() -> MemoryProviderContract {
+    fixture_contract(60, 20, &[MemoryStrategy::StagedResidency])
+}
+
+fn shape_gate_request<'a>(mode: &'a str, reference_count: u32) -> VideoAdmissionInputs<'a> {
+    let mut request = inputs(241, budget(128.0), 18 * GIB);
+    request.mode = mode;
+    request.reference_count = reference_count;
+    request.reference_shape = if reference_count == 0 {
+        "none"
+    } else {
+        "image"
+    };
+    request.runtime = Some(VideoRuntimeMemoryState {
+        budget: MemoryBudget {
+            total_bytes: 128 * GIB,
+            committed_bytes: 20 * GIB,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        cache_state: MemoryCacheState::Warm,
+        load_policy: OffloadPolicy::Resident,
+        provider_resident_bytes: 20 * GIB,
+    });
+    request
+}
+
+/// sc-22738 — evidence must never turn a shipped render into a hard `Unsupported`.
+///
+/// `memory_strategy::generate_with_scope` refuses the whole generation when the provider rejects
+/// the run context, so a covered `text_to_video` request against a provider that admits only
+/// `image_to_video`/`video_to_video` must reach the engine with the input it got before this gate
+/// existed. The refusal path is untouched: bounds and curves keep gating.
+#[test]
+fn a_request_shape_the_provider_refuses_reaches_the_engine_without_a_context() {
+    let generator = shape_gated_generator(Some(shape_gate_contract()));
+    let outcome = admit_video_generation_with_curves(
+        &generator,
+        shape_gate_request("text_to_video", 0),
+        None,
+    );
+    assert_eq!(
+        outcome,
+        VideoAdmissionOutcome::default(),
+        "a provider-refused shape must hand the engine its own load-time defaults"
+    );
+
+    // The identical request against a provider that declares no shape gate still carries the
+    // context, so the assertion above is about the declaration and not about the request fitting.
+    let ungated = fixture_generator(Some(shape_gate_contract()));
+    assert!(
+        admit_video_generation_with_curves(&ungated, shape_gate_request("text_to_video", 0), None,)
+            .context
+            .is_some(),
+        "the same admitted request carries a context when the provider accepts the shape"
+    );
+}
+
+/// The shape the provider does declare is unchanged: it still carries the selected contract and
+/// evidence receipt into `generate_with_scope`.
+#[test]
+fn a_request_shape_the_provider_declares_still_carries_its_context() {
+    let generator = shape_gated_generator(Some(shape_gate_contract()));
+    let outcome = admit_video_generation_with_curves(
+        &generator,
+        shape_gate_request("image_to_video", 1),
+        None,
+    );
+    let context = outcome
+        .context
+        .expect("a declared image_to_video/one-reference shape keeps its run context");
+    assert_eq!(context.mode.as_key(), "image_to_video");
+    assert_eq!(context.geometry.reference_count, 1);
+    assert!(context.has_reference);
+    assert!(outcome.refusal.is_none());
+}
+
 fn inputs<'a>(
     frames: u32,
     budget: Option<Budget>,

@@ -25,6 +25,10 @@
 // A bound that has STALED classifies nothing, so the cell is capturable again the moment its
 // evidence stops speaking for production.
 //
+// A cell whose PINNED ARTIFACT the production loader refuses classifies `artifact_unsupported`
+// (sc-22738): the anchor row carries the engine's own `unsupported:` sentence, nothing is recorded
+// or committed, and the run does NOT exit 2 — see `ARTIFACT_UNSUPPORTED`.
+//
 // `--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle in
 // <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
 // anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
@@ -2266,6 +2270,57 @@ export async function watchdogHardStop(eventFile) {
 export const METAL_REFUSAL = "Metal refused this process's submissions at the host's wired limit";
 
 /**
+ * The PRODUCTION loader's own refusal of the PINNED artifact, as the adapter prints it (sc-22738).
+ *
+ * Every capture arm wraps `catalog.media().load(provider, &spec)` — the same call the worker makes
+ * through `inference_runtime.rs` — as `load real <provider> <tier> provider: <engine error>`. When
+ * that error is an `unsupported:`, the pinned engine has REFUSED THE SHIPPED ARTIFACT: nothing about
+ * the walk, the host's memory, the plan or the adapter is implicated, and re-running changes
+ * nothing until the rehost or the engine changes. Measured on 2026-09-06:
+ *
+ *   * `wan_2_2_i2v_14b:q4:mlx` — `… /q4/high_noise_model.safetensors packed head.head lacks scales`
+ *   * `wan_2_2:{bf16,q4,q8}:mlx` — `wan2_2_ti2v_5b: config.json is not the complete canonical dense
+ *     Wan2.2 TI2V-5B configuration`
+ *
+ * Both read as an ordinary `capture_failed` until now, which is the wrong claim twice over: it says
+ * the WALK failed (exit 2, a red campaign) when the walk did exactly what it should, and it buries
+ * the loader's own sentence — the only thing that tells the artifact owner what to fix — in a
+ * generic bucket beside genuine harness breakage.
+ *
+ * Deliberately NOT a memory fact. An `exceeded` bound says "this cell's peak is at least N"; this
+ * says "this cell does not load at all at this pin", so no evidence is recorded, no commit is made,
+ * and the store is untouched. The anchor row simply reports what the engine said.
+ */
+export const ARTIFACT_UNSUPPORTED = "the pinned engine's production loader refused the shipped artifact";
+
+/**
+ * Matches the adapter's load-refusal line, capturing the engine's own reason.
+ *
+ * Anchored on the arms' shared wrapper — `load real <provider> <tier> provider:` — and on
+ * `unsupported:`, gen-core's `Error::Unsupported` display. A load that fails any OTHER way (an I/O
+ * error, a panic, a `Msg`) is NOT this: it stays `capture_failed`, because only `Unsupported` is the
+ * engine declining a surface it understands rather than something going wrong.
+ */
+export const ARTIFACT_UNSUPPORTED_PATTERN =
+  /^load real (\S+) (\S+) provider: unsupported: (.+)$/;
+
+/**
+ * The engine's exact reason if this stderr carries a production-loader artifact refusal, else null.
+ *
+ * Same shape as `metalSubmissionsIgnored`: a pure predicate over the child's captured stderr, one
+ * spelling, no re-derivation at the call site. It reads every line rather than only the last,
+ * because adapters print informational lines after the failure (the sc-22414 coherence tally) and
+ * `failureReason` already had to be taught the same lesson.
+ */
+export function artifactUnsupported(stderr) {
+  for (const line of String(stderr ?? "").split("\n")) {
+    const match = ARTIFACT_UNSUPPORTED_PATTERN.exec(line.trim());
+    if (match) return { provider: match[1], tier: match[2], reason: match[3] };
+  }
+  return null;
+}
+
+/**
  * Whether a capture of this anchor runs under the footprint guard: EVERY capture on Darwin. A
  * candle capture running on a Mac draws from the same unified pool the sampler measures, so the
  * host-RAM hazard is the same whichever adapter is under the harness (sc-22738 review); the guard
@@ -2502,6 +2557,14 @@ export async function measureAnchor(row, context) {
     // pages too, never fired. Nothing in the event log names it, so the adapter's own stderr is the
     // witness, and until now it read as an ordinary `capture_failed` while production went on
     // admitting the identical request at the ladder's bf16 rung.
+    // sc-22738: the THIRD way a capture ends without being a walk failure. The pinned engine's own
+    // production loader refused the shipped artifact — checked BEFORE the two memory arms, because
+    // a load that never completed cannot have measured or exceeded anything, and neither the guard
+    // nor Metal has any part in it. See `ARTIFACT_UNSUPPORTED`.
+    const artifact = artifactUnsupported(error.stderr ?? error.message);
+    if (artifact) {
+      return finish("artifact_unsupported", `${artifact.provider} ${artifact.tier}: ${artifact.reason}`.slice(0, FAILURE_REASON_LIMIT));
+    }
     const refused = !hardStop && guardsCapture(row.key) && metalSubmissionsIgnored(error.stderr ?? error.message);
     // Whether the PREVIOUS anchor of this run refused the same way; cleared for every anchor at the
     // top of its own attempt, so the count is over consecutive attempts rather than over the run.
@@ -2726,8 +2789,23 @@ export async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`\n${table(results, ["key", "status", "seconds", "reason"])}\n`);
   process.stdout.write(`\ncommits: ${state.commits.length ? state.commits.join(" ") : "none"}\nsummary: ${summaryPath}\n`);
   if (state.halt) fail(state.halt);
-  const failed = results.filter((result) => !["committed", "committed_exceeded", "captured", "exceeded"].includes(result.status));
+  // sc-22738: `artifact_unsupported` is NOT a walk failure. The walk reached the cell, ran the
+  // production loader against the pinned artifact, and recorded the engine's verdict; nothing here
+  // can make that cell capturable, so exiting 2 would red every campaign until an artifact owner
+  // acts. It is still on every summary row and in the table above, which is where it belongs.
+  const failed = results.filter(
+    (result) => !["committed", "committed_exceeded", "captured", "exceeded", "artifact_unsupported"].includes(result.status),
+  );
   if (failed.length > 0) process.exitCode = 2;
+  const unsupported = results.filter((result) => result.status === "artifact_unsupported");
+  if (unsupported.length > 0) {
+    process.stdout.write(
+      `\n${unsupported.length} anchor(s) were refused by the pinned production loader (${ARTIFACT_UNSUPPORTED});\n`
+      + "the artifact, not the walk, is the cause — these do not fail the run:\n"
+      + unsupported.map((result) => `- ${result.key}: ${result.reason}`).join("\n")
+      + "\n",
+    );
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -592,6 +592,31 @@ fn context(
     }
 }
 
+/// Install the admitted rung's request controls onto the planned request, the way production does.
+///
+/// sc-22738 (measured 2026-09-06): `wan_2_2_i2v_14b:bf16:mlx` reached the receipt mint after a
+/// 370-second load and was refused with `admitted Wan I2V request is missing its explicit memory
+/// carrier` — `wan_i2v_memory::selection_from_request` reads the executing selection out of
+/// `request.memory` and refuses `None` outright, and this arm built its request without ever
+/// setting the field. Production never presents such a request: `video_admission.rs:2294` puts
+/// `contract.generation_memory(&selected.selection)` on the outcome, `video_jobs/wan.rs:2095`
+/// applies it to the input, and `video_jobs/wan.rs:2148` carries it onto the `GenerationRequest`.
+/// That is the whole installation, and it is reproduced here against the LOADED provider's own
+/// contract — the same object production reads it from (`video_admission.rs:2095`).
+///
+/// The Wan contract declares `ResidentRequestMemory::ExplicitResident`, so even a Resident rung
+/// yields `Some(GenerationMemory::default())` and every Wan arm needs this. SCAIL-2's contract
+/// declares `PreserveLoadDefaults`, so a Resident SCAIL-2 selection yields `None` and its request
+/// stays carrier-free — which is exactly what its own `validate_active_request` expects. One
+/// call site, production's own mapping, no per-arm special case.
+fn install_memory_carrier(
+    request: &mut GenerationRequest,
+    contract: &MemoryProviderContract,
+    selection: &MemorySelection,
+) {
+    request.memory = contract.generation_memory(selection);
+}
+
 /// The request receipt this render will present, minted by the ENGINE's own public helper.
 ///
 /// Both families bind admission to a receipt derived from the sealed artifact and the exact request
@@ -756,7 +781,12 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let planned_render = generation_request(arm, geometry);
+    let mut planned_render = generation_request(arm, geometry);
+    // Production admits FIRST and installs the selected rung's controls onto the request it hands
+    // the engine; the receipt is minted over that request. Do the same here, or the Wan mint reads
+    // an absent carrier and refuses (sc-22738).
+    install_memory_carrier(&mut planned_render, contract, &selection);
+    let planned_render = planned_render;
     let receipt = evidence_revision(arm, &artifact.spec, &planned_render, selection)?;
     let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
         generator.memory_strategy_safety_check(&context(
@@ -1309,6 +1339,107 @@ mod tests {
                 arm.provider
             );
             repositories.push(arm.repository);
+        }
+    }
+
+    /// A weights-free A14B contract from the pinned engine's own authority, for the request-shape
+    /// assertions below. `weights_free_contract` serves exactly the two A14B routes and touches no
+    /// filesystem, so these run on any host.
+    fn weights_free_a14b_contract(arm: Arm) -> mlx_gen::gen_core::MemoryProviderContract {
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/nonexistent/wan-a14b")));
+        mlx_gen::gen_core::wan_i2v_memory::weights_free_contract(
+            arm.provider,
+            mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+            &spec,
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", arm.provider))
+    }
+
+    /// The planned render carries the admitted rung's memory controls, exactly as production
+    /// installs them, so the ENGINE's mint can read the executing selection back out of the
+    /// request (sc-22738).
+    ///
+    /// `wan_i2v_memory::selection_from_request` refuses a `None` carrier outright —
+    /// `admitted Wan I2V request is missing its explicit memory carrier` — and then requires the
+    /// carrier to be byte-identical to `contract.generation_memory(&selection)`. Both halves are
+    /// asserted here against a contract the engine built, over every Wan arm and every strategy
+    /// its contract admits.
+    ///
+    /// MUTATION that reds this: deleting the `install_memory_carrier` call in `run`, or changing
+    /// its body to leave `request.memory` unset — the `is_some` assertion fails with the same
+    /// condition the engine refuses on. Changing it to mint a carrier of its own (say
+    /// `GenerationMemory::default()` for every rung) reds the equality assertion instead.
+    #[test]
+    fn the_planned_wan_render_carries_the_admitted_rungs_memory_controls() {
+        let geometry = Geometry {
+            width: 832,
+            height: 480,
+            frames: 77,
+        };
+        for arm in [T2V_A14B, I2V_A14B] {
+            let contract = weights_free_a14b_contract(arm);
+            for strategy in [
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+            ] {
+                let selection = MemorySelection {
+                    strategy,
+                    parameters: MemoryStrategyParameters::default(),
+                    tier: MemoryNumericTier {
+                        precision: Precision::Bf16,
+                        quant: None,
+                        component_precision_floors: &[],
+                    },
+                };
+                let mut request = generation_request(arm, geometry);
+                assert!(
+                    request.memory.is_none(),
+                    "{}: the planned request starts carrier-free; the install is the only source",
+                    arm.provider
+                );
+                install_memory_carrier(&mut request, &contract, &selection);
+                // The engine's own two conditions, in its own order.
+                assert!(
+                    request.memory.is_some(),
+                    "{} {strategy:?}: an absent carrier is what the Wan mint refuses with \
+                     \"admitted Wan I2V request is missing its explicit memory carrier\"",
+                    arm.provider
+                );
+                assert_eq!(
+                    contract.generation_memory(&selection),
+                    request.memory,
+                    "{} {strategy:?}: the carrier must be the contract's own mapping of the \
+                     admitted selection, never one this arm invented",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// SCAIL-2 is carrier-free at Resident BY ITS OWN CONTRACT, not by an exception this arm
+    /// carves out: `PreserveLoadDefaults` maps a Resident rung to `None`, which is what its
+    /// `validate_active_request` treats as an unmanaged generate. The Wan contract declares
+    /// `ExplicitResident` instead, which is why the Wan arms above need the carrier even at
+    /// Resident. One installation covers both because the contracts disagree, not the code.
+    #[test]
+    fn the_resident_carrier_follows_each_contracts_own_resident_policy() {
+        for arm in [T2V_A14B, I2V_A14B] {
+            let contract = weights_free_a14b_contract(arm);
+            let selection = MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: MemoryStrategyParameters::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                },
+            };
+            assert!(
+                contract.generation_memory(&selection).is_some(),
+                "{}: the Wan contract is ExplicitResident; a Resident rung still carries controls",
+                arm.provider
+            );
         }
     }
 

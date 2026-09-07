@@ -20942,13 +20942,17 @@ fn krea_realtime_target_surface(request: &Value) -> Result<KreaRealtimeSurface, 
 /// `evidence_revision` sealed under
 /// `provider-resident-video-request-v3:krea_realtime_14b:mode=…:shape=…:`.
 ///
-/// THE WORKER SIDE agrees. `video_jobs/krea_realtime.rs` builds its `VideoGenInput` with
-/// `..VideoGenInput::default()` and never sets `memory_context`, so nothing but
-/// `video_admission.rs` can fill it — and the context that path builds carries
+/// THE WORKER SIDE agrees, and since sc-22738 it agrees BY CONSTRUCTION rather than by accident.
+/// `video_jobs/krea_realtime.rs` builds its `VideoGenInput` with `..VideoGenInput::default()`, but
+/// the shared funnel overwrites that field from admission (`video_jobs/wan.rs`
+/// `apply_video_admission_outcome`), so the `..default()` is not what keeps the context off this
+/// request. The context `video_admission.rs` would build carries
 /// `mode = MemoryMode::Other("text_to_video")`, `reference_count = 0` and an `evidence_revision`
 /// that is a curve/anchor id or `video-estimate-floor-v1`
 /// (`video_admission.rs#admit_video_generation_with_curves_and_profiles`), never that sealed
-/// receipt. A reference-free t2v render therefore reaches the engine through
+/// receipt — so `video_admission.rs#engine_declines_advisory_context` asks the loaded provider's
+/// own `memory_strategy_safety_check` before attaching it, sees the refusal, and drops both the
+/// context and the rung knobs. A reference-free t2v render therefore reaches the engine through
 /// `memory_strategy::generate_with_scope`'s no-context early return; the gate is asked nothing.
 ///
 /// sc-22738 probed that surface anyway, and all three `krea_realtime_14b:*:mlx` anchors died on the
@@ -20968,7 +20972,8 @@ const KREA_REALTIME_ADMISSION_BLOCKER: &str = concat!(
     "`mlx-gen-krea-realtime`'s registered safety_check admits only the image_to_video and ",
     "video_to_video routes carrying exactly one reference under a sealed ",
     "provider-resident-video-request-v3 receipt, and refuses every other request mode by name; ",
-    "the worker's own t2v path leaves VideoGenInput::memory_context unset, and the context ",
+    "the worker's admission gate asks the provider's own safety check before attaching a run ",
+    "context and drops the one it would refuse (sc-22738), and the context ",
     "video_admission.rs would build carries text_to_video, reference_count 0 and a curve/anchor ",
     "evidence id rather than that receipt. This arm therefore asks the admission gate nothing, ",
     "exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence ",
