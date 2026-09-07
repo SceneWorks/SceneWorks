@@ -57,6 +57,11 @@ import {
   readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
+  parseWanMlxSealedProviders,
+  readWanMlxSealedProviders,
+  wanMlxSealGap,
+  WAN_MLX_LOADER_PATH,
+  WAN_MLX_SEAL_UNCHECKED,
   WATCHDOG,
   LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
   UNIFIED_RESERVE_BYTES,
@@ -1851,9 +1856,23 @@ async function shippedTieredCells() {
 }
 
 let measurabilityGapsPromise;
-function measurabilityGaps() {
+async function measurabilityGaps() {
   measurabilityGapsPromise ??= computeMeasurabilityGaps();
-  return measurabilityGapsPromise;
+  return (await measurabilityGapsPromise).gaps;
+}
+
+/**
+ * sc-22738: the gaps excused because the PINNED `mlx-gen-wan` loader seals no memory receipt for
+ * the route, so its loaded provider publishes no memory-strategy contract and no change in this
+ * repository can make the cell capturable (fixed engine-side in SceneWorks/inference#964).
+ *
+ * Not an allowlist: the excuse is re-derived from the same pinned loader `classifyAnchor` reads, so
+ * it empties itself at the pin bump. `every shipped tiered model is measurable` asserts it stays
+ * bounded to exactly that.
+ */
+async function pinnedLoaderGaps() {
+  measurabilityGapsPromise ??= computeMeasurabilityGaps();
+  return (await measurabilityGapsPromise).pinned;
 }
 
 /** The measurability gap set: shipped cells `--list` does not classify runnable / weights_missing. */
@@ -1874,10 +1893,14 @@ async function computeMeasurabilityGaps() {
     // and re-running it could only re-establish the same inequality. A bound that stales puts the
     // cell straight back into `runnable`, so the gap set still sees it the moment it is capturable.
     if (!["runnable", "weights_missing", "exceeded_current"].includes(status)) {
-      gaps.push({ ...cell, status, reason: row?.reason ?? `${PLAN_PATH} declares no anchor ${cell.key}` });
+      gaps.push({ ...cell, status, provider: row?.provider ?? null, reason: row?.reason ?? `${PLAN_PATH} declares no anchor ${cell.key}` });
     }
   }
-  return gaps;
+  const sealed = await readWanMlxSealedProviders();
+  const pinned = sealed === null
+    ? []
+    : gaps.filter((gap) => gap.provider !== null && gap.reason === wanMlxSealGap(gap.provider, sealed));
+  return { gaps: gaps.filter((gap) => !pinned.includes(gap)), pinned, sealed };
 }
 
 function gapReport(gaps) {
@@ -2350,6 +2373,79 @@ pub const SDXL_ROUTES: &[SdxlRoute] = &[
   });
   assert.equal(row.status, "weights_missing");
   assert.equal(row.routeCheck, SDXL_ROUTES_UNCHECKED);
+});
+
+// sc-22738. `wan_2_2_t2v_14b:{bf16,q4,q8}:mlx` classified `runnable` and every booked capture died
+// AFTER the load (273 s for bf16, 114 s for q4) on "loaded wan2_2_t2v_14b exposed no memory-strategy
+// contract". Nothing the classifier read could see it: the anchor loader closure names
+// `i2v_memory_strategy.rs` as the memory-strategy entry point for BOTH A14B routes, and that file
+// registers the two identically. The divergence is in the loader one file over.
+test("a Wan MLX route whose pinned loader seals no receipt is not measurable, and an unreadable checkout refuses nothing", async () => {
+  // The two loader shapes, verbatim in the part that matters: one seals, one does not.
+  const source = `
+pub const MODEL_ID_T2V_14B: &str = "wan2_2_t2v_14b";
+pub const MODEL_ID_I2V_14B: &str = "wan2_2_i2v_14b";
+pub fn load_t2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
+    // A comment naming crate::i2v_memory_strategy::prepare(spec, MODEL_ID_T2V_14B) is prose.
+    Ok(Box::new(Wan14b { i2v_memory: None }))
+}
+pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
+    let i2v_memory = Some(crate::i2v_memory_strategy::prepare(spec, MODEL_ID_I2V_14B)?);
+    Ok(Box::new(Wan14b { i2v_memory }))
+}
+`;
+  const sealed = parseWanMlxSealedProviders(source);
+  assert.deepEqual([...sealed], ["wan2_2_i2v_14b"], "a commented-out seal is prose, not a seal");
+  assert.equal(wanMlxSealGap("wan2_2_i2v_14b", sealed), null);
+  assert.match(wanMlxSealGap("wan2_2_t2v_14b", sealed), /seals no memory receipt for wan2_2_t2v_14b/);
+  // Fail-closed both ways: an unresolvable provider const, and a source that seals nothing at all,
+  // THROW rather than reporting every Wan MLX route as unsealed on a parser failure.
+  assert.throws(
+    () => parseWanMlxSealedProviders("crate::i2v_memory_strategy::prepare(spec, MODEL_ID_MYSTERY)"),
+    /declares no `const … : &str` value for/,
+  );
+  assert.throws(() => parseWanMlxSealedProviders("fn load_t2v_14b() {}"), /for no route at all/);
+
+  // Live: the pinned checkout's own loader, and the classification it produces for the T2V cell.
+  const live = await readWanMlxSealedProviders();
+  assert.equal(await readWanMlxSealedProviders(path.join(ROOT, "no", "such", "checkout")), null);
+  assert.equal(await readWanMlxSealedProviders(""), null, "no inference checkout is not a refusal");
+  const plan = await readPlan();
+  const key = "wan_2_2_t2v_14b:q4:mlx";
+  const models = await readManifestModels();
+  const context = (wanMlxSealed) => ({
+    models,
+    backend: "mlx",
+    hubs: [path.join(ROOT, "no", "such", "hub")],
+    current: new Map(),
+    captured: new Map(),
+    declaredLanes: new Set(["wan_2_2_t2v_14b:mlx", "wan_2_2_i2v_14b:mlx"]),
+    declaredProviders: new Set(["mlx:wan2_2_t2v_14b", "mlx:wan2_2_i2v_14b"]),
+    wanMlxSealed,
+  });
+  // With nothing to read, the cell classifies as it otherwise would and SAYS the check did not run.
+  const unchecked = await classifyAnchor(key, plan.anchors[key], context(null));
+  assert.equal(unchecked.routeCheck, WAN_MLX_SEAL_UNCHECKED);
+  assert.notEqual(unchecked.status, "harness_unsupported");
+  // An unsealed T2V loader is a refusal that names the missing contract, and it is SCOPED: the I2V
+  // route on the same family marker, and the T2V route once its loader seals, stay measurable.
+  const unsealed = new Set(["wan2_2_ti2v_5b", "wan2_2_i2v_14b"]);
+  const refused = await classifyAnchor(key, plan.anchors[key], context(unsealed));
+  assert.equal(refused.status, "harness_unsupported");
+  assert.match(refused.reason, /exposed no memory-strategy contract/);
+  const i2vKey = "wan_2_2_i2v_14b:q4:mlx";
+  const sibling = await classifyAnchor(i2vKey, plan.anchors[i2vKey], context(unsealed));
+  assert.notEqual(sibling.status, "harness_unsupported", "the refusal is per route, not per family");
+  const fixed = await classifyAnchor(key, plan.anchors[key], context(new Set([...unsealed, "wan2_2_t2v_14b"])));
+  assert.notEqual(fixed.status, "harness_unsupported", "a pin whose loader seals re-admits the cell");
+
+  // And the fact itself at the pin this repository ships, so a bump that fixes it is visible here.
+  if (live === null) {
+    assert.ok(!process.env.CI, `on CI the pinned inference checkout must supply ${WAN_MLX_LOADER_PATH}`);
+  } else {
+    assert.ok(live.has("wan2_2_i2v_14b"), "the I2V loader has always sealed; a parser that reads it as unsealed is broken");
+    assert.ok(live.has("wan2_2_ti2v_5b"), "the TI2V-5B loader has always sealed");
+  }
 });
 
 // sc-22729: the three caller-staged SDXL components are declared in TWO places — the catalog's
@@ -3892,6 +3988,22 @@ test("the lane default anchor composition is one declaration both lanes' walkers
 test("every shipped tiered model is measurable", async () => {
   const gaps = await measurabilityGaps();
   assert.equal(gaps.length, 0, gapReport(gaps));
+  // sc-22738: a route the PINNED `mlx-gen-wan` loader does not seal a receipt for cannot be made
+  // measurable by any change in this repository — the loaded provider publishes no memory-strategy
+  // contract, so the capture arm refuses the cell after the load (fixed engine-side in
+  // SceneWorks/inference#964; the cells come back the moment the pin carries it). `pinnedLoaderGaps`
+  // re-derives that excuse from the same pinned loader `classifyAnchor` reads rather than listing
+  // cells, so it empties itself at the pin bump — and it stays bounded to exactly that here.
+  const sealed = await readWanMlxSealedProviders();
+  for (const gap of await pinnedLoaderGaps()) {
+    assert.equal(
+      gap.reason,
+      wanMlxSealGap(gap.provider, sealed),
+      `${gap.key}: excused for something other than the pinned loader's own seal`,
+    );
+    assert.equal(gap.backend, "mlx", `${gap.key}: the loader seal is an MLX-lane fact`);
+    assert.ok(!sealed.has(gap.provider), `${gap.key}: excused a cell whose loader DOES seal`);
+  }
 });
 
 test("failure reasons name the thrown error, not the Node banner after it", () => {
