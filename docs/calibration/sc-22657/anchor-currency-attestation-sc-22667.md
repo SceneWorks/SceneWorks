@@ -182,3 +182,36 @@ appended to `why`); no file is added to any `filesChangedSinceMeasurement`, beca
 No re-measure was taken — an empty intersection is the byte-identical case the doctrine names as the
 trivial extension. Matrix after `--stamp-anchors`: `15 anchors, 10 stale, 5 current by attestation`
 (unchanged set).
+
+## Extension to inference `e16c6a55` (sc-22738, fourth terminal pin, 2026-09-07)
+
+The sc-22738 pin moved again (`3b922bac` → `e16c6a55e8cb1e2a911ec590e581b068fcc5b529`, inference
+`main` = PR #965 `fix/sc-22738-wan-rehost-tolerance` over #964 `fix/sc-22738-wan-t2v-memory-contract`
+over #963 `fix/sc-22738-mlx-progress-boundaries`, all first-parent over `3b922bac`) so the Bernini and
+Mage-Flow MLX generators emit the lifecycle boundaries their memory contracts declare, the loaded Wan
+T2V-A14B reaches its memory contract, and Wan tolerates the legacy inert config key and dense output
+heads on packed tiers. The `3b922bac..e16c6a55` range changes eleven inference files: gen-core
+`residency.rs` and `wan_i2v_memory.rs`; `mlx-gen-bernini/src/bernini.rs` and its conformance test;
+`mlx-gen-mage/src/{model,pipeline}.rs`; `mlx-gen-wan/src/{config,i2v_memory_strategy,memory_strategy,model}.rs`;
+and one `mlx-gen-flux` real-weight test. Unlike the previous two extensions the intersection is
+**not** empty — every one of the five attested closures links gen-core, and gen-core `residency.rs`
+changed — so each anchor was read file by file:
+
+`residency.rs` (+195/−8, of which 147 lines are new unit tests) is instrumentation-only.
+`ensure_warm_locked` drops its `on_progress` parameter and no longer emits
+`Loading(TextEncoder)`/`Loading(Renderer)` itself; the two warm (`!stage_residency`) arms of
+`run_request_scoped` and `run_staged_request_scoped` emit `Loading(TextEncoder)` before the warm
+load and `Loading(Renderer)` **after** the prompt encode, both gated on the new `warm_needs_load`
+(a populated warm pair still reports no load). The staged arms, `run_two_phase`, the components
+loaded, their order, their devices and the offload policy are byte-identical.
+
+| Closure | `closureFiles` ∩ `3b922bac..e16c6a55` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle` (q4) | `gen-core/src/residency.rs` | measured on the **staged** arm (`measuredRegime.staged = true`), which the diff does not touch: neither what it loads nor where the boundaries it was cut on fall changed. |
+| `z_image_turbo:candle` (q4 / q8 / bf16) | `gen-core/src/residency.rs` | `candle-gen-z-image` never drives `gen_core::residency::Residency` (no `run_request_scoped` / `run_staged_request_scoped` / `run_two_phase` call in the crate); the file is in the closure only as a gen-core module and is unreached by the Z-Image Candle load and render path. |
+| `z_image_turbo:mlx` (q4) | `gen-core/src/residency.rs` | `mlx-gen-z-image` drives `run_staged_request_scoped` and the anchor was measured on the **warm** arm (`measuredRegime.staged = false`), so the moved `Loading(Renderer)` is on its path — but the loads it triggers are unchanged, and the MLX adapter's Z-Image capture (`run_z_image_reference_loaded`) cuts conditioning on the first `Progress::Step` and denoise on `Progress::Decoding`, neither of which `residency.rs` emits or moved. Both the memory behaviour and the phase attribution the packaged record was minted under are unaffected. |
+
+`wan_i2v_memory.rs` is in none of the five closures. The five entries were **extended**
+(`attestedRevision` → `e16c6a55`, the reading appended to `why`); no file is added to any
+`filesChangedSinceMeasurement`. No re-measure was taken. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged set).
