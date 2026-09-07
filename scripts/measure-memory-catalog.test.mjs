@@ -4037,6 +4037,33 @@ test("failure reasons name the thrown error, not the Node banner after it", () =
     "a synchronized Mage-Flow lifecycle phase reported a zero active peak",
   );
 
+  // sc-22738, the other half. `protocol::fail` now writes the failure line FIRST and flushes its
+  // deferred notes after it, so reading from the end put the sc-22414 coherence tally back in
+  // every summary row — by construction this time. A `note:` line is information, not an outcome.
+  const deferred = [
+    "file:///x/harness.mjs:1962",
+    "Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: LTX-2.3 admission rejected an exact-fit calibrated budget",
+    "memory-strategy provider adapter: note: GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)",
+    "    at ChildProcess.<anonymous> (file:///x/harness.mjs:1962:11)",
+    "Node.js v24.15.0",
+  ].join("\n");
+  assert.equal(
+    failureReason({ stderr: deferred, message: "node exited 1" }),
+    "Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: LTX-2.3 admission rejected an exact-fit calibrated budget",
+  );
+  // The same note without the adapter banner, and several of them, still skipped.
+  assert.equal(
+    failureReason({ stderr: ["the real refusal", "note: first tally", "note: second tally"].join("\n") }),
+    "the real refusal",
+  );
+  // A real failure that merely CONTAINS the word is an outcome and must still be quoted.
+  assert.equal(
+    failureReason({ stderr: "adapter refused: take note: the ceiling was breached" }),
+    "adapter refused: take note: the ceiling was breached",
+  );
+  // Notes alone leave the runner with nothing better to say than the note.
+  assert.equal(failureReason({ stderr: "note: only a tally" }), "note: only a tally");
+
   // Bounded by LENGTH alone: a `;` or a `)` inside a real adapter message is content, not a cut.
   const delimited = "Error: adapter refused; the wired ceiling (87044670532 bytes) was already breached";
   assert.equal(failureReason({ stderr: delimited }), delimited);
@@ -4066,6 +4093,14 @@ async function stubCheckout() {
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-22738: the adapter's exit-1 stderr AFTER protocol::fail was taught to defer its
+      // informational notes -- outcome first, flush_deferred_notes after it. The last line on
+      // stderr is therefore a note on every failed capture, by construction.
+      if (process.env.STUB_CAPTURE_DEFERRED_NOTE) {
+        console.error("memory-strategy provider adapter: LTX-2.3 admission rejected an exact-fit calibrated budget: ltx_2_3: incremental live demand 9 exceeds effective budget 7");
+        console.error("memory-strategy provider adapter: note: GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
+        process.exit(1);
+      }
       // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
       // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
       // sc-22738: the adapter's exit-1 stderr when the PINNED ENGINE's production loader refuses
@@ -4331,6 +4366,18 @@ test("a failed derivation step rolls the tree back to HEAD and keeps the raw cap
     assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
   } finally {
     delete process.env.STUB_CAPTURE_FAILS;
+  }
+  // sc-22738: end to end, through the real child process, with the adapter's deferred note LAST.
+  // Dropping the informational skip in `failureReason` reds this on the note line.
+  process.env.STUB_CAPTURE_DEFERRED_NOTE = "1";
+  try {
+    const result = await measureAnchor(row, stubContext(checkout));
+    assert.equal(result.status, "capture_failed");
+    assert.match(result.reason, /rejected an exact-fit calibrated budget/);
+    assert.doesNotMatch(result.reason, /coherence retries/, "the deferred note is not the outcome");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_DEFERRED_NOTE;
   }
 });
 

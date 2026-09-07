@@ -2372,6 +2372,19 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
 export const FAILURE_REASON_LIMIT = 300;
 
 /**
+ * A line the adapter wrote as INFORMATION rather than as its outcome.
+ *
+ * The adapter's `protocol` module documents exactly one such prefix: `flush_deferred_notes` emits
+ * every deferred note as `memory-strategy provider adapter: note: <text>`, and `protocol::fail`
+ * calls it AFTER writing the failure line, so on a failed capture the note lines are the LAST
+ * things on stderr. The banner is optional here because a note can also reach the runner already
+ * unwrapped, and the whole prefix is anchored so a real failure message that merely CONTAINS the
+ * word "note" is never skipped.
+ */
+export const INFORMATIONAL_LINE_PATTERN =
+  /^(?:memory-strategy provider adapter: )?note:/;
+
+/**
  * The LAST line of a child's stderr that names the failure, not the Node banner after it.
  *
  * sc-22738: this used to take the FIRST line matching `/^(Error|…Error|fatal|error)\b/`, falling
@@ -2404,7 +2417,13 @@ export function failureReason(error) {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !/^(at |Node\.js v)/.test(line));
-  return (lines.at(-1) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+  // sc-22738, the SECOND half of the same defect. Reading from the end fixed the ordering, and
+  // then `protocol::fail` was taught to defer its informational notes until AFTER the failure
+  // line — so the last line became the sc-22414 coherence tally again, this time by construction.
+  // Informational lines are not outcomes: skip them and quote the last line that is one. Falling
+  // back to the last line overall keeps a stderr that is ONLY notes from reporting nothing.
+  const outcome = lines.filter((line) => !INFORMATIONAL_LINE_PATTERN.test(line));
+  return ((outcome.at(-1) ?? lines.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
 }
 
 export async function measureAnchor(row, context) {

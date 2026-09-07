@@ -14933,6 +14933,43 @@ fn ltx_ordinary_admission(
     }
 }
 
+/// The exact-fit admission budget, expressed in the currency production's gate actually spends
+/// (sc-22738).
+///
+/// THE DEFECT THIS REPLACES. This probe used to set `budget.total_bytes = predicted` and then file
+/// `effectiveBudgetBytes: predicted`. Those were the same number only while the arm handed the
+/// gate a bare budget. `a1c855ad5` routed this arm through the worker's real presentation
+/// (`ltx_ordinary_admission`, which sets `reserved_headroom_bytes` from
+/// `mlx_fit_gate::live_request_budget`'s non-Mage branch and the live committed/reclaimable pair),
+/// and from that point the budget the gate weighed was
+/// `MemoryBudget::effective_bytes` = `total − committed + reclaimable − reserved`, i.e. the
+/// unified reserve BELOW the predicted need. `standard_memory_strategy_safety_check`'s only
+/// budget clause is `budget.fits(predicted_peak_bytes)`, so the gate refused every LTX-2.3 tier
+/// after a full load — correctly. The record's `effectiveBudgetBytes` was the field that was
+/// wrong, not the gate.
+///
+/// THE FIX IS A UNITS FIX, not a retired scenario. `memory_calibration.rs`'s
+/// `validate_runtime_complete` requires `exact_fit` to pass with
+/// `predictedBytes == effectiveBudgetBytes`, so the scenario the schema asks for is precisely
+/// "a budget whose EFFECTIVE bytes equal the predicted need" — the boundary host, not a host whose
+/// nameplate total equals the need. Solving `effective_bytes() == predicted` for `total_bytes`
+/// with production's own reserve and live snapshot held fixed gives
+/// `total = predicted + reserved + committed − reclaimable`; `fits` accepts exact boundaries, and
+/// the ceiling term `total − reserved = predicted + committed − reclaimable` cannot bind because
+/// the same gate already rejects `reclaimable > committed`. Nothing here is synthesized that
+/// production would not present: the reserve, the committed snapshot and the reclaim credit are
+/// carried through untouched from the live context, and only the host nameplate moves to the
+/// boundary the scenario is defined at.
+fn ltx_exact_fit_budget(live: MemoryBudget, predicted: u64) -> MemoryBudget {
+    MemoryBudget {
+        total_bytes: predicted
+            .saturating_add(live.reserved_headroom_bytes)
+            .saturating_add(live.committed_bytes)
+            .saturating_sub(live.reclaimable_bytes),
+        ..live
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct LtxLifecycleMetrics {
     clean_warm_peak: u64,
@@ -16303,14 +16340,26 @@ fn run_ltx_with_admission(
 
     let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
+    // The exact-fit scenario, posed the way the gate weighs it: see [`ltx_exact_fit_budget`]. The
+    // effective figure is READ BACK off the budget rather than assumed, so the record's
+    // `effectiveBudgetBytes` is what the predicate actually spent and the schema's
+    // `predictedBytes == effectiveBudgetBytes` clause is a statement about this run.
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
-    exact.budget.total_bytes = predicted;
-    if !matches!(
-        generator.memory_strategy_safety_check(&exact),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err("LTX-2.3 admission rejected an exact-fit calibrated budget".to_owned());
+    exact.budget = ltx_exact_fit_budget(context.budget, predicted);
+    let exact_effective_bytes = exact.budget.effective_bytes();
+    if exact_effective_bytes != predicted {
+        return Err(format!(
+            "LTX-2.3 exact-fit budget resolved {exact_effective_bytes} effective bytes for a \
+             {predicted} byte predicted peak; the probe must present the boundary host, not a \
+             nameplate total"
+        ));
+    }
+    if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(&exact)
+    {
+        return Err(format!(
+            "LTX-2.3 admission rejected an exact-fit calibrated budget: {reason}"
+        ));
     }
 
     let lifecycle_input = LtxLifecycleInput {
@@ -16378,7 +16427,7 @@ fn run_ltx_with_admission(
     let scenarios = if admission == LtxRunAdmission::BoundedCampaignEntry {
         let blocker = "SC-20318 executes only selected plus warm-repeat parity; cancellation, authorized-error, and recovery renders remain unexecuted";
         json!([
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": exact_effective_bytes },
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
             { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
             { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
@@ -16389,7 +16438,7 @@ fn run_ltx_with_admission(
         ])
     } else {
         json!([
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": exact_effective_bytes },
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
             { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
             { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
@@ -27628,6 +27677,95 @@ mod ltx_tests {
                 "{key}"
             );
             assert!(!context.has_phases, "{key}");
+        }
+        assert_eq!(
+            rows,
+            LTX_TIERS.len(),
+            "every shipped tier has one planned MLX row"
+        );
+    }
+
+    /// sc-22738. The post-render exact-fit probe is posed in the currency the gate spends.
+    ///
+    /// The regression this pins is the one that killed every `ltx_2_3:*:mlx` anchor after a full
+    /// load: with the worker's real presentation carrying a 2 GiB reserve, a budget whose
+    /// NAMEPLATE total equals the predicted peak has an EFFECTIVE budget a whole reserve below it,
+    /// so `standard_memory_strategy_safety_check`'s `budget.fits` clause refuses it — by design.
+    /// The first assertion below is that refusal, stated as a fact about the old shape rather than
+    /// left implicit; the second is that [`ltx_exact_fit_budget`] restores the boundary the
+    /// scenario is defined at, `effective_bytes() == predicted`, and is admitted there.
+    /// Reverting the helper to `total_bytes = predicted` reds the second on every shipped tier.
+    #[test]
+    fn the_exact_fit_probe_presents_the_boundary_host_not_a_nameplate_total() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut rows = 0;
+        for (key, row) in plan["anchors"].as_object().expect("anchors is an object") {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 3 || parts[0] != LTX_PROVIDER || parts[2] != "mlx" {
+                continue;
+            }
+            rows += 1;
+            let request = ltx_plan_row_request(key, row);
+            let geometry =
+                ltx_target_geometry(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let selection =
+                planned_selection(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let contract = ltx_fixture_contract(ltx_tier_quant(parts[1]));
+            let calibration = contract.calibration.as_ref().expect("fixture calibration");
+            let (context, projection) = ltx_ordinary_admission(
+                &contract,
+                calibration,
+                selection,
+                geometry,
+                LTX_TEST_HOST_BYTES,
+            )
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+            // Stands in for the measured overall peak the live arm probes with.
+            let predicted = projection.predicted_peak_bytes;
+
+            let mut nameplate = context.clone();
+            nameplate.predicted_peak_bytes = predicted;
+            nameplate.budget.total_bytes = predicted;
+            assert!(
+                nameplate.budget.effective_bytes() < predicted,
+                "{key}: a nameplate-total budget must sit below the need once production's \
+                 reserve is presented"
+            );
+            assert!(
+                matches!(
+                    mlx_gen::gen_core::default_memory_strategy_safety_check(&contract, &nameplate),
+                    MemorySafetyDecision::Reject { .. }
+                ),
+                "{key}: the pre-sc-22738 exact-fit shape must still be refused; if it is admitted \
+                 the reserve has silently left the production presentation"
+            );
+
+            let mut exact = context.clone();
+            exact.predicted_peak_bytes = predicted;
+            exact.budget = ltx_exact_fit_budget(context.budget, predicted);
+            assert_eq!(
+                exact.budget.effective_bytes(),
+                predicted,
+                "{key}: the exact-fit budget must spend exactly the predicted peak"
+            );
+            assert_eq!(
+                exact.budget.reserved_headroom_bytes, context.budget.reserved_headroom_bytes,
+                "{key}: the probe must carry production's reserve through untouched"
+            );
+            assert_eq!(
+                exact.budget.committed_bytes, context.budget.committed_bytes,
+                "{key}: the probe must carry the live committed snapshot through untouched"
+            );
+            assert!(
+                matches!(
+                    mlx_gen::gen_core::default_memory_strategy_safety_check(&contract, &exact),
+                    MemorySafetyDecision::Accept
+                ),
+                "{key}: the boundary host must be admitted"
+            );
         }
         assert_eq!(
             rows,
