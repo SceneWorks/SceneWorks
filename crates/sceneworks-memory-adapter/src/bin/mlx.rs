@@ -11390,6 +11390,80 @@ fn mage_admission_budget(
     (required_total_peak_bytes, contract.total_resident_bytes())
 }
 
+/// The FINDING a measured Mage-Flow peak above the engine's own modelled total files (sc-22738).
+///
+/// WHY THIS IS NOT A REFUSAL. It used to be one, and every `mage_flow*:*:mlx` anchor died on it
+/// after a complete 11–38 s render: `measured Mage-Flow peak … exceeds the pinned provider's own
+/// modelled total …`. That inverted the epic's premise. `mlx_gen_mage::memory::generation_peak_gb`
+/// is a MODEL, not an observation — `generation_resident_gb(tier) + vae_peak_gb(w, h)`, where
+/// `generation_resident_gb` is a single 512² anchor per tier with that anchor's VAE term subtracted
+/// out and the ONLY geometry-dependent term in the whole estimator is the linear VAE **decode**
+/// fit. So the model asserts that everything except the VAE decode is resolution-independent, and
+/// it carries no term whatsoever for a reference image: the six family members share one scalar per
+/// tier, edit routes included. Both assertions are false against measurement, which is precisely
+/// what this capture exists to establish. Refusing here discards the only evidence that says so.
+///
+/// WHAT THE EXCEEDANCE MEANS FOR PRODUCTION. The worker admits a Mage request on that same model
+/// (`mlx_fit_gate.rs` `request_total_peak_bytes`, whose `mage_flow` branch IS
+/// `providers::mage::memory::generation_peak_gb`, against a budget from
+/// `production_safe_budget_gb`). An under-prediction is therefore a live production hazard, not a
+/// capture artifact, and the measured peak recorded here is the evidence admission should anchor
+/// on instead (E5: measurement never gates; E4: the production path is what is measured).
+///
+/// The blocker states the pair AND the delta, plus the geometry, tier and route the pair belongs
+/// to, because a bare "exceeded" sentence would not let a reader size the hazard or tell the
+/// resolution-independence gap (`mage_flow` 768² bf16: ~0.6 GB) from the missing reference-image
+/// term (`mage_flow_edit` 768² bf16: ~7.3 GB on the same tier and geometry).
+fn mage_model_shortfall_blocker(
+    arm: MageArm,
+    tier: &str,
+    width: u32,
+    height: u32,
+    measured_peak_bytes: u64,
+    modelled_total_bytes: u64,
+) -> Option<String> {
+    let delta = measured_peak_bytes.checked_sub(modelled_total_bytes)?;
+    if delta == 0 {
+        return None;
+    }
+    Some(format!(
+        "the pinned {} provider's own fit model UNDER-PREDICTS this cell: measured peak \
+         {measured_peak_bytes} bytes exceeds its modelled total {modelled_total_bytes} bytes by \
+         {delta} bytes at {width}x{height} on the {} route at {tier}. Recorded as measured \
+         evidence rather than discarding the capture: `mlx_gen_mage::memory::generation_peak_gb` \
+         scales only its linear VAE decode term with geometry and carries no reference-image term \
+         at all, and the worker admits this route on that same model \
+         (`mlx_fit_gate.rs::request_total_peak_bytes`), so the measured peak is what production \
+         admission should anchor on.",
+        arm.provider,
+        mage_mode(arm),
+    ))
+}
+
+/// The peak-below-weights REFUSAL, which is a different claim from the shortfall finding above.
+///
+/// A render cannot peak below the weights it is holding: MLX active memory is absolute, and the
+/// provider declares those weights itself as the resident credit half of
+/// [`mage_admission_budget`]. A measured peak underneath them is not evidence about the engine's
+/// fit model — it is proof this capture did not measure a loaded render (a drained or
+/// mis-scoped peak counter, a generator that never materialized), and a record built from it would
+/// publish an anchor far below the real floor. That stays a refusal.
+fn mage_peak_below_weights_error(
+    arm: MageArm,
+    tier: &str,
+    measured_peak_bytes: u64,
+    resident_weight_bytes: u64,
+) -> Option<String> {
+    (measured_peak_bytes < resident_weight_bytes).then(|| {
+        format!(
+            "measured {} {tier} peak {measured_peak_bytes} is BELOW the {resident_weight_bytes} \
+             resident weight bytes the loaded provider declares; the capture did not measure a \
+             loaded render",
+            arm.provider
+        )
+    })
+}
+
 /// The plan row must name the production identity this cell's loaded generator publishes —
 /// checked against the weights-free table BEFORE the load, so a row still carrying the retired
 /// single string (or a conformance string) fails in milliseconds rather than after a
@@ -11949,15 +12023,21 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
 
-    // What was just measured must fit inside the total this provider modelled for the request; a
-    // measured peak ABOVE it means the engine's own fit model under-predicts this cell, and the
-    // capture says so instead of recording the number under an admission that never covered it.
-    if predicted > required_total_peak_bytes {
-        return Err(format!(
-            "measured Mage-Flow peak {predicted} exceeds the pinned provider's own modelled total \
-             {required_total_peak_bytes} for {width}x{height} at {tier}"
-        ));
+    // A peak below the declared weights proves the capture is invalid, so it still refuses; a peak
+    // ABOVE the engine's modelled total is a finding ABOUT that model and is recorded, never
+    // refused (see [`mage_peak_below_weights_error`] and [`mage_model_shortfall_blocker`]).
+    if let Some(error) = mage_peak_below_weights_error(arm, tier, predicted, resident_credit_bytes)
+    {
+        return Err(error);
     }
+    let model_shortfall_blocker = mage_model_shortfall_blocker(
+        arm,
+        tier,
+        width,
+        height,
+        predicted,
+        required_total_peak_bytes,
+    );
     // Exact fit in the provider's own currency: capacity for exactly the committed snapshot plus
     // the admitted incremental demand, and not one byte less. Restating the measured peak as the
     // demand here would be a different claim from the one the request was admitted under — Mage
@@ -12168,6 +12248,23 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
                 vec![MAGE_ENGINE_BOUNDARIES.to_owned()],
             )
         };
+    // The finding rides on the SAME record the measurement does, so a reader of this cell cannot
+    // see the peak without seeing that the engine's model did not cover it.
+    let mut lifecycle_blockers = lifecycle_blockers;
+    lifecycle_blockers.extend(model_shortfall_blocker);
+    // ...and the same pair machine-readably, so a consumer can size the gap without parsing prose.
+    let model_measurements = [
+        (
+            "engineModelledTotalBytes",
+            "bytes",
+            required_total_peak_bytes,
+        ),
+        (
+            "engineModelShortfallBytes",
+            "bytes",
+            predicted.saturating_sub(required_total_peak_bytes),
+        ),
+    ];
 
     let mut fragment = json!({
         "status": "complete",
@@ -12230,6 +12327,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
                 ("stagedComponents", "count", 2),
             ]
             .into_iter()
+            .chain(model_measurements)
             .chain(lifecycle_measurements),
         ),
         "capturedAt": protocol::captured_at(),
@@ -12288,6 +12386,150 @@ mod mage_tests {
                 format!("MLX five-rung calibration does not implement provider {provider:?}")
             );
         }
+    }
+
+    /// sc-22738. A measured peak ABOVE the engine's own modelled total is a FINDING, never a
+    /// refusal, and the finding states the delta.
+    ///
+    /// The numbers are tonight's measured MLX re-capture on this Mac at 768x768 bf16, where the
+    /// old refusal killed every one of the 18 `mage_flow*:*:mlx` anchors after a complete render:
+    /// the plain route peaked 0.6 GB above the model and the edit route 7.3 GB above the SAME
+    /// modelled total, because `generation_peak_gb` scales only its VAE decode term with geometry
+    /// and has no reference-image term at all.
+    ///
+    /// MUTATIONS THIS PINS. Dropping the delta from the blocker string reds the third and sixth
+    /// assertions. Dropping the measured peak, the modelled total, the geometry, the tier or the
+    /// route reds one of the others. Widening the helper to fire on an equal or under-measured
+    /// peak reds the last two. Restoring the refusal at the CALL SITE is pinned separately, by
+    /// [`the_model_shortfall_reaches_the_record_and_never_refuses`] — this test alone could not
+    /// see it, because the render it happens after needs real weights.
+    #[test]
+    fn a_peak_above_the_engines_model_is_recorded_as_a_finding_with_its_delta() {
+        let arm = MAGE_ARMS
+            .into_iter()
+            .find(|arm| arm.provider == "mage_flow_edit")
+            .expect("the edit route is a registered Mage arm");
+        let measured = 25_635_586_048_u64;
+        let modelled = 18_328_139_520_u64;
+        let finding = mage_model_shortfall_blocker(arm, "bf16", 768, 768, measured, modelled)
+            .expect("a peak above the modelled total is a finding");
+        assert!(
+            finding.contains(&measured.to_string()),
+            "the finding must state the measured peak: {finding}"
+        );
+        assert!(
+            finding.contains(&modelled.to_string()),
+            "the finding must state the modelled total: {finding}"
+        );
+        assert!(
+            finding.contains(&(measured - modelled).to_string()),
+            "the finding must state the delta: {finding}"
+        );
+        assert!(
+            finding.contains("768x768"),
+            "the finding must state the geometry: {finding}"
+        );
+        assert!(
+            finding.contains("bf16") && finding.contains("mage_flow_edit"),
+            "the finding must state the tier and the route: {finding}"
+        );
+        // The plain route's much smaller shortfall at the same geometry and tier is a DIFFERENT
+        // number in the record, not a shared "exceeded" sentence.
+        let plain = MAGE_ARMS
+            .into_iter()
+            .find(|arm| arm.provider == "mage_flow")
+            .expect("the plain route is a registered Mage arm");
+        let plain_finding =
+            mage_model_shortfall_blocker(plain, "bf16", 768, 768, 18_924_699_648, modelled)
+                .expect("a peak above the modelled total is a finding");
+        assert!(
+            plain_finding.contains(&(18_924_699_648_u64 - modelled).to_string())
+                && plain_finding != finding,
+            "each route files its own delta: {plain_finding}"
+        );
+        // A peak the model DID cover files nothing.
+        assert_eq!(
+            mage_model_shortfall_blocker(arm, "bf16", 768, 768, modelled, modelled),
+            None
+        );
+        assert_eq!(
+            mage_model_shortfall_blocker(arm, "bf16", 768, 768, modelled - 1, modelled),
+            None
+        );
+    }
+
+    /// sc-22738. The shortfall FINDING reaches the record, and the arm has no exceedance refusal.
+    ///
+    /// Read the way the sibling receipt guard in this file reads the arm — the exceedance only
+    /// happens after a measured render, which needs real weights, so the property is pinned over
+    /// the arm's source. What it pins is exactly the mutation the fix reverses: restoring
+    /// `if predicted > required_total_peak_bytes { return Err(…) }` reds the second assertion, and
+    /// computing the finding but never extending it into `lifecycle_blockers` (so the record
+    /// carries the peak with no statement that the model missed it) reds the first and third.
+    #[test]
+    fn the_model_shortfall_reaches_the_record_and_never_refuses() {
+        let source = include_str!("mlx.rs");
+        let start = source
+            .find("\nfn run_mage_provider(")
+            .expect("the arm still exists");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the arm's body closes")];
+        assert!(
+            body.contains("let model_shortfall_blocker = mage_model_shortfall_blocker("),
+            "the arm must compute the shortfall finding"
+        );
+        assert!(
+            body.contains("lifecycle_blockers.extend(model_shortfall_blocker);"),
+            "the shortfall finding must be recorded on the record's blockers, not dropped"
+        );
+        assert!(
+            body.contains("\"engineModelledTotalBytes\"")
+                && body.contains("\"engineModelShortfallBytes\""),
+            "the record must carry the modelled total and the shortfall machine-readably"
+        );
+        assert!(
+            !body.contains("exceeds the pinned provider's own modelled total"),
+            "a measured peak above the engine's model is a finding, never a refusal"
+        );
+        // The `>` comparison against the modelled total must not reappear as a control-flow gate.
+        assert!(
+            !body.contains("if predicted > required_total_peak_bytes"),
+            "the exceedance must not gate the capture"
+        );
+    }
+
+    /// sc-22738. The one peak check that survives as a REFUSAL, because it proves the capture is
+    /// invalid rather than saying something about the engine's model: MLX active memory is
+    /// absolute, so a render cannot peak below the weights the provider itself declares resident.
+    ///
+    /// MUTATIONS THIS PINS. Deleting the check, or narrowing it so an under-weight capture stops
+    /// refusing, reds the first assertion; dropping either figure or the route from the refusal
+    /// reds the second; relaxing the comparison to `<=` reds the third. The last pins that this
+    /// check does NOT reclassify the shortfall case — every measured Mage peak tonight is far
+    /// above the declared weights.
+    #[test]
+    fn a_peak_below_the_declared_weights_is_still_a_refusal() {
+        let arm = MAGE_ARMS
+            .into_iter()
+            .find(|arm| arm.provider == "mage_flow")
+            .expect("the plain route is a registered Mage arm");
+        let error = mage_peak_below_weights_error(arm, "bf16", 1_000, 16_000_000_000)
+            .expect("a peak below the declared weights is a refusal");
+        assert!(
+            error.contains("1000") && error.contains("16000000000") && error.contains("mage_flow"),
+            "the refusal must state both figures and the route: {error}"
+        );
+        assert_eq!(
+            mage_peak_below_weights_error(arm, "bf16", 16_000_000_000, 16_000_000_000),
+            None
+        );
+        assert_eq!(
+            mage_peak_below_weights_error(arm, "bf16", 18_924_699_648, 16_000_000_000),
+            None
+        );
     }
 
     /// The six checkpoints are architecturally identical, so a plan whose `modelId` names a
