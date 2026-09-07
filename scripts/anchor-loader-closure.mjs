@@ -668,6 +668,51 @@ export function assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, 
 }
 
 /**
+ * The declared entry points a HISTORICAL tree can still key this model by, and why the rest were
+ * dropped (sc-22738).
+ *
+ * The literal rule above is a statement about the CURRENT declaration against the CURRENT pin: it
+ * catches an entry point that would digest the wrong loader today. It is NOT a statement about the
+ * past. Walking back to an anchor's own measurement revision reaches trees that predate the
+ * declaration — a file the declaration names may not exist yet, and a file that does exist may not
+ * name the model yet, because the id it now carries was introduced later. `z_image_edit:mlx`
+ * resolves to engine id `z_image_turbo`, which both Z-Image entry points spell at the pin and
+ * neither spells at `bb2bc989`, where the files do not exist at all.
+ *
+ * Neither of those is a broken declaration, so neither may throw. Both are the same fact — the
+ * historical tree does not carry this model's loader as the declaration describes it — and the key
+ * already knows how to say that: the entry-point list is part of the hashed text, so a unit derived
+ * over a narrower list cannot equal the pin's digest and the anchor reads NOT CURRENT. That is the
+ * truth about it.
+ *
+ * THE LITERAL RULE NARROWS AT THE GRANULARITY IT IS ASKED AT, which is the WHOLE LIST. It has
+ * always been `some()` — one entry point naming the id vouches for the list — and per-file
+ * narrowing would therefore be a different rule, not the same rule applied historically: at the pin
+ * itself five declared units (`flux2_dev:mlx`, `krea_2_raw:mlx`, `z_image:mlx`,
+ * `z_image_turbo:candle`, `bernini:mlx`) keep an entry point that does not itself carry the literal,
+ * and dropping those would silently re-key anchors that are not stale. So the surviving list is
+ * narrowed only when NO survivor names the id, and an unchanged rule leaves every current digest
+ * exactly where it was.
+ */
+export function narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree }) {
+  const id = engineId ?? model.split(":")[0];
+  const present = entryPoints.filter((file) => tree.has(file));
+  const narrowed = entryPoints
+    .filter((file) => !present.includes(file))
+    .map((file) => ({ file, reason: "absent" }));
+  const bodies = tree.read(present);
+  const named = present.some((file) => (bodies.get(file) ?? "").includes(`"${id}"`));
+  if (named) return { entryPoints: present, narrowed };
+  return {
+    entryPoints: [],
+    narrowed: [
+      ...narrowed,
+      ...present.map((file) => ({ file, reason: `does not carry the literal "${id}"` })),
+    ],
+  };
+}
+
+/**
  * `engineId` redirects the literal rule above at a DIFFERENT model's loader, so it cannot be taken
  * on the declaration's own word: `krea_2_turbo:mlx` declaring `engineId: "z_image_turbo"` with the
  * Z-Image entry points would otherwise pass every shape check and key Krea's currency to the
@@ -702,15 +747,25 @@ export function assertEngineIdMatchesPlan({ model, engineId, planAnchors }) {
   );
 }
 
-/** Every declared model's digest at one revision, sharing the per-revision tree read. */
-export function anchorLoaderDigests({ repo, revision, declared, tree, planAnchors }) {
+/**
+ * Every declared model's digest at one revision, sharing the per-revision tree read.
+ *
+ * `assertNamed` is the literal rule, and it is on by default because the default caller is the
+ * CURRENT pin, where a declaration that names no loader is a bug to be shouted about. A caller
+ * walking HISTORICAL revisions has already applied the same rule as a narrowing
+ * (`narrowEntryPointsAtRevision`) and passes `false`, so a past tree that does not yet name the
+ * model narrows the unit instead of aborting the walk (sc-22738). `assertEngineIdMatchesPlan` is
+ * asked in both: it checks the declaration against the anchor plan, not against any tree, so it is
+ * as true of a historical walk as of the pin.
+ */
+export function anchorLoaderDigests({ repo, revision, declared, tree, planAnchors, assertNamed = true }) {
   const resolved = tree ?? gitTree(repo, revision);
   const plan = planAnchors ?? calibrationPlanAnchors();
   const crates = firstPartyCrates(resolved, resolved.paths());
   const out = new Map();
   for (const [model, entry] of Object.entries(declared)) {
     const { entryPoints, engineId } = entry;
-    assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree: resolved });
+    if (assertNamed) assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree: resolved });
     assertEngineIdMatchesPlan({ model, engineId, planAnchors: plan });
     out.set(model, loaderClosureDigest({ model, engineId, entryPoints, tree: resolved, crates }));
   }
@@ -920,31 +975,41 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
   }
   // One tree read per revision, shared by every model measured at it.
   const digests = new Map();
+  /** `revision|model` -> the declared entry points that revision could not be keyed by, and why. */
+  const narrowedAt = new Map();
   for (const [revision, models] of byRevision) {
     const tree = gitTree(repo, revision);
-    // AN ENTRY POINT THAT DID NOT EXIST YET IS DROPPED, NOT AN ERROR. A historical revision can
-    // predate a file today's declaration names — `mlx-gen-ltx/src/memory_strategy.rs` postdates the
-    // LTX-2.3 capture — and that IS the difference the key should report: the entry-point list is
-    // part of the hashed text, so a closure derived over a smaller list cannot equal the pin's, and
-    // the anchor reads not-current. Which is the truth about it.
-    const historical = Object.fromEntries(
-      [...models].map((model) => [
-        model,
-        {
-          ...(declared[model].engineId ? { engineId: declared[model].engineId } : {}),
-          entryPoints: declared[model].entryPoints.filter((file) => tree.has(file)),
-        },
-      ]),
-    );
-    for (const [model, entry] of Object.entries(historical)) {
-      if (entry.entryPoints.length === 0) {
-        throw new Error(
-          `no declared entry point of ${model} exists at ${revision.slice(0, 8)} — its anchors ` +
-            "cannot be keyed to that measurement at all",
-        );
-      }
+    // AN ENTRY POINT THE HISTORICAL TREE CANNOT KEY THIS MODEL BY IS DROPPED, NOT AN ERROR. A
+    // historical revision can predate a file today's declaration names
+    // (`mlx-gen-ltx/src/memory_strategy.rs` postdates the LTX-2.3 capture), and it can carry files
+    // that do not yet name the model — the same fact, reached two ways, and that IS the difference
+    // the key should report: the entry-point list is part of the hashed text, so a closure derived
+    // over a narrower list cannot equal the pin's, and the anchor reads not-current. Which is the
+    // truth about it. The narrowing and its reason are carried into the report, so a key derived
+    // over less than the declaration says never has to be guessed at.
+    const historical = {};
+    for (const model of models) {
+      const { engineId, entryPoints } = declared[model];
+      const narrowing = narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree });
+      narrowedAt.set(`${revision}|${model}`, narrowing.narrowed);
+      historical[model] = {
+        ...(engineId ? { engineId } : {}),
+        entryPoints: narrowing.entryPoints,
+      };
     }
-    const perModel = anchorLoaderDigests({ repo, revision, declared: historical, tree });
+    // The literal rule was just applied AS THE NARROWING, so it is not asked again as an assertion:
+    // a tree that names the model keeps its full surviving list, and one that does not has already
+    // narrowed to nothing. An empty unit is a legal derivation, not an error — it hashes the model
+    // and an empty file list, which is reproducible, distinct per model, and can never equal a pin
+    // digest derived over at least one entry point. So the anchor reads NOT CURRENT, which is
+    // exactly what a measurement the current declaration cannot describe should say.
+    const perModel = anchorLoaderDigests({
+      repo,
+      revision,
+      declared: historical,
+      tree,
+      assertNamed: false,
+    });
     for (const [model, entry] of perModel) digests.set(`${revision}|${model}`, entry.digest);
   }
   const report = [];
@@ -964,6 +1029,9 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
       revision,
       digest,
       attested: Boolean(attestation),
+      // Every declared entry point this revision could not be keyed by, with its reason. Empty for
+      // the ordinary anchor whose measurement revision carries the whole declaration.
+      narrowed: narrowedAt.get(`${revision}|${anchor.modelId}:${anchor.backend}`) ?? [],
       changed: JSON.stringify(stamped) !== JSON.stringify(anchor.source),
     });
     return { ...anchor, source: stamped };
@@ -1094,6 +1162,11 @@ export async function main(argv = process.argv.slice(2)) {
         `${row.changed ? "*" : " "} ${row.revision.slice(0, 8)} ${row.digest.slice(0, 16)} ` +
           `${row.attested ? "attested " : ""}${row.id}`,
       );
+      // A key derived over less than the declaration names says so, rather than leaving a
+      // not-current anchor looking like an unexplained digest mismatch.
+      for (const { file, reason } of row.narrowed) {
+        console.log(`    narrowed: ${file} (${reason})`);
+      }
     }
     const body = `${JSON.stringify(stamped, null, 2)}\n`;
     if (argv.includes("--check")) {

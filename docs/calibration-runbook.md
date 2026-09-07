@@ -2209,6 +2209,31 @@ its own measurement revision — and it must never be bent into a stamp at the p
 the measurement's own provenance and mark every anchor current again. A pin bump is *supposed* to
 leave the moved models' anchors stale.
 
+**A historical revision that cannot key a model NARROWS the unit — it is not an error (sc-22738).**
+The walk stands in each anchor's own measurement revision, which can predate the declaration it is
+reading. Two ways that shows up, and they are the same fact:
+
+- an entry point **does not exist yet** (`mlx-gen-ltx/src/memory_strategy.rs` postdates the LTX-2.3
+  capture), or
+- an entry point exists but **does not carry the model's literal yet** — for a catalog alias, the
+  `engineId` literal. `z_image_edit:mlx` resolves to `z_image_turbo`, which both Z-Image entry
+  points spell at the pin and neither spells at `bb2bc989`.
+
+Either way the entry point is dropped from that revision's unit and the reason is printed under the
+anchor's `--stamp-anchors` row (`narrowed: <file> (<reason>)`). The entry-point list is part of the
+hashed text, so a key derived over a narrower list can never equal the pin's and the anchor simply
+reads **not current** — which is the truth about a measurement the current declaration cannot
+describe. A revision that narrows to *nothing* still derives a real, reproducible digest; it does
+not abort the stamp.
+
+The literal rule itself is unchanged and still throws **at the pin**, where a declaration naming no
+loader is a bug (`assertModelIsNamedByEntryPoints`; `anchorLoaderDigests` takes `assertNamed`, true
+by default and false only on the historical walk that already applied the rule as a narrowing). And
+it stays a **whole-list `some()`** rule: one entry point naming the id vouches for the list. Do not
+"tighten" it to per-file — five shipped units (`flux2_dev:mlx`, `krea_2_raw:mlx`, `z_image:mlx`,
+`z_image_turbo:candle`, `bernini:mlx`) keep an entry point that does not itself carry the literal at
+the pin, and narrowing per file silently re-keys anchors that are not stale.
+
 **Currency attestations — the second gate, written down (sc-22667).** A staled key says the
 loader's *source* moved. This runbook's invalidation doctrine is two-gated: only a load-or-device-path
 change with no behaviour witness says the *memory behaviour* moved, and a differing digest alone is
