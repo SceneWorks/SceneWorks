@@ -2614,14 +2614,8 @@ pub(super) async fn generate_video_using(
     // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
     // promoted LTX curve is T2V; every other mode falls back until its own curve exists.
     let admission_mode = sceneworks_core::video_request::payload_video_mode(&job.payload);
-    // Curve currency is the provider's live packaged compile closure, independent of whether an
-    // exact per-cell calibration binding exists in the manifest (sc-19020). An undeclared provider
-    // keeps the established sentinel and therefore cannot match a closure-bound fitted curve.
-    let admission_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-        crate::video_admission::LANE.as_key(),
-        input.engine_id,
-    )
-    .unwrap_or_else(|| crate::mlx_fit_gate::UNCALIBRATED_CLOSURE.to_owned());
+    // No closure lookup here (sc-22738): a packaged curve or anchor matches this request on its
+    // identity alone, whether or not the provider's compile closure has moved since capture.
 
     let cancel = CancelFlag::new();
     let stall_policy = video_stall_timeout(&input);
@@ -2734,7 +2728,6 @@ pub(super) async fn generate_video_using(
                     fps: input.fps,
                     runtime: None,
                     headroom_bytes: spec_headroom_bytes,
-                    expected_closure_digest: &admission_closure_digest,
                 };
                 // Evidence is the preflight: an unsupported request stays direct generation without
                 // attempting a platform memory probe that could fail independently of admission.

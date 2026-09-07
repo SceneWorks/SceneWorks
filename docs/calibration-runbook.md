@@ -27,14 +27,23 @@ Companions, not prerequisites — you should not need to open either to finish a
 
 Measuring a lane **improves prediction**. It does not unlock anything.
 
-Since epic 18093 (sc-18095/18096/18097), a lane whose provider compile closure has moved keeps
-serving its measured numbers behind a **per-term admission allowance**, and unmeasured cells are
-admitted from **fitted, anchor-derived, or floor estimates** behind whichever allowance names their
-remaining uncertainty (`crates/sceneworks-worker/src/ladder_margin_policy.rs`; sc-22508 replaced the
-single per-backend multiplier with one named term per basis). Nothing in `npm run check`,
-`npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are zero staleness gates
-in CI**. So the payoff of a capture is narrower margins and better-grounded admission on that lane,
-not a ladder that was previously refused.
+**Measurement currency is a re-capture signal for the probe tooling, and nothing else (sc-22738,
+Michael's standing rule: "The App Runtime should ALWAYS continue behaving as if the measurement were
+valid").** A lane whose provider compile closure has moved keeps serving its measured numbers
+**exactly as measured** — a stale calibration record is graded at its measured peak, a stale anchor
+binds and derives, a stale fitted curve matches, and a stale measured lower bound refuses, all
+identically to current ones. Unmeasured cells are admitted from **fitted, anchor-derived, or floor
+estimates** behind whichever allowance names their remaining uncertainty
+(`crates/sceneworks-worker/src/ladder_margin_policy.rs`; sc-22508 replaced the single per-backend
+multiplier with one named term per basis; sc-22738 retired the "stale-measured" widening that epic
+18093 had charged a moved closure). The runtime admission seam carries no field, parameter or
+function that could express "stale" — `scripts/runtime-admission-currency.test.mjs` keeps it that
+way — so a critical fix in shared engine code, which touches nearly every closure, ships without
+hours of re-measurement and without silently moving what a live request gets. Nothing in
+`npm run check`, `npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are
+zero staleness gates in CI, and staleness never changes runtime behaviour**. So the payoff of a
+capture is a measurement where there was an estimate, and a fresher measurement where the
+tooling reports a stale one — never a ladder that was previously refused or widened.
 
 Read that as permission to measure the lane that matters and leave the rest on estimates.
 
@@ -65,8 +74,11 @@ measurement; a planned-but-undeclared lane needs both an adapter arm and a closu
   ...
 ```
 
-`IMPACT` is stale bindings × the margin the runtime is applying to them right now, so the top row is
-the lane where a capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
+`IMPACT` is stale bindings × the lane's derived recapture spread — the report's own ranking weight for
+"how much measured surface a re-capture refreshes", NOT a margin the runtime applies (since sc-22738
+the runtime widens nothing for staleness; the report's "serving under a widened margin" header
+predates that and describes the ranking, not admission) — so the top row is the lane where a
+capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
 worker's fit gates consult today); `RECORDS` is corpus debt. Prefer bindings.
 
 `CAPTURE` (sc-18212) is §2c answered mechanically: the report parses the two adapter binaries'
@@ -1271,8 +1283,10 @@ matrix publishes only anchors, so neither index the classifier consulted could s
 
 Currency is the SAME rule an anchor's is: the bound's `source.loaderClosureDigest` against the digest
 `config/anchor-loader-closures.json` carries for that `(model, lane)`. A pin bump or a closure edit
-that stales the bound — the same event that stops it refusing anything in production — puts the cell
-straight back to `runnable`, with no edit to the runner.
+that stales the bound puts the cell straight back to `runnable`, with no edit to the runner — and
+that is ALL it does: production keeps refusing exactly what the bound refused when measured
+(sc-22738), because a shared-engine fix silently re-admitting a request a host was already unable to
+finish is the failure the bound exists to prevent.
 
 **`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
 `capture_failed` that stamped nothing at all: the store kept no trace, and production went on
@@ -1285,8 +1299,9 @@ The stop is now written by `harness record-exceeded` into an `exceededBounds` bu
 goes through the SAME `check` → `ingest` → `PACKAGED_MEMORY_ANCHOR_SOURCES` → `extract` → `stamp` →
 matrix → commit path a completed capture takes. Its store row lives in `config/memory-anchors.json`
 under `exceededBounds`, alongside `anchors` and `analyticOnly`, and carries the same
-`source.loaderClosureDigest` currency key — so a bound goes stale, and stops refusing anything,
-exactly as a measured anchor does.
+`source.loaderClosureDigest` currency key — so the tooling can see when a bound is worth stopping at
+again, exactly as it can for a measured anchor. The runtime never reads that key (sc-22738): a stale
+bound refuses, and a stale anchor derives, exactly as a current one.
 
 What a bound claims is ONE inequality — *the peak at this geometry is at least this* — and nothing
 else. It prices no estimate, widens no envelope and enters no derivation. Its only consumers are the
@@ -2263,8 +2278,10 @@ anchor reads not-current — which is the truth about it.
 job.** It asks "is the checked-in file what the walker derives at this revision?" — a question about
 whether someone hand-edited derived data. It does NOT ask "do the anchors still match", and nothing
 in CI may be made to. **A pin bump whose loader source genuinely moved is designed to leave anchors
-stale**: they demote to the conservative floor and the render still runs. Gating on that would
-rebuild the pin-bump-forces-re-measurement coupling this epic (E8) exists to remove. Run `--check`
+stale**: the matrix and `npm run report:stale-lanes` report them as such, the runtime keeps pricing
+from them exactly as before (sc-22738 — staleness never changes runtime behaviour), and the render
+still runs. Gating on that would rebuild the pin-bump-forces-re-measurement coupling this epic (E8)
+exists to remove. Run `--check`
 by hand after a `--write`, and after a pin bump run `--write` and commit whatever it produces — a
 run that changes nothing is the expected case, and a run that changes a digest is information, not a
 failure.

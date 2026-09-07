@@ -671,10 +671,13 @@ pub struct MemoryAnchorStore {
 /// the inequality's own terms. A completed capture of the same cell later adds a real anchor
 /// beside it; the bound stays, because it stays true.
 ///
-/// CURRENCY IS THE SAME KEY AS AN ANCHOR'S. The bound describes what a particular loader did with
-/// a particular set of weights, so it goes stale exactly as a measured point does — see
-/// [`AnchorSource::loader_closure_digest`] and [`ExceededBound::is_current`]. A stale bound
-/// refuses nothing; the cell falls back to whatever it had before.
+/// IT BINDS REGARDLESS OF CURRENCY (sc-22738). The bound carries the same
+/// [`AnchorSource::loader_closure_digest`] an anchor does, and for the same reason: so the probe
+/// tooling can tell when the loader that produced it has moved and the cell is worth stopping at
+/// again. The runtime never reads that key. A bound whose closure has moved refuses exactly what
+/// it refused the day it was measured, because the alternative — a shared-engine fix silently
+/// re-admitting the very request a host was already unable to finish — is the failure the bound
+/// exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExceededBound {
@@ -708,12 +711,6 @@ pub struct ExceededBound {
 }
 
 impl ExceededBound {
-    /// Same currency question, same key, same answer shape as [`MemoryAnchor::is_current`].
-    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
-        closures.digest_for(&self.model_id, self.backend)
-            == Some(self.source.loader_closure_digest.as_str())
-    }
-
     /// Whether a request at `(width, height, frames)` is at or above the geometry this bound was
     /// measured at, on every axis. Monotonicity is the whole claim: a render that already needed
     /// at least X bytes at this geometry cannot need less at a strictly larger one. A request
@@ -908,6 +905,14 @@ pub struct AnchorSource {
     /// revision, no lock and no workspace input, a pin bump that leaves the loader's source
     /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
     /// unrelated change stays authoritative.
+    ///
+    /// A RE-CAPTURE SIGNAL FOR THE PROBE TOOLING ONLY (sc-22738). `measure-memory-catalog.mjs`,
+    /// `generate-memory-matrix.mjs` (`current` per anchor, `summary.staleAnchors`) and
+    /// `stale-lane-report.mjs` compare this key to decide what to re-capture. Nothing in the
+    /// runtime does: an anchor binds, derives and a bound refuses exactly as if this key matched,
+    /// whether or not it does. There is no `is_current` on this type on purpose — a runtime
+    /// function that could express "stale" is how a shared-engine fix that touches nearly every
+    /// closure would silently move what a live request gets.
     pub loader_closure_digest: String,
     /// HOW the key above was derived (sc-22667). `None`: at the record's own measurement revision,
     /// the default. `Some`: at [`AnchorCurrencyAttestation::attested_revision`] instead, on the
@@ -1823,12 +1828,17 @@ fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
 
 /// The checked-in loader-closure declarations — the CURRENT value of every declared model's
 /// currency key. Derived at the pinned inference revision by `scripts/anchor-loader-closure.mjs`.
+///
+/// Parsed here so `cargo test` can hold the store to its declarations (every packaged anchor's
+/// `(model, lane)` must be declared; an attestation must name the pin the file was derived at).
+/// The runtime admission seam never reads it (sc-22738): there is no packaged accessor, and no
+/// anchor, bound or curve lookup takes an `AnchorLoaderClosures`.
 pub const PACKAGED_ANCHOR_LOADER_CLOSURES: &str =
     include_str!("../../../config/anchor-loader-closures.json");
 
 /// Must equal the `digestVersion` of the checked-in file. Two versions answer different questions,
-/// so a version bump reads as "no declaration" (fail closed to the floor) rather than silently
-/// comparing digests derived under different rules.
+/// so a version bump is refused at parse rather than silently comparing digests derived under
+/// different rules.
 pub const ANCHOR_LOADER_CLOSURE_VERSION: &str = "anchor-loader-closure v2";
 
 /// One `(model, backend lane)`'s declared loader closure.
@@ -1870,9 +1880,9 @@ pub fn anchor_loader_closure_key(model_id: &str, backend: AnchorBackend) -> Stri
 }
 
 impl AnchorLoaderClosures {
-    /// The current loader-closure digest for one `(model, backend lane)`, or `None` when the
-    /// coordinate is undeclared — which is fail-closed: an anchor whose loader nothing tracks
-    /// cannot be shown to be current, so it is not.
+    /// The declared loader-closure digest for one `(model, backend lane)`, or `None` when the
+    /// coordinate is undeclared. A tooling/test accessor: the runtime compares no anchor against
+    /// it (sc-22738).
     pub fn digest_for(&self, model_id: &str, backend: AnchorBackend) -> Option<&str> {
         self.models
             .get(&anchor_loader_closure_key(model_id, backend))
@@ -1932,27 +1942,6 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// The packaged declarations, parsed once. `None` demotes every anchor to the caller's floor.
-pub fn packaged_anchor_loader_closures() -> Option<&'static AnchorLoaderClosures> {
-    static PACKAGED: OnceLock<Option<AnchorLoaderClosures>> = OnceLock::new();
-    PACKAGED
-        .get_or_init(|| load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES).ok())
-        .as_ref()
-}
-
-impl MemoryAnchor {
-    /// Whether this anchor's evidence is CURRENT (sc-22511, E9).
-    ///
-    /// The one and only currency question: does the code that loads THIS model on THIS backend
-    /// still hash to what it hashed when the anchor was measured? Not the pin, not a sibling model,
-    /// not a shared crate the loader never reaches, not the calibration campaign that produced the
-    /// record — none of those can move this answer, by construction of the key.
-    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
-        closures.digest_for(&self.model_id, self.backend)
-            == Some(self.source.loader_closure_digest.as_str())
-    }
-}
-
 /// The packaged store, parsed and validated once. `None` is fail-open: callers keep their
 /// pre-existing floor.
 pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
@@ -1965,20 +1954,15 @@ pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
 impl MemoryAnchorStore {
     /// The BINDING measured lower bound for one request, or `None` (sc-22738).
     ///
-    /// Binding means: same identity on every axis a measured point is keyed on, request geometry
-    /// at or above the bound's on every axis, and a currency key that still matches the packaged
-    /// loader closures. Among the survivors the LARGEST footprint wins — several bounds may cover
-    /// one request once a cell has been stopped at more than one geometry, and the strongest true
-    /// inequality is the useful one.
+    /// Binding means: same identity on every axis a measured point is keyed on, and request
+    /// geometry at or above the bound's on every axis. Among the survivors the LARGEST footprint
+    /// wins — several bounds may cover one request once a cell has been stopped at more than one
+    /// geometry, and the strongest true inequality is the useful one.
     ///
-    /// Currency is checked HERE rather than by the caller because a stale bound must refuse
-    /// nothing at all: the loader moved, so the measurement no longer describes what would run.
-    pub fn binding_exceeded_bound(
-        &self,
-        query: ExceededBoundQuery<'_>,
-        closures: Option<&AnchorLoaderClosures>,
-    ) -> Option<&ExceededBound> {
-        let closures = closures?;
+    /// Currency is NOT a conjunct, and the signature cannot express one: a bound whose loader
+    /// closure has since moved refuses exactly what it refused when measured. The moved closure is
+    /// the probe tooling's cue to stop at the cell again, never the runtime's cue to forget it.
+    pub fn binding_exceeded_bound(&self, query: ExceededBoundQuery<'_>) -> Option<&ExceededBound> {
         self.exceeded_bounds
             .iter()
             .filter(|bound| {
@@ -1996,7 +1980,6 @@ impl MemoryAnchorStore {
                     && bound.overlay.as_deref() == query.overlay
                     && bound.reference_count == query.reference_count
                     && bound.covers_geometry(query.width, query.height, query.frames)
-                    && bound.is_current(closures)
             })
             .max_by_key(|bound| bound.observed_footprint_bytes)
     }
@@ -3890,6 +3873,14 @@ mod tests {
     // is the COMPARISON: which anchors a rotated key stales, and which it leaves alone.
     // -------------------------------------------------------------------------------------
 
+    /// The tooling's currency question, restated locally for the two config-consistency tests
+    /// below. Deliberately NOT a method on `MemoryAnchor`: the runtime carries no such function
+    /// (sc-22738), and `scripts/anchor-loader-closure.mjs` owns the real one.
+    fn anchor_is_current(anchor: &MemoryAnchor, closures: &AnchorLoaderClosures) -> bool {
+        closures.digest_for(&anchor.model_id, anchor.backend)
+            == Some(anchor.source.loader_closure_digest.as_str())
+    }
+
     fn packaged_closures() -> AnchorLoaderClosures {
         load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
             .expect("the packaged loader closures parse")
@@ -3941,12 +3932,13 @@ mod tests {
     /// CURRENCY IS REPORTED, NEVER ASSERTED — and that distinction is the point of E8.
     ///
     /// A packaged anchor whose model's loader source has moved since the measurement is STALE BY
-    /// DESIGN: `is_current` returns false, admission demotes that cell to the conservative floor,
-    /// and the render still runs. Asserting currency here would turn the first pin bump that
-    /// genuinely touches a loader into a red `cargo test` on a change with nothing wrong in it —
-    /// which is the pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level
-    /// down. `bump-inference` regenerates the closures with `--write` automatically, so that red
-    /// would land on the bump itself.
+    /// DESIGN, and since sc-22738 that is a fact only the probe tooling acts on: the runtime binds
+    /// and derives from it exactly as from a current one, and the render still runs. Asserting
+    /// currency here would turn the first pin bump that genuinely touches a loader into a red
+    /// `cargo test` on a change with nothing wrong in it — which is the
+    /// pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level down.
+    /// `bump-inference` regenerates the closures with `--write` automatically, so that red would
+    /// land on the bump itself.
     ///
     /// What IS asserted is the loud half above: an anchor for a model nobody DECLARED is a
     /// mistake in the store, not a designed state, and it fails.
@@ -3957,13 +3949,14 @@ mod tests {
         let stale: Vec<&str> = store
             .anchors
             .iter()
-            .filter(|anchor| !anchor.is_current(&closures))
+            .filter(|anchor| !anchor_is_current(anchor, &closures))
             .map(|anchor| anchor.id.as_str())
             .collect();
         if !stale.is_empty() {
             eprintln!(
                 "note: {} of {} packaged anchors are not current against their model's declared \
-                 loader closure and will demote to the conservative floor: {}",
+                 loader closure (a re-capture signal for the tooling; the runtime binds them \
+                 regardless): {}",
                 stale.len(),
                 store.anchors.len(),
                 stale.join(", ")
@@ -3996,12 +3989,12 @@ mod tests {
             // An attestation of an older revision would leave the anchor stale AND claim a
             // justification — the contradiction this test exists to catch.
             assert_eq!(
-                anchor.is_current(&closures),
+                anchor_is_current(anchor, &closures),
                 attestation.attested_revision == pin,
                 "{}: attested at {} against pin {pin} but is_current={}",
                 anchor.id,
                 attestation.attested_revision,
-                anchor.is_current(&closures)
+                anchor_is_current(anchor, &closures)
             );
             assert!(
                 matches!(
@@ -4048,137 +4041,6 @@ mod tests {
         assert!(error.contains("unknown field"), "{error}");
         // Well-formed as shipped.
         assert!(load_memory_anchors(&store.to_string()).is_ok());
-    }
-
-    /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
-    /// model's anchors — a sibling model declared beside it keeps its own.
-    ///
-    /// Both sides of this are REAL packaged anchors, not fabricated ones. `ltx_2_3` and `ltx_2_5`
-    /// share the crate `mlx-gen-ltx`, which is precisely the pair the crate-level provider digest
-    /// could not separate (E9's first named failure): under that unit a 2.3-only edit rotated 2.5.
-    #[test]
-    fn a_rotated_loader_digest_stales_exactly_that_models_anchors() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        // A KNOWN-CURRENT BASELINE BY CONSTRUCTION: every declared digest is set to what that
-        // model's own anchors recorded. This is a comparison test, and it must not silently become
-        // a currency gate — whether the real pinned source still agrees is a separate question
-        // whose answer is allowed to be "no" (a stale anchor demotes to the floor, by design).
-        let mut closures = packaged_closures();
-        for anchor in &store.anchors {
-            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-            let declared = closures
-                .models
-                .get_mut(&key)
-                .unwrap_or_else(|| panic!("{key} is declared"));
-            declared
-                .digest
-                .clone_from(&anchor.source.loader_closure_digest);
-        }
-        let closures = closures;
-        let subject = anchor_loader_closure_key("ltx_2_5", AnchorBackend::Mlx);
-        let sibling = anchor_loader_closure_key("ltx_2_3", AnchorBackend::Mlx);
-        assert_ne!(subject, sibling);
-
-        let anchors_for = |key: &str| -> Vec<&MemoryAnchor> {
-            store
-                .anchors
-                .iter()
-                .filter(|anchor| anchor_loader_closure_key(&anchor.model_id, anchor.backend) == key)
-                .collect()
-        };
-        let subject_anchors = anchors_for(&subject);
-        let sibling_anchors = anchors_for(&sibling);
-        assert!(
-            !subject_anchors.is_empty() && !sibling_anchors.is_empty(),
-            "both models must carry packaged anchors for this comparison to mean anything"
-        );
-
-        // Rotate ONE model's key at a time and read both populations back.
-        let rotated = |key: &str, to: &str| {
-            let mut moved = closures.clone();
-            moved
-                .models
-                .get_mut(key)
-                .unwrap_or_else(|| panic!("{key} is declared"))
-                .digest = to.repeat(64);
-            moved
-        };
-
-        // The sibling's loader moved: every ltx_2_5 anchor stays authoritative, every ltx_2_3
-        // anchor stales.
-        let moved_sibling = rotated(&sibling, "c");
-        for anchor in &subject_anchors {
-            assert!(
-                anchor.is_current(&moved_sibling),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                !anchor.is_current(&moved_sibling),
-                "anchor {} must stale when ITS OWN loader moves",
-                anchor.id
-            );
-        }
-
-        // And the mirror image.
-        let moved_subject = rotated(&subject, "d");
-        for anchor in &subject_anchors {
-            assert!(
-                !anchor.is_current(&moved_subject),
-                "anchor {} must stale when its OWN loader moves",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                anchor.is_current(&moved_subject),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
-        }
-    }
-
-    /// The same anchor on the other backend lane is a different loader and a different key.
-    #[test]
-    fn currency_is_keyed_per_backend_lane_and_fails_closed_when_undeclared() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let closures = packaged_closures();
-        let mut candle = store.anchors[0].clone();
-        candle.backend = AnchorBackend::Candle;
-        assert!(
-            !candle.is_current(&closures),
-            "an undeclared (model, lane) cannot be shown current, so it is not"
-        );
-    }
-
-    /// The campaign fingerprint is provenance, not currency: a re-fingerprinted campaign over the
-    /// same loader must not demote the anchor (E9).
-    #[test]
-    fn the_calibration_fingerprint_is_not_a_currency_term() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let anchor = &store.anchors[0];
-        // Current BY CONSTRUCTION, for the reason spelled out in
-        // `a_rotated_loader_digest_stales_exactly_that_models_anchors`: the claim here is about the
-        // FINGERPRINT, and reading it off the live pinned source would quietly make it a currency
-        // gate that reds on any pin bump the loader source actually moved through.
-        let mut closures = packaged_closures();
-        let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-        closures
-            .models
-            .get_mut(&key)
-            .unwrap_or_else(|| panic!("{key} is declared"))
-            .digest
-            .clone_from(&anchor.source.loader_closure_digest);
-
-        let mut refingerprinted = anchor.clone();
-        assert!(refingerprinted.is_current(&closures));
-        refingerprinted.source.calibration_fingerprint = "sc-99999-some-later-campaign".to_owned();
-        assert!(
-            refingerprinted.is_current(&closures),
-            "a later campaign fingerprint must not move currency"
-        );
     }
 
     #[test]
@@ -5596,24 +5458,6 @@ mod tests {
         }
     }
 
-    fn bernini_closures(digest: &str) -> AnchorLoaderClosures {
-        AnchorLoaderClosures {
-            comment: String::new(),
-            digest_version: ANCHOR_LOADER_CLOSURE_VERSION.to_owned(),
-            inference_revision: "a".repeat(40),
-            models: BTreeMap::from([(
-                "bernini:mlx".to_owned(),
-                AnchorLoaderClosure {
-                    engine_id: None,
-                    entry_points: vec!["mlx-gen-bernini/src/bernini.rs".to_owned()],
-                    digest: digest.to_owned(),
-                    closure_file_count: 1,
-                    closure_files: vec!["mlx-gen-bernini/src/bernini.rs".to_owned()],
-                },
-            )]),
-        }
-    }
-
     fn bernini_query(width: u32, height: u32, frames: u32) -> ExceededBoundQuery<'static> {
         ExceededBoundQuery {
             model_id: "bernini",
@@ -5634,14 +5478,14 @@ mod tests {
     }
 
     /// sc-22738: a measured lower bound binds at and above its own geometry, on the identity it was
-    /// measured on, and only while its currency key still matches.
+    /// measured on — and regardless of whether its currency key still matches the packaged loader
+    /// closures (see `a_bound_whose_loader_closure_moved_still_binds`).
     #[test]
     fn a_measured_lower_bound_binds_at_and_above_its_geometry_on_its_own_identity() {
         let store = bound_store(vec![bernini_bound()]);
-        let current = bernini_closures(&"b".repeat(64));
         let bind = |query| {
             store
-                .binding_exceeded_bound(query, Some(&current))
+                .binding_exceeded_bound(query)
                 .map(|bound| bound.observed_footprint_bytes)
         };
         // The measured point itself, and every request at or above it on all three axes.
@@ -5701,17 +5545,48 @@ mod tests {
             }),
             Some(97_147_294_328),
         );
-        // A MOVED loader closure stales the bound exactly as it stales an anchor: the measurement
-        // no longer describes what would run, so it refuses nothing.
-        let moved = bernini_closures(&"c".repeat(64));
-        assert_eq!(
-            store.binding_exceeded_bound(bernini_query(848, 480, 49), Some(&moved)),
-            None,
+    }
+
+    /// sc-22738 (Michael's standing rule): the runtime ALWAYS behaves as if the measurement were
+    /// valid. A bound whose `loaderClosureDigest` matches nothing the packaged closures declare —
+    /// or that is stamped at a digest the ledger has since moved past — binds exactly as a current
+    /// one. The lookup signature cannot even take the closures, so the only way to demote here is to
+    /// re-add the parameter. MUTATION: restoring `bound.is_current(closures)` as a conjunct (or
+    /// `let closures = closures?;`) turns every assertion below red.
+    #[test]
+    fn a_bound_whose_loader_closure_moved_still_binds() {
+        let store = bound_store(vec![bernini_bound()]);
+        // The store's bound is stamped at "b"*64; the packaged ledger declares something else for
+        // bernini:mlx (or nothing at all — the lookup does not care which).
+        let declared = load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
+            .expect("packaged closures parse")
+            .digest_for("bernini", AnchorBackend::Mlx)
+            .map(str::to_owned);
+        assert_ne!(
+            declared.as_deref(),
+            Some(
+                store.exceeded_bounds[0]
+                    .source
+                    .loader_closure_digest
+                    .as_str()
+            ),
+            "the fixture must be stale against the ledger for this test to prove anything"
         );
         assert_eq!(
-            store.binding_exceeded_bound(bernini_query(848, 480, 49), None),
-            None,
-            "no packaged closures at all is fail-open, never a refusal",
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // And a bound at a digest no ledger has ever declared binds too: currency is not a term.
+        let mut undeclared = bernini_bound();
+        undeclared.source.loader_closure_digest = "f".repeat(64);
+        let store = bound_store(vec![undeclared]);
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(1280, 720, 97))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
         );
     }
 
@@ -5731,17 +5606,16 @@ mod tests {
             ..bernini_bound()
         };
         let store = bound_store(vec![smaller, bernini_bound()]);
-        let current = bernini_closures(&"b".repeat(64));
         assert_eq!(
             store
-                .binding_exceeded_bound(bernini_query(848, 480, 49), Some(&current))
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
                 .map(|bound| bound.observed_footprint_bytes),
             Some(97_147_294_328),
         );
         // At a geometry only the smaller bound covers, the smaller one is the whole claim.
         assert_eq!(
             store
-                .binding_exceeded_bound(bernini_query(848, 480, 25), Some(&current))
+                .binding_exceeded_bound(bernini_query(848, 480, 25))
                 .map(|bound| bound.observed_footprint_bytes),
             Some(80_000_000_000),
         );

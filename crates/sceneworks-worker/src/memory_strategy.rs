@@ -4,18 +4,22 @@
 //! owns live-budget arithmetic and the normative strategy order. Optimized candidates are admitted
 //! only through gen-core's canonical evidence validator.
 //!
-//! Closure-digest currency is a signal, not a gate (sc-18095, epic 18093): a fully-verified
-//! measured cell whose provider closure moved stays eligible with its peak widened by the
-//! backend's stale-measured margin from [`crate::ladder_margin_policy`], and current evidence is
-//! strictly preferred over stale for the same key. Structural verdicts (`Invalid`,
-//! `OutOfEnvelope`, `CompositionMismatch`, unverified conformance) still exclude.
+//! Measurement currency is not a selector input (sc-22738, Michael's standing rule: the runtime
+//! always behaves as if the measurement were valid). Between sc-18095 and sc-22738 a fully-verified
+//! measured cell whose provider closure had moved was graded "stale" and widened by the backend's
+//! recapture spread; that made a shared-engine fix — which touches nearly every closure — silently
+//! move what a live request got. Now a measured cell is graded at its measured peak under every
+//! closure, and neither [`RequestScope`] nor [`Candidate`] can carry a digest to compare. The probe
+//! tooling (`scripts/stale-lane-report.mjs`, `measure-memory-catalog.mjs`) owns "what to
+//! re-capture". Structural verdicts (`Invalid`, `OutOfEnvelope`, `CompositionMismatch`,
+//! unverified conformance) still exclude.
 //!
 //! Estimate-backed candidates admit the full ladder (sc-18096, epic 18093 R1): a caller may
 //! submit synthesized candidates ([`CandidateBasis::EstimateFittedCurve`] /
 //! [`CandidateBasis::EstimateFloor`]) for implemented-but-unmeasured rungs. They are graded at
 //! their peak widened by the backend's ESTIMATE margin, every structural exclusion still applies,
 //! and any eligible measured candidate at the same rung supersedes them — the normative
-//! precedence is measured-current > stale-measured > estimate.
+//! precedence is measured > estimate.
 
 use std::collections::BTreeSet;
 
@@ -236,19 +240,16 @@ pub struct RequestScope<'a> {
     pub mode: &'a str,
     pub overlay: Option<&'a str>,
     pub geometry: MemoryGeometry,
-    /// The live compile-closure digest of the provider being admitted (sc-17774).
-    ///
-    /// Read from `sceneworks_core::memory_calibration::packaged_closure_digest`. It replaces
-    /// `expected_inference_revision`, which every lane satisfied with its OWN frozen constant — four
-    /// separate per-model mechanisms doing the same job differently, none of which could tell a
-    /// change to its own model from a change to somebody else's.
-    pub expected_closure_digest: &'a str,
+    // There is deliberately no closure-digest field here (sc-22738). The request scope used to
+    // carry the provider's LIVE compile-closure digest so the selector could grade a measured
+    // candidate as "stale" and widen it; that made a shared-engine fix silently move what a live
+    // request got. Currency is now a re-capture signal for the probe tooling only, and this type
+    // cannot express it.
 }
 
 /// What produced a candidate's peak number (sc-18096, epic 18093 R1).
 ///
-/// A measured candidate is backed by a calibration record (its currency — current vs stale
-/// closure — is decided separately, from the digest pair). An estimate candidate was synthesized
+/// A measured candidate is backed by a calibration record. An estimate candidate was synthesized
 /// by the caller for an implemented-but-unmeasured rung; the two estimate variants exist because
 /// the binding-phase constraint
 /// ([`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]) governs
@@ -317,15 +318,8 @@ impl CandidateBasis {
 pub struct Candidate<'a> {
     pub selection: MemorySelection,
     pub evidence: &'a MemoryEvidence,
-    /// The provider closure digest this candidate's evidence was MEASURED under (sc-17774).
-    ///
-    /// It sits on `Candidate` rather than on `evidence` only because `MemoryEvidence` is a gen-core
-    /// type owned by the inference repository, which SceneWorks pins by SHA; the field cannot move
-    /// there without an inference change and a pin bump. The comparison itself is unaffected and is
-    /// applied to every lane identically.
-    pub closure_digest: &'a str,
-    /// Whether the peak is a measurement or a synthesized estimate (sc-18096). Like
-    /// `closure_digest`, this lives on `Candidate` because `MemoryEvidence` is pinned gen-core.
+    /// Whether the peak is a measurement or a synthesized estimate (sc-18096). This lives on
+    /// `Candidate` because `MemoryEvidence` is pinned gen-core.
     pub basis: CandidateBasis,
     /// The portion of `evidence.predicted_peak_bytes` that is a flat, phase-blind activation
     /// ALLOWANCE rather than counted weight bytes (sc-22508).
@@ -339,16 +333,11 @@ pub struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
-    /// How this candidate's remaining uncertainty is named, given how its currency graded.
-    fn admission_subject(
-        &self,
-        backend: MemoryBackend,
-        currency: CandidateCurrency,
-    ) -> AdmissionSubject {
+    /// How this candidate's remaining uncertainty is named.
+    fn admission_subject(&self, backend: MemoryBackend) -> AdmissionSubject {
         AdmissionSubject {
             backend,
             basis: self.basis,
-            closure_is_stale: currency == CandidateCurrency::StaleClosure,
             unmodeled_activation_bytes: self.unmodeled_activation_bytes,
         }
     }
@@ -357,29 +346,30 @@ impl Candidate<'_> {
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
-/// stale-margin widening, which happens in integer bytes) to GiB exactly once; callers cannot
-/// submit a second floating-point estimate with a lower coefficient.
+/// allowance widening, which happens in integer bytes) to GiB exactly once; callers cannot submit
+/// a second floating-point estimate with a lower coefficient.
 pub(crate) fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
     peak_bytes as f64 / BYTES_PER_GIB
 }
 
-/// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18095/sc-18096): with evidence
-/// measured under the request's live compile closure, with stale-closure measured evidence that
-/// stays eligible behind the widened stale-measured margin, or as a synthesized estimate behind
-/// the wider estimate margin.
+/// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18096): as measured evidence,
+/// graded at its exact peak, or as a synthesized estimate behind the estimate allowance.
+///
+/// There is no third grade (sc-22738). Until this story a measured candidate whose provider
+/// closure had moved since capture was graded as "stale" and widened by the recapture spread —
+/// a runtime demotion keyed on measurement currency, which is exactly what a shared-engine fix
+/// must never trigger. Measured is measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CandidateCurrency {
-    Current,
-    StaleClosure,
+enum CandidateGrade {
+    Measured,
     Estimate,
 }
 
-impl CandidateCurrency {
-    /// Normative precedence (sc-18096): measured-current > stale-measured > estimate.
+impl CandidateGrade {
+    /// Normative precedence (sc-18096): measured > estimate.
     const fn precedence(self) -> u8 {
         match self {
-            Self::Current => 2,
-            Self::StaleClosure => 1,
+            Self::Measured => 1,
             Self::Estimate => 0,
         }
     }
@@ -403,23 +393,6 @@ pub(crate) fn admitted_peak_bytes(subject: AdmissionSubject, peak_bytes: u64) ->
     )
 }
 
-/// The selector's own stale-measured grading (sc-18095), exported so the MLX gate's evidence-path
-/// budget pre-check grades a stale candidate at the SAME admitted ceiling `select_strategy` will
-/// (sc-18096). The pre-check runs against each candidate's captured foreign reserve, which the
-/// selector's uniform budget cannot carry, so the two must share this one policy function rather
-/// than each deriving an allowance.
-pub(crate) fn stale_admitted_peak_bytes(backend: MemoryBackend, peak_bytes: u64) -> u64 {
-    admitted_peak_bytes(
-        AdmissionSubject {
-            backend,
-            basis: CandidateBasis::Measured,
-            closure_is_stale: true,
-            unmodeled_activation_bytes: None,
-        },
-        peak_bytes,
-    )
-}
-
 /// The admitted ceiling of a weights+headroom FLOOR whose split is declared (sc-22508), exported
 /// for the video lane's refusal-artifact guard so it compares against the same number
 /// `select_strategy` graded the floor candidate at.
@@ -432,7 +405,6 @@ pub(crate) fn floor_admitted_peak_bytes(
         AdmissionSubject {
             backend,
             basis: CandidateBasis::EstimateFloor,
-            closure_is_stale: false,
             unmodeled_activation_bytes,
         },
         peak_bytes,
@@ -581,7 +553,7 @@ fn candidate_exclusion(
     request: RequestScope<'_>,
     contract: &MemoryProviderContract,
     candidate: &Candidate<'_>,
-) -> Result<CandidateCurrency, MemoryEvidenceVerdict> {
+) -> Result<CandidateGrade, MemoryEvidenceVerdict> {
     if request.resolved_route != contract.provider_id
         || request.backend != contract.backend.backend_id()
         || candidate.evidence.key.resolved_route != request.resolved_route
@@ -618,7 +590,7 @@ fn candidate_exclusion(
         // checks it short-circuits do not apply to a candidate with no calibration record behind
         // it.
         return match candidate.evidence.optimized_eligibility(contract) {
-            Ok(()) | Err(MemoryEvidenceVerdict::Unverified) => Ok(CandidateCurrency::Estimate),
+            Ok(()) | Err(MemoryEvidenceVerdict::Unverified) => Ok(CandidateGrade::Estimate),
             Err(reason) => Err(reason),
         };
     }
@@ -638,20 +610,10 @@ fn candidate_exclusion(
     {
         return Err(reason);
     }
-    // sc-17774: the provider's own compiled closure, not an inference revision. `evidence
-    // .inference_revision` stays as capture provenance and is deliberately not compared — comparing
-    // it is what let a commit to one model stale every other model's measurements.
-    //
-    // sc-18095 (epic 18093): a mismatch no longer EXCLUDES the candidate. Currency is a signal, not
-    // a gate: measured evidence whose closure moved stays eligible with its peak widened by the
-    // backend's stale-measured margin (`crate::ladder_margin_policy`), applied by the selector.
-    // Every structural exclusion above still runs first, so `Invalid`, `OutOfEnvelope`, and
-    // `CompositionMismatch` exclude a stale candidate exactly as they exclude a current one — only
-    // fully-verified measured cells reach the stale-admission path.
-    if candidate.closure_digest != request.expected_closure_digest {
-        return Ok(CandidateCurrency::StaleClosure);
-    }
-    Ok(CandidateCurrency::Current)
+    // `evidence.inference_revision` is capture provenance and is deliberately not compared
+    // (sc-17774), and since sc-22738 neither is any closure digest: a fully-verified measured cell
+    // is graded at its measured peak whether or not the provider's code has moved since capture.
+    Ok(CandidateGrade::Measured)
 }
 
 /// Select the first fitting candidate in the normative resident → staged → bounded-decode →
@@ -738,7 +700,7 @@ pub fn select_strategy_charging(
             accumulate_reason(&mut first_unknown, MemoryEvidenceVerdict::Missing);
             continue;
         }
-        let mut eligible: Vec<(&Candidate<'_>, CandidateCurrency, u64)> = Vec::new();
+        let mut eligible: Vec<(&Candidate<'_>, CandidateGrade, u64)> = Vec::new();
         let mut first_exclusion = None;
         for candidate in rung_candidates {
             match candidate_exclusion(request, contract, candidate) {
@@ -752,32 +714,14 @@ pub fn select_strategy_charging(
                         "memory-strategy candidate excluded"
                     );
                 }
-                Ok(currency) => {
+                Ok(grade) => {
                     // sc-22508: ONE per-term allowance, named by the policy from this candidate's
-                    // basis and currency, charged against the term that carries the uncertainty.
-                    let subject = candidate.admission_subject(backend_kind, currency);
+                    // basis, charged against the term that carries the uncertainty.
+                    let subject = candidate.admission_subject(backend_kind);
                     let allowance = crate::ladder_margin_policy::admission_allowance(subject);
                     let admitted_peak_bytes =
                         admitted_peak_bytes(subject, candidate.evidence.predicted_peak_bytes);
-                    if currency == CandidateCurrency::StaleClosure {
-                        // sc-18095: record the admission and the widened peak so a later OOM under
-                        // this selection is attributable to stale-closure evidence.
-                        tracing::info!(
-                            route = request.resolved_route,
-                            backend = request.backend,
-                            ?strategy,
-                            raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
-                            widened_peak_bytes = admitted_peak_bytes,
-                            allowance_term = allowance.term.as_key(),
-                            allowance_fraction = allowance.fraction,
-                            allowance_bytes = admitted_peak_bytes
-                                .saturating_sub(candidate.evidence.predicted_peak_bytes),
-                            candidate_closure_digest = candidate.closure_digest,
-                            expected_closure_digest = request.expected_closure_digest,
-                            "stale-closure memory-strategy candidate admitted with widened margin"
-                        );
-                    }
-                    if currency == CandidateCurrency::Estimate {
+                    if grade == CandidateGrade::Estimate {
                         // sc-18096: record the estimate admission, which basis produced it, and
                         // both the raw and widened peaks, so a later OOM under this selection is
                         // attributable to a synthesized estimate rather than a measurement.
@@ -794,35 +738,23 @@ pub fn select_strategy_charging(
                             "estimate-backed memory-strategy candidate admitted with widened margin"
                         );
                     }
-                    eligible.push((candidate, currency, admitted_peak_bytes));
+                    eligible.push((candidate, grade, admitted_peak_bytes));
                 }
             }
         }
-        // sc-18095: current evidence is strictly preferred over stale for the same key — a stale
-        // cell whose exact key was re-measured under the live closure never competes with the
-        // re-measurement.
-        //
-        // sc-18096: any eligible MEASURED candidate at this rung — current or stale — supersedes
-        // every estimate at the rung. An estimate exists to cover a rung nobody measured; where a
-        // measurement exists it is authoritative in both directions, including "this rung's
-        // measured peak does not fit", which a synthesized guess must not overrule on a
-        // fatal-OOM lane.
+        // sc-18096: any eligible MEASURED candidate at this rung supersedes every estimate at the
+        // rung. An estimate exists to cover a rung nobody measured; where a measurement exists it
+        // is authoritative in both directions, including "this rung's measured peak does not
+        // fit", which a synthesized guess must not overrule on a fatal-OOM lane.
         let eligible = {
-            let superseded_by_current = |candidate: &Candidate<'_>| {
-                eligible.iter().any(|(current, currency, _)| {
-                    *currency == CandidateCurrency::Current
-                        && current.evidence.key == candidate.evidence.key
-                })
-            };
             let rung_has_measured = eligible
                 .iter()
-                .any(|(_, currency, _)| *currency != CandidateCurrency::Estimate);
+                .any(|(_, grade, _)| *grade == CandidateGrade::Measured);
             eligible
                 .iter()
-                .filter(|(candidate, currency, _)| match currency {
-                    CandidateCurrency::Current => true,
-                    CandidateCurrency::StaleClosure => !superseded_by_current(candidate),
-                    CandidateCurrency::Estimate => !rung_has_measured,
+                .filter(|(_, grade, _)| match grade {
+                    CandidateGrade::Measured => true,
+                    CandidateGrade::Estimate => !rung_has_measured,
                 })
                 .copied()
                 .collect::<Vec<_>>()
@@ -843,42 +775,28 @@ pub fn select_strategy_charging(
                 parameters.decode_overlap.unwrap_or(0),
             )
         };
-        if let Some((candidate, currency, admitted_peak_bytes)) = eligible
+        if let Some((candidate, grade, admitted_peak_bytes)) = eligible
             .iter()
             .filter(|(candidate, _, admitted_peak_bytes)| {
                 *admitted_peak_bytes <= to_bytes(pool_for(candidate))
             })
             .max_by(
-                |(left, left_currency, left_peak), (right, right_currency, right_peak)| {
+                |(left, left_grade, left_peak), (right, right_grade, right_peak)| {
                     left_peak
                         .cmp(right_peak)
                         // The normative precedence breaks peak ties between distinct keys too
-                        // (current > stale > estimate); on an all-current set this arm is always
-                        // `Equal`, so pre-sc-18095 selection is byte-for-byte unchanged.
-                        .then_with(|| left_currency.precedence().cmp(&right_currency.precedence()))
+                        // (measured > estimate); on an all-measured set this arm is always `Equal`,
+                        // so pre-sc-18095 selection is byte-for-byte unchanged.
+                        .then_with(|| left_grade.precedence().cmp(&right_grade.precedence()))
                         .then_with(|| parameter_preference(left).cmp(&parameter_preference(right)))
                 },
             )
         {
             let needed_gb = peak_bytes_to_gb(*admitted_peak_bytes);
             let allowance = crate::ladder_margin_policy::admission_allowance(
-                candidate.admission_subject(backend_kind, *currency),
+                candidate.admission_subject(backend_kind),
             );
-            if *currency == CandidateCurrency::StaleClosure {
-                tracing::warn!(
-                    route = request.resolved_route,
-                    backend = request.backend,
-                    ?strategy,
-                    raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
-                    widened_peak_bytes = *admitted_peak_bytes,
-                    allowance_term = allowance.term.as_key(),
-                    allowance_fraction = allowance.fraction,
-                    allowance_bytes = (*admitted_peak_bytes)
-                        .saturating_sub(candidate.evidence.predicted_peak_bytes),
-                    "memory-strategy selection uses stale-closure evidence at the widened peak"
-                );
-            }
-            if *currency == CandidateCurrency::Estimate {
+            if *grade == CandidateGrade::Estimate {
                 tracing::warn!(
                     route = request.resolved_route,
                     backend = request.backend,
@@ -933,7 +851,6 @@ mod tests {
     use super::*;
     use crate::ladder_margin_policy::{
         AdmissionTerm, CANDLE_RECAPTURE_SPREAD, FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
-        MLX_RECAPTURE_SPREAD,
     };
     use gen_core::{
         LoadShape, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
@@ -949,8 +866,6 @@ mod tests {
     const FP: &str = "provider-formula-v1";
     const SW: &str = "sc-15449-contract-v1";
     const INF: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
-    /// A closure digest that is deliberately NOT the request's, for candidates a test needs stale.
-    const STALE_CLOSURE: &str = "stale-closure-digest";
 
     fn tier() -> MemoryNumericTier {
         MemoryNumericTier {
@@ -1096,7 +1011,6 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
-            expected_closure_digest: INF,
         }
     }
 
@@ -1147,7 +1061,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1158,7 +1071,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1271,7 +1183,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &source_only_change,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1309,7 +1220,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &exact,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1350,7 +1260,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1361,7 +1270,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1423,7 +1331,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1461,7 +1368,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1501,7 +1407,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1533,7 +1438,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &captured,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1620,7 +1524,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &excluded_staged,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1631,7 +1534,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &bounded_decode,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1674,7 +1576,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1685,7 +1586,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             },
@@ -1749,7 +1649,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1816,7 +1715,6 @@ mod tests {
         let candidate = Candidate {
             selection,
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1840,7 +1738,6 @@ mod tests {
                 &[Candidate {
                     selection,
                     evidence: &staged,
-                    closure_digest: INF,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 }],
@@ -1865,7 +1762,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1894,7 +1790,6 @@ mod tests {
                 &[Candidate {
                     selection: candidate.selection,
                     evidence: &wrong_backend,
-                    closure_digest: INF,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 }],
@@ -1942,7 +1837,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &high,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1955,7 +1849,6 @@ mod tests {
         let high_candidate = Candidate {
             selection: high_selection,
             evidence: &high,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
@@ -1994,7 +1887,6 @@ mod tests {
                 Candidate {
                     selection: high_selection,
                     evidence: &tied_high,
-                    closure_digest: INF,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 },
@@ -2323,7 +2215,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
-                closure_digest: INF,
                 basis: CandidateBasis::Measured,
                 unmodeled_activation_bytes: None,
             })
@@ -2461,7 +2352,6 @@ mod tests {
                 tier: tier(),
             },
             evidence: &record,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         }];
@@ -2573,7 +2463,6 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: record,
-                    closure_digest: INF,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 })
@@ -2623,14 +2512,18 @@ mod tests {
         }
     }
 
-    // ── sc-18095: currency as a signal — stale-closure evidence admits behind a widened margin ──
+    // ── sc-22738: the runtime never demotes measured evidence for closure currency ──
 
-    /// Regression pin: an all-current candidate set selects byte-for-byte as before sc-18095. The
-    /// exact-boundary fit is the sharp edge — if the selector widened CURRENT evidence by any
-    /// margin at all, an 8 GiB peak would stop fitting an 8 GiB budget, and `needed_gb` would stop
-    /// being the raw evidence ceiling.
+    /// sc-22738: a measured candidate is graded at its exact measured peak — the selector has no
+    /// currency input at all (`RequestScope` and `Candidate` carry no closure digest), so there is
+    /// no "stale" grade left to widen against. The exact-boundary fit is the sharp edge — if the
+    /// selector widened a measured candidate by any margin, an 8 GiB peak would stop fitting an
+    /// 8 GiB budget, and `needed_gb` would stop being the raw evidence ceiling. The structural
+    /// guard `scripts/runtime-admission-currency.test.mjs` independently keeps
+    /// `expected_closure_digest`/`closure_digest` out of `RequestScope`/`Candidate` so this
+    /// invariant cannot regress silently.
     #[test]
-    fn exact_current_selection_is_byte_for_byte_unchanged_and_never_widened() {
+    fn exact_measured_selection_is_byte_for_byte_unchanged_and_never_widened() {
         let mut staged = evidence(MemoryStrategy::StagedResidency);
         let provider = staged_only_provider();
         rekey_composition(&mut staged, &provider);
@@ -2653,7 +2546,6 @@ mod tests {
                 &[Candidate {
                     selection,
                     evidence: &staged,
-                    closure_digest: INF,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 }],
@@ -2666,216 +2558,11 @@ mod tests {
         );
     }
 
-    /// sc-18095: a stale-only cell stays eligible, graded at exactly the policy-widened peak. The
-    /// expected value is recomputed here from the POLICY constant rather than the selector's own
-    /// helper, so a selector that stops widening (or widens by the wrong number) turns this red.
+    /// sc-22738: an ordinary measured candidate that also fails a structural check is still
+    /// excluded with the structural verdict — a measured basis is not a bypass.
+    /// `CompositionMismatch` and `Invalid` both still exclude.
     #[test]
-    fn stale_closure_evidence_is_admitted_at_exactly_the_policy_widened_peak() {
-        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
-        let mut staged = evidence(MemoryStrategy::StagedResidency);
-        let provider = staged_only_provider();
-        rekey_composition(&mut staged, &provider);
-        staged.predicted_peak_bytes = raw_peak_bytes;
-        let result = select_strategy(
-            request(),
-            &provider,
-            Some(Budget {
-                available_gb: 11.0,
-                reclaimable_gb: 0.0,
-                total_gb: 11.0,
-                reserved_headroom_gb: 0.0,
-            }),
-            &[Candidate {
-                selection: MemorySelection {
-                    strategy: MemoryStrategy::StagedResidency,
-                    parameters: Default::default(),
-                    tier: tier(),
-                },
-                evidence: &staged,
-                closure_digest: STALE_CLOSURE,
-                basis: CandidateBasis::Measured,
-                unmodeled_activation_bytes: None,
-            }],
-        );
-        let Selection::Selected { needed_gb, .. } = result else {
-            panic!("a stale-only cell must stay eligible under sc-18095: {result:?}");
-        };
-        assert!(
-            needed_gb > peak_bytes_to_gb(raw_peak_bytes),
-            "the admitted peak must be WIDENED past the raw measurement, got {needed_gb}"
-        );
-        let expected_widened_bytes =
-            (raw_peak_bytes as f64 * (1.0 + CANDLE_RECAPTURE_SPREAD)).ceil();
-        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
-    }
-
-    /// sc-18095 acceptance: a fully stale ladder still reaches a deep rung instead of collapsing to
-    /// the legacy rung-1/2 fallback — the demotion this story retires. Peaks descend with the
-    /// ladder and only rung 4's widened peak fits the budget.
-    #[test]
-    fn a_fully_stale_ladder_can_still_select_a_deep_rung() {
-        let peaks = [40.0, 30.0, 20.0, 10.0, 2.0];
-        let evidences = MemoryStrategy::ALL
-            .into_iter()
-            .zip(peaks)
-            .map(|(strategy, gb)| {
-                let mut record = evidence(strategy);
-                record.key.parameters = cumulative_params(strategy);
-                record.predicted_peak_bytes = (gb * BYTES_PER_GIB) as u64;
-                record.observed_peak_bytes = Some(record.predicted_peak_bytes);
-                record
-            })
-            .collect::<Vec<_>>();
-        let candidates = MemoryStrategy::ALL
-            .into_iter()
-            .zip(&evidences)
-            .map(|(strategy, record)| Candidate {
-                selection: MemorySelection {
-                    strategy,
-                    parameters: cumulative_params(strategy),
-                    tier: tier(),
-                },
-                evidence: record,
-                closure_digest: STALE_CLOSURE,
-                basis: CandidateBasis::Measured,
-                unmodeled_activation_bytes: None,
-            })
-            .collect::<Vec<_>>();
-        let selection = select_strategy(
-            request(),
-            &contract(),
-            Some(Budget {
-                available_gb: 3.0,
-                reclaimable_gb: 0.0,
-                total_gb: 48.0,
-                reserved_headroom_gb: 0.0,
-            }),
-            &candidates,
-        );
-        assert!(
-            matches!(
-                selection,
-                Selection::Selected {
-                    selection: MemorySelection {
-                        strategy: MemoryStrategy::BoundedTransformerResidency,
-                        ..
-                    },
-                    ..
-                }
-            ),
-            "a stale ladder must stay walkable down to rung 4: {selection:?}"
-        );
-    }
-
-    /// Mutation check demanded by the story: prove the widening is APPLIED, not just plumbed. This
-    /// stale cell's raw peak fits the budget exactly — a selector whose stale margin is zeroed (or
-    /// that forgets to widen) selects it, flipping this test red. The real selector grades it at
-    /// the widened peak, which overflows the budget into `Reject`.
-    #[test]
-    fn zeroing_the_stale_margin_would_flip_this_rejection_into_a_selection() {
-        let raw_peak_bytes: u64 = 8 * 1024 * 1024 * 1024;
-        let budget = Budget {
-            available_gb: 8.0,
-            reclaimable_gb: 0.0,
-            total_gb: 8.0,
-            reserved_headroom_gb: 0.0,
-        };
-        // The zero-margin outcome would FIT: the raw peak is exactly the effective budget.
-        assert!(raw_peak_bytes <= (8.0 * BYTES_PER_GIB) as u64);
-        let mut staged = evidence(MemoryStrategy::StagedResidency);
-        let provider = staged_only_provider();
-        rekey_composition(&mut staged, &provider);
-        staged.predicted_peak_bytes = raw_peak_bytes;
-        let result = select_strategy(
-            request(),
-            &provider,
-            Some(budget),
-            &[Candidate {
-                selection: MemorySelection {
-                    strategy: MemoryStrategy::StagedResidency,
-                    parameters: Default::default(),
-                    tier: tier(),
-                },
-                evidence: &staged,
-                closure_digest: STALE_CLOSURE,
-                basis: CandidateBasis::Measured,
-                unmodeled_activation_bytes: None,
-            }],
-        );
-        let Selection::Reject { needed_gb, .. } = result else {
-            panic!(
-                "a stale cell must be graded at its WIDENED peak; selecting at the raw peak means \
-                 the stale margin was not applied: {result:?}"
-            );
-        };
-        assert!(
-            needed_gb > 8.0,
-            "the reported requirement must carry the widening: {needed_gb}"
-        );
-    }
-
-    /// sc-18095: current evidence is strictly preferred over stale FOR THE SAME KEY, even when the
-    /// stale cell's widened peak would otherwise win the within-rung largest-fitting-peak choice —
-    /// and the preference is declaration-order invariant.
-    #[test]
-    fn current_evidence_beats_stale_for_the_same_key_in_either_declaration_order() {
-        let provider = staged_only_provider();
-        let mut current = evidence(MemoryStrategy::StagedResidency);
-        rekey_composition(&mut current, &provider);
-        current.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
-        // Same evidence KEY, different measurement: the stale capture saw a larger peak, and its
-        // widened value is larger still — the naive max-by-peak winner.
-        let mut stale = current.clone();
-        stale.predicted_peak_bytes = 9 * 1024 * 1024 * 1024;
-        let selection = MemorySelection {
-            strategy: MemoryStrategy::StagedResidency,
-            parameters: Default::default(),
-            tier: tier(),
-        };
-        let current_candidate = Candidate {
-            selection,
-            evidence: &current,
-            closure_digest: INF,
-            basis: CandidateBasis::Measured,
-            unmodeled_activation_bytes: None,
-        };
-        let stale_candidate = Candidate {
-            selection,
-            evidence: &stale,
-            closure_digest: STALE_CLOSURE,
-            basis: CandidateBasis::Measured,
-            unmodeled_activation_bytes: None,
-        };
-        let budget = Some(Budget {
-            available_gb: 10.0,
-            reclaimable_gb: 0.0,
-            total_gb: 10.0,
-            reserved_headroom_gb: 0.0,
-        });
-        let forward = select_strategy(
-            request(),
-            &provider,
-            budget,
-            &[current_candidate, stale_candidate],
-        );
-        let reverse = select_strategy(
-            request(),
-            &provider,
-            budget,
-            &[stale_candidate, current_candidate],
-        );
-        assert_eq!(forward, reverse);
-        assert!(
-            matches!(forward, Selection::Selected { needed_gb: 8.0, .. }),
-            "the current re-measurement must win over the stale cell with the same key: {forward:?}"
-        );
-    }
-
-    /// sc-18095: staleness is not a bypass — a stale candidate that also fails a structural check
-    /// is excluded with the structural verdict, exactly like a current one. `CompositionMismatch`
-    /// and `Invalid` both still exclude.
-    #[test]
-    fn structural_exclusions_still_exclude_a_stale_candidate() {
+    fn structural_exclusions_still_exclude_a_measured_candidate() {
         // CompositionMismatch: the contract grew an engagement edge the captured composition lacks.
         let captured = evidence(MemoryStrategy::BoundedDecode);
         let mut changed_contract = contract();
@@ -2904,7 +2591,6 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: &captured,
-                    closure_digest: STALE_CLOSURE,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 }],
@@ -2931,7 +2617,6 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: &wrong_backend,
-                    closure_digest: STALE_CLOSURE,
                     basis: CandidateBasis::Measured,
                     unmodeled_activation_bytes: None,
                 }],
@@ -2939,138 +2624,6 @@ mod tests {
             Selection::Unverified {
                 reason: MemoryEvidenceVerdict::Invalid,
             }
-        );
-    }
-
-    /// sc-18095: the stale margin is per-backend. The budget sits between the candle-widened and
-    /// MLX-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) Candle
-    /// margin — or with no margin — flips the first arm.
-    #[test]
-    fn mlx_stale_admission_uses_the_mlx_margin() {
-        let mut provider = staged_only_provider();
-        provider.backend = MemoryBackendRealization::MlxMetal {
-            bounded_wired_residency: true,
-            lazy_or_mmap_materialization: true,
-            explicit_evaluation_and_synchronization: true,
-            cache_eviction: true,
-        };
-        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
-        let mut staged = evidence(MemoryStrategy::StagedResidency);
-        staged.key.backend = gen_core::MemoryBackend::Mlx;
-        rekey_composition(&mut staged, &provider);
-        staged.predicted_peak_bytes = raw_peak_bytes;
-        let mut scope = request();
-        scope.backend = "mlx";
-        let candidate = Candidate {
-            selection: MemorySelection {
-                strategy: MemoryStrategy::StagedResidency,
-                parameters: Default::default(),
-                tier: tier(),
-            },
-            evidence: &staged,
-            closure_digest: STALE_CLOSURE,
-            basis: CandidateBasis::Measured,
-            unmodeled_activation_bytes: None,
-        };
-        let budget = |available_gb| {
-            Some(Budget {
-                available_gb,
-                reclaimable_gb: 0.0,
-                total_gb: 48.0,
-                reserved_headroom_gb: 0.0,
-            })
-        };
-        // Candle widening: 10.2 GiB; MLX widening: ~12.52 GiB. 11 GiB must NOT fit on MLX.
-        assert!(
-            matches!(
-                select_strategy(scope, &provider, budget(11.0), &[candidate]),
-                Selection::Reject { .. }
-            ),
-            "11 GiB fits a Candle-widened 10 GiB cell but must not fit the MLX-widened one"
-        );
-        let Selection::Selected { needed_gb, .. } =
-            select_strategy(scope, &provider, budget(13.0), &[candidate])
-        else {
-            panic!("the MLX-widened peak fits a 13 GiB budget");
-        };
-        let expected_widened_bytes = (raw_peak_bytes as f64 * (1.0 + MLX_RECAPTURE_SPREAD)).ceil();
-        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
-    }
-
-    /// sc-18095: the selector's tracing records the stale admission and the widened peak it used,
-    /// so a later OOM under this selection is attributable to stale-closure evidence.
-    #[test]
-    fn tracing_records_stale_admission_and_the_widened_peak() {
-        use std::io::Write;
-
-        // Concurrent subscriber-less tests also drive these callsites; without the floor their
-        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
-        crate::test_env::install_tracing_interest_floor();
-
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let capture = Capture::default();
-        let writer = capture.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .without_time()
-            .finish();
-
-        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
-        let mut staged = evidence(MemoryStrategy::StagedResidency);
-        let provider = staged_only_provider();
-        rekey_composition(&mut staged, &provider);
-        staged.predicted_peak_bytes = raw_peak_bytes;
-        let result = tracing::subscriber::with_default(subscriber, || {
-            select_strategy(
-                request(),
-                &provider,
-                Some(Budget {
-                    available_gb: 11.0,
-                    reclaimable_gb: 0.0,
-                    total_gb: 11.0,
-                    reserved_headroom_gb: 0.0,
-                }),
-                &[Candidate {
-                    selection: MemorySelection {
-                        strategy: MemoryStrategy::StagedResidency,
-                        parameters: Default::default(),
-                        tier: tier(),
-                    },
-                    evidence: &staged,
-                    closure_digest: STALE_CLOSURE,
-                    basis: CandidateBasis::Measured,
-                    unmodeled_activation_bytes: None,
-                }],
-            )
-        });
-        assert!(matches!(result, Selection::Selected { .. }), "{result:?}");
-        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-        let widened_peak_bytes =
-            (raw_peak_bytes as f64 * (1.0 + CANDLE_RECAPTURE_SPREAD)).ceil() as u64;
-        assert!(
-            output.contains("stale-closure memory-strategy candidate admitted with widened margin"),
-            "admission event missing from trace output: {output}"
-        );
-        assert!(
-            output.contains(&format!("widened_peak_bytes={widened_peak_bytes}")),
-            "widened peak missing from trace output: {output}"
-        );
-        assert!(
-            output.contains("memory-strategy selection uses stale-closure evidence"),
-            "stale-selection event missing from trace output: {output}"
         );
     }
 
@@ -3115,7 +2668,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
-                closure_digest: INF,
                 basis: CandidateBasis::EstimateFloor,
                 unmodeled_activation_bytes: None,
             }],
@@ -3141,7 +2693,6 @@ mod tests {
             crate::ladder_margin_policy::admission_allowance(AdmissionSubject {
                 backend: MemoryBackend::Candle,
                 basis: CandidateBasis::EstimateFloor,
-                closure_is_stale: false,
                 unmodeled_activation_bytes: None,
             })
             .term
@@ -3176,7 +2727,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
-                closure_digest: INF,
                 basis: CandidateBasis::EstimateFloor,
                 unmodeled_activation_bytes: None,
             }],
@@ -3193,9 +2743,10 @@ mod tests {
         );
     }
 
-    /// sc-18096 precedence: ANY eligible measured candidate at a rung — current or stale —
-    /// supersedes every estimate at that rung, in either declaration order, and a current
-    /// measured selection stays byte-for-byte unwidened while the estimate coexists.
+    /// sc-18096 precedence (sc-22738: measured is measured, there is no currency grade left):
+    /// any eligible measured candidate at a rung supersedes every estimate at that rung, in
+    /// either declaration order, and the measured selection stays byte-for-byte unwidened while
+    /// the estimate coexists.
     #[test]
     fn measured_candidates_supersede_estimates_at_the_same_rung() {
         let provider = staged_only_provider();
@@ -3214,14 +2765,12 @@ mod tests {
         let measured_candidate = Candidate {
             selection,
             evidence: &measured,
-            closure_digest: INF,
             basis: CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         };
         let estimate_candidate = Candidate {
             selection,
             evidence: &estimate,
-            closure_digest: INF,
             basis: CandidateBasis::EstimateFloor,
             unmodeled_activation_bytes: None,
         };
@@ -3249,32 +2798,7 @@ mod tests {
             "the CURRENT measurement must win at its raw, unwidened peak: {forward:?}"
         );
 
-        // A STALE measurement also supersedes the estimate: the widened measured 8.4 GiB peak is
-        // the admitted requirement, not the estimate's 4.4.
-        let stale_candidate = Candidate {
-            selection,
-            evidence: &measured,
-            closure_digest: STALE_CLOSURE,
-            basis: CandidateBasis::Measured,
-            unmodeled_activation_bytes: None,
-        };
-        let result = select_strategy(
-            request(),
-            &provider,
-            budget,
-            &[estimate_candidate, stale_candidate],
-        );
-        let Selection::Selected { needed_gb, .. } = result else {
-            panic!("the stale measurement must stay selectable: {result:?}");
-        };
-        let expected_widened_bytes = (8.0 * BYTES_PER_GIB * (1.0 + CANDLE_RECAPTURE_SPREAD)).ceil();
-        assert_eq!(
-            needed_gb,
-            expected_widened_bytes / BYTES_PER_GIB,
-            "the stale MEASUREMENT outranks the smaller estimate at the same rung"
-        );
-
-        // And where the measurement — even widened — does not fit, the estimate must NOT rescue
+        // And where the measurement does not fit, the estimate must NOT rescue
         // the rung: a guess never overrules a measurement's refusal.
         let tight = Some(Budget {
             available_gb: 5.0,
@@ -3330,7 +2854,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
-                closure_digest: INF,
                 basis: CandidateBasis::EstimateAnchorDerived {
                     lane: AnchorDerivationLane::Video,
                 },
@@ -3386,7 +2909,7 @@ mod tests {
         );
         assert_eq!(
             admitted_peak_bytes(
-                candidates[0].admission_subject(MemoryBackend::Mlx, CandidateCurrency::Estimate),
+                candidates[0].admission_subject(MemoryBackend::Mlx),
                 evidences[0].predicted_peak_bytes,
             ),
             evidences[0].predicted_peak_bytes,
@@ -3400,7 +2923,7 @@ mod tests {
                 basis: CandidateBasis::EstimateAnchorDerived {
                     lane: AnchorDerivationLane::Image,
                 },
-                ..candidates[0].admission_subject(MemoryBackend::Mlx, CandidateCurrency::Estimate)
+                ..candidates[0].admission_subject(MemoryBackend::Mlx)
             },
             evidences[0].predicted_peak_bytes,
         );
@@ -3436,14 +2959,11 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
-                closure_digest: INF,
                 basis: CandidateBasis::EstimateFloor,
                 unmodeled_activation_bytes: Some(headroom_bytes),
             }
         }
-        let subject = |candidate: &Candidate<'_>| {
-            candidate.admission_subject(MemoryBackend::Mlx, CandidateCurrency::Estimate)
-        };
+        let subject = |candidate: &Candidate<'_>| candidate.admission_subject(MemoryBackend::Mlx);
 
         let small_candidate = floor_of(&small_record, headroom_bytes);
         let large_candidate = floor_of(&large_record, headroom_bytes);
@@ -3497,7 +3017,6 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
-                closure_digest: INF,
                 basis: CandidateBasis::EstimateFloor,
                 unmodeled_activation_bytes: None,
             })
@@ -3581,7 +3100,6 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: &staged,
-                    closure_digest: INF,
                     basis: CandidateBasis::EstimateFittedCurve,
                     unmodeled_activation_bytes: None,
                 }],
