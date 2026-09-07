@@ -3,7 +3,7 @@ compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
 use candle_gen::testkit::{StableIdleConfig, VramProbe};
 use runtime_cuda::gen_core::{
-    adapter_stack_identity, AdapterKind, AdapterSpec, Conditioning, GenerationMemory,
+    adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, Conditioning, GenerationMemory,
     GenerationOutput, GenerationRequest, Image, LoadShape, LoadSpec, MemoryBudget,
     MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
     MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection,
@@ -2742,7 +2742,9 @@ fn run_five_rung_reference_loaded(
             })?;
     }
     let mut generation = match mage {
-        Some(arm) => mage_generation_request(arm, width, height),
+        Some(arm) => {
+            mage_generation_request(arm, &generator.descriptor().capabilities, width, height)
+        }
         None => five_rung_generation_request(width, height, edit),
     };
     scope
@@ -3294,7 +3296,21 @@ fn validate_mage_plan_identity(request: &Value, arm: MageArm, tier: &str) -> Res
 /// engine's route gate additionally requires `MemoryMode::Edit` with 1..=8 references
 /// (`memory_strategy.rs` `route_is_supported`), so the single fitted reference is what makes an edit
 /// capture measure the edit path rather than text-to-image under an edit label.
-fn mage_generation_request(arm: MageArm, width: u32, height: u32) -> GenerationRequest {
+/// GUIDANCE AND THE NEGATIVE PROMPT ARE READ OFF THE LOADED DESCRIPTOR (sc-22738). The MLX twin of
+/// this arm had every `mage_flow*_turbo` cell refused at request time — before any render — with
+/// `unsupported: mage_flow_turbo: guidance is not supported`: the shared floor
+/// `gen-core/src/generator.rs:3216-3221` rejects `req.guidance.is_some() && !supports_guidance`, and
+/// `candle-gen-mage` publishes both flags per variant (`src/lib.rs:132-148` `generation_descriptor`,
+/// `:939-940` for the edit variants) with the distilled members declaring `false`. Reading the
+/// TABLE's `guidance` scale instead of the descriptor is what sent the knob anyway. Production asks
+/// the descriptor (`image_jobs/base.rs` `resolve_guidance` :4632, `resolve_negative_prompt` :4870),
+/// so this arm asks the descriptor; `arm.guidance` is the scale used only where one is accepted.
+fn mage_generation_request(
+    arm: MageArm,
+    capabilities: &Capabilities,
+    width: u32,
+    height: u32,
+) -> GenerationRequest {
     GenerationRequest {
         prompt: if arm.edit {
             "replace the background with a plain grey studio backdrop".to_owned()
@@ -3302,14 +3318,16 @@ fn mage_generation_request(arm: MageArm, width: u32, height: u32) -> GenerationR
             "a weathered brass astrolabe on a linen cloth, soft window light".to_owned()
         },
         // The distilled members run CFG genuinely off at guidance 1.0, at which the engine builds no
-        // unconditional branch at all.
-        negative_prompt: (arm.guidance > 1.0).then(|| "blurry, distorted, text".to_owned()),
+        // unconditional branch at all — and refuses a negative prompt outright.
+        negative_prompt: capabilities
+            .supports_negative_prompt
+            .then(|| "blurry, distorted, text".to_owned()),
         width,
         height,
         count: 1,
         seed: Some(MAGE_SEED),
         steps: Some(arm.steps),
-        guidance: Some(arm.guidance),
+        guidance: capabilities.supports_guidance.then_some(arm.guidance),
         conditioning: if arm.edit {
             vec![Conditioning::Reference {
                 image: Image {
@@ -8168,7 +8186,8 @@ mod mage_tests {
     #[test]
     fn only_the_edit_members_carry_a_reference() {
         for arm in MAGE_ARMS {
-            let request = mage_generation_request(arm, 768, 768);
+            let capabilities = mage_capabilities(arm);
+            let request = mage_generation_request(arm, &capabilities, 768, 768);
             assert_eq!(request.conditioning.len(), usize::from(arm.edit));
             if arm.edit {
                 let Conditioning::Reference { image, strength } = &request.conditioning[0] else {
@@ -8181,10 +8200,81 @@ mod mage_tests {
                 );
             }
             assert_eq!(request.steps, Some(arm.steps));
-            assert_eq!(request.guidance, Some(arm.guidance));
-            assert_eq!(request.negative_prompt.is_some(), arm.guidance > 1.0);
+            // Both knobs follow the loaded descriptor's capability, never the table's scale
+            // (sc-22738) — see `a_distilled_mage_route_sends_no_guidance_and_no_negative_prompt`.
+            assert_eq!(request.guidance.is_some(), capabilities.supports_guidance);
+            assert_eq!(
+                request.negative_prompt.is_some(),
+                capabilities.supports_negative_prompt
+            );
             assert_eq!(request.seed, Some(MAGE_SEED));
         }
+    }
+
+    /// The capability set the pinned engine publishes for one member: `candle-gen-mage`
+    /// `src/lib.rs:132-148` takes both flags per generator and `:939-940` derives the edit ones as
+    /// `!matches!(variant, MageEditVariant::EditTurbo)` — i.e. the two distilled `*_turbo` ids
+    /// advertise neither knob, exactly as the MLX twin does.
+    fn mage_capabilities(arm: MageArm) -> Capabilities {
+        let guided = !arm.provider.ends_with("turbo");
+        Capabilities {
+            supports_guidance: guided,
+            supports_negative_prompt: guided,
+            ..Capabilities::default()
+        }
+    }
+
+    /// sc-22738. A DISTILLED MAGE ROUTE SENDS NO GUIDANCE AND NO NEGATIVE PROMPT.
+    ///
+    /// The MLX twin of this arm had all six `mage_flow*_turbo` cells refused at REQUEST time with
+    /// `unsupported: mage_flow_turbo: guidance is not supported` — the shared floor
+    /// (`gen-core/src/generator.rs:3216-3221`) rejects a `guidance` on a provider whose
+    /// `supports_guidance` is false. This lane built the same request off the same table, so it
+    /// carried the same defect; both now read the loaded descriptor, as production does
+    /// (`image_jobs/base.rs` `resolve_guidance` :4632, `resolve_negative_prompt` :4870).
+    ///
+    /// MUTATIONS THIS PINS. Restoring `guidance: Some(arm.guidance)` reds the first assertion;
+    /// restoring `negative_prompt: (arm.guidance > 1.0).then(…)`, which reads the TABLE, reds the
+    /// second; withholding both unconditionally reds the third and fourth.
+    #[test]
+    fn a_distilled_mage_route_sends_no_guidance_and_no_negative_prompt() {
+        let distilled = Capabilities::default();
+        let guided = Capabilities {
+            supports_guidance: true,
+            supports_negative_prompt: true,
+            ..Capabilities::default()
+        };
+        for arm in MAGE_ARMS {
+            let refused = mage_generation_request(arm, &distilled, 768, 768);
+            assert_eq!(
+                refused.guidance, None,
+                "{} must send no guidance to a provider that does not accept one",
+                arm.provider
+            );
+            assert_eq!(
+                refused.negative_prompt, None,
+                "{} must send no negative prompt to a provider that does not accept one",
+                arm.provider
+            );
+            let accepted = mage_generation_request(arm, &guided, 768, 768);
+            assert_eq!(
+                accepted.guidance,
+                Some(arm.guidance),
+                "{} must send its declared scale where the provider accepts one",
+                arm.provider
+            );
+            assert!(
+                accepted.negative_prompt.is_some(),
+                "{} must send its negative prompt where the provider accepts one",
+                arm.provider
+            );
+        }
+        let distilled_ids = MAGE_ARMS
+            .into_iter()
+            .filter(|arm| arm.guidance == 1.0)
+            .map(|arm| arm.provider)
+            .collect::<Vec<_>>();
+        assert_eq!(distilled_ids, ["mage_flow_turbo", "mage_flow_edit_turbo"]);
     }
 }
 
