@@ -3498,6 +3498,70 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
 });
 
+// sc-22738. `mlx_wan_scail2.rs#probes_admission` decides whether the Wan 2.2 / SCAIL-2 capture asks
+// the provider's admission gate anything, and its answer turns on ONE fact: neither engine can read
+// any evidence identity SceneWorks mints, because both parse the run context's `evidence_revision`
+// as a receipt they sealed themselves. `wan_2_2_i2v_14b:bf16:mlx` died on the FIRST probe after a
+// 383-second load before the arm mirrored that.
+//
+// The Wan half of the arm asks the engine for its token (`wan_i2v_memory::RECEIPT_VERSION` is
+// `pub`); the SCAIL-2 half cannot, because `mlx-gen-scail2` compares its token as a bare literal
+// inside `validate_context_revision_shape` and publishes no const for it. Both are bound to the
+// pinned engine source HERE so a rename reds rather than silently widening the arm's skip — and the
+// worker is checked to mint neither, which is what makes the skip production's own decision.
+test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the worker mints neither", { skip: skipWithoutRoutes }, async () => {
+  const arm = await readFile(
+    path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs"),
+    "utf8",
+  );
+
+  const wan = await readFile(
+    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core/src/wan_i2v_memory.rs"),
+    "utf8",
+  );
+  const wanToken = /pub const RECEIPT_VERSION: &str = "([a-z0-9-]+)";/.exec(wan)?.[1];
+  assert.ok(wanToken, "gen-core's wan_i2v_memory still publishes RECEIPT_VERSION");
+  assert.match(
+    arm,
+    /Some\(_\) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,/,
+    "the Wan half must ASK the engine for its receipt token, never restate it",
+  );
+  // …and the arm's prose, which is what a record reader sees, names the same shape.
+  assert.ok(
+    arm.includes(`${wanToken}:<mode>:fps<N>:<artifact>:<selection>:`),
+    `the arm's admission blocker must name the engine's own receipt shape (${wanToken})`,
+  );
+
+  const scail2 = await readFile(
+    path.join(process.env.INFERENCE_REPO, "crates/media/mlx-gen/mlx-gen-scail2/src/memory_strategy.rs"),
+    "utf8",
+  );
+  const shape = /fn validate_context_revision_shape\(([\s\S]*?)\n\}\n/.exec(scail2);
+  assert.ok(shape, "mlx-gen-scail2 still gates the context on its own receipt shape");
+  const scail2Token = /parts\[0\] != "([a-z0-9-]+)"/.exec(shape[1])?.[1];
+  assert.ok(scail2Token, "the SCAIL-2 receipt token parsed empty");
+  const mirrored = /const SCAIL2_RECEIPT_TOKEN: &str = "([a-z0-9-]+)";/.exec(arm)?.[1];
+  assert.equal(
+    mirrored,
+    scail2Token,
+    "the arm's SCAIL-2 receipt-token mirror has drifted from the pinned engine's own gate",
+  );
+
+  // The other half of the same claim, and the reason the skip is production's decision rather than
+  // the adapter's: SceneWorks mints NEITHER token, so the evidence identity the worker puts on a
+  // video run context can never be one these gates read.
+  const minted = await execFileAsync("git", [
+    "grep", "-l", "-F", "-e", wanToken, "-e", scail2Token, "--",
+    "crates/sceneworks-worker/src", "crates/sceneworks-core/src",
+  ], { cwd: ROOT }).then((result) => result.stdout.trim(), () => "");
+  assert.equal(
+    minted,
+    "",
+    "the worker now spells an engine receipt token; it may mint a context these gates accept, so "
+      + "the Wan/SCAIL-2 arm must probe admission again instead of recording the scenarios unexecuted",
+  );
+});
+
 test("the bare MLX LTX-2.3 and MiniMax-H3 plan rows are the engines' calibrated tiers", { skip: skipWithoutRoutes }, async () => {
   const bare = await videoFamilyBareTiers();
   for (const [family, crate] of [
