@@ -1,0 +1,310 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "inventorySha256": "9e8b06efeef59cff6a14b46a497af0e52835073b6a800d7d473e89737a29cb2d",
+        "repository": "SceneWorks/qwen-image-mlx",
+        "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "capturedAt": "2026-09-06T15:33:00Z",
+      "derivation": {
+        "justification": "Exact physical MLX provider response, artifact inventory, and selected/reference outputs are preserved as immutable capture receipts.",
+        "lifecycle": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        },
+        "loadability": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        },
+        "memory": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        },
+        "negativeMutation": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        },
+        "overlay": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        },
+        "quality": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-7a13b889216592ce8ff7"
+          ]
+        }
+      },
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:qwen-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 16596985144
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 37768842364
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 44357563148
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 49518997268
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "qwen-image-q8-seed16353-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-4a54665d0b486438f652",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ee77dad220c0fbaa0a1e",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.2951784620329268,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 16596985144,
+          "allocatorBytes": 19061129276,
+          "reclaimableBytes": 2464144132
+        },
+        "decode": {
+          "activeBytes": 44357563148,
+          "allocatorBytes": 44357563148,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 37768842364,
+          "allocatorBytes": 42930276484,
+          "reclaimableBytes": 5161434120
+        },
+        "overall": {
+          "activeBytes": 44357563148,
+          "allocatorBytes": 49518997268,
+          "reclaimableBytes": 5161434120
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 20065550336,
+        "decode": 46640660480,
+        "denoise": 45097156608,
+        "overall": 52009369600
+      },
+      "quality": {
+        "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.18823529411764706,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00196078431372549,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "45bd0786f98e59629a1bd3248c1f9351c15b5be5d1825104e7bb60d7b639a3b2",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f6b8294fde058384a16a8b8c901293a62f2172f75cd65d3a0848ac26e2756d59",
+          "revision": "8663394fd87869bad0563ed7bc6a0009f9c7d85c"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 52009369600,
+          "name": "exact_fit",
+          "predictedBytes": 52009369600,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the pinned MLX Qwen base provider path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "qwen_image",
+        "overlay": "none",
+        "provider": "qwen_image",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6,
+  "sourceSessions": [
+    {
+      "capturedAt": "2026-09-06T15:33:00Z",
+      "claims": [
+        "memory",
+        "quality",
+        "negative_mutation",
+        "lifecycle",
+        "loadability",
+        "overlay"
+      ],
+      "command": "[\"/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/campaign-mlx/target/release/memory-mlx-adapter\"]",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "id": "ims-7a13b889216592ce8ff7",
+      "inputs": [
+        {
+          "bytes": 38567765514,
+          "path": "/Volumes/Models/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/8080a4171f1c8b7fca6c30491eafbe6ffab754bf/q8",
+          "repository": "SceneWorks/qwen-image-mlx",
+          "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+          "role": "base",
+          "sha256": "9e8b06efeef59cff6a14b46a497af0e52835073b6a800d7d473e89737a29cb2d",
+          "variant": "q8"
+        }
+      ],
+      "kind": "physical_mlx",
+      "outputs": [
+        {
+          "bytes": 2050,
+          "path": "docs/calibration/sc-22738/ims-7a13b889216592ce8ff7.request.json",
+          "role": "request",
+          "sha256": "ccdc8a8b54b71af10c47bc9dbf3e9a360e3063bd58c8676e310001d24bdecee7"
+        },
+        {
+          "bytes": 3145728,
+          "path": "docs/calibration/sc-22738/implan-ee77dad220c0fbaa0a1e-selected_rgb-1024x1024-a50c3d1f094e6a038d146114d3518b5bdddf134ffa72cc736e0c5698672200d5.rgb",
+          "role": "selected_rgb",
+          "sha256": "a50c3d1f094e6a038d146114d3518b5bdddf134ffa72cc736e0c5698672200d5"
+        },
+        {
+          "bytes": 3145728,
+          "path": "docs/calibration/sc-22738/implan-ee77dad220c0fbaa0a1e-reference_rgb-1024x1024-a50c3d1f094e6a038d146114d3518b5bdddf134ffa72cc736e0c5698672200d5.rgb",
+          "role": "reference_rgb",
+          "sha256": "a50c3d1f094e6a038d146114d3518b5bdddf134ffa72cc736e0c5698672200d5"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "closureDigest": "45bd0786f98e59629a1bd3248c1f9351c15b5be5d1825104e7bb60d7b639a3b2",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f6b8294fde058384a16a8b8c901293a62f2172f75cd65d3a0848ac26e2756d59",
+          "revision": "8663394fd87869bad0563ed7bc6a0009f9c7d85c"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-22738/ims-7a13b889216592ce8ff7.log",
+      "stdoutSha256": "1673c6ae2928149520606b15636fcd306bee304779aee2170d28991fe1ca0c17",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q8"
+      }
+    }
+  ]
+}
