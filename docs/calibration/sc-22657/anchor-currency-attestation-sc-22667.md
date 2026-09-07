@@ -243,15 +243,27 @@ alters what is loaded or how much memory the peak path takes. Matrix after `--st
 both bounds now stamp at the pin's declared digest and classify `exceeded_current` in the catalog
 walk.
 
-**Deliberately not attested here.** The sc-22738 MLX campaign branch (`story/sc-22738-mlx-rerun`)
-carries six more bounds measured at `3b922bac` — `bernini` q4/q8, `bernini_image` bf16,
-`krea_realtime_14b` bf16/q4/q8 — and the running campaign may add `wan_2_2_i2v_14b` bf16. Their
-evidence records are not in this tree, so an entry for them could not be checked against a record
-(`measuredRevision` must equal the cited record's revision) and would be silently inert in
-`--stamp-anchors` until the campaign branch merges. The per-lane reading is the same as the two
-rows above (`bernini_image:mlx` shares the Bernini closure; `krea_realtime_14b:mlx` intersects the
-diff only in the four `mlx-gen-wan` files and `wan_i2v_memory.rs`, and its decode tiling is the
-untouched `pipeline.rs` `auto_tiling_budgeted_z16_quality_overlap`; `wan_2_2_i2v_14b:mlx` reaches
-`model.rs`'s `a14b_decode_tiling`, whose `image_to_video` arm is the unchanged `decode_tiling` call
-and whose new `tile_vae_decode` door the I2V route does not take) — but the entries belong beside
-those records, in the branch that carries them.
+**Deliberately not attested in PR #2782, attested in the campaign evidence PR.** At the time of
+PR #2782 the sc-22738 MLX campaign branch carried six more bounds measured at `3b922bac` —
+`bernini` q4/q8, `bernini_image` bf16, `krea_realtime_14b` bf16/q4/q8 — and the running campaign
+later added `wan_2_2_i2v_14b` bf16. Their evidence records were not in that tree, so an entry for
+them could not be checked against a record (`measuredRevision` must equal the cited record's
+revision) and would have been silently inert in `--stamp-anchors` until the campaign branch merged.
+The seven entries were written in the PR that assembles the campaign evidence (walk-1 ∪ rerun),
+beside the records they cite; each was re-read against `3b922bac..e16c6a55` rather than copied:
+
+| Bound | `closureFiles` ∩ `3b922bac..e16c6a55` | Reading |
+| --- | --- | --- |
+| `bernini:mlx` q4 (`exc-3ff33b42…`, 848x480x49, stop at 108,484,649,848 B) and q8 (`exc-086e91ed…`, 848x480x49, stop at 108,595,791,424 B) | the same six files as the bf16 row above | the bf16 reading verbatim, with one clause re-checked because it no longer follows from "bf16 is dense": `packed_transformer_bytes` is the Wan I2V contract walker's packed-tier pricing arm, and `mlx-gen-bernini/src` carries no reference to `wan_i2v_memory` (grep: 0), so the tier does not matter. |
+| `bernini_image:mlx` bf16 (`exc-55ce7578…`, 848x480x1, stop at 94,852,699,512 B) | the same six files — `bernini_image:mlx`'s closure is the same 117 files as `bernini:mlx`, differing only in its entry points | the bf16 reading verbatim. |
+| `krea_realtime_14b:mlx` bf16 (`exc-596a1ae3…`, stop at 109,921,567,216 B), q4 (`exc-c8c7f41a…`, 110,079,800,312 B), q8 (`exc-e3635aa6…`, 110,094,811,152 B), all 832x480x45 | `gen-core/wan_i2v_memory.rs`, `mlx-gen-wan/src/{config,i2v_memory_strategy,memory_strategy,model}.rs` | `mlx-gen-krea-realtime/src` has no reference to `wan_i2v_memory`, `Wan14b`, `load_t2v_14b` or `load_i2v_14b` (grep: 0); from `model.rs` it takes only `effective_te_quant` (t2v.rs:59, :995) and `descriptor_t2v_14b` (pipeline.rs:881), both untouched; its decode tiling is `pipeline.rs` `auto_tiling_budgeted_z16_quality_overlap` (t2v.rs:60, :292), not in the diff; `config.rs` only adds `LEGACY_INERT_CONFIG_KEYS` / `without_legacy_inert_keys` beside the `WanModelConfig` / `WanQuant` / `GuideScale` it imports; `memory_strategy.rs`'s `canonical_config` is reached only from the `wan2_2_ti2v_5b` `load` (model.rs:441); `i2v_memory_strategy.rs`'s single hunk starts at line 659, inside `mod tests`. |
+| `wan_2_2_i2v_14b:mlx` bf16 (`exc-8071db43…`, 1280x720x77, stop at 106,174,403,704 B) | the same five files | the route loads through `load_i2v_14b` (model.rs:2214) → `i2v_memory_strategy::prepare(…, MODEL_ID_I2V_14B)`, unchanged; `Wan14b::generate_impl`'s decode tiling is now selected by `a14b_decode_tiling`, and for an `image_to_video` request the arm taken is the same `i2v_memory_strategy::decode_tiling` call with or without `memory.tile_vae_decode`, while a request with no memory contract falls to `auto_tiling_budgeted_z16` at both revisions — identical for every I2V input; `load_t2v_14b`'s receipt seal is the T2V route; `packed_transformer_bytes` is the `(Denoise, Some(quant))` arm (wan_i2v_memory.rs:1429) and bf16 takes the dense arm; `canonical_config` is the TI2V-5B loader's. |
+
+None of the seven records names the phase the stop landed in (a bound record carries the ceiling,
+the observed footprint and the geometry), and the entries claim nothing about that. No re-measure
+was taken. After `--stamp-anchors` all nine sc-22738 bounds stamp at the pin's declared digest and
+classify `exceeded_current` in the catalog walk. The 49 walk-1 anchors measured at `563c44e1`
+(chroma, flux_dev/schnell, flux2_dev q4/q8, klein, ideogram, kolors, lens, qwen, sana) are
+**not** attested: `563c44e1..e16c6a55` is 25 inference files, a different and larger diff, and
+nobody has read it per closure. They keep their own measurement-revision keys and read stale in
+the probe tooling; the runtime treats them as measured either way.

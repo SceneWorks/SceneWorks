@@ -127,14 +127,138 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
         include_str!(
             "../../../docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json"
         ),
     ),
     (
+        "docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q8-mlx-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json",
@@ -177,6 +301,30 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!(
             "../../../docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json"
         ),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json",
@@ -299,6 +447,60 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json"),
     ),
@@ -391,202 +593,6 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     (
         "docs/generated/qwen-candle-five-rung-sc-15817.json",
         include_str!("../../../docs/generated/qwen-candle-five-rung-sc-15817.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/kolors-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/kolors-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/kolors-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/kolors-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json"),
     ),
 ];
 
@@ -3727,25 +3733,51 @@ mod tests {
     // carries any.
     // -------------------------------------------------------------------------------------
 
-    #[test]
-    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
-        let corpus = retained_corpus();
-        let measured: std::collections::BTreeSet<(String, &str, &str)> = corpus
+    /// Every `(tier, transformer variant, decoder)` cell that ANY packaged corpus measures for
+    /// LTX-2.5 on MLX as a completed run — the sc-18791 seed corpus and, since the sc-22738
+    /// campaign, the per-cell corpora under `docs/calibration/sc-22738/`. Derived from the
+    /// compiled-in list rather than pinned, so a campaign that lands a new pipeline cell (the
+    /// rerun's dev/conv bf16 and q4) extends the expectation instead of reddening it.
+    fn measured_ltx25_mlx_cells() -> std::collections::BTreeSet<(String, String, String)> {
+        PACKAGED_MEMORY_ANCHOR_SOURCES
             .iter()
+            .flat_map(|(_, raw)| {
+                let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
+                source["records"]
+                    .as_array()
+                    .map(|records| records.to_vec())
+                    .unwrap_or_default()
+            })
+            .filter(|record| {
+                record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                    && record["backend"].as_str() == Some("mlx")
+                    && record["status"].as_str() == Some("runtime_complete")
+            })
             .map(|record| {
                 (
-                    record.tier.clone(),
-                    transformer_variant_key(record.transformer_variant),
-                    decoder_key(record.decoder),
+                    record["target"]["tier"].as_str().expect("tier").to_owned(),
+                    record["target"]["transformerVariant"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
+                    record["target"]["decoder"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
+        let measured = measured_ltx25_mlx_cells();
         // Shape, not a frozen count: the corpus spans more than one variant and more than one
         // decoder, so this test cannot silently degenerate into a single-cell assertion.
         assert!(
             measured
                 .iter()
-                .map(|(_, variant, _)| *variant)
+                .map(|(_, variant, _)| variant.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
@@ -3754,7 +3786,7 @@ mod tests {
         assert!(
             measured
                 .iter()
-                .map(|(_, _, decoder)| *decoder)
+                .map(|(_, _, decoder)| decoder.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
@@ -3769,8 +3801,8 @@ mod tests {
                     anchor.model_id == "ltx_2_5"
                         && anchor.backend == AnchorBackend::Mlx
                         && anchor.tier == *tier
-                        && variant_key_opt(anchor.transformer_variant) == *variant_key
-                        && decoder_key_opt(anchor.decoder) == *decoder_key_str
+                        && variant_key_opt(anchor.transformer_variant) == variant_key.as_str()
+                        && decoder_key_opt(anchor.decoder) == decoder_key_str.as_str()
                 })
                 .count();
             assert_eq!(
@@ -3790,13 +3822,32 @@ mod tests {
             "the store must not carry an anchor for a pipeline cell the corpus never measured"
         );
         // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
-        // asks that the LTX-2.5 rows still come from the LTX-2.5 corpus and nothing more.
+        // asks that every LTX-2.5 row still comes from a packaged corpus that carries a completed
+        // LTX-2.5 MLX record — the seed corpus or a sc-22738 campaign corpus — and nothing more.
         for anchor in store()
             .anchors
             .iter()
             .filter(|anchor| anchor.model_id == "ltx_2_5")
         {
-            assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+            let cites_ltx25_corpus = PACKAGED_MEMORY_ANCHOR_SOURCES
+                .iter()
+                .find(|(path, _)| *path == anchor.source.path)
+                .map(|(_, raw)| {
+                    let source: serde_json::Value =
+                        serde_json::from_str(raw).expect("corpus parses");
+                    source["records"].as_array().is_some_and(|records| {
+                        records.iter().any(|record| {
+                            record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                                && record["backend"].as_str() == Some("mlx")
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            assert!(
+                cites_ltx25_corpus,
+                "{}: an LTX-2.5 anchor must cite a packaged corpus carrying LTX-2.5 MLX records",
+                anchor.id
+            );
         }
     }
 
@@ -4045,13 +4096,23 @@ mod tests {
                 Ltx25Decoder::Conv
             )
             .is_none());
-        // Measured at q4: dev/diffvae only.
+        // Measured at q4: dev/diffvae (seed corpus) and, since the sc-22738 rerun, dev/conv.
+        // Never measured at q4: either distilled combo.
         assert!(store()
             .anchor_for(
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q4",
                 Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::Conv
+            )
+            .is_some());
+        assert!(store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q4",
+                Ltx25TransformerVariant::Distilled,
                 Ltx25Decoder::Conv
             )
             .is_none());
@@ -4224,6 +4285,33 @@ mod tests {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
             doctored["anchors"][ltx][field] = value;
+            // The doctored identity may now name a cell another packaged anchor really occupies
+            // (the sc-22738 rerun anchored dev/conv at bf16, so relabelling the seed dev/diffvae
+            // row's decoder collides with it). Drop that other row so the ONLY defect the loader
+            // can see is the doctored row disagreeing with its own record — the duplicate-cell
+            // guard is a different invariant with its own test.
+            let identity = |anchor: &serde_json::Value| {
+                [
+                    "modelId",
+                    "backend",
+                    "tier",
+                    "transformerVariant",
+                    "decoder",
+                    "overlay",
+                    "referenceCount",
+                ]
+                .map(|key| anchor[key].clone())
+            };
+            let target = identity(&doctored["anchors"][ltx]);
+            let anchors = doctored["anchors"].as_array().expect("anchors").clone();
+            doctored["anchors"] = serde_json::Value::Array(
+                anchors
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, anchor)| *index == ltx || identity(anchor) != target)
+                    .map(|(_, anchor)| anchor)
+                    .collect(),
+            );
             let error = load_memory_anchors(&doctored.to_string())
                 .err()
                 .unwrap_or_else(|| panic!("{field} must bind to the source record"));
@@ -5434,10 +5522,23 @@ mod tests {
     /// residency is request-scoped even under eager materialization, and the window opened on a
     /// cold first request. `z_image_turbo` q4 was re-captured with the window opened above its
     /// materialized resident set and is now IN domain
-    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the five other MLX image
-    /// anchors keep the cold-request shape until their own re-capture and stay in this census.
+    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the other MLX image
+    /// anchors of that pre-campaign bundle keep the cold-request shape until their own re-capture
+    /// and stay in this census.
+    ///
+    /// CENSUS SCOPE (sc-22738): the cold-request rows are exactly the MLX image anchors still
+    /// cited from the pre-campaign bundle `docs/generated/memory-calibration-evidence.json`. The
+    /// sc-22738 campaign re-captured the MLX image catalog under the fixed adapter into
+    /// `docs/calibration/sc-22738/`, and those rows are NOT this census: some report the resident
+    /// set in their conditioning level (klein q4: 15.1 GB against a 21.7 GB set) and are in the
+    /// law's domain, others (sd3_5, mage_flow, chroma) legitimately hold their text encoder
+    /// staged below it. Selecting "every MLX image anchor but z_image_turbo" was a frozen census
+    /// of the five bundle rows and red the moment a re-captured anchor landed. The bundle rows
+    /// that a later campaign re-captures leave this census with their file, and an empty census
+    /// is the test retired, not a failure.
     #[test]
     fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
+        const PRE_CAMPAIGN_BUNDLE: &str = "docs/generated/memory-calibration-evidence.json";
         let packaged: Vec<&MemoryAnchor> = store()
             .anchors
             .iter()
@@ -5445,13 +5546,12 @@ mod tests {
                 anchor.backend == AnchorBackend::Mlx
                     && anchor.geometry.frames == 1
                     && anchor.model_id != "z_image_turbo"
+                    && anchor.source.path == PRE_CAMPAIGN_BUNDLE
             })
             .collect();
-        assert!(
-            packaged.len() >= 5,
-            "the packaged store carries the five cold-request MLX image anchors, found {}",
-            packaged.len()
-        );
+        if packaged.is_empty() {
+            return;
+        }
         for anchor in packaged {
             assert!(
                 !anchor.measured_regime.staged,
@@ -7801,12 +7901,19 @@ mod tests {
     /// non-windowed request from a windowed anchor. The direction is covered instead by
     /// `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta` (byte-for
     /// -byte application) and by the engine-agreement tests (which key the table itself).
+    ///
+    /// SCOPE (sc-22738): the validation is over the seed corpus's OWN topology, so the doctored
+    /// store keeps only the LTX-2.5 anchors that corpus produced. The sc-22738 rerun anchored
+    /// dev/conv at bf16 and q4 from its own corpora; left in, distilled/conv would derive from
+    /// dev/conv (a variant crossing priced zero) instead of dev/diffvae plus the decoder crossing,
+    /// and the nonzero-delta interrogation below would have nothing to interrogate.
     #[test]
     fn leave_one_out_sibling_delta_derivations_bracket_the_retained_distilled_records() {
         let mut doctored = store().clone();
         doctored.anchors.retain(|anchor| {
-            !(anchor.model_id == "ltx_2_5"
-                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled))
+            anchor.model_id != "ltx_2_5"
+                || (anchor.source.path == LTX25_CORPUS_PATH
+                    && anchor.transformer_variant != Some(Ltx25TransformerVariant::Distilled))
         });
         let corpus = retained_corpus();
         let distilled: Vec<_> = corpus

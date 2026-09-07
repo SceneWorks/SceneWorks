@@ -1,5 +1,5 @@
 {
-  "_comment": "Memory-anchor CURRENCY ATTESTATIONS (sc-22667, epic sc-22657). An anchor's currency key is normally derived at its own measurement revision (scripts/anchor-loader-closure.mjs --stamp-anchors), so a pin bump that touches the model's loader closure stales it. This repository's invalidation doctrine is two-gated: a differing closure digest is not evidence that memory behaviour changed - only a load-or-device-path change without a behaviour witness is. An entry here records, per anchor, that the closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only (contract pricing, byte walkers, facts, tests, docs) or is witnessed unchanged by a re-measure on the same hardware; `--stamp-anchors` then derives that anchor's key at `attestedRevision` and copies the attestation into the store's `source.currencyAttestation`. The attestation is BOUNDED: it names one revision, `measuredRevision` must still equal the cited record's inference revision, and a later pin bump that moves the loader closure past `attestedRevision` stales the anchor again until it is re-read (a new entry) or re-captured (delete the entry). Never write one for a load-or-device-path change without a measured witness - that is the false green the currency key exists to prevent. Reviewed narrative: docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md (c6d6a4db, sc-22667; extended to 8a65db2a by the sc-22723 feature pin, and to 563c44e1, 3b922bac and e16c6a55 by the sc-22738 terminal pins; the two sc-22738 measured lower bounds on file at e16c6a55 are attested from 3b922bac by the same reading - a bound is stamped by the same --stamp-anchors walk and held to the same two-gated doctrine, and its attestation claims only that the diff cannot change the peak the stop was reached at).",
+  "_comment": "Memory-anchor CURRENCY ATTESTATIONS (sc-22667, epic sc-22657). An anchor's currency key is normally derived at its own measurement revision (scripts/anchor-loader-closure.mjs --stamp-anchors), so a pin bump that touches the model's loader closure stales it. This repository's invalidation doctrine is two-gated: a differing closure digest is not evidence that memory behaviour changed - only a load-or-device-path change without a behaviour witness is. An entry here records, per anchor, that the closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only (contract pricing, byte walkers, facts, tests, docs) or is witnessed unchanged by a re-measure on the same hardware; `--stamp-anchors` then derives that anchor's key at `attestedRevision` and copies the attestation into the store's `source.currencyAttestation`. The attestation is BOUNDED: it names one revision, `measuredRevision` must still equal the cited record's inference revision, and a later pin bump that moves the loader closure past `attestedRevision` stales the anchor again until it is re-read (a new entry) or re-captured (delete the entry). Never write one for a load-or-device-path change without a measured witness - that is the false green the currency key exists to prevent. Reviewed narrative: docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md (c6d6a4db, sc-22667; extended to 8a65db2a by the sc-22723 feature pin, and to 563c44e1, 3b922bac and e16c6a55 by the sc-22738 terminal pins; the nine sc-22738 measured lower bounds on file at e16c6a55 are attested from 3b922bac by the same reading (two in PR #2782, seven in the campaign evidence PR that carries their records) - a bound is stamped by the same --stamp-anchors walk and held to the same two-gated doctrine, and its attestation claims only that the diff cannot change the peak the stop was reached at).",
   "attestations": [
     {
       "anchorId": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
@@ -478,6 +478,242 @@
         {
           "path": "crates/contracts/gen-core/src/residency.rs",
           "class": "accounting-only / instrumentation (Loading(TextEncoder)/Loading(Renderer) emission moved from ensure_warm_locked into the warm arms, gated on warm_needs_load; loads, order, devices, offload policy unchanged; 147 lines of new tests)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:bernini:mlx:q4:base:base:bernini-image-q4-mlx-dual-expert-ladder-v1:exc-3ff33b42be1429719760",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): bernini:q4:mlx (text_to_video) at 848x480x49 was stopped by the footprint watchdog at 108,484,649,848 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 6 files, read one by one. crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs is the generator body this bound was measured in and the only executed file that changed: generate_impl gains on_progress(Progress::Loading(LoadPhase::TextEncoder)) before the planner load and on_progress(Progress::Loading(LoadPhase::Renderer)) before the expert loads, plus one import (LoadPhase) and one weights-free unit test; no load, load order, device, dtype, decode tiling or allocation changed - two report events and nothing else. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. Bernini reaches none of the changed items: mlx-gen-bernini/src has no reference to wan_i2v_memory (grep: 0), does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy, uses neither Wan14b nor load_t2v_14b nor a14b_decode_tiling (its decode tiling is mlx_gen_bernini::memory_strategy::decode_tiling / TilingConfig::auto), and the mlx_gen_wan items it does import (WanBlockStream, WanTransformer, WanVae, RopeTable, config::WanModelConfig, convert::*, pipeline::denoise_moe / preprocess_* / video_decode_peak_bytes_for_vae_and_tiling, scheduler, text_encoder, model::Wan) are unchanged across the range. The z16 VAE decode tile budget - mlx-gen-wan/src/pipeline.rs auto_tiling_budgeted_z16* and mlx-gen/src/vae_tiling.rs - is not in the diff. Every other closure file (gen-core, mlx-gen, core-llm, the rest of mlx-gen-wan and mlx-gen-bernini) is unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker Bernini never calls - grep: 0 references in mlx-gen-bernini/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
+          "class": "accounting-only / instrumentation (two Progress::Loading emissions before the planner and expert loads, one import, one weights-free test; no load, order, device, tiling or allocation changed)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; WanModelConfig untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; Bernini does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling wraps Wan14b decode tiling; load_t2v_14b seals the T2V-A14B receipt; Bernini uses neither Wan14b nor either function, and the items it uses are untouched)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:bernini:mlx:q8:base:base:bernini-image-q8-mlx-dual-expert-ladder-v1:exc-086e91ed15c7415c4ffc",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): bernini:q8:mlx (text_to_video) at 848x480x49 was stopped by the footprint watchdog at 108,595,791,424 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 6 files, read one by one. crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs is the generator body this bound was measured in and the only executed file that changed: generate_impl gains on_progress(Progress::Loading(LoadPhase::TextEncoder)) before the planner load and on_progress(Progress::Loading(LoadPhase::Renderer)) before the expert loads, plus one import (LoadPhase) and one weights-free unit test; no load, load order, device, dtype, decode tiling or allocation changed - two report events and nothing else. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. Bernini reaches none of the changed items: mlx-gen-bernini/src has no reference to wan_i2v_memory (grep: 0), does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy, uses neither Wan14b nor load_t2v_14b nor a14b_decode_tiling (its decode tiling is mlx_gen_bernini::memory_strategy::decode_tiling / TilingConfig::auto), and the mlx_gen_wan items it does import (WanBlockStream, WanTransformer, WanVae, RopeTable, config::WanModelConfig, convert::*, pipeline::denoise_moe / preprocess_* / video_decode_peak_bytes_for_vae_and_tiling, scheduler, text_encoder, model::Wan) are unchanged across the range. The z16 VAE decode tile budget - mlx-gen-wan/src/pipeline.rs auto_tiling_budgeted_z16* and mlx-gen/src/vae_tiling.rs - is not in the diff. Every other closure file (gen-core, mlx-gen, core-llm, the rest of mlx-gen-wan and mlx-gen-bernini) is unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker Bernini never calls - grep: 0 references in mlx-gen-bernini/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
+          "class": "accounting-only / instrumentation (two Progress::Loading emissions before the planner and expert loads, one import, one weights-free test; no load, order, device, tiling or allocation changed)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; WanModelConfig untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; Bernini does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling wraps Wan14b decode tiling; load_t2v_14b seals the T2V-A14B receipt; Bernini uses neither Wan14b nor either function, and the items it uses are untouched)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:bernini_image:mlx:bf16:base:base:bernini-image-bf16-mlx-dual-expert-ladder-v1:exc-55ce757827be31846a13",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): bernini_image:bf16:mlx (text_to_image; the bernini_image:mlx closure is the same 117 files as bernini:mlx, differing only in its entry points) at 848x480x1 was stopped by the footprint watchdog at 94,852,699,512 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 6 files, read one by one. crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs is the generator body this bound was measured in and the only executed file that changed: generate_impl gains on_progress(Progress::Loading(LoadPhase::TextEncoder)) before the planner load and on_progress(Progress::Loading(LoadPhase::Renderer)) before the expert loads, plus one import (LoadPhase) and one weights-free unit test; no load, load order, device, dtype, decode tiling or allocation changed - two report events and nothing else. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. Bernini reaches none of the changed items: mlx-gen-bernini/src has no reference to wan_i2v_memory (grep: 0), does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy, uses neither Wan14b nor load_t2v_14b nor a14b_decode_tiling (its decode tiling is mlx_gen_bernini::memory_strategy::decode_tiling / TilingConfig::auto), and the mlx_gen_wan items it does import (WanBlockStream, WanTransformer, WanVae, RopeTable, config::WanModelConfig, convert::*, pipeline::denoise_moe / preprocess_* / video_decode_peak_bytes_for_vae_and_tiling, scheduler, text_encoder, model::Wan) are unchanged across the range. The z16 VAE decode tile budget - mlx-gen-wan/src/pipeline.rs auto_tiling_budgeted_z16* and mlx-gen/src/vae_tiling.rs - is not in the diff. Every other closure file (gen-core, mlx-gen, core-llm, the rest of mlx-gen-wan and mlx-gen-bernini) is unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker Bernini never calls - grep: 0 references in mlx-gen-bernini/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
+          "class": "accounting-only / instrumentation (two Progress::Loading emissions before the planner and expert loads, one import, one weights-free test; no load, order, device, tiling or allocation changed)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; WanModelConfig untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; Bernini does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling wraps Wan14b decode tiling; load_t2v_14b seals the T2V-A14B receipt; Bernini uses neither Wan14b nor either function, and the items it uses are untouched)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:krea_realtime_14b:mlx:bf16:base:base:krea-realtime-14b-bf16-mlx-resident-ladder-v1:exc-596a1ae39ba4e61551cd",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): krea_realtime_14b:bf16:mlx (text_to_video) at 832x480x45 was stopped by the footprint watchdog at 109,921,567,216 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 5 files, read one by one. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. krea_realtime_14b reaches none of the changed items: mlx-gen-krea-realtime/src has no reference to wan_i2v_memory, Wan14b, load_t2v_14b or load_i2v_14b (grep: 0); from mlx_gen_wan::model it uses only effective_te_quant (t2v.rs:59, :995) and descriptor_t2v_14b (pipeline.rs:881), both untouched; its decode tiling is mlx_gen_wan::pipeline::auto_tiling_budgeted_z16_quality_overlap (t2v.rs:60, :292), and pipeline.rs is not in the diff; from config.rs it imports WanModelConfig / WanQuant / GuideScale, which the diff does not touch; it does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy. Its own crate, gen-core residency.rs aside (the instrumentation-only move of two Progress::Loading emissions recorded for the anchors at this pin, and not in this closure's intersection), and every other closure file are unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker krea_realtime_14b never calls - grep: 0 references in mlx-gen-krea-realtime/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; the WanModelConfig / WanQuant / GuideScale items krea-realtime imports are untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; krea-realtime does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling and load_t2v_14b are Wan14b's own; krea-realtime takes only effective_te_quant and descriptor_t2v_14b from this file, both untouched, and tiles its decode through the untouched pipeline.rs auto_tiling_budgeted_z16_quality_overlap)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:krea_realtime_14b:mlx:q4:base:base:krea-realtime-14b-q4-mlx-resident-ladder-v1:exc-c8c7f41ad2c9c1f42023",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): krea_realtime_14b:q4:mlx (text_to_video) at 832x480x45 was stopped by the footprint watchdog at 110,079,800,312 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 5 files, read one by one. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. krea_realtime_14b reaches none of the changed items: mlx-gen-krea-realtime/src has no reference to wan_i2v_memory, Wan14b, load_t2v_14b or load_i2v_14b (grep: 0); from mlx_gen_wan::model it uses only effective_te_quant (t2v.rs:59, :995) and descriptor_t2v_14b (pipeline.rs:881), both untouched; its decode tiling is mlx_gen_wan::pipeline::auto_tiling_budgeted_z16_quality_overlap (t2v.rs:60, :292), and pipeline.rs is not in the diff; from config.rs it imports WanModelConfig / WanQuant / GuideScale, which the diff does not touch; it does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy. Its own crate, gen-core residency.rs aside (the instrumentation-only move of two Progress::Loading emissions recorded for the anchors at this pin, and not in this closure's intersection), and every other closure file are unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker krea_realtime_14b never calls - grep: 0 references in mlx-gen-krea-realtime/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; the WanModelConfig / WanQuant / GuideScale items krea-realtime imports are untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; krea-realtime does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling and load_t2v_14b are Wan14b's own; krea-realtime takes only effective_te_quant and descriptor_t2v_14b from this file, both untouched, and tiles its decode through the untouched pipeline.rs auto_tiling_budgeted_z16_quality_overlap)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:krea_realtime_14b:mlx:q8:base:base:krea-realtime-14b-q8-mlx-resident-ladder-v1:exc-e3635aa610448bc8d98a",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): krea_realtime_14b:q8:mlx (text_to_video) at 832x480x45 was stopped by the footprint watchdog at 110,094,811,152 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 5 files, read one by one. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. krea_realtime_14b reaches none of the changed items: mlx-gen-krea-realtime/src has no reference to wan_i2v_memory, Wan14b, load_t2v_14b or load_i2v_14b (grep: 0); from mlx_gen_wan::model it uses only effective_te_quant (t2v.rs:59, :995) and descriptor_t2v_14b (pipeline.rs:881), both untouched; its decode tiling is mlx_gen_wan::pipeline::auto_tiling_budgeted_z16_quality_overlap (t2v.rs:60, :292), and pipeline.rs is not in the diff; from config.rs it imports WanModelConfig / WanQuant / GuideScale, which the diff does not touch; it does not link mlx_gen_wan::memory_strategy or i2v_memory_strategy. Its own crate, gen-core residency.rs aside (the instrumentation-only move of two Progress::Loading emissions recorded for the anchors at this pin, and not in this closure's intersection), and every other closure file are unchanged.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan I2V contract walker krea_realtime_14b never calls - grep: 0 references in mlx-gen-krea-realtime/src)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity; the WanModelConfig / WanQuant / GuideScale items krea-realtime imports are untouched)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`; krea-realtime does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (a14b_decode_tiling and load_t2v_14b are Wan14b's own; krea-realtime takes only effective_te_quant and descriptor_t2v_14b from this file, both untouched, and tiles its decode through the untouched pipeline.rs auto_tiling_budgeted_z16_quality_overlap)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:wan_2_2_i2v_14b:mlx:bf16:base:base:sc-22736-wan2-2-i2v-a14b-mlx-dense-v1:exc-8071db4312d55971c74b",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): wan_2_2_i2v_14b:bf16:mlx (image_to_video) at 1280x720x77 was stopped by the footprint watchdog at 106,174,403,704 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 5 files, read one by one. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. The wan_2_2_i2v_14b route loads through load_i2v_14b (model.rs:2214), which calls i2v_memory_strategy::prepare(spec, MODEL_ID_I2V_14B) - unchanged, since that file's diff is tests only - and renders through Wan14b::generate_impl, whose decode tiling is now selected by a14b_decode_tiling: for an image_to_video request the arm taken is the same i2v_memory_strategy::decode_tiling call whether or not the request carries memory.tile_vae_decode, and a request without a memory contract falls to auto_tiling_budgeted_z16 at both revisions, so the selection is identical for every I2V input. load_t2v_14b's receipt seal is the T2V route. packed_transformer_bytes prices packed tiers only and this is the dense bf16 tier (tier.quant is None, the dense arm, unchanged). canonical_config is the TI2V-5B loader's. The z16 decode tile budget itself (pipeline.rs auto_tiling_budgeted_z16*, mlx-gen/src/vae_tiling.rs) is not in the diff.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree).",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in the (Denoise, Some(quant)) arm of packed_transformer_bytes plus test; bf16 is the dense tier and takes the unchanged dense arm)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only (the I2V-14B loader's prepare and decode_tiling are byte-identical)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; reached only from the wan2_2_ti2v_5b `load`, not from load_i2v_14b)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only / behaviour-preserving wrapper for this bound (a14b_decode_tiling selects the same i2v_memory_strategy::decode_tiling call for every image_to_video request that the inline selection did; load_t2v_14b's receipt seal is the T2V route)"
         }
       ]
     }
