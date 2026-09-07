@@ -1808,6 +1808,172 @@ pub(crate) fn packaged_video_evidence_covers_request(
         contract,
         request,
     )
+    // A MEASURED LOWER BOUND is sealed packaged evidence too (sc-22738). It prices nothing, so it
+    // adds no candidate to the ladder — but it is the reason the worker must pay for the live
+    // budget probe, and the reason this gate must not abstain. Bernini bf16 MLX is the case that
+    // forced it: `bernini:bf16:mlx` carries no anchor and no curve, so this predicate answered
+    // false, the caller never probed the budget, admission returned `default()` — abstain — and an
+    // 848x480x49 request the host had already been unable to finish was admitted again. With the
+    // bound packaged, the request reaches [`exceeded_bound_refusal`] with a real budget in hand.
+    //
+    // THE SIDE EFFECT, NAMED: on a host the bound does NOT refuse, the request now also reaches the
+    // ladder instead of abstaining, so the weights-plus-headroom floor gets a say where it
+    // previously had none. That is the correct posture for a cell known to run large — and it is
+    // bounded in practice, because a host big enough to carry the bound clears that floor with room
+    // to spare, and `refusal_is_a_margin_artifact` still suppresses a floor refusal inside the
+    // estimate band. It applies ONLY to a coordinate at or above a stopped geometry on the stopped
+    // identity: every other request on the same model is untouched, including the reference-carrying
+    // Bernini surfaces, whose reference count no reference-free bound matches.
+    || binding_exceeded_bound(contract, request).is_some()
+}
+
+/// The anchor store the bound lookup reads: the packaged one, or a fixture a focused test has
+/// injected. Same shape as `vram_gate::tests::with_injected_anchor_store`, and the reason is the
+/// same: the refusal must be graded through its PRODUCTION path, on a store whose contents the
+/// test states, rather than through a parallel copy of the predicate.
+fn exceeded_bound_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+    #[cfg(test)]
+    if let Some(store) = INJECTED_EXCEEDED_BOUND_STORE.with(std::cell::Cell::get) {
+        return Some(store);
+    }
+    sceneworks_core::memory_anchor::packaged_memory_anchors()
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_EXCEEDED_BOUND_STORE: std::cell::Cell<
+        Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam (sc-22738): run `body` with `store` standing in for the packaged anchor store
+/// wherever the measured-lower-bound lookup reads it.
+#[cfg(test)]
+pub(crate) fn with_injected_exceeded_bound_store<T>(
+    store: sceneworks_core::memory_anchor::MemoryAnchorStore,
+    body: impl FnOnce() -> T,
+) -> T {
+    let leaked: &'static _ = Box::leak(Box::new(store));
+    INJECTED_EXCEEDED_BOUND_STORE.with(|cell| cell.set(Some(leaked)));
+    let outcome = body();
+    INJECTED_EXCEEDED_BOUND_STORE.with(|cell| cell.set(None));
+    outcome
+}
+
+/// The binding measured lower bound for this request, or `None` (sc-22738).
+///
+/// GENERIC BY CONSTRUCTION. Nothing here names a model: the identity is the same conjunction every
+/// anchor lookup uses, so any cell a footprint hard stop has ever bounded refuses through this one
+/// path. Bernini is the first occupant, not a special case.
+fn binding_exceeded_bound<'a>(
+    contract: &MemoryProviderContract,
+    request: &VideoAdmissionInputs<'a>,
+) -> Option<&'static sceneworks_core::memory_anchor::ExceededBound> {
+    use sceneworks_core::memory_anchor::ExceededBoundQuery;
+
+    let backend = match request.lane {
+        VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+        VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
+    };
+    exceeded_bound_store()?.binding_exceeded_bound(
+        ExceededBoundQuery {
+            model_id: request.model_id,
+            // Production has resolved both, so it states both: see `ExceededBoundQuery`.
+            model_family: Some(request.model_family),
+            route: Some(request.route),
+            provider: contract.provider_id.as_str(),
+            backend,
+            tier: crate::mlx_fit_gate::plan_tier_key(request.tier),
+            transformer_variant: request.transformer_variant,
+            decoder: request.decoder,
+            mode: request.mode,
+            overlay: request.overlay,
+            reference_count: request.reference_count,
+            width: request.width,
+            height: request.height,
+            frames: request.frames,
+        },
+        sceneworks_core::memory_anchor::packaged_anchor_loader_closures(),
+    )
+}
+
+/// The pre-load refusal a measured lower bound owns (sc-22738, epic 22723 E4), or `None` when the
+/// host can carry the bound.
+///
+/// WHY THIS RUNS AHEAD OF THE LADDER, AND WHY IT IS NOT A LADDER CANDIDATE. Every other candidate
+/// in this module is an ESTIMATE — a fitted curve, an anchor derivation, a weights-plus-headroom
+/// floor — graded behind an estimate margin and subject to
+/// [`refusal_is_a_margin_artifact`]'s suppression, which exists precisely so an estimate cannot
+/// manufacture a refusal inside its own error band. A bound is not an estimate: it is a footprint
+/// a process on a real host actually reached before it had to be killed. There is no error band to
+/// forgive and no margin artifact to suppress, so it decides on its own terms, before any of that
+/// machinery runs, and an ANALYTIC estimate for the same cell is simply outranked — the derivation
+/// never gets to price a request the measurement has already ruled out.
+///
+/// It is also, deliberately, the ONLY thing a bound does. It widens no envelope, feeds no
+/// derivation and publishes no peak: an inequality is not a decomposition, and pretending otherwise
+/// would put a number the measurement never produced into the estimate path.
+fn exceeded_bound_refusal(
+    contract: &MemoryProviderContract,
+    request: &VideoAdmissionInputs<'_>,
+    runtime: VideoRuntimeMemoryState,
+) -> Option<String> {
+    let bound = binding_exceeded_bound(contract, request)?;
+    let budget = runtime.budget;
+    // The byte-exact form of `Budget::effective_gb`: the live pool plus what is reclaimable, less
+    // the operational reserve, capped by the physical ceiling less that same reserve. Stated in
+    // bytes rather than routed through the f64 GiB form because the comparison below is against a
+    // measured byte count, and a bound must not be forgiven by a rounding step.
+    let available = budget.total_bytes.saturating_sub(budget.committed_bytes);
+    let effective_bytes = available
+        .saturating_add(budget.reclaimable_bytes)
+        .saturating_sub(budget.reserved_headroom_bytes)
+        .min(
+            budget
+                .total_bytes
+                .saturating_sub(budget.reserved_headroom_bytes),
+        );
+    let required_bytes = bound.required_bytes(request.headroom_bytes);
+    if !bound.refuses_host(budget.total_bytes, effective_bytes, request.headroom_bytes) {
+        return None;
+    }
+    tracing::warn!(
+        event = "video_memory_exceeded_bound_refusal",
+        route = request.route,
+        backend = request.lane.as_key(),
+        bound = %bound.id,
+        observed_footprint_bytes = bound.observed_footprint_bytes,
+        headroom_bytes = request.headroom_bytes,
+        required_bytes,
+        effective_bytes,
+        width = request.width,
+        height = request.height,
+        frames = request.frames,
+        "refusing before load: this coordinate has a measured lower bound this host cannot carry"
+    );
+    let gib = |bytes: u64| bytes as f64 / sceneworks_core::memory_anchor::BYTES_PER_GIB;
+    Some(format!(
+        "{} at {}x{}x{} has already been measured as too large for a machine this size. A run of \
+         this exact model, tier and clip shape reached {:.1} GiB of memory at {}x{}x{} on a \
+         {:.0} GiB host without finishing, and had to be stopped to keep that machine alive ({}); \
+         it needs at least {:.1} GiB, and this host has {:.0} GiB with {:.1} GiB free. That is a \
+         measurement rather than an estimate, so the render is refused before it loads instead of \
+         after it has taken the machine down. Reduce the resolution or the clip length, or run it \
+         on a larger machine.",
+        request.route,
+        request.width,
+        request.height,
+        request.frames,
+        gib(bound.observed_footprint_bytes),
+        bound.geometry.width,
+        bound.geometry.height,
+        bound.geometry.frames,
+        gib(bound.host_memory_bytes),
+        bound.id,
+        gib(required_bytes),
+        gib(budget.total_bytes),
+        gib(effective_bytes),
+    ))
 }
 
 /// Whether the packaged anchor store carries the measured anchor this request's
@@ -1926,6 +2092,17 @@ fn admit_video_generation_with_curves_and_profiles(
     let Some(contract) = contract else {
         return VideoAdmissionOutcome::default();
     };
+    // sc-22738: a measured lower bound this host cannot carry refuses HERE — with the contract and
+    // the live budget resolved, and before a single estimate is priced. See
+    // [`exceeded_bound_refusal`] for why a measurement decides ahead of the ladder rather than
+    // inside it.
+    if let Some(refusal) = exceeded_bound_refusal(contract, &request, runtime) {
+        return VideoAdmissionOutcome {
+            memory: None,
+            context: None,
+            refusal: Some(refusal),
+        };
+    }
     // The request must have one fully matching fitted curve before any estimate/floor candidate is
     // allowed into the selector. This replaces the historical exact-T2V predicate: a future mode
     // is admitted by adding its own sealed curve, not by weakening a mode/reference/FPS `if`.

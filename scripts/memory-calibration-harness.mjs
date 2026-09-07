@@ -555,6 +555,29 @@ export function recordId(record) {
   }).slice(0, 20)}`;
 }
 
+/**
+ * One exceeded bound's content-derived id (sc-22738). Same construction and same exclusions as
+ * [`recordId`] — the derived `inference.closureDigest` is a pure function of terms already inside
+ * the identity — plus the two figures that ARE the bound's claim. A second hard stop of the same
+ * cell at the same geometry on the same host that reaches a different footprint is a DIFFERENT
+ * bound and gets a different id, because the inequality it states is different.
+ */
+export function exceededBoundId(bound) {
+  return `exc-${digest({
+    harnessVersion: bound.harnessVersion,
+    repositories: repositoriesIdentity(bound.repositories),
+    backend: bound.backend,
+    loadShape: bound.loadShape,
+    hardware: bound.hardware,
+    artifact: bound.artifact,
+    target: bound.target,
+    referenceCount: bound.referenceCount,
+    observedFootprintBytes: bound.observedFootprintBytes,
+    ceilingBytes: bound.ceilingBytes,
+    calibrationFingerprint: bound.calibrationFingerprint,
+  }).slice(0, 20)}`;
+}
+
 function validateEngagedRungs(strategy, label) {
   const engaged = strategy.engagedRungs;
   if (!Array.isArray(engaged) || engaged.length === 0) {
@@ -1114,7 +1137,38 @@ export function validateBundle(bundle) {
       }
     }
   }
+  const boundIds = new Set();
+  for (const bound of bundle.exceededBounds ?? []) {
+    validateExceededBound(bound);
+    if (boundIds.has(bound.id)) fail(`duplicate exceeded bound ${bound.id}`);
+    boundIds.add(bound.id);
+  }
   return bundle;
+}
+
+/**
+ * One exceeded bound's invariants beyond the schema's shape (sc-22738).
+ *
+ * All three are about the inequality being a real one. A footprint under the ceiling did not come
+ * from a hard stop; a footprint above the whole host is not a reading of that host; and an id that
+ * is not the content digest of the bound's own identity would let two different measurements share
+ * a row. The Rust loader re-checks the first two against this very file, so a bundle that passes
+ * here and a store row that passes there cannot disagree.
+ */
+export function validateExceededBound(bound) {
+  object(bound, "exceeded bound");
+  if (bound.observedFootprintBytes < bound.ceilingBytes) {
+    fail(
+      `${bound.id}: observed footprint ${bound.observedFootprintBytes} is under the hard-stop ` +
+        `ceiling ${bound.ceilingBytes} — that is not a run the guard stopped`,
+    );
+  }
+  if (bound.observedFootprintBytes > bound.hardware.memoryBytes) {
+    fail(`${bound.id}: observed footprint exceeds the whole capture host's memory`);
+  }
+  if (bound.id !== exceededBoundId(bound)) {
+    fail(`${bound.id}: id is not the digest of its own identity (expected ${exceededBoundId(bound)})`);
+  }
 }
 
 function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy) {
@@ -1925,6 +1979,168 @@ export async function captureAnchor({ plan, anchorKey, ...rest }) {
 }
 
 /**
+ * The `repositories` block every capture and every bound carries: both HEADs, both dirty flags, and
+ * the SceneWorks matrix source revision. Shared by [`capturePlannedCase`] and
+ * [`recordExceededBound`] so a bound's provenance is assembled by the same code a record's is.
+ */
+async function probeRepositoryState({ sceneWorksRepo, inferenceRepo }) {
+  const gitState = async (repo, sceneWorks = false) => ({
+    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
+    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
+    ...(sceneWorks
+      ? {
+          matrixSourceRevision: JSON.parse(
+            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
+          ).generatedFrom.sceneWorksRevision,
+        }
+      : {}),
+  });
+  return {
+    sceneWorks: await gitState(sceneWorksRepo, true),
+    inference: await gitState(inferenceRepo),
+  };
+}
+
+/** The lane closure digest resolver both capture arms stamp their `repositories.inference` with. */
+function laneClosureDigestFor({ sceneWorksRepo, inferenceRepo }) {
+  return async (laneKey, revision) => {
+    const declarations = JSON.parse(
+      await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
+    );
+    const crateDir = declarations.providers?.[laneKey]?.crate;
+    // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
+    // conservative answer: the record carries no currency term, so it can never read `current`
+    // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
+    // it later.
+    if (!crateDir) return undefined;
+    return providerClosureDigest({ repo: inferenceRepo, revision, provider: laneKey, crateDir })
+      .digest;
+  };
+}
+
+/**
+ * The guard's verdict, read off its own event log (sc-22738).
+ *
+ * The `hard_stop` reason is the authority for BOTH figures — the guard spells them into it as
+ * `physical_footprint_at_or_above_<ceiling>:observed_<footprint>` at the instant it fired — and the
+ * final `sample` is cross-checked against it, so a truncated or interleaved log cannot yield a
+ * bound whose footprint no sample ever saw. A log with no `hard_stop` returns `null`: the capture
+ * failed for some other reason, and inventing a bound from its last sample would state an
+ * inequality nothing measured.
+ */
+export function parseWatchdogHardStop(body) {
+  let stop = null;
+  let lastSample = null;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event === "sample") lastSample = event;
+    if (event.event === "hard_stop" && !stop) stop = event;
+  }
+  if (!stop) return null;
+  const match = /^physical_footprint_at_or_above_(\d+):observed_(\d+)$/.exec(String(stop.reason));
+  if (!match) {
+    fail(
+      `watchdog hard stop ${JSON.stringify(stop.reason)} is not a physical-footprint stop; only a ` +
+        "footprint stop states a lower bound on the render's peak",
+    );
+  }
+  const ceilingBytes = Number(match[1]);
+  const observedFootprintBytes = Number(match[2]);
+  if (!Number.isSafeInteger(ceilingBytes) || !Number.isSafeInteger(observedFootprintBytes)) {
+    fail("watchdog hard stop states figures outside the safe integer range");
+  }
+  if (lastSample && lastSample.physicalFootprintBytes !== observedFootprintBytes) {
+    fail(
+      `watchdog hard stop claims footprint ${observedFootprintBytes} but its last sample read ` +
+        `${lastSample.physicalFootprintBytes}`,
+    );
+  }
+  return { reason: stop.reason, ceilingBytes, observedFootprintBytes };
+}
+
+/**
+ * Turn ONE footprint hard stop into retained evidence (sc-22738, epic 22723 E4/E5).
+ *
+ * Before this arm existed a hard stop stamped NOTHING. The capture process group was killed, the
+ * runner logged `capture_failed`, and the single fact the run had established — that this cell's
+ * peak is at least the footprint the guard saw — was thrown away, leaving production admitting the
+ * request it had just had to kill. The bundle this writes goes through the same `check` → `ingest`
+ * → extract → stamp → matrix path a completed capture does, so a bound is stamped, packaged and
+ * committed by the machinery that already exists rather than by a second one.
+ *
+ * WHAT THIS ARM DOES NOT DO: it does not run the provider's render. It probes the adapter for the
+ * host's hardware — the same `action: "probe"` a capture takes first — reads the guard's event log,
+ * and binds the artifact the runner had set in the environment. There is no fragment to trust,
+ * because there is no completed run; every field is either the plan's, the repositories', the
+ * probe's, the runner's artifact binding, or the guard's.
+ */
+export async function recordExceededBound({
+  plan, anchorKey, providerCommand, sceneWorksRepo, inferenceRepo, watchdogEventFile, artifact,
+  closureDigestFor = null, executeProvider = execute, now = () => new Date(),
+}) {
+  if (!Array.isArray(providerCommand) || !providerCommand.length) {
+    fail("provider command must be a JSON argv array");
+  }
+  const planned = planAnchor(plan, anchorKey);
+  object(artifact, "artifact");
+  for (const field of ["repository", "resolvedRevision", "variant"]) {
+    text(artifact[field], `artifact.${field}`);
+  }
+  const eventBody = await readFile(watchdogEventFile, "utf8");
+  const stop = parseWatchdogHardStop(eventBody);
+  if (!stop) fail(`${watchdogEventFile} records no watchdog hard stop`);
+  const repositories = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  const probeOutput = await executeProvider(
+    providerCommand[0],
+    providerCommand.slice(1),
+    canonicalJson({ action: "probe", repositories }),
+  );
+  const probe = JSON.parse(probeOutput);
+  const after = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during the probe");
+  const lane = `${planned.backend}:${planned.target.provider}`;
+  const resolveDigest = closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const digestForLane = planned.evidenceScope === "authoritative"
+    ? await resolveDigest(lane, repositories.inference.revision)
+    : undefined;
+  const bound = {
+    logicalCaseId: planned.logicalCaseId,
+    backend: planned.backend,
+    // The plan's declared shape, not a provider attestation: the run was killed before the adapter
+    // could attest anything, and the load shape is what the capture ASKED for. It is stated rather
+    // than omitted because the bound is keyed on it — a deferred-materialization run reaches a
+    // different footprint than an eager one, and neither may borrow the other's inequality.
+    loadShape: planned.loadShape,
+    repositories: digestForLane
+      ? { ...repositories, inference: { ...repositories.inference, closureDigest: digestForLane } }
+      : repositories,
+    hardware: probe.hardware,
+    artifact,
+    target: planned.target,
+    // The anchor plan has no reference axis at all (packages/schemas/memory-anchor-plan.schema.json
+    // states geometry as width/height/batch/frames), so every anchor capture — and therefore every
+    // bound one can produce — is reference-free. Stated as a field rather than assumed because the
+    // store keys on it: a reference-carrying request must not inherit a reference-free bound.
+    referenceCount: 0,
+    observedFootprintBytes: stop.observedFootprintBytes,
+    ceilingBytes: stop.ceilingBytes,
+    reason: stop.reason,
+    eventFileSha256: createHash("sha256").update(eventBody).digest("hex"),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    capturedAt: now().toISOString(),
+    harnessVersion: HARNESS_VERSION,
+  };
+  const bundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    records: [],
+    exceededBounds: [{ id: exceededBoundId(bound), ...bound }],
+  };
+  return validateBundle(bundle);
+}
+
+/**
  * The capture primitive: one planned case in, one single-record bundle out.
  *
  * `captureAnchor` is the only production caller and derives its `planned` from the anchor plan. This
@@ -1966,17 +2182,6 @@ export async function capturePlannedCase({
     }
   }
   object(planned, "planned case");
-  const gitState = async (repo, sceneWorks = false) => ({
-    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
-    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
-    ...(sceneWorks
-      ? {
-          matrixSourceRevision: JSON.parse(
-            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
-          ).generatedFrom.sceneWorksRevision,
-        }
-      : {}),
-  });
   // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
   // live inference checkout, so the captured half of the currency comparison is derived here rather
   // than backfilled later. The LANE decides which closure is measured, and a lane is
@@ -1984,28 +2189,8 @@ export async function capturePlannedCase({
   // `evidenceSemantics` both use.
   const lane = `${planned.backend}:${planned.target.provider}`;
   const closureDigest =
-    closureDigestFor ??
-    (async (laneKey, revision) => {
-      const declarations = JSON.parse(
-        await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
-      );
-      const crateDir = declarations.providers?.[laneKey]?.crate;
-      // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
-      // conservative answer: the record carries no currency term, so it can never read `current`
-      // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
-      // it later.
-      if (!crateDir) return undefined;
-      return providerClosureDigest({
-        repo: inferenceRepo,
-        revision,
-        provider: laneKey,
-        crateDir,
-      }).digest;
-    });
-  const probeRepositories = async () => ({
-    sceneWorks: await gitState(sceneWorksRepo, true),
-    inference: await gitState(inferenceRepo),
-  });
+    closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const probeRepositories = () => probeRepositoryState({ sceneWorksRepo, inferenceRepo });
   // The stability probe deliberately carries NO closure digest: the digest is a pure function of
   // (lane, inference revision), and the revision is compared here, so hashing it again would only
   // re-derive a value that cannot move while `revision` holds still.
@@ -2338,7 +2523,18 @@ async function main() {
       ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
     }));
   }
-  fail("usage: capture|check|ingest|plan (see docs/memory-calibration-harness.md)");
+  if (command === "record-exceeded") {
+    return void await atomicWrite(outputPath(), await recordExceededBound({
+      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+      anchorKey: value("--anchor"),
+      providerCommand: JSON.parse(value("--provider-command")),
+      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
+      inferenceRepo: path.resolve(value("--inference-repo")),
+      watchdogEventFile: path.resolve(value("--watchdog-events") ?? fail("--watchdog-events is required")),
+      artifact: JSON.parse(value("--artifact") ?? fail("--artifact is required")),
+    }));
+  }
+  fail("usage: capture|record-exceeded|check|ingest|plan (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

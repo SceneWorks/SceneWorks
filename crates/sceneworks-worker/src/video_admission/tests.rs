@@ -3952,6 +3952,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
         }],
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        exceeded_bounds: Vec::new(),
     }
 }
 
@@ -4343,5 +4344,182 @@ fn a_contract_stating_no_architecture_facts_yields_the_default_core_facts() {
     assert_eq!(
         architecture_facts_from_contract(&compatibility),
         sceneworks_core::memory_anchor::ArchitectureFacts::default()
+    );
+}
+
+// --------------------------------------------------------------------------------------------
+// Measured lower bounds (sc-22738, epic 22723 E4)
+// --------------------------------------------------------------------------------------------
+
+/// The fixture store carrying tonight's Bernini stop, and a contract whose provider it names.
+fn bernini_bound_store(
+    observed_footprint_bytes: u64,
+) -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    use sceneworks_core::memory_anchor as anchor;
+    anchor::MemoryAnchorStore {
+        schema_version: anchor::MEMORY_ANCHOR_SCHEMA_VERSION,
+        anchors: Vec::new(),
+        analytic_only: Vec::new(),
+        component_deltas: Vec::new(),
+        exceeded_bounds: vec![anchor::ExceededBound {
+            id: "exceeded:bernini:mlx:q8:base:base:fp:exc-0".to_owned(),
+            model_id: "bernini".to_owned(),
+            model_family: "bernini".to_owned(),
+            route: "bernini".to_owned(),
+            provider: "bernini".to_owned(),
+            backend: anchor::AnchorBackend::Mlx,
+            tier: "q8".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video".to_owned(),
+            overlay: None,
+            reference_count: 0,
+            load_shape: anchor::AnchorLoadShape::EagerMaterialization,
+            geometry: anchor::AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 49,
+                fps: None,
+            },
+            observed_footprint_bytes,
+            ceiling_bytes: 94_822_600_832,
+            host_memory_bytes: 137_438_953_472,
+            reason: "physical_footprint_at_or_above_94822600832:observed_97147294328".to_owned(),
+            source: anchor::AnchorSource {
+                path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                    .to_owned(),
+                sha256: "0".repeat(64),
+                record_id: "exc-0".to_owned(),
+                calibration_fingerprint: "fp".to_owned(),
+                // The currency key the PACKAGED closures declare for `bernini:mlx`, so the fixture
+                // reads current through the same comparison production makes. A store whose key did
+                // not match would abstain, and the refusal test below would prove nothing.
+                loader_closure_digest: anchor::packaged_anchor_loader_closures()
+                    .and_then(|closures| closures.digest_for("bernini", anchor::AnchorBackend::Mlx))
+                    .expect("the packaged closures declare bernini:mlx")
+                    .to_owned(),
+                currency_attestation: None,
+            },
+        }],
+    }
+}
+
+fn bernini_t2v_inputs<'a>(frames: u32, total_gb: f64) -> VideoAdmissionInputs<'a> {
+    let mut request = inputs(frames, budget(total_gb), 16 * GIB);
+    request.model_id = "bernini";
+    request.model_family = "bernini";
+    request.route = "bernini";
+    request.mode = "text_to_video";
+    request.reference_count = 0;
+    request.reference_shape = "none";
+    request.width = 848;
+    request.height = 480;
+    request.fps = 16;
+    // The Bernini plan states no LTX pipeline axes; a fixture that left the LTX-2.5 defaults in
+    // place would be grading a coordinate the bound was never measured on.
+    request.transformer_variant = None;
+    request.decoder = None;
+    request
+}
+
+fn bernini_contract() -> MemoryProviderContract {
+    let mut contract = fixture_contract(20, 4, &[MemoryStrategy::Resident]);
+    contract.provider_id = "bernini".to_owned();
+    contract
+}
+
+/// THE story (sc-22738). `bernini:bf16:mlx` at 848x480x49 was ADMITTED by production — the cell
+/// carries no anchor and no curve, so `packaged_video_evidence_covers_request` answered false and
+/// admission abstained before it ever looked at a budget — and the render then ran 72 minutes and
+/// reached 97,147,294,328 bytes of physical footprint before the capture guard had to kill it.
+///
+/// With the stop packaged as a measured lower bound, the same request is refused BEFORE the load on
+/// a host that cannot carry it, and admitted unchanged on one that can.
+#[test]
+fn a_measured_lower_bound_refuses_the_request_that_took_the_host_down() {
+    let generator = fixture_generator(Some(bernini_contract()));
+    let refusal = with_injected_exceeded_bound_store(bernini_bound_store(97_147_294_328), || {
+        admit_video_generation(&generator, bernini_t2v_inputs(49, 128.0)).refusal
+    });
+    let refusal = refusal.expect("the 128 GiB host that could not finish this render is refused");
+    assert!(refusal.contains("measurement"), "refusal reads: {refusal}");
+    assert!(
+        refusal.contains("bernini"),
+        "refusal names the route: {refusal}"
+    );
+    assert!(
+        refusal.contains("90.5 GiB"),
+        "refusal states what was measured: {refusal}"
+    );
+
+    // A host FOUR TIMES the size is admitted: the bound refuses a render this class of machine
+    // cannot finish, never the request itself.
+    let admitted = with_injected_exceeded_bound_store(bernini_bound_store(97_147_294_328), || {
+        admit_video_generation(&generator, bernini_t2v_inputs(49, 512.0)).refusal
+    });
+    assert_eq!(
+        admitted, None,
+        "a big enough host still runs the render (a ladder refusal here would mean the fixture \
+         contract, not the bound, is deciding)",
+    );
+}
+
+/// MUTATION: with the bound removed from the store — the state of the world before this story —
+/// the identical request on the identical host is admitted, which is exactly the defect. If this
+/// assertion ever fails, the refusal above is coming from something other than the bound.
+#[test]
+fn without_the_bound_the_same_request_is_admitted_again() {
+    let generator = fixture_generator(Some(bernini_contract()));
+    let empty = sceneworks_core::memory_anchor::MemoryAnchorStore {
+        exceeded_bounds: Vec::new(),
+        ..bernini_bound_store(97_147_294_328)
+    };
+    let outcome = with_injected_exceeded_bound_store(empty, || {
+        admit_video_generation(&generator, bernini_t2v_inputs(49, 128.0))
+    });
+    assert_eq!(
+        outcome,
+        VideoAdmissionOutcome::default(),
+        "no bound, no anchor, no curve: admission abstains and the render proceeds — the defect",
+    );
+}
+
+/// The bound refuses only at and above the geometry it was measured at, and only on the identity it
+/// was measured on. A shorter clip and a foreign lane both take nothing from it.
+#[test]
+fn a_bound_refuses_only_at_and_above_its_own_measured_coordinate() {
+    let generator = fixture_generator(Some(bernini_contract()));
+    assert_eq!(
+        with_injected_exceeded_bound_store(bernini_bound_store(97_147_294_328), || {
+            admit_video_generation(&generator, bernini_t2v_inputs(25, 128.0))
+        })
+        .refusal,
+        None,
+        "a 25-frame clip is below the measured point; the inequality says nothing about it",
+    );
+    let mut candle = bernini_t2v_inputs(49, 128.0);
+    candle.lane = VideoLane::Candle;
+    assert_eq!(
+        with_injected_exceeded_bound_store(bernini_bound_store(97_147_294_328), || {
+            admit_video_generation(&generator, candle)
+        })
+        .refusal,
+        None,
+        "an MLX measurement does not bound the candle lane",
+    );
+}
+
+/// A STALE bound refuses nothing: the loader closure moved, so the measurement no longer describes
+/// what would run, and the cell falls back to whatever it had before.
+#[test]
+fn a_stale_bound_refuses_nothing() {
+    let generator = fixture_generator(Some(bernini_contract()));
+    let mut store = bernini_bound_store(97_147_294_328);
+    store.exceeded_bounds[0].source.loader_closure_digest = "d".repeat(64);
+    assert_eq!(
+        with_injected_exceeded_bound_store(store, || {
+            admit_video_generation(&generator, bernini_t2v_inputs(49, 128.0))
+        }),
+        VideoAdmissionOutcome::default(),
     );
 }

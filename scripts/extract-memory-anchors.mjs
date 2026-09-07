@@ -211,6 +211,12 @@ export async function loadCorpora(root = ROOT, files = null) {
       path: relative,
       sha256: sha256(body),
       records: parsed.records,
+      // sc-22738: the bundle's second entry kind, carried alongside the records rather than in a
+      // separate reader — a corpus that states a measured lower bound states it in the same file
+      // it would have stated a record in, and shape detection above already qualified the file.
+      exceededBounds: Array.isArray(parsed.exceededBounds)
+        ? parsed.exceededBounds
+        : [],
     });
   }
   return corpora;
@@ -559,8 +565,14 @@ const anchorId = (candidate) =>
  * loader it was never measured against — the false green this key exists to prevent.
  */
 export function loaderClosureDigestFor(previousStore, anchorId) {
-  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
-    ?.loaderClosureDigest;
+  const recorded = [
+    ...(previousStore?.anchors ?? []),
+    // sc-22738: an exceeded bound's currency key is carried by exactly the same rule, and for
+    // exactly the same reason — the bound describes what a particular loader did, so its key stays
+    // frozen at the measurement's own revision and a new bound fails loudly rather than borrowing
+    // the pin's digest.
+    ...(previousStore?.exceededBounds ?? []),
+  ].find((entry) => entry.id === anchorId)?.source?.loaderClosureDigest;
   if (typeof recorded !== "string" || !/^[0-9a-f]{64}$/.test(recorded)) {
     throw new Error(
       `anchor ${anchorId} has no recorded loader-closure digest in ${STORE_PATH}. A newly ` +
@@ -580,8 +592,10 @@ export function loaderClosureDigestFor(previousStore, anchorId) {
  * neither half. `null` for an anchor keyed at its own measurement revision.
  */
 export function currencyAttestationFor(previousStore, anchorId) {
-  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
-    ?.currencyAttestation;
+  const recorded = [
+    ...(previousStore?.anchors ?? []),
+    ...(previousStore?.exceededBounds ?? []),
+  ].find((entry) => entry.id === anchorId)?.source?.currencyAttestation;
   return recorded && typeof recorded === "object" ? recorded : null;
 }
 
@@ -658,6 +672,71 @@ function anchorRow(
     // the field stays byte-identical and keeps the staged-only law (`#[serde(default)]` on the
     // Rust side). Last, matching `MemoryAnchor`'s field order.
     ...(stagedExempt ? { stagedResidencyStructurallyNotApplicable: true } : {}),
+  };
+}
+
+const exceededBoundId = (entry, cell) =>
+  [
+    "exceeded",
+    cell.modelId,
+    entry.backend,
+    entry.target.tier,
+    entry.target.transformerVariant ?? "base",
+    entry.target.decoder ?? "base",
+    entry.calibrationFingerprint,
+    entry.id,
+  ].join(":");
+
+/**
+ * One bundle `exceededBounds` entry as the store carries it (sc-22738).
+ *
+ * Deliberately NOT `anchorRow`'s shape with fields blanked out. A bound states one inequality and
+ * carries the identity that inequality is keyed on — there is no measured regime, no phase
+ * decomposition and no envelope, because the render was killed before any of those existed, and a
+ * row with zeroed phase peaks would read as a measurement of zero rather than as an absence.
+ */
+function exceededBoundRow(entry, corpus, cell, previousStore) {
+  const id = exceededBoundId(entry, cell);
+  return {
+    id,
+    modelId: cell.modelId,
+    modelFamily: cell.modelFamily,
+    route: entry.target.route ?? entry.target.provider,
+    provider: entry.target.provider,
+    backend: entry.backend,
+    tier: entry.target.tier,
+    transformerVariant: entry.target.transformerVariant ?? null,
+    decoder: entry.target.decoder ?? null,
+    mode: entry.target.mode,
+    overlay:
+      entry.target.overlay && entry.target.overlay !== "none"
+        ? entry.target.overlay
+        : null,
+    referenceCount: entry.referenceCount,
+    loadShape: entry.loadShape,
+    geometry: {
+      width: entry.target.geometry.width,
+      height: entry.target.geometry.height,
+      frames: entry.target.geometry.frames,
+      // A bound is a footprint reading, not a rate measurement: the killed run emitted no
+      // `outputFps`, so the row states none rather than copying the plan's request back as if it
+      // had been observed. The Rust lookup does not key on fps.
+      fps: null,
+    },
+    observedFootprintBytes: entry.observedFootprintBytes,
+    ceilingBytes: entry.ceilingBytes,
+    hostMemoryBytes: entry.hardware.memoryBytes,
+    reason: entry.reason,
+    source: {
+      path: corpus.path,
+      sha256: corpus.sha256,
+      recordId: entry.id,
+      calibrationFingerprint: entry.calibrationFingerprint,
+      loaderClosureDigest: loaderClosureDigestFor(previousStore, id),
+      ...(currencyAttestationFor(previousStore, id)
+        ? { currencyAttestation: currencyAttestationFor(previousStore, id) }
+        : {}),
+    },
   };
 }
 
@@ -1640,11 +1719,31 @@ export async function buildAnchorStore({
       )
     : [];
 
+  // 6. Measured lower bounds (sc-22738). One row per retained `exceededBounds` entry, from the
+  //    SAME packaged corpora the anchors come from — the Rust loader re-derives each bound's
+  //    handshake against the compiled-in file, so an unpackaged corpus would make the store
+  //    unloadable exactly as an unpackaged anchor would. A bound for a coordinate the routing
+  //    catalog does not resolve is dropped for the same reason an anchor for one is: the request
+  //    it would refuse cannot be made.
+  const exceededBounds = [];
+  for (const corpus of corpora) {
+    if (!packagedSources.has(corpus.path)) continue;
+    for (const entry of corpus.exceededBounds) {
+      const cell = catalogByCell.get(
+        cellKey(entry.target.modelId, entry.backend, entry.target.tier),
+      );
+      if (!cell) continue;
+      exceededBounds.push(exceededBoundRow(entry, corpus, cell, previousStore));
+    }
+  }
+  exceededBounds.sort((left, right) => compareText(left.id, right.id));
+
   return {
     schemaVersion: MEMORY_ANCHOR_SCHEMA_VERSION,
     anchors,
     analyticOnly,
     componentDeltas,
+    exceededBounds,
   };
 }
 

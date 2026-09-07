@@ -605,9 +605,19 @@ export function bespokePreGateProviders(cleaned, consts, label, gateStarts = [],
       ids: (m) => armTableEngineIds(cleaned, m[2], label),
     },
   ];
-  // A statement is a candidate pre-gate when it dispatches: either the plain `return <call>(request);`
-  // shape, or the `if let Some(…)` shape above. Everything else in the region is ordinary code.
-  const candidate = new RegExp(String.raw`\{\s*${DISPATCH}\s*\}$|^if\s+let\s+Some\(`);
+  // A statement is a candidate pre-gate when it DISPATCHES: either the plain
+  // `return <call>(request);` shape, or an `if let Some(…)` whose block returns a call rather than
+  // an `Err`. Everything else in the region is ordinary code.
+  //
+  // The second alternative used to be a bare `^if\s+let\s+Some\(`, which is not the rule this
+  // function states: `return Err(…)` is a REFUSAL, not a dispatch, and a refusal names no provider
+  // for this report to read. sc-22738 added exactly such a pre-gate — the measured-lower-bound
+  // capture refusal, `if let Some(refusal) = exceeded_bound_capture_refusal(request)? { return
+  // Err(refusal); }` — and the over-broad candidate made it throw as an unreadable dispatch shape.
+  // Narrowed to what the doc comment above already says, so a refusal pre-gate is ordinary code.
+  const candidate = new RegExp(
+    String.raw`\{\s*${DISPATCH}\s*\}$|^if\s+let\s+Some\([\s\S]*\breturn\s+${CALL}\s*\(`,
+  );
   for (const statement of topLevelIfStatements(region)) {
     if (!candidate.test(statement)) continue;
     const guard = guards.map((shape) => ({ shape, match: shape.re.exec(statement) })).find((hit) => hit.match);

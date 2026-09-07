@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f1d1c845ef638d74d7aeaaf1f6f4cb7fda42d709cee9a13320ab698c56a3d401",
+    "sceneWorksRevision": "source-tree:f526e9dff72cf4aae53506650a670173a53ededa716e8ec9b87834a5437b5248",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "616812a02c859de879eeca98fb13f0906d80855f25f13484f492a071713b81e6"
+        "sha256": "c0ef201dd1041330effdca47464d970c695110d058c8ca9ce3c029d31ae51653"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,11 +77,11 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "c04ab9173a7c68a437e86dab48e08b45e69aed7ba972c6413d5403494ee55623"
+        "sha256": "c899cb76ce347124ba21d8dc5006c60290bf21d6516ada41327ea1f7b1384dd6"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "6ba08d71642caf0499c420a3cee9651d3a6312815ccde1292575c505202ec2be"
+        "sha256": "25a9cd3cfd48bf1d29ced3fdafc4a449326fc95cb5e1162e6141fae86d76cb8a"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -89,11 +89,11 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "162884ad7f4465e72ee5811a335f1bf10ed64885ce34445916f11f3f053d0d5f"
+        "sha256": "94580d2b3eba722531308cb2ca165e0c83ee899f5d233362d5f053e1473db10e"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "baeaf84be48353ffc4ec395d651340856b3aa361633a0e9ca4bd89986bc9c562"
+        "sha256": "3d12ccdb3b7762b3611337ae956ac5eb725f6fbb4084f7c335edcf2b147aa930"
       }
     }
   },

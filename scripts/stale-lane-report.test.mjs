@@ -1120,6 +1120,12 @@ fn run_downstream(request: &Value) -> Result<Value, String> {
 // The shapes above are fixtures; this is the shipped source. Both adapter bins must expose a run
 // entry the scan can find, and every pre-gate in it must parse — a rename or a new guard shape reds
 // here rather than quietly shrinking the capturable set.
+/// This is the assertion that grades a NEW pre-gate against the real adapters. sc-22738 added one
+/// to `mlx.rs#run` that REFUSES rather than dispatches — the measured lower-bound capture refusal,
+/// `if let Some(refusal) = … { return Err(refusal); }` — and the candidate test for a pre-gate was a
+/// bare `if let Some(`, so it threw here as an unreadable dispatch shape even though this parser's
+/// own rule says `return Err(…)` is a refusal. The candidate now requires an actual dispatch, and
+/// this test is what proves a refusing pre-gate leaves all 20+ real arms readable behind it.
 test("both shipped adapter bins expose a resolvable run entry whose pre-gates all parse", async () => {
   for (const bin of ["mlx", "candle"]) {
     const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${bin}.rs`), "utf8");

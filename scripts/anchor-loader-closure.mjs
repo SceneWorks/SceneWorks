@@ -764,7 +764,13 @@ export const ANCHOR_STORE_PATH = "config/memory-anchors.json";
  * today; a clone must carry all of them.
  */
 export function anchorMeasurementRevision(anchor, corpus) {
-  const record = (corpus.records ?? []).find((entry) => entry.id === anchor.source?.recordId);
+  // sc-22738: a store row's cited entry is a `records` member for an anchor and an `exceededBounds`
+  // member for a measured lower bound. Both carry `id` and `repositories.inference.revision`, which
+  // is the whole of what this needs, so the two arrays are searched as one rather than the caller
+  // being made to say which kind of row it holds.
+  const record = [...(corpus.records ?? []), ...(corpus.exceededBounds ?? [])].find(
+    (entry) => entry.id === anchor.source?.recordId,
+  );
   const revision = record?.repositories?.inference?.revision;
   if (typeof revision !== "string" || !/^[0-9a-f]{40}$/.test(revision)) {
     throw new Error(
@@ -890,8 +896,12 @@ function storeAttestation(attestation) {
  * anchor no longer attested). Returns the new store and a per-anchor report.
  */
 export function stampAnchorStore({ repo, store, declared, corpora, attestations = new Map() }) {
+  // sc-22738: bounds are stamped by the SAME walk as anchors. A measured lower bound goes stale
+  // exactly as a measured point does, and a second stamping pass would be a second place for the
+  // two to disagree about what "current" means.
+  const stampable = [...store.anchors, ...(store.exceededBounds ?? [])];
   const byRevision = new Map();
-  for (const anchor of store.anchors) {
+  for (const anchor of stampable) {
     const corpus = corpora.get(anchor.source?.path);
     if (!corpus) {
       throw new Error(`anchor ${anchor.id} cites ${anchor.source?.path}, which was not read`);
@@ -938,7 +948,7 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
     for (const [model, entry] of perModel) digests.set(`${revision}|${model}`, entry.digest);
   }
   const report = [];
-  const anchors = store.anchors.map((anchor) => {
+  const stamp = (anchor) => {
     const { revision, attestation } = anchorCurrencyRevision(
       anchor,
       corpora.get(anchor.source.path),
@@ -957,8 +967,19 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
       changed: JSON.stringify(stamped) !== JSON.stringify(anchor.source),
     });
     return { ...anchor, source: stamped };
-  });
-  return { store: { ...store, anchors }, report };
+  };
+  const anchors = store.anchors.map(stamp);
+  const exceededBounds = (store.exceededBounds ?? []).map(stamp);
+  return {
+    store: {
+      ...store,
+      anchors,
+      // Absent stays absent: a store written before the migration must round-trip byte-identically
+      // through a stamp, or `--check` would red on every checkout that has not regenerated yet.
+      ...(store.exceededBounds === undefined ? {} : { exceededBounds }),
+    },
+    report,
+  };
 }
 
 function usage() {
@@ -1002,7 +1023,7 @@ export async function main(argv = process.argv.slice(2)) {
     );
     const corpora = new Map();
     const revisions = new Set();
-    for (const anchor of store.anchors) {
+    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
@@ -1052,7 +1073,7 @@ export async function main(argv = process.argv.slice(2)) {
     const storePath = path.join(root, ANCHOR_STORE_PATH);
     const store = JSON.parse(await readFile(storePath, "utf8"));
     const corpora = new Map();
-    for (const anchor of store.anchors) {
+    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
@@ -1087,7 +1108,7 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     }
     await writeFile(storePath, body);
-    console.log(`stamped ${report.length} anchors in ${ANCHOR_STORE_PATH}`);
+    console.log(`stamped ${report.length} anchors and bounds in ${ANCHOR_STORE_PATH}`);
     return 0;
   }
 

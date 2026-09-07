@@ -20870,7 +20870,153 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+/// The activation allowance the worker's video admission charges on top of a measured lower bound
+/// (sc-22738): `mlx_fit_gate::spec_headroom_bytes` for a generic engine, less the fixed unified
+/// reserve, which is exactly `video_jobs/wan.rs`'s `admission_headroom_bytes`. Both terms come from
+/// the shared declarations, so the mirror moves with production or not at all.
+///
+/// The GENERIC allowance specifically: an engine that declares its own `HeadroomAllowance` gets a
+/// different number in the worker, and this arm cannot resolve one — it has no `LoadSpec`. That
+/// makes the mirror's requirement a floor on production's, which is the safe direction for a
+/// capture-side refusal: it never refuses a capture production would refuse harder.
+fn exceeded_bound_headroom_bytes() -> u64 {
+    sceneworks_core::memory_anchor::gib_to_bytes(
+        (sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB
+            - sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
+            .max(0.0),
+    )
+}
+
+/// PRODUCTION'S measured-lower-bound refusal, mirrored on the capture side (sc-22738, epic 22723).
+///
+/// THE INCIDENT THIS EXISTS FOR. `bernini:bf16:mlx` at 848x480x49 was admitted by production,
+/// rendered for 72 minutes on a 128 GiB Mac, and was killed by the harness's footprint watchdog at
+/// 97,147,294,328 bytes — still climbing, mid-VAE-decode. Nothing in the pipeline learned anything:
+/// the capture stamped nothing, and the next campaign would have queued the identical render. Now
+/// the stop is packaged as an [`sceneworks_core::memory_anchor::ExceededBound`], and this check —
+/// at the ONE seam every arm passes through, before any provider is named or any weight is
+/// touched — refuses the re-run in seconds instead of burning another 72 minutes and putting the
+/// host's GPU at risk again.
+///
+/// It is not a measurement gate (epic 22723 E5). It refuses exactly one thing: re-running a render
+/// this host has already proven it cannot finish. A host large enough to carry the bound is
+/// admitted and measures normally, and so is every cell no hard stop has ever bounded — which is
+/// all of them until one is.
+///
+/// The budget presented is the WHOLE host less the fixed unified reserve, i.e. the most generous
+/// budget a capture could ever be given: the runner starts each anchor on a quiet machine, and a
+/// refusal must mean "not even an empty host can carry this", never "the host was busy".
+fn exceeded_bound_capture_refusal(request: &Value) -> Result<Option<String>, String> {
+    let Some(store) = sceneworks_core::memory_anchor::packaged_memory_anchors() else {
+        return Ok(None);
+    };
+    exceeded_bound_capture_refusal_in(store, request)
+}
+
+/// [`exceeded_bound_capture_refusal`] against a caller-supplied store, so the decision can be
+/// graded on a stated store rather than on whatever the packaged one happens to carry at the
+/// current pin.
+fn exceeded_bound_capture_refusal_in(
+    store: &sceneworks_core::memory_anchor::MemoryAnchorStore,
+    request: &Value,
+) -> Result<Option<String>, String> {
+    let planned = protocol::planned(request)?;
+    let target = planned
+        .get("target")
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let text = |pointer: &str| target.get(pointer).and_then(Value::as_str);
+    let (Some(model_id), Some(provider), Some(tier), Some(mode)) = (
+        text("modelId"),
+        text("provider"),
+        text("tier"),
+        text("mode"),
+    ) else {
+        return Ok(None);
+    };
+    let geometry = target.get("geometry");
+    let dimension = |name: &str| geometry.and_then(|g| g.get(name)).and_then(Value::as_u64);
+    let (Some(width), Some(height), Some(frames)) =
+        (dimension("width"), dimension("height"), dimension("frames"))
+    else {
+        return Ok(None);
+    };
+    let variant = match text("transformerVariant") {
+        Some("distilled") => {
+            Some(sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled)
+        }
+        Some("dev") => Some(sceneworks_core::memory_calibration::Ltx25TransformerVariant::Dev),
+        _ => None,
+    };
+    let decoder = match text("decoder") {
+        Some("conv") => Some(sceneworks_core::memory_calibration::Ltx25Decoder::Conv),
+        Some("diffvae") => Some(sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae),
+        _ => None,
+    };
+    let Some(bound) = store.binding_exceeded_bound(
+        sceneworks_core::memory_anchor::ExceededBoundQuery {
+            model_id,
+            // See `ExceededBoundQuery`: a capture plan carries no catalog resolution, and both
+            // omitted axes are functions of ones graded above.
+            model_family: None,
+            route: None,
+            provider,
+            backend: sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+            tier,
+            transformer_variant: variant,
+            decoder,
+            mode,
+            overlay: text("overlay").filter(|overlay| *overlay != "none"),
+            reference_count: 0,
+            width: u32::try_from(width)
+                .map_err(|_| "planned geometry width overflows".to_owned())?,
+            height: u32::try_from(height)
+                .map_err(|_| "planned geometry height overflows".to_owned())?,
+            frames: u32::try_from(frames)
+                .map_err(|_| "planned geometry frames overflows".to_owned())?,
+        },
+        sceneworks_core::memory_anchor::packaged_anchor_loader_closures(),
+    ) else {
+        return Ok(None);
+    };
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let budget_bytes = hardware_bytes.saturating_sub(sceneworks_core::memory_anchor::gib_to_bytes(
+        sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
+    ));
+    let headroom_bytes = exceeded_bound_headroom_bytes();
+    let required_bytes = bound.required_bytes(headroom_bytes);
+    // The SAME predicate production applies (`ExceededBound::refuses_host`), over this host's own
+    // figures: `hardware.memoryBytes` as the physical ceiling, and that ceiling less the fixed
+    // unified reserve as the most generous budget a capture could ever be given.
+    if !bound.refuses_host(hardware_bytes, budget_bytes, headroom_bytes) {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{model_id}:{tier}:mlx at {width}x{height}x{frames} carries a measured lower bound this \
+         host cannot carry: {bound} recorded {} bytes of physical footprint at {}x{}x{} on a \
+         {}-byte host without completing ({}). This capture needs at least {required_bytes} bytes \
+         and an empty host offers {budget_bytes}. Refusing before the load — production refuses \
+         this request too (video_admission::exceeded_bound_refusal), and re-running it would spend \
+         the session re-measuring a stop already on file.",
+        bound.observed_footprint_bytes,
+        bound.geometry.width,
+        bound.geometry.height,
+        bound.geometry.frames,
+        bound.host_memory_bytes,
+        bound.reason,
+        bound = bound.id,
+    )))
+}
+
 fn run(request: &Value) -> Result<Value, String> {
+    // sc-22738: the ONE seam every arm passes through. A cell a footprint hard stop has already
+    // bounded is refused here, before the provider is dispatched — generic by construction, so no
+    // arm has to remember to ask.
+    if let Some(refusal) = exceeded_bound_capture_refusal(request)? {
+        return Err(refusal);
+    }
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
         .and_then(Value::as_str)
@@ -30070,5 +30216,212 @@ mod video_frame_equality_sweep {
             runtime_macos::vae_tiling_unmodelled_reason(MINIMAX_PROVIDER),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod exceeded_bound_tests {
+    use super::*;
+
+    // ------------------------------------------------------------------------------------------
+    // Measured lower bounds, capture side (sc-22738, epic 22723)
+    // ------------------------------------------------------------------------------------------
+
+    /// A store carrying the Bernini stop, keyed current against the PACKAGED loader closures so the
+    /// currency comparison the lookup makes is the real one.
+    fn bernini_bound_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        use sceneworks_core::memory_anchor as anchor;
+        anchor::MemoryAnchorStore {
+            schema_version: anchor::MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: Vec::new(),
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: vec![anchor::ExceededBound {
+                id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
+                model_id: "bernini".to_owned(),
+                model_family: "bernini".to_owned(),
+                route: "bernini".to_owned(),
+                provider: "bernini".to_owned(),
+                backend: anchor::AnchorBackend::Mlx,
+                tier: "bf16".to_owned(),
+                transformer_variant: None,
+                decoder: None,
+                mode: "text_to_video".to_owned(),
+                overlay: None,
+                reference_count: 0,
+                load_shape: anchor::AnchorLoadShape::EagerMaterialization,
+                geometry: anchor::AnchorGeometry {
+                    width: 848,
+                    height: 480,
+                    frames: 49,
+                    fps: None,
+                },
+                observed_footprint_bytes: 97_147_294_328,
+                ceiling_bytes: 94_822_600_832,
+                host_memory_bytes: 137_438_953_472,
+                reason: "physical_footprint_at_or_above_94822600832:observed_97147294328"
+                    .to_owned(),
+                source: anchor::AnchorSource {
+                    path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                        .to_owned(),
+                    sha256: "0".repeat(64),
+                    record_id: "exc-0".to_owned(),
+                    calibration_fingerprint: "fp".to_owned(),
+                    loader_closure_digest: anchor::packaged_anchor_loader_closures()
+                        .and_then(|closures| {
+                            closures.digest_for("bernini", anchor::AnchorBackend::Mlx)
+                        })
+                        .expect("the packaged closures declare bernini:mlx")
+                        .to_owned(),
+                    currency_attestation: None,
+                },
+            }],
+        }
+    }
+
+    fn bernini_capture_request(tier: &str, frames: u64, memory_bytes: u64) -> Value {
+        json!({
+            "action": "run",
+            "hardware": { "probe": "test", "memoryBytes": memory_bytes },
+            "planned": {
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "target": {
+                    "provider": "bernini",
+                    "modelId": "bernini",
+                    "tier": tier,
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": { "width": 848, "height": 480, "batch": 1, "frames": frames },
+                },
+            },
+        })
+    }
+
+    /// sc-22738: the capture side refuses the render production refuses. The `bernini:bf16:mlx`
+    /// anchor spent 72 minutes reaching a footprint this host could not carry and was killed; with
+    /// the stop on file, the next campaign is told so in milliseconds instead of repeating it.
+    #[test]
+    fn a_bounded_capture_is_refused_before_the_load_on_a_host_that_cannot_carry_it() {
+        let store = bernini_bound_store();
+        let refusal = exceeded_bound_capture_refusal_in(
+            &store,
+            &bernini_capture_request("bf16", 49, 137_438_953_472),
+        )
+        .expect("the predicate reads the request")
+        .expect(
+            "the same 128 GiB Mac that could not finish this render must not be given it again",
+        );
+        assert!(refusal.contains("measured lower bound"), "{refusal}");
+        assert!(
+            refusal.contains("97147294328"),
+            "it states the footprint: {refusal}"
+        );
+        assert!(refusal.contains("Refusing before the load"), "{refusal}");
+    }
+
+    /// Everything the bound does NOT claim still captures: a bigger host, a shorter clip, another
+    /// tier. A measurement gate would have refused these too, and that is precisely what epic
+    /// 22723's E5 forbids.
+    #[test]
+    fn an_unbounded_capture_is_untouched_by_the_bound() {
+        let store = bernini_bound_store();
+        for (label, request) in [
+            (
+                "a host large enough to carry it",
+                bernini_capture_request("bf16", 49, 549_755_813_888),
+            ),
+            (
+                "a clip below the measured point",
+                bernini_capture_request("bf16", 25, 137_438_953_472),
+            ),
+            (
+                "another tier of the same model",
+                bernini_capture_request("q4", 49, 137_438_953_472),
+            ),
+        ] {
+            assert_eq!(
+                exceeded_bound_capture_refusal_in(&store, &request)
+                    .expect("the predicate reads it"),
+                None,
+                "{label} must still be capturable",
+            );
+        }
+        // And an EMPTY store refuses nothing at all — the posture for every cell no hard stop has
+        // ever bounded, which is all of them until one is.
+        let empty = sceneworks_core::memory_anchor::MemoryAnchorStore {
+            exceeded_bounds: Vec::new(),
+            ..bernini_bound_store()
+        };
+        assert_eq!(
+            exceeded_bound_capture_refusal_in(
+                &empty,
+                &bernini_capture_request("bf16", 49, 137_438_953_472)
+            )
+            .expect("the predicate reads it"),
+            None,
+        );
+    }
+
+    /// The capture-side allowance is PRODUCTION'S, read from the shared declarations rather than
+    /// restated: `mlx_fit_gate::spec_headroom_bytes` for a generic engine less the fixed unified
+    /// reserve, which is what `video_jobs/wan.rs` hands the video gate as `headroom_bytes`.
+    #[test]
+    fn the_capture_side_allowance_is_the_workers_video_admission_headroom() {
+        assert_eq!(exceeded_bound_headroom_bytes(), 17_179_869_184);
+        assert_eq!(
+            exceeded_bound_headroom_bytes(),
+            sceneworks_core::memory_anchor::gib_to_bytes(
+                sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB
+            ) - sceneworks_core::memory_anchor::gib_to_bytes(
+                sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB
+            ),
+        );
+    }
+
+    /// THE WIRING, not the predicate. `exceeded_bound_capture_refusal_in` can be perfectly correct
+    /// and reach nothing: deleting the two lines that call it out of `fn run` left every other test
+    /// in this module green, because they all drive the predicate directly. This test drives `run`
+    /// itself with the shipped store and a request the packaged Bernini bound covers, and asserts
+    /// the refusal comes out of the ENTRY POINT — before any provider is dispatched, any weight is
+    /// opened, or any 72-minute render begins.
+    #[test]
+    fn the_capture_refusal_is_wired_into_the_run_entry_point() {
+        let error = run(&bernini_capture_request("bf16", 49, 137_438_953_472))
+            .expect_err("a bounded request must not reach a provider arm at all");
+        assert!(
+            error.contains("measured lower bound"),
+            "the refusal must be the bound's, not a downstream arm's: {error}",
+        );
+    }
+
+    /// The shipped store carries the stop this story recorded. A SHAPE assertion, not a count: the
+    /// claim is that `bernini:bf16:mlx` at 848x480x49 has a measured lower bound on file, which is
+    /// what makes both refusals above reachable at all.
+    #[test]
+    fn the_packaged_store_carries_the_bernini_bf16_mlx_stop() {
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store loads");
+        let bound = store
+            .exceeded_bounds
+            .iter()
+            .find(|bound| {
+                bound.model_id == "bernini"
+                    && bound.tier == "bf16"
+                    && bound.backend == sceneworks_core::memory_anchor::AnchorBackend::Mlx
+            })
+            .expect("the bernini:bf16:mlx footprint hard stop is on file");
+        assert_eq!(bound.mode, "text_to_video");
+        assert_eq!(
+            (
+                bound.geometry.width,
+                bound.geometry.height,
+                bound.geometry.frames
+            ),
+            (848, 480, 49)
+        );
+        assert_eq!(bound.observed_footprint_bytes, 97_147_294_328);
+        assert_eq!(bound.host_memory_bytes, 137_438_953_472);
+        assert!(bound.observed_footprint_bytes >= bound.ceiling_bytes);
     }
 }

@@ -1210,6 +1210,69 @@ Flag notes, all from the `capture` arm of `main`:
   optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
   `scripts/extract-memory-anchors.mjs` can actually price.
 
+#### What each anchor's run can END as (`measure-memory-catalog.mjs`)
+
+One row per outcome the walk reports in its summary table and its `summary-*.json`. The first four
+are SUCCESS — the walk's exit code is 2 only if some anchor ended outside this group's first four:
+
+| outcome | what happened | tree |
+|---|---|---|
+| `committed` | the render finished, and its record, packaged-source entry, re-derived store, stamp and matrix landed as one commit | one commit |
+| `committed_exceeded` | the footprint watchdog HARD-STOPPED the render, and the stop landed as a **measured lower bound** (sc-22738) through the same ingest path | one commit |
+| `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
+| `exceeded` | `--no-commit`: the guard hard-stopped the render; the stop is named on the row but there is nowhere to put it | clean |
+| `capture_failed` | the capture died for a reason that is NOT a footprint stop (or is one the row cannot bind an artifact for) | clean |
+| `check_failed` | the bundle failed `harness check` | clean |
+| `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
+
+**`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
+`capture_failed` that stamped nothing at all: the store kept no trace, and production went on
+admitting the very request the host had just been unable to finish. `bernini:bf16:mlx` is the case
+that forced it — 848×480×49 ran 72 minutes and reached 97,147,294,328 bytes of physical footprint on
+this 128 GiB Mac before the guard stopped it mid-decode, and the next campaign would have queued the
+identical render.
+
+The stop is now written by `harness record-exceeded` into an `exceededBounds` bundle, which then
+goes through the SAME `check` → `ingest` → `PACKAGED_MEMORY_ANCHOR_SOURCES` → `extract` → `stamp` →
+matrix → commit path a completed capture takes. Its store row lives in `config/memory-anchors.json`
+under `exceededBounds`, alongside `anchors` and `analyticOnly`, and carries the same
+`source.loaderClosureDigest` currency key — so a bound goes stale, and stops refusing anything,
+exactly as a measured anchor does.
+
+What a bound claims is ONE inequality — *the peak at this geometry is at least this* — and nothing
+else. It prices no estimate, widens no envelope and enters no derivation. Its only consumers are the
+two refusals, which apply the same predicate (`ExceededBound::refuses_host`): a host no larger than
+the one that failed is refused outright, and a larger host is graded on whether it can offer the
+footprint plus the lane's activation allowance.
+
+- **Production**: `video_admission::exceeded_bound_refusal` refuses before the load, ahead of the
+  ladder — a measurement has no estimate margin to be forgiven inside, so it decides before any
+  estimate is priced and an analytic estimate for the cell is simply outranked.
+- **Capture**: `mlx.rs#exceeded_bound_capture_refusal`, at the one seam every provider arm passes
+  through, so the next campaign refuses the same render in milliseconds instead of re-burning 72
+  minutes and putting the host's GPU at risk again.
+
+Neither is a measurement gate (E5). A bound refuses exactly one thing — re-running a render this
+class of machine has already proven it cannot finish — and every cell no hard stop has ever bounded,
+which is all of them until one is, is untouched.
+
+To record a stop by hand from a retained event log (what seeded the Bernini row):
+
+```bash
+node scripts/memory-calibration-harness.mjs record-exceeded \
+  --plan config/memory-calibration-plan.json --anchor bernini:bf16:mlx \
+  --provider-command '["/abs/path/to/target/release/memory-mlx-adapter"]' \
+  --sceneworks-repo /abs/path/to/SceneWorks --inference-repo /abs/path/to/inference \
+  --watchdog-events /abs/path/to/<anchor>-watchdog.jsonl \
+  --artifact '{"repository":"…","resolvedRevision":"…","variant":"bf16","inventorySha256":"…"}' \
+  --output /abs/path/OUTSIDE/the/repo/<anchor>-exceeded.json
+```
+
+It runs no render. It probes the adapter for the host's hardware (the same `action: "probe"` a
+capture takes first), reads the guard's `hard_stop` event for both figures, and binds the artifact
+the runner had set up — there is no provider fragment to trust, because there is no completed run.
+A log with no `hard_stop` is refused rather than turned into a bound from its last sample.
+
 ### 6a-bis. The whole catalog on a runner — `memory-catalog-campaign.yml` (sc-22738)
 
 The same `measure-memory-catalog.mjs` walk as §6a, run on the self-hosted GPU boxes instead of an
@@ -2120,6 +2183,18 @@ affected ones in the same commit.
 > `cells[].anchor`. It moves no state (sc-22511), so landing a current lane can no longer flip a
 > cell — but the pins below and `npm run report:stale-lanes` still move, and the artifact still has
 > to be regenerated (§8) in the same commit.
+
+> **sc-22738 — a measured lower bound moves NO pinned set.** Landing one changes the matrix only
+> through its fingerprints (`generatedFrom.sceneWorksRevision` and the `anchorStore` /
+> `anchorDerivation` / `anchorAdmission` source digests): a bound is not an anchor, so
+> `summary.anchors`, `summary.staleAnchors` and every `cells[].anchor` are untouched, and
+> `npm run report:stale-lanes` still reads the bounded lane as PENDING CAPTURE — which is the truth
+> about it, because nothing has been measured to completion there. Verified by landing the
+> `bernini:bf16:mlx` stop: `docs/generated/memory-matrix.json` moved on four digest lines and
+> nothing else. What DOES move is `docker/rust.Dockerfile`, which must copy the new corpus into both
+> builder contexts (`platform-review-contracts.test.mjs` reds otherwise), and the compiled-in list
+> in `memory_anchor.rs`, which must stay SORTED — `appendPackagedSource` inserts in place for
+> exactly that reason.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
 simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).

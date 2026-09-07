@@ -478,8 +478,11 @@ test("a `#[path]` override resolves the module to the file it names", { skip }, 
 /** The packaged store, every corpus its anchors cite, and the declaration in derivable form. */
 function packagedStore() {
   const store = JSON.parse(readFileSync(path.join(root, "config/memory-anchors.json"), "utf8"));
+  // sc-22738: the stamp walks anchors AND measured lower bounds — both carry a currency key keyed
+  // to their own measurement revision — so both kinds' corpora must be read here.
+  const stampable = [...store.anchors, ...(store.exceededBounds ?? [])];
   const corpora = new Map();
-  for (const anchor of store.anchors) {
+  for (const anchor of stampable) {
     const cited = anchor.source.path;
     if (!corpora.has(cited)) {
       corpora.set(cited, JSON.parse(readFileSync(path.join(root, cited), "utf8")));
@@ -496,11 +499,11 @@ function packagedStore() {
   );
   // Both the measurement revisions and the attested ones: the stamp derives at the latter for an
   // attested anchor, and the attestation check re-reads the former.
-  const revisions = store.anchors.flatMap((anchor) => [
+  const revisions = stampable.flatMap((anchor) => [
     anchorMeasurementRevision(anchor, corpora.get(anchor.source.path)),
     anchorCurrencyRevision(anchor, corpora.get(anchor.source.path), attestations).revision,
   ]);
-  return { store, corpora, declared, revisions, attestations };
+  return { store, corpora, declared, revisions, attestations, stampable };
 }
 
 test("every packaged anchor's key is the derivation at ITS OWN measurement revision", { skip }, (t) => {
@@ -514,6 +517,15 @@ test("every packaged anchor's key is the derivation at ITS OWN measurement revis
     store.anchors.map((anchor) => anchor.source),
     "re-run: node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
   );
+  // sc-22738: measured lower bounds are stamped by the SAME walk and must round-trip identically.
+  // A bound whose key drifted would silently stop refusing (or start refusing on evidence the
+  // loader has moved past), which is the failure mode this key exists to prevent.
+  assert.deepEqual(
+    stamped.exceededBounds.map((bound) => bound.source),
+    store.exceededBounds.map((bound) => bound.source),
+    "re-run: node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
+  );
+  assert.ok(store.exceededBounds.length > 0, "the packaged store carries a measured lower bound");
 
   // AND IT IS NOT THE PIN'S DIGEST. If the recorded half were derived at the pin, currency would
   // compare a value with itself and report "current" through every loader change there is. The
