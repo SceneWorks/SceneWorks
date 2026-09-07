@@ -7,6 +7,7 @@ use sceneworks_core::base_weights::{
 use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
 use sceneworks_core::checkpoint_ingest::ManagedIngest;
 use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+use sceneworks_core::file_lock::FileLock;
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -3734,16 +3735,67 @@ where
     Ok(())
 }
 
+/// Cross-platform: the conversion locks are taken on every backend, so this module is NOT gated on
+/// macOS the way the converter tests below are.
+#[cfg(test)]
+mod conversion_lock_tests {
+    use super::*;
+    use fs2::FileExt as _;
+
+    /// sc-22738: released conversion locks must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every such
+    /// reference is gone — and conversion forks converter processes throughout, which would park
+    /// the next finalize (and the startup sweep) behind an already-released lock for up to the
+    /// 30-second timeout.
+    #[test]
+    fn released_conversion_locks_are_free_even_while_an_inherited_descriptor_survives() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let lock_root = temporary.path().join("locks");
+        std::fs::create_dir_all(&lock_root).expect("lock root");
+        let target = temporary.path().join("models").join("converted");
+
+        let locks = ConversionFinalizeLocks::acquire(&lock_root, &target).expect("locks acquire");
+        let inherited = [
+            locks
+                ._lifecycle
+                .inherited_descriptor()
+                .expect("descriptor duplicates"),
+            locks
+                ._target
+                .inherited_descriptor()
+                .expect("descriptor duplicates"),
+        ];
+        drop(locks);
+
+        // The lifecycle lock is taken SHARED by finalizers and EXCLUSIVE by the startup sweep, so
+        // the sweep's acquisition is what a stuck release blocks; probe it that way.
+        let lifecycle = open_conversion_lock(&lock_root.join(CONVERSION_LIFECYCLE_LOCK))
+            .expect("lifecycle lock opens");
+        assert!(
+            lifecycle.try_lock_exclusive().is_ok(),
+            "a released lifecycle lock must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
+    }
+}
+
 struct ConversionFinalizeLocks {
-    _lifecycle: std::fs::File,
-    _target: std::fs::File,
+    /// [`FileLock`]s, not bare handles: each releases with an explicit `LOCK_UN`, because
+    /// `close(2)` alone leaves the lock held while any forked child still references the same open
+    /// file description (sc-22738), and this process forks converters throughout a conversion.
+    _lifecycle: FileLock,
+    _target: FileLock,
 }
 
 impl ConversionFinalizeLocks {
     fn acquire(lock_root: &Path, final_dir: &Path) -> WorkerResult<Self> {
         let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
-        let lifecycle = open_conversion_lock(&lifecycle_path)?;
-        lock_conversion_file(&lifecycle, &lifecycle_path, true)?;
+        let lifecycle = lock_conversion_file(
+            open_conversion_lock(&lifecycle_path)?,
+            &lifecycle_path,
+            true,
+        )?;
 
         // Hash the canonical target path so arbitrary/custom model ids can never alias the
         // lifecycle lock or another model's lock-file pathname.
@@ -3752,8 +3804,8 @@ impl ConversionFinalizeLocks {
             Sha256::digest(final_dir.to_string_lossy().as_bytes())
         );
         let target_path = lock_root.join(format!("target-{target_digest}.lock"));
-        let target = open_conversion_lock(&target_path)?;
-        lock_conversion_file(&target, &target_path, false)?;
+        let target =
+            lock_conversion_file(open_conversion_lock(&target_path)?, &target_path, false)?;
         Ok(Self {
             _lifecycle: lifecycle,
             _target: target,
@@ -3877,18 +3929,20 @@ fn resolve_conversion_managed_roots(data_dir: &Path) -> WorkerResult<ConversionM
     })
 }
 
-fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> WorkerResult<()> {
+fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> WorkerResult<FileLock> {
     let deadline = std::time::Instant::now() + CONVERSION_LOCK_TIMEOUT;
     let contended = fs2::lock_contended_error().raw_os_error();
+    let mut file = file;
     loop {
         let result = if shared {
-            fs2::FileExt::try_lock_shared(file)
+            FileLock::try_shared_retryable(file)
         } else {
-            fs2::FileExt::try_lock_exclusive(file)
+            FileLock::try_exclusive_retryable(file)
         };
         match result {
-            Ok(()) => return Ok(()),
-            Err(error) if error.raw_os_error() == contended => {
+            Ok(lock) => return Ok(lock),
+            Err((handle, error)) if error.raw_os_error() == contended => {
+                file = handle;
                 if std::time::Instant::now() >= deadline {
                     return Err(WorkerError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -3901,7 +3955,7 @@ fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> Work
                 }
                 std::thread::sleep(CONVERSION_LOCK_POLL);
             }
-            Err(error) => return Err(error.into()),
+            Err((_handle, error)) => return Err(error.into()),
         }
     }
 }
@@ -3927,8 +3981,11 @@ fn sweep_stranded_conversion_backups_blocking(data_dir: &Path) -> WorkerResult<(
         lock_root,
     } = resolve_conversion_managed_roots(data_dir)?;
     let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
-    let lifecycle = open_conversion_lock(&lifecycle_path)?;
-    lock_conversion_file(&lifecycle, &lifecycle_path, false)?;
+    let _lifecycle = lock_conversion_file(
+        open_conversion_lock(&lifecycle_path)?,
+        &lifecycle_path,
+        false,
+    )?;
 
     let mut by_target: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for entry in std::fs::read_dir(&backup_root)? {

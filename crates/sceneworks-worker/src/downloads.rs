@@ -89,7 +89,7 @@ pub(crate) use download_lock::DownloadLock;
 
 mod download_lock {
     use super::{task_join_error, WorkerError, WorkerResult};
-    use fs2::FileExt as _;
+    use sceneworks_core::file_lock::FileLock;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -113,7 +113,10 @@ mod download_lock {
     /// the size check when no sha256 is available. The lock releases when the
     /// underlying handle drops. Mirrors `manifest::ManifestLock`.
     pub(crate) struct DownloadLock {
-        _file: std::fs::File,
+        /// A [`FileLock`], not a bare handle: the release is an explicit `LOCK_UN`, because
+        /// `close(2)` alone leaves the lock held while any forked child still references the same
+        /// open file description (sc-22738).
+        _lock: FileLock,
     }
 
     impl DownloadLock {
@@ -125,7 +128,7 @@ mod download_lock {
             if let Some(parent) = lock_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let file = std::fs::OpenOptions::new()
+            let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .read(true)
                 .write(true)
@@ -138,9 +141,10 @@ mod download_lock {
             // (same posture as `manifest::ManifestLock`, sc-8843).
             let contended = fs2::lock_contended_error().raw_os_error();
             loop {
-                match file.try_lock_exclusive() {
-                    Ok(()) => return Ok(Self { _file: file }),
-                    Err(error) if error.raw_os_error() == contended => {
+                match FileLock::try_exclusive_retryable(file) {
+                    Ok(lock) => return Ok(Self { _lock: lock }),
+                    Err((handle, error)) if error.raw_os_error() == contended => {
+                        file = handle;
                         if Instant::now() >= deadline {
                             return Err(WorkerError::Io(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
@@ -152,7 +156,7 @@ mod download_lock {
                         }
                         std::thread::sleep(DOWNLOAD_LOCK_POLL);
                     }
-                    Err(error) => return Err(error.into()),
+                    Err((_handle, error)) => return Err(error.into()),
                 }
             }
         }
@@ -184,6 +188,7 @@ mod download_lock {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use fs2::FileExt as _;
 
         /// sc-8900 / F-098: two holders of the same target's download lock are
         /// mutually exclusive — the second `try_lock_exclusive` sees contention while
@@ -223,6 +228,39 @@ mod download_lock {
             // A DIFFERENT target never contends with the first.
             let other = dir.path().join("weights").join("other.safetensors");
             let _first_other = DownloadLock::acquire(&other).expect("distinct target locks");
+        }
+
+        /// sc-22738: a released download lock must be free IMMEDIATELY, even while a descriptor
+        /// this process handed to a child still references the same open file description.
+        /// `flock(2)` locks live on the open file description, so a close-only release only takes
+        /// effect once every such reference is gone — and this pool forks constantly. The probe is
+        /// the non-blocking primitive, not `acquire`, so the failure is an assertion rather than a
+        /// one-hour spin-wait.
+        #[test]
+        fn a_released_download_lock_is_free_even_while_an_inherited_descriptor_survives() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join("weights").join("model.safetensors");
+
+            let held = DownloadLock::acquire(&target).expect("lock acquires");
+            let inherited = held
+                ._lock
+                .inherited_descriptor()
+                .expect("descriptor duplicates");
+            drop(held);
+
+            let probe = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(download_lock_path(&target))
+                .expect("probe opens lock file");
+            assert!(
+                probe.try_lock_exclusive().is_ok(),
+                "a download lock released by its owner must not stay held by an inherited \
+                 descriptor"
+            );
+            drop(inherited);
         }
 
         /// The lock file is a `.download.lock` sibling of the target (per-file scope),
