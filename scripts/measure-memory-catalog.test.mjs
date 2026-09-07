@@ -28,6 +28,8 @@ import {
   anchorParts,
   anchorSlug,
   appendPackagedSource,
+  writePackagedSource,
+  RUSTFMT_EDITION,
   capturedInCampaign,
   classifyAnchor,
   compiledInferencePin,
@@ -1265,6 +1267,63 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
     ),
     "a mention outside the list must not suppress the append",
   );
+});
+
+/** A throwaway checkout carrying just what `writePackagedSource` reads: the file and rustfmt's config. */
+async function packagedSourceFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-packaged-fmt-"));
+  await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
+  const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
+  await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
+  await writeFile(
+    path.join(root, "rustfmt.toml"),
+    await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
+  );
+  return { root, source, file: path.join(root, PACKAGED_SOURCES_PATH) };
+}
+
+// sc-22738: the one-line tuple the append writes fits `max_width` only while the corpus name is
+// short. `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so
+// the runner committed a tree whose `cargo fmt --check` reds the `parity-rust` lane — after the
+// push. Every shorter name in the campaign happened to fit, which is why it surfaced this late.
+test("packaging a long-named corpus leaves memory_anchor.rs rustfmt-clean", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/flux2-dev-bf16-mlx-exceeded-evidence.json";
+  assert.ok(
+    `        include_str!("../../../${relative}"),`.length > 100,
+    "the fixture path must be long enough to exceed max_width on one line",
+  );
+  assert.equal(await writePackagedSource(root, relative), true);
+  // The gate itself, not a re-implementation of its width rule.
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+  const written = await readFile(file, "utf8");
+  assert.ok(
+    written.includes(
+      ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n"),
+    ),
+    "rustfmt wrapped the argument onto its own line",
+  );
+  // The mutation this guards: the append's own output — the format step skipped — is what red the
+  // lane, so `rustfmt --check` must reject it.
+  await writeFile(file, appendPackagedSource(source, relative));
+  await assert.rejects(
+    execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]),
+    "an unformatted append must not pass the parity lane's check",
+  );
+});
+
+test("packaging a short-named corpus is byte-identical to the bare append", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/qwen-image-q4-mlx-evidence.json";
+  assert.equal(await writePackagedSource(root, relative), true);
+  assert.equal(await readFile(file, "utf8"), appendPackagedSource(source, relative));
+  // Already packaged: nothing is rewritten, so nothing is reformatted either.
+  assert.equal(await writePackagedSource(root, relative), false);
+});
+
+test("the edition the runner formats with is the one rustfmt.toml declares", async () => {
+  const config = await readFile(path.join(ROOT, "rustfmt.toml"), "utf8");
+  assert.equal(config.match(/^edition\s*=\s*"([^"]+)"$/m)?.[1], RUSTFMT_EDITION);
 });
 
 // sc-22738: the embed and the Docker COPY lines are ONE step. `platform-review-contracts.test.mjs`

@@ -1805,6 +1805,55 @@ export function appendPackagedSource(source, relativePath) {
 }
 
 /**
+ * The edition `rustfmt` is invoked with, bound to `rustfmt.toml` by a test.
+ *
+ * `cargo fmt` passes the workspace edition explicitly; a bare `rustfmt` would fall back to the
+ * config file's, so the two are stated in one place and asserted equal rather than left to drift.
+ */
+export const RUSTFMT_EDITION = "2021";
+
+/**
+ * Format one Rust file in place with `rustfmt`, or fail the run.
+ *
+ * A campaign host always has the toolchain the same run builds with, so an absent or failing
+ * `rustfmt` is a broken host, not a condition to route around: formatting silently skipped would
+ * put the tree back in the state this exists to prevent.
+ */
+export async function formatRustSource(file) {
+  try {
+    // `cwd` is the file's directory so `rustfmt.toml` is discovered from its ancestors, exactly as
+    // `cargo fmt` resolves it for the crate.
+    await run("rustfmt", ["--edition", RUSTFMT_EDITION, file], { cwd: path.dirname(file) });
+  } catch (error) {
+    fail(`rustfmt could not format ${file}: ${error.message}`);
+  }
+}
+
+/**
+ * Package `relativePath` into [`PACKAGED_SOURCES_PATH`] and leave the file rustfmt-stable.
+ *
+ * The append writes the tuple on one line (sc-22738), which fits `max_width = 100` only while the
+ * corpus name is short: `docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json` makes
+ * the `include_str!` line 101 columns and rustfmt wants it wrapped, so the runner's own commit red
+ * the `parity-rust` lane's `cargo fmt --check` — on a tree it had already pushed. Earlier commits
+ * passed only because their names happened to be a few characters shorter.
+ *
+ * The width rule is therefore not re-implemented here: rustfmt itself is run over the written file,
+ * so whatever the checked-in `rustfmt.toml` says — now or after a config change — is what lands.
+ *
+ * Returns whether the file changed; a corpus already packaged rewrites (and reformats) nothing.
+ */
+export async function writePackagedSource(root, relativePath) {
+  const file = path.join(root, PACKAGED_SOURCES_PATH);
+  const source = await readFile(file, "utf8");
+  const appended = appendPackagedSource(source, relativePath);
+  if (appended === source) return false;
+  await writeFile(file, appended);
+  await formatRustSource(file);
+  return true;
+}
+
+/**
  * The two Rust builder stages' evidence-copy blocks, and the line that opens each of them.
  *
  * Every `include_str!` `memory_anchor.rs` compiles in must ALSO be copied into both Docker builder
@@ -2191,8 +2240,7 @@ export async function measureAnchor(row, context) {
           fail(`copy physical receipts from ${receipts}: ${error.message}`);
         }
       }
-      const rust = await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8");
-      await writeFile(path.join(root, PACKAGED_SOURCES_PATH), appendPackagedSource(rust, target));
+      await writePackagedSource(root, target);
       // The same corpus, into both Docker builder contexts. Idempotent, so a re-ingest of a bundle
       // already packaged rewrites nothing.
       const dockerfile = await readFile(path.join(root, DOCKERFILE_PATH), "utf8");
