@@ -547,106 +547,133 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
     }
 }
 
-/// The admission context for the safety scenarios, in the shape the worker admits these routes
-/// under.
-#[allow(clippy::too_many_arguments)]
-fn context(
-    arm: Arm,
-    selection: MemorySelection,
-    calibration: &MemoryCalibrationIdentity,
-    fingerprint: &str,
-    geometry: Geometry,
-    evidence_revision: &str,
-    total_bytes: u64,
-    predicted_peak_bytes: u64,
-) -> MemoryRunContext {
-    MemoryRunContext {
-        selection,
-        optimization_authority: MemoryOptimizationAuthority::Calibrated,
-        calibration_abi: calibration.abi,
-        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
-        // call site passes `calibration.fingerprint`.
-        calibration_fingerprint: fingerprint.to_owned(),
-        load_shape: calibration.load_shape,
-        mode: MemoryMode::Other(arm.mode.to_owned()),
-        has_reference: arm.carrier.reference_count() > 0,
-        use_pid: false,
-        has_phases: false,
-        geometry: MemoryGeometry {
-            width: geometry.width,
-            height: geometry.height,
-            batch: 1,
-            frames: geometry.frames,
-            reference_count: arm.carrier.reference_count(),
-        },
-        overlay: None,
-        budget: MemoryBudget {
-            total_bytes,
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        predicted_peak_bytes,
-        cache_state: MemoryCacheState::Cold,
-        evidence_revision: evidence_revision.to_owned(),
-    }
-}
+/// The evidence identity the WORKER puts on the run context it offers a video provider, when no
+/// fitted curve priced the candidate.
+///
+/// `crates/sceneworks-worker/src/video_admission.rs:1716-1720` — the selected candidate carries the
+/// packaged curve's id, else the resolved decode profile's revision, else this token.
+const WORKER_ESTIMATE_FLOOR_EVIDENCE: &str = "video-estimate-floor-v1";
 
-/// Install the admitted rung's request controls onto the planned request, the way production does.
-///
-/// sc-22738 (measured 2026-09-06): `wan_2_2_i2v_14b:bf16:mlx` reached the receipt mint after a
-/// 370-second load and was refused with `admitted Wan I2V request is missing its explicit memory
-/// carrier` — `wan_i2v_memory::selection_from_request` reads the executing selection out of
-/// `request.memory` and refuses `None` outright, and this arm built its request without ever
-/// setting the field. Production never presents such a request: `video_admission.rs:2294` puts
-/// `contract.generation_memory(&selected.selection)` on the outcome, `video_jobs/wan.rs:2095`
-/// applies it to the input, and `video_jobs/wan.rs:2148` carries it onto the `GenerationRequest`.
-/// That is the whole installation, and it is reproduced here against the LOADED provider's own
-/// contract — the same object production reads it from (`video_admission.rs:2095`).
-///
-/// The Wan contract declares `ResidentRequestMemory::ExplicitResident`, so even a Resident rung
-/// yields `Some(GenerationMemory::default())` and every Wan arm needs this. SCAIL-2's contract
-/// declares `PreserveLoadDefaults`, so a Resident SCAIL-2 selection yields `None` and its request
-/// stays carrier-free — which is exactly what its own `validate_active_request` expects. One
-/// call site, production's own mapping, no per-arm special case.
-fn install_memory_carrier(
-    request: &mut GenerationRequest,
-    contract: &MemoryProviderContract,
-    selection: &MemorySelection,
-) {
-    request.memory = contract.generation_memory(selection);
-}
+/// The two decode-profile revisions the same site can carry instead
+/// (`video_admission.rs:801`, `:819`, `:835`, read back at `:1152`).
+const WORKER_DECODE_PROFILE_EVIDENCE: [&str; 2] = [
+    "video-provider-selected-decode-profile-v1",
+    "video-provider-conservative-decode-profile-v1",
+];
 
-/// The request receipt this render will present, minted by the ENGINE's own public helper.
+/// The receipt token SCAIL-2's gate requires the context's `evidence_revision` to open with.
 ///
-/// Both families bind admission to a receipt derived from the sealed artifact and the exact request
-/// bytes, so a capture cannot invent one: the Wan routes go through
-/// `wan_i2v_memory::request_evidence_revision` over the receipt this arm sealed, and SCAIL-2
-/// through `mlx_gen_scail2::memory_strategy::request_evidence_revision` over the structural
-/// evidence its own prepared receipt carries.
-fn evidence_revision(
-    arm: Arm,
-    spec: &LoadSpec,
-    request: &GenerationRequest,
-    selection: MemorySelection,
-) -> Result<String, String> {
+/// A MIRROR, not a read: `mlx-gen-scail2`'s `validate_context_revision_shape`
+/// (`memory_strategy.rs:570-588` at inference `3b922bac`) compares this as a bare literal and the
+/// crate publishes no `pub const` for it, unlike the Wan side's
+/// `gen_core::wan_i2v_memory::RECEIPT_VERSION`. `scripts/measure-memory-catalog.test.mjs` binds
+/// both tokens to the pinned engine source so a rename reds there rather than silently widening
+/// [`probes_admission`].
+const SCAIL2_RECEIPT_TOKEN: &str = "scail2-resident-v1";
+
+/// The receipt token THIS arm's engine gate requires, asked of the engine where it publishes one.
+fn engine_receipt_token(arm: Arm) -> &'static str {
     match arm.route {
-        Some(_) => {
-            let prepared = mlx_gen_wan::i2v_memory_strategy::prepare(spec, arm.provider)
-                .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
-            mlx_gen_wan::i2v_memory_strategy::request_evidence_revision(&prepared, request)
-                .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))
-        }
-        None => {
-            let evidence = mlx_gen_scail2::memory_strategy::structural_resident_evidence(spec)
-                .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
-            mlx_gen_scail2::memory_strategy::request_evidence_revision(
-                &evidence, request, selection,
-            )
-            .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))
-        }
+        Some(_) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,
+        None => SCAIL2_RECEIPT_TOKEN,
     }
 }
+
+/// Every evidence identity the worker's video admission can put on a `MemoryRunContext` for this
+/// arm's provider: the estimate floor, the two decode-profile revisions, and any packaged curve
+/// promoted for this provider. The curve list is READ from the shipped bundle rather than assumed
+/// empty, so a future promoted Wan or SCAIL-2 curve enters this vocabulary automatically.
+fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {
+    let mut identities = vec![WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned()];
+    identities.extend(
+        WORKER_DECODE_PROFILE_EVIDENCE
+            .iter()
+            .map(|identity| (*identity).to_owned()),
+    );
+    if let Some(bundle) = sceneworks_core::video_memory_curves::packaged_video_memory_curves() {
+        identities.extend(
+            bundle
+                .curves
+                .iter()
+                .filter(|curve| curve.provider == arm.provider)
+                .map(|curve| curve.id.clone()),
+        );
+    }
+    identities
+}
+
+/// Whether `identity` is one this arm's engine gate can read as its OWN sealed request receipt.
+///
+/// Both gates parse the context's `evidence_revision` as a colon-delimited receipt whose first
+/// segment is the engine's own version token — `wan_i2v_memory::validate_context` through
+/// `receipt_rate_and_tail` (`wan_i2v_memory.rs:2882-2895`, checked at `:2944`), SCAIL-2 through
+/// `validate_context_revision_shape` (`memory_strategy.rs:570-588`) — and refuse everything else
+/// before any budget is compared.
+fn engine_seals_evidence(arm: Arm, identity: &str) -> bool {
+    identity.starts_with(&format!("{}:", engine_receipt_token(arm)))
+}
+
+/// Whether production would obtain an admission decision from this provider's gate for the request
+/// this arm renders. The twin of `mlx.rs#bernini_probes_admission` and
+/// `mlx.rs#krea_realtime_probes_admission`, and false for a structurally similar reason.
+///
+/// THE ENGINE SIDE. Both gates bind admission to a receipt the ENGINE seals over the artifact and
+/// the exact request bytes. `gen_core::wan_i2v_memory::validate_context`
+/// (`crates/contracts/gen-core/src/wan_i2v_memory.rs:2897-3040` at inference `3b922bac`) refuses
+/// with `crossed Wan I2V memory context` unless `context.evidence_revision` parses as
+/// `wan-video-structural-v5:<mode>:fps<N>:<artifact_identity>:<selection_receipt>:…` (`:2944`,
+/// `:3024`) AND `context.overlay` is exactly the sealed `wan-adapters-v1:<sha256>` adapter identity
+/// (`:3021`, minted at `:1726`). `mlx-gen-scail2`'s `validate_context_identity`
+/// (`crates/media/mlx-gen/mlx-gen-scail2/src/memory_strategy.rs:660-666`) requires
+/// `scail2-resident-v1:<receipt_sha256>:<64 hex>:<64 hex>`.
+///
+/// THE WORKER SIDE mints neither, and cannot: SceneWorks never links either engine's receipt
+/// helper. `video_admission.rs:2244-2268` builds the run context with `overlay: request.overlay` —
+/// the worker's own descriptive spelling, `provider_video_mode:<mode>` plus any adapter/enhancer
+/// axis (`video_jobs/wan.rs#video_admission_overlay`, `:1557-1874`) — and with
+/// `evidence_revision: selected.evidence_revision`, which is a packaged curve id, a decode-profile
+/// revision or `video-estimate-floor-v1` (`:1716-1720`). `engine_declines_advisory_context`
+/// (`video_admission.rs:1822-1830`, called at `:2277`) therefore sees the engine's refusal on every
+/// such request and returns `memory: None, context: None`, and
+/// `video_jobs/wan.rs#apply_video_admission_outcome` (`:2088-2096`) writes BOTH onto the input, so
+/// the render reaches the engine through `memory_strategy::generate_with_scope`'s no-context early
+/// return on its load-time defaults, carrying no request memory at all.
+///
+/// sc-22738 probed that surface anyway and `wan_2_2_i2v_14b:bf16:mlx` died on the FIRST probe after
+/// a 383-second load with `admission rejected a fitting probe budget`. The remedy is not a context
+/// shaped to make the gate answer — that would characterize a decision the product never takes —
+/// it is to skip the probe exactly where production skips the context, and to render the same
+/// carrier-free request production renders.
+///
+/// Computed, not asserted: it asks whether ANY evidence identity the worker can carry today is one
+/// this engine seals. A pin or a promoted curve that made one so flips this to `true` and the arm
+/// refuses the capture by name rather than quietly recording scenarios production now runs.
+fn probes_admission(arm: Arm) -> bool {
+    worker_context_evidence_identities(arm)
+        .iter()
+        .any(|identity| engine_seals_evidence(arm, identity))
+}
+
+/// What the record says about the admission scenarios it did not run, and why. Stated once and
+/// carried into every `not_run` reason, the lifecycle blocker and the diagnostics.
+const ADMISSION_BLOCKER: &str = concat!(
+    "production never presents these Wan 2.2 / SCAIL-2 providers a memory run context their own ",
+    "gate accepts, so this capture has no admission decision to characterize. Both gates require ",
+    "the ENGINE's sealed request receipt — gen-core's wan_i2v_memory::validate_context parses ",
+    "evidence_revision as wan-video-structural-v5:<mode>:fps<N>:<artifact>:<selection>: and ",
+    "requires the overlay to be the sealed wan-adapters-v1:<sha256> adapter identity, and ",
+    "mlx-gen-scail2 requires scail2-resident-v1:<receipt>:<sha256>:<sha256> — and SceneWorks mints ",
+    "neither: the worker's video admission carries a packaged curve id, a decode-profile revision ",
+    "or video-estimate-floor-v1 as the evidence identity, and the descriptive ",
+    "provider_video_mode:<mode> overlay spelling. engine_declines_advisory_context therefore sees ",
+    "the refusal on every such request and drops BOTH the run context and the rung's request ",
+    "memory carrier, so the render reaches the engine on its load-time defaults through ",
+    "generate_with_scope's no-context early return. This arm asks the gate nothing, exactly as ",
+    "production asks it nothing, and renders the same carrier-free request production renders: the ",
+    "exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on ",
+    "a surface production never presents. This anchor prices the RESIDENT load of that request and ",
+    "claims nothing about any admission decision"
+);
 
 fn quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= MAX_THRESHOLD && mean <= MEAN_THRESHOLD && rms <= RMS_THRESHOLD
@@ -682,6 +709,9 @@ fn lifecycle_blocker(arm: Arm) -> String {
             arm.steps
         ));
     }
+    // sc-22738: stated in the same breath as the lifecycle exclusion because it is the same kind of
+    // claim — what this record deliberately does NOT say.
+    blocker.push_str(&format!(". Additionally: {ADMISSION_BLOCKER}"));
     blocker
 }
 
@@ -715,6 +745,21 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
              production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    // The arm's admission decision, taken the way the WORKER takes it (sc-22738): see
+    // [`probes_admission`]. On every cell this arm can plan the answer is `false` — neither engine's
+    // gate can read any evidence identity SceneWorks mints — so no probe context is built, nothing
+    // is asked of the provider's safety check, and the render below runs on the provider's load-time
+    // defaults exactly as production runs it. The record says so rather than claiming an admission
+    // result it never obtained. A `true` answer means the seam moved: refuse the capture by name
+    // and re-derive the probe context from `video_admission.rs` before recording anything.
+    if probes_admission(arm) {
+        return Err(format!(
+            "{}: the worker's video admission can now carry an evidence identity this engine's \
+             gate seals, so production DOES take an admission decision for this request; re-derive \
+             the probe context from video_admission.rs before capturing this cell",
             arm.provider
         ));
     }
@@ -777,59 +822,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         ));
     }
 
-    let hardware_bytes = request
-        .pointer("/hardware/memoryBytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let mut planned_render = generation_request(arm, geometry);
-    // Production admits FIRST and installs the selected rung's controls onto the request it hands
-    // the engine; the receipt is minted over that request. Do the same here, or the Wan mint reads
-    // an absent carrier and refuses (sc-22738).
-    install_memory_carrier(&mut planned_render, contract, &selection);
-    let planned_render = planned_render;
-    let receipt = evidence_revision(arm, &artifact.spec, &planned_render, selection)?;
-    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        generator.memory_strategy_safety_check(&context(
-            arm,
-            selection,
-            calibration,
-            fingerprint,
-            geometry,
-            &receipt,
-            total_bytes,
-            predicted,
-        ))
-    };
-    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
-    // below cannot pass through a blanket refusal.
-    if !matches!(
-        safety(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(format!(
-            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
-             a blanket refusal, not evidence",
-            arm.provider
-        ));
-    }
-    if !matches!(
-        safety(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err(format!(
-            "{} admission accepted an unknown/zero memory budget",
-            arm.provider
-        ));
-    }
-    if !matches!(
-        safety("stale-wan-scail2-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err(format!(
-            "{} admission accepted stale calibration evidence",
-            arm.provider
-        ));
-    }
+    // The request production renders, and NOTHING is installed on it (sc-22738). Production's
+    // admission drops the rung's request memory carrier along with the run context the engine
+    // declines (`video_admission.rs#engine_declines_advisory_context` →
+    // `video_jobs/wan.rs#apply_video_admission_outcome`), so a Wan render reaches
+    // `mlx-gen-wan/src/model.rs`'s `validate_active_request` with `request.memory == None` and is
+    // waved through onto the provider's load-time defaults. A capture that installed the carrier
+    // would present a memory-managed request no shipped path presents — and one that engine would
+    // refuse outright, because no admitted scope armed its active evidence.
+    let planned_render = generation_request(arm, geometry);
 
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -906,15 +907,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
-    if !matches!(
-        safety(&calibration.fingerprint, predicted, predicted),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(format!(
-            "{} admission rejected an exact-fit calibrated budget",
-            arm.provider
-        ));
-    }
+    // No exact-fit probe against the MEASURED evidence either, and for the same reason the three
+    // pre-render scenarios are unexecuted: the gate this arm would ask cannot read any evidence
+    // identity SceneWorks mints, so an answer here would characterize a decision production never
+    // takes. See [`ADMISSION_BLOCKER`].
 
     // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
     clear_cache();
@@ -986,8 +982,14 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 
     let lifecycle_blocker = lifecycle_blocker(arm);
     let lifecycle_blocker = lifecycle_blocker.as_str();
+    // GATED, not `runtime_complete` (sc-22738). Runtime activation is exactly the claim that the
+    // provider's admission gate accepted an exact-fit budget and rejected the two mutations, and
+    // this capture asked it nothing — because production asks it nothing for this request. The
+    // MEASUREMENT is unaffected and is carried in full: `observedMemory` and `predictedPeakBytes`
+    // are the resident-load prices this anchor exists to publish, and `extract-memory-anchors.mjs`
+    // reads them off this record exactly as it reads them off a runtime-complete one.
     let mut fragment = json!({
-        "status": "runtime_complete",
+        "status": "gated",
         "strategy": strategy,
         // From the CONTRACT's own calibration identity, never copied from the plan: a receipt may
         // only testify to the materialization shape its own run used (sc-16482).
@@ -995,9 +997,9 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         "artifact": artifact.json(tier),
         "sweep": complete_sweep(request)?,
         "scenarios": [
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed" },
-            { "name": "stale_evidence", "result": "passed" },
+            { "name": "exact_fit", "result": "not_run", "reason": ADMISSION_BLOCKER },
+            { "name": "unknown_budget", "result": "not_run", "reason": ADMISSION_BLOCKER },
+            { "name": "stale_evidence", "result": "not_run", "reason": ADMISSION_BLOCKER },
             { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -1355,27 +1357,38 @@ mod tests {
         .unwrap_or_else(|error| panic!("{}: {error}", arm.provider))
     }
 
-    /// The planned render carries the admitted rung's memory controls, exactly as production
-    /// installs them, so the ENGINE's mint can read the executing selection back out of the
-    /// request (sc-22738).
+    /// The planned render is CARRIER-FREE, exactly as production's declined admission leaves it
+    /// (sc-22738).
     ///
-    /// `wan_i2v_memory::selection_from_request` refuses a `None` carrier outright —
-    /// `admitted Wan I2V request is missing its explicit memory carrier` — and then requires the
-    /// carrier to be byte-identical to `contract.generation_memory(&selection)`. Both halves are
-    /// asserted here against a contract the engine built, over every Wan arm and every strategy
-    /// its contract admits.
+    /// `video_admission.rs#engine_declines_advisory_context` returns `memory: None, context: None`
+    /// for every request these gates refuse, and `video_jobs/wan.rs#apply_video_admission_outcome`
+    /// writes BOTH onto the input — so the shipped render reaches `mlx-gen-wan/src/model.rs`'s
+    /// `validate_active_request` with `request.memory == None` and is waved through onto the
+    /// provider's load-time defaults. sc-22738 briefly installed the carrier here to satisfy a
+    /// receipt mint for probes production never runs; that made the capture render a memory-managed
+    /// request no shipped path presents, and one the engine refuses outright because no admitted
+    /// scope ever armed its active evidence.
     ///
-    /// MUTATION that reds this: deleting the `install_memory_carrier` call in `run`, or changing
-    /// its body to leave `request.memory` unset — the `is_some` assertion fails with the same
-    /// condition the engine refuses on. Changing it to mint a carrier of its own (say
-    /// `GenerationMemory::default()` for every rung) reds the equality assertion instead.
+    /// Non-vacuous on the Wan side: the contract really would hand out a carrier at every rung
+    /// (`ExplicitResident`), so the absent carrier is a decision, not an accident of the default.
+    ///
+    /// MUTATION that reds this: re-adding an `install_memory_carrier`-shaped write of
+    /// `request.memory` in `generation_request` or in `run`.
     #[test]
-    fn the_planned_wan_render_carries_the_admitted_rungs_memory_controls() {
+    fn the_planned_render_is_carrier_free_as_productions_declined_admission_leaves_it() {
         let geometry = Geometry {
             width: 832,
             height: 480,
             frames: 77,
         };
+        for arm in ARMS {
+            assert!(
+                generation_request(arm, geometry).memory.is_none(),
+                "{}: production renders this request carrier-free; a capture that installs one \
+                 measures a memory-managed path no shipped route presents",
+                arm.provider
+            );
+        }
         for arm in [T2V_A14B, I2V_A14B] {
             let contract = weights_free_a14b_contract(arm);
             for strategy in [
@@ -1392,52 +1405,157 @@ mod tests {
                         component_precision_floors: &[],
                     },
                 };
-                let mut request = generation_request(arm, geometry);
                 assert!(
-                    request.memory.is_none(),
-                    "{}: the planned request starts carrier-free; the install is the only source",
-                    arm.provider
-                );
-                install_memory_carrier(&mut request, &contract, &selection);
-                // The engine's own two conditions, in its own order.
-                assert!(
-                    request.memory.is_some(),
-                    "{} {strategy:?}: an absent carrier is what the Wan mint refuses with \
-                     \"admitted Wan I2V request is missing its explicit memory carrier\"",
-                    arm.provider
-                );
-                assert_eq!(
-                    contract.generation_memory(&selection),
-                    request.memory,
-                    "{} {strategy:?}: the carrier must be the contract's own mapping of the \
-                     admitted selection, never one this arm invented",
+                    contract.generation_memory(&selection).is_some(),
+                    "{} {strategy:?}: the Wan contract is ExplicitResident, so an admitted rung \
+                     WOULD carry controls — the carrier-free request above is production's \
+                     declined path, not the contract's default",
                     arm.provider
                 );
             }
         }
+        let body = arm_source_body();
+        assert!(
+            !body.contains(".memory = ") && !body.contains("generation_memory("),
+            "the arm installs a request memory carrier again — under any variable name, from any \
+             source; production's admission drops the carrier along with the run context its \
+             engine declines"
+        );
     }
 
-    /// SCAIL-2 is carrier-free at Resident BY ITS OWN CONTRACT, not by an exception this arm
-    /// carves out: `PreserveLoadDefaults` maps a Resident rung to `None`, which is what its
-    /// `validate_active_request` treats as an unmanaged generate. The Wan contract declares
-    /// `ExplicitResident` instead, which is why the Wan arms above need the carrier even at
-    /// Resident. One installation covers both because the contracts disagree, not the code.
+    /// The arm's `run` body, read as source so the assertions below cannot be satisfied by a
+    /// helper the body no longer calls. The measured path needs real weights, so it is not
+    /// executable in a unit test.
+    fn arm_source_body() -> &'static str {
+        let source = include_str!("mlx_wan_scail2.rs");
+        let start = source
+            .find("\npub(super) fn run(")
+            .expect("the arm still exists");
+        &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the arm's body closes")]
+    }
+
+    /// The arm asks the admission gate exactly what PRODUCTION asks it — which, for every cell this
+    /// arm can plan, is nothing (sc-22738).
+    ///
+    /// Both engines bind admission to a receipt they seal themselves, and SceneWorks mints neither:
+    /// the worker's video admission carries a packaged curve id, a decode-profile revision or
+    /// `video-estimate-floor-v1`. sc-22736 probed the gate anyway and `wan_2_2_i2v_14b:bf16:mlx`
+    /// died on the FIRST probe after a 383-second load with "admission rejected a fitting probe
+    /// budget". The remedy is not a context shaped to make the gate answer — production never
+    /// presents one — it is to skip the probe exactly where production skips the context.
+    ///
+    /// MUTATIONS that red this: making `probes_admission` a constant `true` or `false` (the
+    /// non-vacuity pair below); dropping the estimate-floor or decode-profile identities from the
+    /// worker vocabulary; restoring any `safety_check` call or the `runtime_complete` status in the
+    /// arm's body; or spelling a scenario's reason as anything but the shared blocker.
     #[test]
-    fn the_resident_carrier_follows_each_contracts_own_resident_policy() {
-        for arm in [T2V_A14B, I2V_A14B] {
-            let contract = weights_free_a14b_contract(arm);
-            let selection = MemorySelection {
-                strategy: MemoryStrategy::Resident,
-                parameters: MemoryStrategyParameters::default(),
-                tier: MemoryNumericTier {
-                    precision: Precision::Bf16,
-                    quant: None,
-                    component_precision_floors: &[],
-                },
+    fn the_arm_asks_the_admission_gate_exactly_what_production_asks_it() {
+        // The plan's own rows, read rather than restated: every planned MLX cell of this family
+        // decides the same way, so none of them can reach a probe.
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut planned_rows = 0;
+        for (key, row) in plan["anchors"].as_object().expect("anchors object") {
+            let Some(arm) = ARMS
+                .into_iter()
+                .find(|arm| row["provider"].as_str() == Some(arm.provider))
+            else {
+                continue;
             };
+            if !key.ends_with(":mlx") {
+                continue;
+            }
             assert!(
-                contract.generation_memory(&selection).is_some(),
-                "{}: the Wan contract is ExplicitResident; a Resident rung still carries controls",
+                !probes_admission(arm),
+                "{key}: production takes no admission decision for this request, so the capture \
+                 must not probe one"
+            );
+            planned_rows += 1;
+        }
+        assert_eq!(
+            planned_rows, 12,
+            "the plan must still carry the twelve MLX Wan/SCAIL-2 rows this case decides for"
+        );
+
+        // Non-vacuous over the predicate's own axis: the worker's real vocabulary is sealed by
+        // NEITHER engine, and an identity that opened with the engine's own receipt token would be.
+        for arm in ARMS {
+            let token = engine_receipt_token(arm);
+            assert!(
+                !token.is_empty() && !token.contains(':'),
+                "{}: the receipt token is one leading segment",
+                arm.provider
+            );
+            for identity in worker_context_evidence_identities(arm) {
+                assert!(
+                    !engine_seals_evidence(arm, &identity),
+                    "{}: the worker identity {identity:?} is now one this engine seals; the arm \
+                     must probe admission again rather than record the scenarios unexecuted",
+                    arm.provider
+                );
+            }
+            assert!(
+                engine_seals_evidence(arm, &format!("{token}:sealed:by:the:engine")),
+                "{}: the seal test never answers yes; it can prove nothing",
+                arm.provider
+            );
+            assert!(
+                worker_context_evidence_identities(arm)
+                    .contains(&WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned()),
+                "{}: the estimate floor is the identity the worker carries when no curve or \
+                 decode profile priced the candidate; it must stay in the vocabulary",
+                arm.provider
+            );
+            for profile in WORKER_DECODE_PROFILE_EVIDENCE {
+                assert!(
+                    worker_context_evidence_identities(arm).contains(&profile.to_owned()),
+                    "{}: {profile} is an identity video_admission.rs can carry",
+                    arm.provider
+                );
+            }
+        }
+
+        // …and the arm ACTS on that decision. The predicate is only the answer; a body that still
+        // called the provider's admission gate, or a record that still claimed the three admission
+        // scenarios passed, would be the sc-22736 defect wearing the sc-22738 predicate.
+        let body = arm_source_body();
+        assert!(
+            !body.contains("safety_check"),
+            "the Wan/SCAIL-2 arm asks the provider's admission gate something again; production \
+             asks it nothing for these requests"
+        );
+        assert!(
+            body.contains("\"status\": \"gated\""),
+            "a capture that ran no admission probe cannot file a runtime-activating record"
+        );
+        for scenario in ["exact_fit", "unknown_budget", "stale_evidence"] {
+            assert!(
+                body.contains(&format!(
+                    "{{ \"name\": \"{scenario}\", \"result\": \"not_run\", \"reason\": \
+                     ADMISSION_BLOCKER }}"
+                )),
+                "the {scenario} scenario must be reported unexecuted, with the reason production \
+                 gives for it"
+            );
+        }
+        assert!(
+            ADMISSION_BLOCKER
+                .contains("production never presents these Wan 2.2 / SCAIL-2 providers")
+                && ADMISSION_BLOCKER.contains("prices the RESIDENT load"),
+            "the record must state why it ran no probe and what it does price: {ADMISSION_BLOCKER}"
+        );
+        // The blocker is carried into the lifecycle exclusion too, so a reader of either field sees
+        // the same claim.
+        for arm in ARMS {
+            assert!(
+                lifecycle_blocker(arm).contains(ADMISSION_BLOCKER),
+                "{}: the lifecycle blocker must carry the admission blocker",
                 arm.provider
             );
         }
