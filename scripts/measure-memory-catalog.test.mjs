@@ -66,6 +66,8 @@ import {
   watchdogGuard,
   watchdogHardStop,
   METAL_REFUSAL,
+  ARTIFACT_UNSUPPORTED,
+  artifactUnsupported,
   MINIMAX_UPSTREAM_ROOT_FILES,
   MINIMAX_TEXT_ENCODER_CONFIG,
   MINIMAX_TIER_DIT_FILES,
@@ -3954,6 +3956,14 @@ async function stubCheckout() {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
       // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
       // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
+      // sc-22738: the adapter's exit-1 stderr when the PINNED ENGINE's production loader refuses
+      // the shipped artifact, verbatim from the wan_2_2_i2v_14b:q4:mlx run of 2026-09-06 (path
+      // shortened), preceded by the informational line the arm always prints first.
+      if (process.env.STUB_CAPTURE_ARTIFACT_UNSUPPORTED) {
+        console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
+        console.error("load real wan2_2_i2v_14b q4 provider: unsupported: /hub/q4/high_noise_model.safetensors packed head.head lacks scales");
+        process.exit(1);
+      }
       if (process.env.STUB_CAPTURE_METAL_REFUSAL) {
         console.error('Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured render: "[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). at /out/mlx-c-staged/mlx/c/transforms.cpp:73"');
         process.exit(1);
@@ -4631,6 +4641,81 @@ test("a Metal submissions-ignored refusal is COMMITTED as a measured bound at th
     assert.match(stderr, /00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored/);
   } finally {
     delete process.env.STUB_CAPTURE_METAL_REFUSAL;
+  }
+});
+
+test("artifactUnsupported matches the production loader's refusal line and NOTHING else", () => {
+  const wan = [
+    "GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)",
+    "load real wan2_2_i2v_14b q4 provider: unsupported: /hub/q4/high_noise_model.safetensors packed head.head lacks scales",
+  ].join("\n");
+  assert.deepEqual(artifactUnsupported(wan), {
+    provider: "wan2_2_i2v_14b",
+    tier: "q4",
+    reason: "/hub/q4/high_noise_model.safetensors packed head.head lacks scales",
+  });
+  // The TI2V-5B shape, all three tiers, and the reason is carried whole.
+  for (const tier of ["bf16", "q4", "q8"]) {
+    const ti2v = `load real wan2_2_ti2v_5b ${tier} provider: unsupported: wan2_2_ti2v_5b: config.json is not the complete canonical dense Wan2.2 TI2V-5B configuration`;
+    assert.deepEqual(artifactUnsupported(ti2v), {
+      provider: "wan2_2_ti2v_5b",
+      tier,
+      reason: "wan2_2_ti2v_5b: config.json is not the complete canonical dense Wan2.2 TI2V-5B configuration",
+    });
+  }
+  // NOT this: only `Unsupported` is the engine declining a surface it understands. Anything else
+  // that went wrong during a load stays an ordinary failure.
+  assert.equal(artifactUnsupported("load real wan2_2_ti2v_5b bf16 provider: No such file or directory (os error 2)"), null);
+  assert.equal(artifactUnsupported("Error: memory-strategy provider adapter: mint the wan2_2_i2v_14b request receipt: unsupported: x"), null);
+  assert.equal(artifactUnsupported("[METAL] Command buffer execution failed: Ignored (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)"), null);
+  assert.equal(artifactUnsupported(""), null);
+  assert.equal(artifactUnsupported(undefined), null);
+});
+
+test("the runbook's outcome table carries the pinned-artifact refusal and its two open rehosts", async () => {
+  const runbook = await readFile(path.join(ROOT, "docs/calibration-runbook.md"), "utf8");
+  assert.match(runbook, /\| `artifact_unsupported` \|/, "the outcome table names the status");
+  assert.ok(runbook.includes(ARTIFACT_UNSUPPORTED), "the runbook quotes the constant, so the two cannot drift");
+  // The note for the artifact owner: repo, revision, and the file/key each refusal names.
+  for (const cited of [
+    "SceneWorks/wan2.2-i2v-a14b-mlx",
+    "c6c78617",
+    "head.head",
+    "SceneWorks/wan2.2-ti2v-5b-mlx",
+    "bb1b0552",
+    "max_area",
+  ]) {
+    assert.ok(runbook.includes(cited), `the open-rehost note must name ${cited}`);
+  }
+});
+
+test("a pinned-artifact loader refusal is its OWN outcome: named, uncommitted, and not a walk failure", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.STUB_CAPTURE_ARTIFACT_UNSUPPORTED = "1";
+  try {
+    const context = stubContext(checkout);
+    const refused = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot,
+      env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      // An artifact binding is present, which is precisely what would have made a Metal refusal a
+      // BOUND: this outcome must be chosen anyway, because nothing was measured.
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    assert.equal(refused.status, "artifact_unsupported", refused.reason);
+    // The row carries the ENGINE's own sentence, not a generic bucket and not the sc-22414 line
+    // that `failureReason` would have quoted before the classification existed.
+    assert.equal(
+      refused.reason,
+      "wan2_2_i2v_14b q4: /hub/q4/high_noise_model.safetensors packed head.head lacks scales",
+    );
+    assert.equal(context.state.commits.length, 0, "a load that never completed records nothing");
+    assert.equal(context.state.halt, null);
+    assert.equal(context.state.metalRefusedLast, null, "this is not a Metal refusal and must not arm the wedged-host counter");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "the store and matrix are untouched");
+  } finally {
+    delete process.env.STUB_CAPTURE_ARTIFACT_UNSUPPORTED;
   }
 });
 
