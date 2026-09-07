@@ -18,7 +18,7 @@ import {
   validatePhysicalMlxAvContentsAgainstRecord,
   validateSourceSessionFiles,
   METAL_REFUSAL_TOLERANCE, METAL_SUBMISSIONS_IGNORED_CODE, METAL_SUBMISSIONS_IGNORED_PHRASE,
-  metalSubmissionsIgnored, parseWatchdogPeak, recordExceededBound,
+  metalSubmissionsIgnored, parseWatchdogPeak, parseWatchdogHardStop, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
 
 /**
@@ -2982,6 +2982,42 @@ test("the bound's footprint is the sampler's PEAK, never its last reading", () =
     () => parseWatchdogPeak(JSON.stringify({ event: "sample", physicalFootprintBytes: 0 })),
     /non-positive physical footprint/,
   );
+});
+
+test("a WALL-CLOCK stop states no bound: `record-exceeded` refuses it, whichever witness it is handed", async () => {
+  // sc-22738: every guarded probe now carries a `--max-runtime-seconds` budget, so this is the
+  // hard stop this parser is most likely to meet that is not a footprint stop. A probe that ran out
+  // of TIME was never witnessed crossing any line — `scail2_14b:bf16:mlx` sat flat at 93.5 GB under
+  // a 94.82 GB ceiling for 90 minutes — and turning the footprint it happened to be sitting at into
+  // an `exceededBounds` entry would make production refuse hosts on an inequality nothing measured.
+  const stream = (reason) => [
+    JSON.stringify({ event: "started", pid: 1 }),
+    JSON.stringify({ event: "sample", phase: "runtime", physicalFootprintBytes: 93_500_000_000 }),
+    JSON.stringify({ event: "hard_stop", reason }),
+    JSON.stringify({ event: "terminated", reason }),
+  ].join("\n");
+  for (const seconds of ["9000.0", "3600", "150.5"]) {
+    assert.throws(
+      () => parseWatchdogHardStop(stream(`runtime_at_or_above_${seconds}s`)),
+      new RegExp(`WALL-CLOCK stop: the probe reached its ${seconds.replace(".", "\\.")}s budget`),
+      seconds,
+    );
+  }
+  // ...and the refusal survives the whole command, INCLUDING the arm that reads a Metal refusal out
+  // of the adapter's stderr: a stop in the log is consulted first, so a wedged probe whose stderr
+  // happened to carry the refusal string cannot be laundered into a bound through the other door.
+  const fixture = await refusalFixture({ events: stream("runtime_at_or_above_9000.0s") });
+  await assert.rejects(recordRefusal({ fixture }), /WALL-CLOCK stop/);
+  // The control: the SAME stream with a footprint stop is exactly what does state a bound.
+  const footprint = parseWatchdogHardStop([
+    JSON.stringify({ event: "sample", phase: "runtime", physicalFootprintBytes: 94_822_600_833 }),
+    JSON.stringify({ event: "hard_stop", reason: "physical_footprint_at_or_above_94822600832:observed_94822600833" }),
+  ].join("\n"));
+  assert.deepEqual(footprint, {
+    reason: "physical_footprint_at_or_above_94822600832:observed_94822600833",
+    ceilingBytes: 94_822_600_832,
+    observedFootprintBytes: 94_822_600_833,
+  });
 });
 
 test("a process-scoped Metal refusal at the wired limit records a bound whose ceiling is its own witnessed peak", async () => {

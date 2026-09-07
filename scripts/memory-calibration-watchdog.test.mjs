@@ -259,6 +259,38 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   result.pids.forEach(assertGone);
 });
 
+test("a probe stopped by its wall-clock budget takes the ceiling stop's exact path, and says so in the runner's spelling", async () => {
+  // sc-22738: this is the trigger `scripts/measure-memory-catalog.mjs` now arms on every guarded
+  // probe (`--max-runtime-seconds`, from `--probe-budget-minutes`). Two properties are asserted
+  // together because the runner depends on both:
+  //
+  //   1. the SPELLING. The runner classifies the stop by parsing this reason
+  //      (`RUNTIME_BUDGET_STOP_PATTERN`); the two scripts agree on a string and nothing else would
+  //      notice it drifting. Note the FLOAT: argparse types the budget as a float, so a 3-second
+  //      budget spells `runtime_at_or_above_3.0s`, not `_3s`.
+  //   2. the PATH. A runtime stop is not a second kill path bolted on beside the ceiling's: the
+  //      hard stop is emitted, the group takes the same SIGTERM→SIGKILL escalation, the same
+  //      `terminated` event closes the log, and the same 97 leaves the shell. A wedged probe is
+  //      being killed through a live Metal command buffer, and there is exactly one way to do that.
+  const budget = await run("hold", 100, 1, 0.2, "2");
+  const ceilingStop = await run("high", 99, 98);
+  assert.equal(budget.status, 97);
+  assert.equal(budget.status, ceilingStop.status, "both stops leave the same status");
+  const stopped = budget.events.find((event) => event.event === "hard_stop");
+  assert.equal(stopped.reason, "runtime_at_or_above_0.2s");
+  // The runner's own parser, spelled here so a change to either side reds this test.
+  assert.match(`watchdog hard stop: ${stopped.reason}`, /^watchdog hard stop: runtime_at_or_above_(\d+(?:\.\d+)?)s$/);
+  for (const result of [budget, ceilingStop]) {
+    const events = result.events.map((event) => event.event);
+    assert.equal(events.at(-1), "terminated", "the same terminal event closes both logs");
+    assert.equal(
+      events.indexOf("terminated") - events.indexOf("hard_stop"), 1,
+      "the stop is followed immediately by the escalation, on both",
+    );
+    result.pids.forEach(assertGone);
+  }
+});
+
 test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", async () => {
   const files = await fixture();
   const launcher = `${files.program}.predeadline-failure.py`;

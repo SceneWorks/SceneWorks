@@ -70,6 +70,11 @@ import {
   watchdogCeilings,
   watchdogGuard,
   watchdogHardStop,
+  watchdogPeakFootprint,
+  runtimeBudgetStopSeconds,
+  RUNTIME_BUDGET_STOP_PATTERN,
+  PROBE_BUDGET_MINUTES,
+  probeBudgetMinutes,
   METAL_REFUSAL,
   ARTIFACT_UNSUPPORTED,
   artifactUnsupported,
@@ -4204,6 +4209,10 @@ async function stubCheckout() {
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-22738: the wedge. A probe that stops climbing and never finishes — the shape
+      // \`scail2_14b:bf16:mlx\` held for 90 minutes at a flat 93.5 GB — so the only thing that can
+      // end it is the guard's wall-clock budget.
+      if (process.env.STUB_CAPTURE_HANGS) { await new Promise((resolve) => { setTimeout(resolve, 600_000); }); }
       // sc-22738: the adapter's exit-1 stderr AFTER protocol::fail was taught to defer its
       // informational notes -- outcome first, flush_deferred_notes after it. The last line on
       // stderr is therefore a note on every failed capture, by construction.
@@ -4246,7 +4255,13 @@ async function stubCheckout() {
       let ceiling;
       let reason;
       if (stop) {
-        [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+        // The real harness refuses any hard stop that is not a footprint stop, because only a
+        // footprint stop states a lower bound (sc-22738). The stub refuses the same way, so a run
+        // that reaches this command with a WALL-CLOCK stop fails loudly here instead of inventing
+        // a bound out of a budget.
+        const footprint = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+        if (!footprint) { console.error("Error: stub record-exceeded: " + stop.reason + " is not a physical-footprint stop"); process.exit(1); }
+        [, ceiling, observed] = footprint;
         reason = stop.reason;
       } else {
         // The refusal arm: no hard stop, so the witnesses the runner must have handed over are the
@@ -4700,7 +4715,7 @@ test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production bud
 test("the watchdog guard's footprint hard stop is the incident and host RAM, never the wired limit", () => {
   // This Mac's probe: 128 GiB, wired ceiling 87,044,670,532.
   const hardware = { memoryBytes: 137_438_953_472, wiredLimitBytes: 87_044_670_532 };
-  const guard = watchdogGuard({ hardware, eventFile: "/tmp/events.jsonl" });
+  const guard = watchdogGuard({ hardware, eventFile: "/tmp/events.jsonl", budgetMinutes: 60 });
   assert.equal(guard[0], path.join(ROOT, WATCHDOG));
   const flag = (name) => Number(guard[guard.indexOf(name) + 1]);
   // The wired limit caps Metal buffers; the guard samples the kernel `phys_footprint`, which counts
@@ -4719,9 +4734,21 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
   assert.ok(flag("--max-footprint-bytes") < LTX_Q4_F305_CRASH_FOOTPRINT_BYTES);
   assert.ok(flag("--min-memory-free-bytes") + flag("--max-footprint-bytes") <= hardware.memoryBytes - 32 * 1024 * 1024 * 1024, "≥ 32 GiB of baseline room");
   // The generic guard speaks no attestation or phase protocol — those belong to the frozen canary
-  // profiles — and sets no wall-time ceiling.
-  for (const absent of ["--require-child-attestation", "--require-provider-phases", "--provider-phase-profile", "--max-runtime-seconds"]) {
+  // profiles.
+  for (const absent of ["--require-child-attestation", "--require-provider-phases", "--provider-phase-profile"]) {
     assert.equal(guard.includes(absent), false, absent);
+  }
+  // It DOES set a wall-time ceiling since sc-22738 (2026-09-07): `scail2_14b:bf16:mlx` sat flat at
+  // 93.5 GB under this 94.82 GB kill line for 90 minutes with the host swapping, because nothing
+  // ever passed the `--max-runtime-seconds` the guard has always supported. Minutes in, seconds out.
+  assert.equal(flag("--max-runtime-seconds"), 3_600);
+  assert.equal(Number(watchdogGuard({ hardware, eventFile: "x", budgetMinutes: 150 })[guard.indexOf("--max-runtime-seconds") + 1]), 9_000);
+  assert.equal(Number(watchdogGuard({ hardware, eventFile: "x", budgetMinutes: 0.05 })[guard.indexOf("--max-runtime-seconds") + 1]), 3);
+  // REQUIRED, not defaulted: an omitted budget is refused rather than quietly spawning the
+  // unbounded probe this story exists to make impossible.
+  assert.throws(() => watchdogGuard({ hardware, eventFile: "x" }), /positive budgetMinutes/);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "60"]) {
+    assert.throws(() => watchdogGuard({ hardware, eventFile: "x", budgetMinutes: bad }), /positive budgetMinutes/, String(bad));
   }
   // The ceiling is the SMALLER of the incident less the reserve and host RAM less the reserve, so
   // no host policy can raise the kill line to or above the incident — and the wired limit is inert
@@ -4739,10 +4766,10 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
     assert.ok(ceilings.maxFootprintBytes < LTX_Q4_F305_CRASH_FOOTPRINT_BYTES);
     assert.ok(ceilings.maxFootprintBytes + ceilings.minMemoryFreeBytes <= 137_438_953_472);
   }
-  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 2 }, eventFile: "x" }), /above host memory/);
-  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 0 }, eventFile: "x" }), /wiredLimitBytes/);
-  assert.throws(() => watchdogGuard({ hardware: { wiredLimitBytes: 2 }, eventFile: "x" }), /memoryBytes/);
-  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: UNIFIED_RESERVE_BYTES }, eventFile: "x" }), /no positive footprint ceiling/);
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 2 }, eventFile: "x", budgetMinutes: 60 }), /above host memory/);
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 0 }, eventFile: "x", budgetMinutes: 60 }), /wiredLimitBytes/);
+  assert.throws(() => watchdogGuard({ hardware: { wiredLimitBytes: 2 }, eventFile: "x", budgetMinutes: 60 }), /memoryBytes/);
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: UNIFIED_RESERVE_BYTES }, eventFile: "x", budgetMinutes: 60 }), /no positive footprint ceiling/);
   // Guarded set: EVERY capture on Darwin — a candle capture on a Mac draws from the same unified
   // pool the sampler measures — and none elsewhere, where the footprint sampler does not exist.
   assert.equal(guardsCapture("z_image_turbo:q4:mlx", "darwin"), true);
@@ -4928,6 +4955,133 @@ test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the
     assert.equal(status, "", "a stopped capture leaves the checkout clean for the next anchor");
   } finally {
     delete process.env.STUB_PROBE_MEMORY_BYTES;
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: the per-probe WALL-CLOCK budget, and the one hard stop that measures nothing.
+// ---------------------------------------------------------------------------------------------
+
+test("every probe carries a wall-clock budget: per lane by default, derived from the plan, overridable", async () => {
+  // The table, and the flag that overrides it.
+  assert.deepEqual(PROBE_BUDGET_MINUTES, { video: 150, image: 60 });
+  assert.equal(probeBudgetMinutes({ videoLane: true }), 150);
+  assert.equal(probeBudgetMinutes({ videoLane: false }), 60);
+  assert.equal(probeBudgetMinutes({ videoLane: true }, 12), 12, "the flag overrides both lanes");
+  assert.equal(probeBudgetMinutes({ videoLane: false }, 0.5), 0.5);
+  assert.throws(() => probeBudgetMinutes({ videoLane: false }, 0), /positive number of minutes/);
+  assert.equal(parseArgs(["--backend", "mlx", "--list"]).probeBudgetMinutes, null, "unset means the lane default");
+  assert.equal(parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", "45"]).probeBudgetMinutes, 45);
+  for (const bad of ["0", "-3", "abc"]) {
+    assert.throws(() => parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", bad]), /positive number of minutes/, bad);
+  }
+  // The LANE is derived from the plan, never listed here: a video anchor is one whose planned
+  // geometry renders more than one frame. Both video and image rows must exist for the check to
+  // mean anything, and `bernini` (the video entry) versus `bernini_image` (the still one) is the
+  // pair that makes the derivation worth having — one family, two lanes, two budgets.
+  const plan = await readPlan();
+  const { rows } = await planRun({ backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+  let video = 0;
+  for (const row of rows) {
+    const frames = plan.anchors[row.key].geometry?.frames ?? 1;
+    assert.equal(row.videoLane, frames > 1, `${row.key} renders ${frames} frame(s)`);
+    assert.equal(probeBudgetMinutes(row), frames > 1 ? 150 : 60, row.key);
+    if (frames > 1) video += 1;
+  }
+  assert.ok(video > 0 && video < rows.length, `${video} of ${rows.length} mlx rows are video anchors`);
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  assert.equal(byKey.get("bernini:q8:mlx").videoLane, true);
+  assert.equal(byKey.get("bernini_image:q8:mlx").videoLane, false);
+});
+
+test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
+  assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_9000.0s"), 9000);
+  assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_3s"), 3);
+  // Everything that is NOT a wall-clock stop keeps its own arm — above all the footprint stop,
+  // which DOES state a bound and must still reach `record-exceeded`.
+  for (const other of [
+    null, "", "watchdog hard stop: physical_footprint_at_or_above_94822600832:observed_94822600833",
+    "watchdog hard stop: telemetry_lost:TimeoutError:x", "watchdog hard stop: monitor_signal_SIGTERM",
+    "watchdog hard stop: runtime_at_or_above_9000",
+  ]) {
+    assert.equal(runtimeBudgetStopSeconds(other), null, String(other));
+  }
+  assert.ok(RUNTIME_BUDGET_STOP_PATTERN.test("watchdog hard stop: runtime_at_or_above_150.5s"));
+  // The peak is read for the operator, so it never throws on the failure path.
+  const dir = await mkdtemp(path.join(tmpdir(), "catalog-peak-"));
+  const file = path.join(dir, "events.jsonl");
+  await writeFile(file, [
+    JSON.stringify({ event: "started" }),
+    JSON.stringify({ event: "sample", physicalFootprintBytes: 3 }),
+    JSON.stringify({ event: "sample", physicalFootprintBytes: 93_500_000_000 }),
+    JSON.stringify({ event: "sample", physicalFootprintBytes: 12 }),
+    "{ truncated",
+    "",
+  ].join("\n"));
+  assert.deepEqual(await watchdogPeakFootprint(file), { peakBytes: 93_500_000_000, samples: 3 }, "the PEAK, not the last sample");
+  await writeFile(path.join(dir, "empty.jsonl"), "");
+  assert.equal(await watchdogPeakFootprint(path.join(dir, "empty.jsonl")), null);
+  assert.equal(await watchdogPeakFootprint(path.join(dir, "absent.jsonl")), null);
+});
+
+test("a probe that reaches its wall-clock budget is a capture_failed, never a memory bound, and the cell stays runnable", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  // The wedge: the capture never finishes and its footprint never reaches the ceiling (the probe
+  // reports a 128 GiB host, so the kill line is the incident's 94,822,600,832 bytes and a Node
+  // process cannot approach it). Only the budget can end this run — 3 seconds of it.
+  process.env.STUB_CAPTURE_HANGS = "1";
+  try {
+    const context = stubContext(checkout, {
+      args: { ...stubContext(checkout).args, probeBudgetMinutes: 0.05 },
+    });
+    const stopped = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      // Fully bound, so nothing but the runtime arm itself can be what stops a bound being written:
+      // the "no artifact binding" refusal is not the guard under test here.
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    // A runtime stop measured NOTHING. It is a failed capture, not an exceedance: recording the
+    // footprint the probe happened to be sitting at would state a lower bound the run never
+    // established, and production would refuse hosts on it.
+    assert.equal(stopped.status, "capture_failed", stopped.reason);
+    assert.match(stopped.reason, /^runtime_budget_exceeded: the 0\.05-minute probe budget \(3s\) elapsed;/);
+    // The line an operator reads has to carry both figures, or there is nothing to judge with.
+    assert.match(stopped.reason, /peak physical footprint \d+ bytes over \d+ sample\(s\) against the 94822600832-byte ceiling/);
+    assert.match(stopped.reason, /no bound was recorded and this cell stays runnable/);
+    assert.equal(context.state.commits.length, 0, "nothing was committed");
+    const { stdout: status } = await checkout.git("status", "--porcelain");
+    assert.equal(status, "", "the tree is clean for the next anchor");
+    // NO BOUND, by every route one could have arrived through.
+    await assert.rejects(
+      stat(path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json")),
+      "no bound bundle was written",
+    );
+    const store = JSON.parse(await readFile(path.join(checkout.root, ANCHOR_STORE_PATH), "utf8"));
+    assert.deepEqual(store.exceededBounds ?? [], [], "the anchor store carries no bound for this cell");
+    assert.deepEqual(store.anchors ?? [], [], "and no measurement either");
+    // ...which is exactly why the cell is still schedulable: `--list` reads the store, and the
+    // store never heard about this attempt.
+    assert.equal((await readExceededBounds(checkout.root)).size, 0);
+    // The guard's own evidence is KEPT in the work dir for the operator, on the SAME stop path a
+    // footprint stop takes: samples, the hard stop, the escalation and the terminated group.
+    const eventFile = path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl");
+    const events = (await readFile(eventFile, "utf8")).trim().split("\n").map(JSON.parse);
+    const hardStop = events.find((event) => event.event === "hard_stop");
+    assert.ok(hardStop, "the guard recorded the stop");
+    assert.equal(hardStop.reason, "runtime_at_or_above_3.0s");
+    assert.equal(runtimeBudgetStopSeconds(await watchdogHardStop(eventFile)), 3, "the runner reads the guard's own spelling");
+    assert.ok(events.some((event) => event.event === "sample"), "the samples behind the reported peak are kept");
+    assert.ok(events.some((event) => event.event === "terminated"), "the group was terminated, not left running");
+    assert.ok((await stat(stopped.log)).size > 0, "the per-anchor log is kept too");
+    const log = await readFile(stopped.log, "utf8");
+    // The plumbing, end to end: minutes on the runner, seconds on the guard.
+    assert.match(log, /memory-calibration-watchdog\.py .*--max-runtime-seconds 3 /);
+  } finally {
+    delete process.env.STUB_CAPTURE_HANGS;
   }
 });
 

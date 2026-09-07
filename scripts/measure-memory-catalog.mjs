@@ -16,8 +16,16 @@
 //   node scripts/measure-memory-catalog.mjs --backend mlx \
 //     --adapter target/release/memory-mlx-adapter --inference-repo ../inference \
 //     --work-dir /abs/OUTSIDE/the/repo/calib --campaign sc-NNNN [--model sdxl ...] [--anchors a,b]
-//     [--skip-current]
+//     [--skip-current] [--probe-budget-minutes N]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
+//
+// Every guarded probe also carries a WALL-CLOCK budget (`--probe-budget-minutes`, defaulted per
+// lane by `PROBE_BUDGET_MINUTES`), passed to the guard as `--max-runtime-seconds`. A probe that
+// reaches it is stopped on the guard's ONE stop path — the same SIGTERM→SIGKILL escalation and the
+// same post-stop census a footprint stop takes — and reported as `capture_failed` with reason
+// `runtime_budget_exceeded`. It is NOT an exceedance: a run that thrashed below the ceiling
+// measured nothing, so no bound is written, the store keeps no trace, and the cell classifies
+// `runnable` again on the next `--list` (sc-22738).
 //
 // A cell the store already carries a CURRENT measured lower bound for classifies `exceeded_current`
 // and is never scheduled, with or without `--skip-current` (sc-22738): the host has proved it cannot
@@ -1326,6 +1334,7 @@ export function parseArgs(argv) {
   const args = {
     backend: null, adapter: null, inferenceRepo: null, workDir: null, campaign: null,
     anchors: null, models: [], skipCurrent: false, dryRun: false, commit: true, hfCache: [], list: false,
+    probeBudgetMinutes: null,
   };
   const value = (flag, index) => {
     const selected = argv[index + 1];
@@ -1344,6 +1353,15 @@ export function parseArgs(argv) {
       case "--anchors": args.anchors = value(flag, index).split(",").filter(Boolean); index += 1; break;
       case "--model": args.models.push(value(flag, index)); index += 1; break;
       case "--skip-current": args.skipCurrent = true; break;
+      // Minutes, and fractional minutes are accepted: the budget is one number in one unit, and a
+      // test (or a deliberately tight re-run) needs to express seconds without a second flag.
+      case "--probe-budget-minutes": {
+        const minutes = Number(value(flag, index));
+        if (!Number.isFinite(minutes) || minutes <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
+        args.probeBudgetMinutes = minutes;
+        index += 1;
+        break;
+      }
       case "--dry-run": args.dryRun = true; break;
       case "--no-commit": args.commit = false; break;
       case "--list": args.list = true; break;
@@ -1640,6 +1658,12 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     // and the capture-dir environment. Defaulted here so no early-return row can reach
     // `measureAnchor` with the flag undefined; both terminal paths below set it from the family.
     sourceCapture: false, physical: false,
+    // sc-22738: which wall-clock budget this probe carries (`PROBE_BUDGET_MINUTES`). The PLAN is
+    // the authority and it already states it: a video anchor is one whose planned geometry renders
+    // more than one frame. Derived rather than listed so a new video row cannot be given an image
+    // lane's budget by omission — and set on the base row, so every early-return status carries it
+    // too and `--dry-run` can print it for a cell it will not run.
+    videoLane: Number(planned?.geometry?.frames ?? 1) > 1,
   };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
   const family = familyFor(parts.modelId, planned.provider, families);
@@ -2277,6 +2301,51 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  * how the MLX lane's own admission reasons about device memory); it is advisory here, never a kill
  * line (sc-22738, measured 2026-09-06).
  */
+/**
+ * The per-probe WALL-CLOCK budget, in minutes, by lane (sc-22738, 2026-09-07).
+ *
+ * WHY A BUDGET AT ALL. The guard's ceilings bound a probe that CLIMBS. They say nothing about one
+ * that stops climbing: `scail2_14b:bf16:mlx` sat at a flat 93.5 GB against the 94.82 GB kill line
+ * for 90 minutes, the host swapping and the adapter's main thread parked in `mlx::core::eval` →
+ * `waitUntilSignaledValue`, and would have sat there until an operator noticed. The watchdog has
+ * supported `--max-runtime-seconds` since it was written; nothing passed it, so every probe ran
+ * unbounded in time.
+ *
+ * THE BASIS, AND WHAT IT IS NOT. The evidence corpus states no wall clock: `durationSeconds` and
+ * every other duration/elapsed field are ABSENT from `docs/calibration/sc-22738/*.json` (a capture
+ * bundle carries `capturedAt` and nothing about how long the render took). So these are derived
+ * from the two figures the corpus and this tree DO state:
+ *
+ *   * consecutive `capturedAt` deltas inside one uninterrupted walk, each an UPPER bound on that
+ *     anchor's whole capture→commit cycle. Longest for a completed IMAGE anchor: 847 s
+ *     (`bernini_image:q8:mlx`, 07:13:26 after q4's 06:59:19 on 2026-09-07). Longest bounding a
+ *     completed VIDEO anchor: 4,161 s (`ltx_2_3:q4:mlx`), with the clean back-to-back `ltx_2_5`
+ *     pair at 1,132 s and 1,097 s.
+ *   * the longest run this tree WITNESSES a guarded probe making real progress in: the 85-minute
+ *     `bernini:q8:mlx` render (a VIDEO entry — `bernini` is the video row, `bernini_image` the
+ *     still one) that was steady at 52 GB when a census false positive SIGKILLed it, named in
+ *     `scripts/memory-calibration-watchdog.py`'s header.
+ *
+ * So: 150 minutes for video is 1.8x that witnessed 85-minute render and ~2.2x the longest video
+ * capture cycle on file; 60 minutes for image is 4.2x the longest image capture cycle on file. Both
+ * are backstops against a wedge, not schedule targets — a budget tight enough to argue about would
+ * be converting slow renders into re-runs.
+ *
+ * The cost of being wrong is bounded BY DESIGN and asymmetric on purpose: a runtime stop records no
+ * bound and leaves the cell `runnable`, so too tight a budget costs a re-run, while too loose a one
+ * costs only operator time. `--probe-budget-minutes` overrides both entries for a run.
+ */
+export const PROBE_BUDGET_MINUTES = { video: 150, image: 60 };
+
+/** This row's wall-clock budget in minutes: the runner's `--probe-budget-minutes`, else its lane's. */
+export function probeBudgetMinutes(row, override = null) {
+  if (override !== null && override !== undefined) {
+    if (!Number.isFinite(override) || override <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
+    return override;
+  }
+  return PROBE_BUDGET_MINUTES[row.videoLane ? "video" : "image"];
+}
+
 export function watchdogCeilings({ memoryBytes }) {
   const bounds = [LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - UNIFIED_RESERVE_BYTES, memoryBytes - UNIFIED_RESERVE_BYTES];
   return { maxFootprintBytes: Math.min(...bounds), minMemoryFreeBytes: UNIFIED_RESERVE_BYTES };
@@ -2292,17 +2361,25 @@ export function watchdogCeilings({ memoryBytes }) {
  * watchdog can panic.
  *
  * Both ceilings are DERIVED (`watchdogCeilings`) from the adapter's probed host memory and the
- * incident, never chosen here; the probe's wired limit is validated but is not a kill line. No wall-time ceiling: a runtime-complete video anchor runs six renders, and time is
- * not the hazard this guard exists for. Darwin-only by construction — the footprint sampler is
- * `/usr/bin/footprint`.
+ * incident, never chosen here; the probe's wired limit is validated but is not a kill line.
+ *
+ * A WALL-CLOCK ceiling too, since sc-22738 (2026-09-07): `budgetMinutes` — see
+ * `PROBE_BUDGET_MINUTES` for the figures and their basis. It is a REQUIRED argument, not a default
+ * here, so no caller can spawn an unbounded probe by omission; the guard treats it as one more
+ * trigger on its ONE stop path, so a runtime stop escalates and discriminates exactly as a
+ * footprint stop does. What differs is what the RUNNER makes of it: a footprint stop measured a
+ * lower bound, a runtime stop measured nothing at all.
+ *
+ * Darwin-only by construction — the footprint sampler is `/usr/bin/footprint`.
  */
-export function watchdogGuard({ hardware, eventFile }) {
+export function watchdogGuard({ hardware, eventFile, budgetMinutes }) {
   const { memoryBytes, wiredLimitBytes } = hardware;
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes <= 0) fail("watchdog guard needs a positive hardware.memoryBytes");
   if (wiredLimitBytes !== undefined) {
     if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) fail("watchdog guard needs a positive hardware.wiredLimitBytes");
     if (wiredLimitBytes > memoryBytes) fail("watchdog guard: wired ceiling above host memory");
   }
+  if (!Number.isFinite(budgetMinutes) || budgetMinutes <= 0) fail("watchdog guard needs a positive budgetMinutes");
   const { maxFootprintBytes, minMemoryFreeBytes } = watchdogCeilings({ memoryBytes });
   if (maxFootprintBytes <= 0) fail(`watchdog guard: no positive footprint ceiling on a ${memoryBytes}-byte host`);
   return [
@@ -2312,6 +2389,8 @@ export function watchdogGuard({ hardware, eventFile }) {
     "--max-footprint-bytes", String(maxFootprintBytes),
     "--host-memory-bytes", String(memoryBytes),
     "--min-memory-free-bytes", String(minMemoryFreeBytes),
+    // Minutes in, seconds out: the guard speaks seconds, the operator books minutes.
+    "--max-runtime-seconds", String(budgetMinutes * 60),
     "--sample-interval", "2",
     "--telemetry-timeout", "10",
     "--term-grace", "1",
@@ -2338,6 +2417,55 @@ export async function watchdogHardStop(eventFile) {
     if (event.event === "hard_stop") return `watchdog hard stop: ${event.reason}`;
   }
   return null;
+}
+
+/**
+ * The guard's own spelling of a WALL-CLOCK stop, as `watchdogHardStop` returns it (sc-22738).
+ *
+ * `memory-calibration-watchdog.py` writes `runtime_at_or_above_<seconds>s` — the argparse value is
+ * a float, so `9000.0` and `3` both occur — for every path that ends on the runtime deadline: the
+ * startup window, the sampling loop, and a telemetry probe bounded by the deadline. A test in
+ * `memory-calibration-watchdog.test.mjs` binds that spelling to this pattern, because the two
+ * scripts agree on it by string and nothing else would notice it drifting.
+ */
+export const RUNTIME_BUDGET_STOP_PATTERN = /^watchdog hard stop: runtime_at_or_above_(\d+(?:\.\d+)?)s$/;
+
+/** The budget a runtime stop names, in seconds, or `null` when `hardStop` is not a runtime stop. */
+export function runtimeBudgetStopSeconds(hardStop) {
+  const match = RUNTIME_BUDGET_STOP_PATTERN.exec(String(hardStop ?? ""));
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The highest `phys_footprint` the guard sampled, `{ peakBytes, samples }`, or `null` when the log
+ * states none (sc-22738).
+ *
+ * Read on the FAILURE path, where the original outcome must still surface, so — unlike the
+ * harness's `parseWatchdogPeak`, whose caller is about to write a bound out of it — nothing here
+ * throws: a missing, truncated or sample-less log yields `null` and the row says "not sampled".
+ * This figure states no bound and is never recorded; it exists so the `--- key: status (reason)`
+ * line tells a human how close the wedged probe was to the ceiling.
+ */
+export async function watchdogPeakFootprint(eventFile) {
+  let body;
+  try {
+    body = await readFile(eventFile, "utf8");
+  } catch {
+    return null;
+  }
+  let peakBytes = null;
+  let samples = 0;
+  for (const line of body.split("\n")) {
+    if (!line.trim()) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.event !== "sample") continue;
+    const footprint = event.physicalFootprintBytes;
+    if (!Number.isSafeInteger(footprint) || footprint <= 0) continue;
+    samples += 1;
+    if (peakBytes === null || footprint > peakBytes) peakBytes = footprint;
+  }
+  return peakBytes === null ? null : { peakBytes, samples };
 }
 
 /**
@@ -2637,6 +2765,9 @@ export async function measureAnchor(row, context) {
   // The host's Metal wired ceiling as THIS anchor's probe read it, kept for the refusal arm below:
   // the bound is keyed on the limit the refused render actually ran under, not on a later reading.
   let probedHardware = null;
+  // sc-22738: this probe's wall-clock budget, resolved once so the guard, the failure arm and the
+  // log all name the same figure.
+  const budgetMinutes = probeBudgetMinutes(row, args.probeBudgetMinutes);
   try {
     if (guardsCapture(row.key)) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
@@ -2645,7 +2776,7 @@ export async function measureAnchor(row, context) {
         cwd: root, env, wiredLimitRequired: anchorParts(row.key).backend === "mlx",
       });
       probedHardware = hardware;
-      const guard = watchdogGuard({ hardware, eventFile: watchdogEvents });
+      const guard = watchdogGuard({ hardware, eventFile: watchdogEvents, budgetMinutes });
       // The guard APPENDS to its event log; this capture's verdict must not read an earlier one's.
       await rm(watchdogEvents, { force: true });
       log.write(`$ /usr/bin/python3 ${guard.join(" ")} -- node ${captureArgs.join(" ")}\n`);
@@ -2657,6 +2788,31 @@ export async function measureAnchor(row, context) {
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
+    // sc-22738 (2026-09-07): a WALL-CLOCK stop, and the one hard stop that is NOT a measurement.
+    //
+    // The guard killed this group on exactly the path a footprint stop takes — same escalation,
+    // same post-stop census — but for a different reason: the probe ran out of time, wherever its
+    // footprint happened to be. `scail2_14b:bf16:mlx` sat flat at 93.5 GB under a 94.82 GB ceiling
+    // for 90 minutes; the footprint it was sitting at is not a line it was witnessed to CROSS, and
+    // recording it as `exceededBounds` would state a lower bound the run never established and make
+    // production refuse hosts on it. So this arm returns BEFORE the two bound-recording arms below,
+    // records nothing, commits nothing, and leaves the cell `runnable` for the next `--list`: no
+    // bundle means no `records` and no bound for the classifier to read. The peak is reported for
+    // the operator's judgment only — a probe that wedged at the ceiling is a different problem from
+    // one that wedged at 3 GB — and is deliberately not written anywhere.
+    const budgetSeconds = runtimeBudgetStopSeconds(hardStop);
+    if (budgetSeconds !== null) {
+      const peak = await watchdogPeakFootprint(watchdogEvents);
+      const ceiling = probedHardware
+        ? `${watchdogCeilings(probedHardware).maxFootprintBytes}-byte ceiling`
+        : "the guard's ceiling";
+      return finish(
+        "capture_failed",
+        `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
+          + `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} `
+          + `against the ${ceiling}. Nothing was measured, so no bound was recorded and this cell stays runnable.`,
+      );
+    }
     // sc-22738 (measured 2026-09-06): the SECOND way a run ends having measured a bound. Metal
     // refused this process's submissions once its working set reached the host's wired limit —
     // `flux2_dev:bf16:mlx` at 775 s, sampled peak 86,988,010,336 against an 87,044,670,532-byte
@@ -2856,7 +3012,7 @@ export async function main(argv = process.argv.slice(2)) {
   const runnable = rows.filter((row) => row.status === "runnable");
   if (args.dryRun) {
     for (const row of runnable) {
-      process.stdout.write(`${row.key}\n  sourceCapture=${row.sourceCapture} physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)}\n`);
+      process.stdout.write(`${row.key}\n  sourceCapture=${row.sourceCapture} physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)} budget=${probeBudgetMinutes(row, args.probeBudgetMinutes)}m\n`);
       for (const root of row.roots) process.stdout.write(`  ${root.label}: ${root.path}\n`);
       for (const [name, value] of Object.entries(row.env)) process.stdout.write(`  ${name}=${value}\n`);
     }
