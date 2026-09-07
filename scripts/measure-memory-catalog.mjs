@@ -628,18 +628,32 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
 /**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
- * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
- * (the Qwen MLX source capture, mlx.rs `qwen_source_capture`): the harness REQUIRES a sourceCapture
- * whenever `--raw-log-dir` is given, so the raw-log pair and `SCENEWORKS_MEMORY_CAPTURE_DIR` must be
- * passed for that arm and for no other.
+ * under "Adapter environment".
+ *
+ * `sourceCapture` marks an MLX arm that emits a provider `sourceCapture` fragment. The coupling the
+ * harness enforces is BIDIRECTIONAL (`capturePlannedCase`): `--raw-log-dir` without a sourceCapture
+ * fails, and a sourceCapture without the raw-log pair fails too. So exactly these arms get
+ * `SCENEWORKS_MEMORY_CAPTURE_DIR` + `SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`, the harness's
+ * `--raw-log-dir`/`--source-path-prefix`, `ingest --source-root`, and the receipt copy into the
+ * campaign directory — and no other arm gets any of them.
+ *
+ * sc-22738: this used to be spelled `physical`, which conflated the emission with the CURRENCY rule
+ * below and so bound the pair to `qwen_image` alone. `crates/.../bin/mlx_ltx25.rs` has emitted a
+ * `physical_mlx` sourceCapture since SC-18783 and `required_env`s the capture dir unconditionally
+ * (`prepare_source_capture`), so all three `ltx_2_5:*:mlx` captures died on
+ * `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — for `bf16` after 883s,
+ * because the harness re-hashes the ~90GB LTX-2.5 snapshot before the adapter is ever spawned. The
+ * two facts are now two flags, and `every MLX arm that emits a sourceCapture declares it`
+ * (measure-memory-catalog.test.mjs) derives the expected set from the adapter sources.
+ *
+ * `physical` is the narrower CURRENCY rule: the harness demands a validated physical source session
+ * before it will call an anchor current, and it scopes that demand to `modelId === "qwen_image"`
+ * alone (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), which a test
+ * below binds this table to. `physical` therefore implies `sourceCapture`; the reverse does not
+ * hold, and LTX-2.5 is the arm that proves it. `physical` is NOT inherited by a sibling family.
  *
  * Rows are keyed by PROVIDER by default; sc-22729 adds MODEL-keyed rows (which must declare their
  * `provider`) for the case where several catalog models ride one engine id. See `familyFor`.
- *
- * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
- * scopes the receipt requirement to `modelId === "qwen_image"` alone
- * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
- * binds this table to that predicate.
  *
  * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
  * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
@@ -668,7 +682,10 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * this table's spelling.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
-  qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
+  qwen_image: {
+    env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"],
+    sourceCapture: true, physical: true,
+  },
   // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
   // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
   // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
@@ -905,8 +922,16 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // the stock enhancer co-requisite `load_artifact` demands of every load. Neither is inside the
   // load root, so the snapshot probe above cannot see them; without these an anchor whose planned
   // cases include the dev variant classified `runnable` and failed after the booked session opened.
+  //
+  // sc-22738: the MLX arm emits a `physical_mlx` sourceCapture on EVERY run (`mlx_ltx25.rs`
+  // `prepare_source_capture` → `source_capture`, which persists the canonical selected/reference AV
+  // pair under `$SCENEWORKS_MEMORY_CAPTURE_DIR/$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`), so it needs
+  // exactly the raw-log provenance the Qwen MLX arm needs — but NOT the qwen-only currency receipt
+  // rule, which is why this is `sourceCapture` and not `physical`. The candle row below emits none
+  // (`candle.rs` has no sourceCapture site), so it must NOT be given the pair: the harness refuses a
+  // `--raw-log-dir` whose provider returned no sourceCapture.
   ltx_2_5: {
-    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"],
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"], sourceCapture: true,
     requiredSnapshotEntries: [
       { path: LTX25_DEV_REFINEMENT_LORA },
       { path: LTX25_ENHANCER_DIR, dir: true },
@@ -1449,7 +1474,13 @@ async function firstExistingDirectory(candidates) {
  */
 export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
-  const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
+  const row = {
+    key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [],
+    // sc-22738: an arm that emits a provider `sourceCapture` is the one that needs the raw-log pair
+    // and the capture-dir environment. Defaulted here so no early-return row can reach
+    // `measureAnchor` with the flag undefined; both terminal paths below set it from the family.
+    sourceCapture: false, physical: false,
+  };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
   const family = familyFor(parts.modelId, planned.provider, families);
   // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
@@ -1533,7 +1564,8 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       };
     }
     row.ltx25SnapshotRoot = snapshot;
-    row.physical = false;
+    row.sourceCapture = backend === "mlx" && family.sourceCapture === true;
+    row.physical = backend === "mlx" && family.physical === true;
     // sc-22738: the weights identity a footprint hard stop would be bound against. It is the
     // runner's binding of what it set up for the capture, not a provider attestation — a killed
     // run attests nothing — so it names exactly the snapshot the row resolved above. LTX-2.5 rows
@@ -1775,6 +1807,7 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
     row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
+  row.sourceCapture = backend === "mlx" && family.sourceCapture === true;
   row.physical = backend === "mlx" && family.physical === true;
   // sc-22738: see the LTX-2.5 branch — the tier root this row resolved, named so a hard stop can
   // state WHICH weights reached the footprint it bounds. `measureAnchor` fills the inventory digest
@@ -2184,11 +2217,43 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
   }
 }
 
-/** The first line of a child's stderr that names the failure, not the Node banner after it. */
+/** Longest failure reason a summary row carries. The ONLY bound: never a delimiter, see below. */
+export const FAILURE_REASON_LIMIT = 300;
+
+/**
+ * The LAST line of a child's stderr that names the failure, not the Node banner after it.
+ *
+ * sc-22738: this used to take the FIRST line matching `/^(Error|…Error|fatal|error)\b/`, falling
+ * back to the first non-banner line. Both arms read the wrong end of the message. The harness
+ * rejects a failed provider with `${command} exited ${code}: ${stderr.trim()}` — the adapter's WHOLE
+ * stderr, many lines, terminal error last — and adapters print informational lines before it. Every
+ * Mage anchor in the 09-06 campaign therefore reported `capture_failed` with
+ * `GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)`, the sc-22414
+ * coherence tally the adapter prints on the way out, while the actual refusal —
+ * `a synchronized Mage-Flow lifecycle phase reported a zero active peak` — sat on the next line and
+ * reached no summary row. Reading from the END gets the adapter's terminal error under both
+ * shapes, because Node's own frames and version banner are the only thing that follows it.
+ *
+ * The full stderr is unchanged and still in the anchor log; this only picks what the one-line
+ * summary quotes. It is bounded by LENGTH alone — never truncated at a `;` or a `)`, because both
+ * occur inside real adapter messages (`mlx_gen=0 mlx_llm=0 (sc-22414)`) and cutting there loses the
+ * half that names the cell.
+ */
 export function failureReason(error) {
-  const lines = String(error.stderr ?? error.message ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
-  const named = lines.find((line) => /^(Error|[A-Za-z]*Error|fatal|error)\b/.test(line));
-  return (named ?? lines.find((line) => !/^(at |Node\.js v)/.test(line)) ?? "unknown failure").slice(0, 300);
+  const stderr = String(error.stderr ?? "");
+  // No child stderr means the runner itself refused (`fail`), and those messages are ONE statement
+  // that may wrap — "post-steps changed paths this run does not own:" and then the paths. Keeping
+  // only the last line would drop the sentence and quote a bare path, so join instead.
+  if (!stderr.trim()) {
+    return String(error.message ?? "unknown failure")
+      .split("\n").map((line) => line.trim()).filter(Boolean)
+      .join(" ").slice(0, FAILURE_REASON_LIMIT) || "unknown failure";
+  }
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(at |Node\.js v)/.test(line));
+  return (lines.at(-1) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
 }
 
 export async function measureAnchor(row, context) {
@@ -2230,7 +2295,7 @@ export async function measureAnchor(row, context) {
     // the guarded render had open rather than a revision that could resolve to several trees.
     if (row.artifact) row.artifact = { ...row.artifact, inventorySha256: inventory.sha256 };
   }
-  if (row.physical) {
+  if (row.sourceCapture) {
     env.SCENEWORKS_MEMORY_CAPTURE_DIR = rawLogDir;
     env.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX = campaignPrefix;
   }
@@ -2248,7 +2313,7 @@ export async function measureAnchor(row, context) {
       await exec(process.execPath, [
         HARNESS, "ingest", "--input", input, ...sourceRoot, "--output", target,
       ], { log });
-      if (row.physical && status === "committed") {
+      if (row.sourceCapture && status === "committed") {
         const receipts = path.join(rawLogDir, campaignDir);
         try {
           for (const name of await readdir(receipts)) {
@@ -2307,7 +2372,7 @@ export async function measureAnchor(row, context) {
     "--sceneworks-repo", root, "--inference-repo", path.resolve(args.inferenceRepo),
     "--output", captureOutput,
   ];
-  if (row.physical) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
+  if (row.sourceCapture) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
   if (row.ltx25SnapshotRoot) captureArgs.push("--ltx25-snapshot-root", row.ltx25SnapshotRoot);
   const watchdogEvents = path.join(workDir, "logs", `${slug}-watchdog.jsonl`);
   const providerStderrFile = path.join(workDir, "logs", `${slug}-provider-stderr.txt`);
@@ -2410,7 +2475,7 @@ export async function measureAnchor(row, context) {
   }
 
   // 2. check the raw bundle before touching the tree.
-  const sourceRoot = row.physical ? ["--source-root", rawLogDir] : [];
+  const sourceRoot = row.sourceCapture ? ["--source-root", rawLogDir] : [];
   try {
     await exec(process.execPath, [HARNESS, "check", "--input", captureOutput, ...sourceRoot], { log });
   } catch (error) {
@@ -2522,7 +2587,7 @@ export async function main(argv = process.argv.slice(2)) {
   const runnable = rows.filter((row) => row.status === "runnable");
   if (args.dryRun) {
     for (const row of runnable) {
-      process.stdout.write(`${row.key}\n  physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)}\n`);
+      process.stdout.write(`${row.key}\n  sourceCapture=${row.sourceCapture} physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)}\n`);
       for (const root of row.roots) process.stdout.write(`  ${root.label}: ${root.path}\n`);
       for (const [name, value] of Object.entries(row.env)) process.stdout.write(`  ${name}=${value}\n`);
     }

@@ -866,6 +866,33 @@ SCENEWORKS_LTX_TEXT_ENCODER_ROOT=/abs/path/.../snapshots/<rev>/gemma
 # the manifest pins `01df27d3…`; `hf download --revision 01df27d3… --include 'q8/*' --include 'q4/*'`
 # re-links them at the manifest revision for **zero bytes**, because the blobs are shared (sc-18810).
 
+# memory-mlx-adapter — ltx_2_5 (SC-18783; the arm with NO `SCENEWORKS_LTX25_*` family for you to
+# set). Every artifact variable below is derived and exported by the HARNESS from
+# `--ltx25-snapshot-root` — repository, revision, the `<transformerVariant>/<tier>` root, the shared
+# enhancer's bytes/digest, the dev refinement adapter's bytes/digest — and `ltx25ProviderEnvironment`
+# DELETES any inherited copy first, so exporting them by hand does nothing. What the operator (or, in
+# a catalog walk, `measure-memory-catalog.mjs`) still owes the arm is the RAW-LOG PAIR:
+SCENEWORKS_MEMORY_CAPTURE_DIR=/absolute/path/outside/both/checkouts/raw
+SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX=docs/calibration/<campaign>
+# sc-22738: `mlx_ltx25.rs#prepare_source_capture` `required_env`s BOTH, unconditionally and before
+# the load, because this arm emits a `physical_mlx` sourceCapture on every run — it persists the
+# canonical selected/reference AV pair under `<capture-dir>/<source-prefix>`. It is the SECOND arm
+# that does so; the Qwen MLX arm (`qwen_source_capture`) is the other, and no third arm on either
+# lane does. The three `ltx_2_5:*:mlx` anchors booked on 2026-09-06 all died on
+# `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — bf16 after 883 s,
+# because the harness re-hashes the ~90 GB snapshot before the adapter is ever spawned — since the
+# catalog runner set the pair for `qwen_image` alone. `PROVIDER_FAMILIES.ltx_2_5` now declares
+# `sourceCapture: true` and the runner derives the pair (and `--raw-log-dir` /
+# `--source-path-prefix`, and `ingest --source-root`, and the receipt copy into the campaign
+# directory) from that flag; a test walks the MLX dispatch and reds if the declared set ever stops
+# matching the arms that really emit. This is NOT the Qwen `physical` currency rule: the harness
+# demands a validated physical source session before it calls an anchor current for
+# `modelId === "qwen_image"` only, so LTX-2.5 writes the receipt without owing it for currency.
+#
+# The Candle arm (`ltx_2_5_distilled`) emits NO sourceCapture, so it must be given NEITHER the pair
+# nor `--raw-log-dir`: `capturePlannedCase` refuses a configured raw-log directory whose provider
+# returned no source capture, which is the same failure from the other side.
+
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 
@@ -1112,6 +1139,12 @@ to `$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
 **One command captures one anchor and writes one record.** There is no campaign to schedule, no
 resume, no reuse assessment and no batch. Capturing a second cell means running the command a second
 time with a different `--anchor`, producing a second file.
+
+The arms that need the raw-log pair are exactly the MLX arms that EMIT a provider `sourceCapture`:
+`qwen_image` (`mlx.rs#qwen_source_capture`) and `ltx_2_5` (`mlx_ltx25.rs#prepare_source_capture`,
+sc-22738). Both `required_env` the capture directory before the load and refuse without it; the
+coupling is enforced from the other side too, so passing `--raw-log-dir` to any OTHER arm makes the
+harness refuse the render. See the LTX-2.5 block under "Adapter environment".
 
 For physical MLX capture, the raw-log directory must also stay outside the checkout. Run
 `scripts/hash-artifact-inventory.mjs --root <exact-tier-root> --github-env <env-file>` once before
