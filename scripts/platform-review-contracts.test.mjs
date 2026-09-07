@@ -1254,9 +1254,17 @@ test("Rust Docker builders copy every production generated embed from sceneworks
 
   const dockerfile = await source("docker/rust.Dockerfile");
   for (const path of generatedEmbeds) {
+    const directory = path.slice(0, path.lastIndexOf("/") + 1);
+    // sc-22738: a calibration campaign is carried as ONE directory COPY per stage, not one line per
+    // corpus. The per-corpus form grew a layer per ingested anchor and took the `builder` stage to
+    // 141 instructions — past Docker's overlay limit, so `parity-docker` died with `max depth
+    // exceeded` while preparing the build. `docs/generated/` stays per-file: that directory also
+    // holds the churning `memory-matrix.json`, which would invalidate the layer on unrelated edits.
     const copy = path.startsWith("docs/generated/ltx-mlx-")
       ? "COPY docs/generated/ltx-mlx-*.json ./docs/generated/"
-      : `COPY ${path} ./${path.slice(0, path.lastIndexOf("/") + 1)}`;
+      : path.startsWith("docs/calibration/")
+        ? `COPY ${directory} ./${directory}`
+        : `COPY ${path} ./${directory}`;
     assert.equal(
       dockerfile.split(copy).length - 1,
       2,

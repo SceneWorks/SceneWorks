@@ -2082,29 +2082,41 @@ export async function writePackagedSource(root, relativePath) {
  * Every `include_str!` `memory_anchor.rs` compiles in must ALSO be copied into both Docker builder
  * contexts, or `docker build` breaks while `cargo build` on a checkout stays green — the two see
  * different trees. `scripts/platform-review-contracts.test.mjs` ("Rust Docker builders copy every
- * production generated embed from sceneworks-core") asserts exactly that, counting the `COPY <path>
- * ./<dir>/` line twice. `appendPackagedSource` added the embed and left the Dockerfile alone, so
- * every anchor commit — a completed capture's as much as a hard stop's — landed a red tree that had
- * to be repaired by hand afterwards (PR #2759 and the bernini q4 seed both did).
+ * production generated embed from sceneworks-core") asserts exactly that, counting the corpus's
+ * `COPY <dir>/ ./<dir>/` line twice. `appendPackagedSource` added the embed and left the Dockerfile
+ * alone, so every anchor commit — a completed capture's as much as a hard stop's — landed a red tree
+ * that had to be repaired by hand afterwards (PR #2759 and the bernini q4 seed both did).
  */
 export const DOCKERFILE_PATH = "docker/rust.Dockerfile";
 export const DOCKERFILE_EMBED_ANCHOR = "COPY docs/generated/memory-calibration-evidence.json ./docs/generated/";
 
 /**
- * `dockerfile` with `relativePath` copied into BOTH builder stages, idempotently.
+ * `dockerfile` with `relativePath`'s CAMPAIGN DIRECTORY copied into BOTH builder stages, idempotently.
  *
- * Placement follows the lines already there rather than inventing an order: inside the same
- * directory group in sorted position (so `docs/calibration/sc-22738/` stays readable as one block),
- * else after the last line of the same `docs/<kind>/` family, else at the end of the block. The
- * block is the contiguous run of `COPY` lines around each occurrence of [`DOCKERFILE_EMBED_ANCHOR`],
- * which is the one embed both stages have carried since the file was written.
+ * One line per campaign, not per corpus. The per-corpus form this replaced grew a layer per ingested
+ * anchor, and sc-22738's 112 anchors carried the `builder` stage to 141 `RUN|COPY|ADD` instructions
+ * — past Docker's overlay layer limit (~125). The `parity-docker` lane then failed to *prepare* the
+ * build, `max depth exceeded` at layer 126/143, with nothing wrong in the tree. A campaign directory
+ * is append-only immutable evidence, so copying it whole costs the layer no extra invalidation, and
+ * an ingest into an already-copied campaign now rewrites the Dockerfile not at all.
+ *
+ * Placement follows the lines already there rather than inventing an order: after the last
+ * `docs/<kind>/` line of the same family, else at the end of the block. The block is the contiguous
+ * run of `COPY` lines around each occurrence of [`DOCKERFILE_EMBED_ANCHOR`], which is the one embed
+ * both stages have carried since the file was written.
  *
  * Fails when the two blocks cannot be found: a Dockerfile this cannot read must red the run rather
  * than silently commit an embed the image will not carry.
  */
 export function insertEvidenceCopy(dockerfile, relativePath) {
   const directory = relativePath.slice(0, relativePath.lastIndexOf("/") + 1);
-  const entry = `COPY ${relativePath} ./${directory}`;
+  // Fail-closed: only a campaign directory may be collapsed. `docs/generated/` is deliberately
+  // per-file — it also holds the churning `memory-matrix.json`, and copying that directory whole
+  // would invalidate the layer (and rebuild the ~275-crate graph) on every selector edit.
+  if (!/^docs\/calibration\/[^/]+\/$/.test(directory)) {
+    fail(`${relativePath} is not a docs/calibration/<campaign>/ corpus; its COPY line is not this function's to write`);
+  }
+  const entry = `COPY ${directory} ./${directory}`;
   const lines = dockerfile.split("\n");
   const anchors = lines.flatMap((line, index) => (line === DOCKERFILE_EMBED_ANCHOR ? [index] : []));
   if (anchors.length !== 2) {
@@ -2123,12 +2135,7 @@ export function insertEvidenceCopy(dockerfile, relativePath) {
     if (lines.slice(start, end + 1).includes(entry)) continue;
     let at = null;
     for (let index = start; index <= end; index += 1) {
-      if (!lines[index].startsWith(`COPY ${directory}`)) continue;
-      if (lines[index] > entry) { at = index; break; }
-      at = index + 1;
-    }
-    if (at === null) {
-      for (let index = start; index <= end; index += 1) if (lines[index].startsWith(family)) at = index + 1;
+      if (lines[index].startsWith(family)) at = index + 1;
     }
     lines.splice(at ?? end + 1, 0, entry);
   }

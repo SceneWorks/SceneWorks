@@ -2423,6 +2423,15 @@ affected ones in the same commit.
 > the same step as the embed and carried in the same commit), on the completed-capture path as much
 > as on the hard-stop one — before that, every anchor commit landed a tree that reds the
 > platform-review suite until someone added the lines by hand.
+>
+> Those COPY lines are **per campaign directory, not per corpus** —
+> `COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/`, once per builder stage. The
+> per-corpus form grew a Docker layer per ingested anchor and this campaign's 112 anchors carried
+> the `builder` stage to 141 `RUN|COPY|ADD` instructions, past the overlay driver's ~125 limit: the
+> `parity-docker` lane failed to *prepare* the build (`max depth exceeded`, layer 126/143) with a
+> perfectly good tree. So ingesting into a campaign the Dockerfile already carries now moves
+> `docker/rust.Dockerfile` not at all, and only the first anchor of a NEW campaign adds a line.
+> `scripts/measure-memory-catalog.test.mjs` holds every stage under 100 instructions.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
 simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).
