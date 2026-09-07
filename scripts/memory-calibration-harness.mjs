@@ -2068,9 +2068,20 @@ export function parseWatchdogHardStop(body) {
   if (!stop) return null;
   const match = /^physical_footprint_at_or_above_(\d+):observed_(\d+)$/.exec(String(stop.reason));
   if (!match) {
+    // sc-22738: the SECOND guard against a false lower bound, behind the runner's own
+    // (`measure-memory-catalog.mjs` returns `capture_failed` for a runtime stop before it ever
+    // calls `record-exceeded`). A wall-clock stop is the case this is now most likely to see: the
+    // probe ran out of its `--max-runtime-seconds` budget wherever its footprint happened to be,
+    // which is not a line it was witnessed to cross. Anything that is not a footprint stop is
+    // refused here for the same reason, whatever put it in the log.
+    const runtime = /^runtime_at_or_above_(\d+(?:\.\d+)?)s$/.exec(String(stop.reason));
     fail(
       `watchdog hard stop ${JSON.stringify(stop.reason)} is not a physical-footprint stop; only a ` +
-        "footprint stop states a lower bound on the render's peak",
+        "footprint stop states a lower bound on the render's peak" +
+        (runtime
+          ? `. This is a WALL-CLOCK stop: the probe reached its ${runtime[1]}s budget, which measures ` +
+            "no memory at all — the capture is a failure, not an exceedance"
+          : ""),
     );
   }
   const ceilingBytes = Number(match[1]);

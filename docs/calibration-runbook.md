@@ -1272,7 +1272,7 @@ first five:
 | `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
 | `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
 | `artifact_unsupported` | the pinned engine's production loader refused the shipped artifact (sc-22738) — the row carries the loader's own `unsupported:` sentence verbatim; **no evidence, no bound, no commit** | clean |
-| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
+| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it ran out of its wall-clock budget (`runtime_budget_exceeded`, below), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
 
@@ -1291,6 +1291,22 @@ that stales the bound puts the cell straight back to `runnable`, with no edit to
 that is ALL it does: production keeps refusing exactly what the bound refused when measured
 (sc-22738), because a shared-engine fix silently re-admitting a request a host was already unable to
 finish is the failure the bound exists to prevent.
+
+**Every probe carries a wall-clock budget (sc-22738, 2026-09-07).** The guard's ceilings bound a
+probe that CLIMBS; they say nothing about one that stops climbing, and `scail2_14b:bf16:mlx` sat
+flat at 93.5 GB under the 94.82 GB kill line for 90 minutes with the host swapping and the adapter
+parked in `mlx::core::eval`. So `measure-memory-catalog.mjs` now passes the guard a
+`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **150
+minutes for a video anchor, 60 for an image one** (the lane is derived from the plan: a video anchor
+renders more than one frame), overridable for a run with `--probe-budget-minutes N`, which
+`--dry-run` prints per row. A probe that reaches its budget is stopped on the guard's ONE stop path
+— the same SIGTERM→SIGKILL escalation and post-stop census a footprint stop takes — and is reported
+as `capture_failed` with reason `runtime_budget_exceeded`, naming the budget and the peak footprint
+sampled so you can tell a probe wedged at the ceiling from one wedged at 3 GB. **It is not an
+exceedance:** the run never crossed a line, so no bound is written (the harness's `record-exceeded`
+refuses a wall-clock stop outright), the store keeps no trace, the watchdog stream and per-anchor log
+stay in the work dir, and the cell classifies `runnable` again on the next `--list`. Re-run it, or
+re-run it with a larger `--probe-budget-minutes` if you believe the render was still making progress.
 
 **`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
 `capture_failed` that stamped nothing at all: the store kept no trace, and production went on
