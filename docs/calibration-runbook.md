@@ -895,8 +895,9 @@ SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX=docs/calibration/<campaign>
 # because the harness re-hashes the ~90 GB snapshot before the adapter is ever spawned — since the
 # catalog runner set the pair for `qwen_image` alone. `PROVIDER_FAMILIES.ltx_2_5` now declares
 # `sourceCapture: true` and the runner derives the pair (and `--raw-log-dir` /
-# `--source-path-prefix`, and `ingest --source-root`, and the receipt copy into the campaign
-# directory) from that flag; a test walks the MLX dispatch and reds if the declared set ever stops
+# `--source-path-prefix`, and `ingest --source-root`, and the receipt copy of the `<session>.log` +
+# `<session>.request.json` pair into the campaign directory — the rendered A/V pair stays in the
+# work dir, its digest/length/geometry/frames being the evidence) from that flag; a test walks the MLX dispatch and reds if the declared set ever stops
 # matching the arms that really emit. This is NOT the Qwen `physical` currency rule: the harness
 # demands a validated physical source session before it calls an anchor current for
 # `modelId === "qwen_image"` only, so LTX-2.5 writes the receipt without owing it for currency.
@@ -1169,7 +1170,10 @@ encoded in the filename and the bytes it reads after the provider exits. The har
 `physical_mlx` source session per fresh case and writes the exact request and provider response beside
 them. A physical session is invalid unless it carries exactly one typed `request`, `selected_rgb`,
 and `reference_rgb` receipt at three distinct paths, so removing an entry cannot make a missing file
-disappear from validation. The request receipt must be canonical JSON for the one record bound to the
+disappear from validation. The rendered outputs themselves (`.rgb`, and the `.avbin` A/V pair the
+LTX-2.5 MLX arm writes) are verified against their receipts at capture and at `ingest --source-root`
+and are NOT committed (sc-22738); the session log and request receipt are. A committed bundle whose
+rendered outputs are absent validates on the receipt alone. The request receipt must be canonical JSON for the one record bound to the
 session, and both RGB receipts must match that record's logical case and geometry. The temporary
 directory therefore mirrors the repository-relative tree. Validation also reconstructs the full
 evidence record from the immutable provider response, request, and artifact input, requires every

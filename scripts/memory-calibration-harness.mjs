@@ -1214,7 +1214,8 @@ async function sha256File(file) {
   return hash.digest("hex");
 }
 
-async function resolveReceiptPath(relativePath, roots) {
+/** The receipt's physical path under the first root that holds it, or `null` when none does. */
+async function findReceiptPath(relativePath, roots) {
   for (const root of roots) {
     const physicalRoot = await realpath(root);
     const candidate = path.resolve(physicalRoot, relativePath);
@@ -1230,7 +1231,26 @@ async function resolveReceiptPath(relativePath, roots) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
-  fail(`missing immutable source receipt ${relativePath}`);
+  return null;
+}
+
+async function resolveReceiptPath(relativePath, roots) {
+  return (await findReceiptPath(relativePath, roots)) ?? fail(`missing immutable source receipt ${relativePath}`);
+}
+
+/**
+ * sc-22738: a physical MLX session's RENDERED outputs (`selected_*` / `reference_*`) are not part of
+ * the committed evidence tree — the 2026-09-07 LTX-2.5 rerun put six 165–176 MB `.avbin` renders
+ * into three anchor commits and GitHub refused the push. The bundle's `outputs[]` receipt (content
+ * digest, byte length, geometry and frames, all also spelled in the content-addressed filename) and
+ * the quality metrics derived from the bytes ARE the evidence. The bytes are verified against that
+ * receipt at capture (`capturePlannedCase`, against the provider's `localPath`) and again at ingest,
+ * where `--source-root` names the raw capture directory and `requireRenderedOutputs` makes their
+ * absence a failure. Anywhere else they are verified when present and accepted on the receipt when
+ * not. The `request` receipt and the session log are required everywhere.
+ */
+function isRenderedOutput(output) {
+  return output.role !== "request";
 }
 
 /**
@@ -1265,6 +1285,7 @@ export async function validateSourceSessionFiles(
   bundle,
   extraRoot = null,
   inferenceClosureDigests = null,
+  { requireRenderedOutputs = false } = {},
 ) {
   validateBundle(bundle);
   if (inferenceClosureDigests) {
@@ -1290,7 +1311,11 @@ export async function validateSourceSessionFiles(
     const requestOutput = session.outputs.find((output) => output.role === "request");
     const avContents = new Map();
     for (const output of session.outputs) {
-      const outputFile = await resolveReceiptPath(output.path, roots);
+      const outputFile = isRenderedOutput(output) && !requireRenderedOutputs
+        ? await findReceiptPath(output.path, roots)
+        : await resolveReceiptPath(output.path, roots);
+      // See `isRenderedOutput`: the render is not in the tree; its receipt is the evidence.
+      if (outputFile === null) continue;
       const outputBytes = await readFile(outputFile);
       if (createHash("sha256").update(outputBytes).digest("hex") !== output.sha256
           || outputBytes.length !== output.bytes) {
@@ -2641,6 +2666,8 @@ async function main() {
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
+      // A raw capture directory must still hold every render it attested (sc-22738).
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
     );
   }
   if (command === "plan") {
@@ -2657,6 +2684,7 @@ async function main() {
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
     ));
   }
   if (command === "capture") {
