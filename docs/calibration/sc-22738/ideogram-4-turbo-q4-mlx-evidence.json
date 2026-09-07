@@ -1,0 +1,248 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/ideogram-4-mlx",
+        "resolvedRevision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "ideogram-4-turbo-q4-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-06T12:42:16Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ideogram-4-turbo-shared-ladder",
+        "blockers": [
+          "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 11268
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 14094604340
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 14286432348
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 29137648284
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 78298117688
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 29137898408
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 10523282316
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 582757968
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 29137898408
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 10523282316
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 74
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ideogram-4-turbo-mlx-q4-1024-seed22732-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-a8be0fdec9848c78c0eb",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ideogram-4-mlx@a3095855b8819dc0d6b067cb1354aaa7da189ff8:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-8ec13341b0903da8e738",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 14094604340,
+          "allocatorBytes": 19819227584,
+          "reclaimableBytes": 5724623244
+        },
+        "decode": {
+          "activeBytes": 29137648284,
+          "allocatorBytes": 78298117688,
+          "reclaimableBytes": 49160469404
+        },
+        "denoise": {
+          "activeBytes": 14286432348,
+          "allocatorBytes": 19935175648,
+          "reclaimableBytes": 5648743300
+        },
+        "overall": {
+          "activeBytes": 29137648284,
+          "allocatorBytes": 78298117688,
+          "reclaimableBytes": 49160469404
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 20870856704,
+        "decode": 82275467264,
+        "denoise": 20937965568,
+        "overall": 82275467264
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "89a192e89bbf85d74c7f55adacf791fc401a628bb0e5b4da1b64fd722bff3712",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:20b9503b8897ec808a52783aa0eda72e4086536536663941bb629e9757662bee",
+          "revision": "b0e46b0b09ec1a1f91161022b09a1ca4019c8161"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 82275467264,
+          "name": "exact_fit",
+          "predictedBytes": 82275467264,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Ideogram 4 Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "ideogram_4_turbo",
+        "overlay": "none",
+        "provider": "ideogram_4_turbo",
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

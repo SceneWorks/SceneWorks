@@ -1496,37 +1496,70 @@ test("the edition the runner formats with is the one rustfmt.toml declares", asy
 // ("Rust Docker builders copy every production generated embed from sceneworks-core") requires each
 // `include_str!` in `memory_anchor.rs` to be copied into BOTH builder stages, and packaging a corpus
 // without them reds that suite on a commit the runner has already made.
-test("a new evidence corpus is copied into both Rust builder stages, in place and idempotently", async () => {
+test("a new evidence corpus is copied into both Rust builder stages, by campaign directory", async () => {
   const dockerfile = await readFile(path.join(ROOT, DOCKERFILE_PATH), "utf8");
   const relative = "docs/calibration/sc-22738/aaa-first-mlx-evidence.json";
-  const line = `COPY ${relative} ./docs/calibration/sc-22738/`;
-  const once = insertEvidenceCopy(dockerfile, relative);
-  assert.equal(once.split(`\n${line}\n`).length - 1, 2, "one line per builder stage");
-  assert.equal(insertEvidenceCopy(once, relative), once, "idempotent");
-  const lines = once.split("\n");
-  for (const index of lines.flatMap((text, at) => (text === line ? [at] : []))) {
-    assert.ok(lines[index - 1].startsWith("COPY "), "inserted inside the stage's COPY run, never after it");
-    assert.ok(lines[index + 1].startsWith("COPY "), "inserted inside the stage's COPY run, never before it");
-  }
-  // Sorted WITHIN its own directory group, which is what keeps a campaign's corpora readable as one
-  // block rather than interleaved with `docs/generated/`.
-  const group = lines.filter((text) => text.startsWith("COPY docs/calibration/sc-22738/"));
-  assert.ok(group.length >= 4, "the campaign group holds the shipped bound plus the new corpus, per stage");
-  assert.deepEqual(group.slice(0, group.length / 2), [...group.slice(0, group.length / 2)].sort());
-  assert.equal(group[0], line, "a corpus that sorts first lands first");
-  // A directory with no lines yet joins the other `docs/calibration/` lines rather than the end.
+  const line = "COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/";
+  // The campaign is already carried, so an ingest into it rewrites the Dockerfile not at all — the
+  // property that keeps the layer count flat no matter how many anchors a campaign lands.
+  assert.equal(dockerfile.split(`\n${line}\n`).length - 1, 2, "one line per builder stage");
+  assert.equal(insertEvidenceCopy(dockerfile, relative), dockerfile, "an ingest adds no layer");
+  // A campaign with no line yet gets exactly one per stage, beside the other calibration lines.
   const fresh = "docs/calibration/sc-99999/x-evidence.json";
-  const freshLine = `COPY ${fresh} ./docs/calibration/sc-99999/`;
-  const withFresh = insertEvidenceCopy(dockerfile, fresh).split("\n");
-  assert.equal(withFresh.filter((text) => text === freshLine).length, 2);
-  for (const index of withFresh.flatMap((text, at) => (text === freshLine ? [at] : []))) {
-    assert.ok(withFresh[index - 1].startsWith("COPY docs/calibration/"), "it lands beside the other calibration corpora");
+  const freshLine = "COPY docs/calibration/sc-99999/ ./docs/calibration/sc-99999/";
+  const once = insertEvidenceCopy(dockerfile, fresh);
+  const lines = once.split("\n");
+  assert.equal(lines.filter((text) => text === freshLine).length, 2, "one line per builder stage");
+  assert.equal(insertEvidenceCopy(once, fresh), once, "idempotent");
+  assert.equal(
+    insertEvidenceCopy(once, "docs/calibration/sc-99999/y-evidence.json"),
+    once,
+    "a second corpus in that campaign adds nothing",
+  );
+  for (const index of lines.flatMap((text, at) => (text === freshLine ? [at] : []))) {
+    assert.ok(lines[index - 1].startsWith("COPY docs/calibration/"), "it lands beside the other calibration corpora");
+    assert.ok(lines[index + 1].startsWith("COPY "), "inserted inside the stage's COPY run, never after it");
   }
   assert.throws(
     () => insertEvidenceCopy(`FROM rust AS builder\n${DOCKERFILE_EMBED_ANCHOR}\nRUN cargo build\n`, relative),
     /not the two builder stages/,
     "a Dockerfile whose two stages cannot be found reds the run instead of committing an uncopied embed",
   );
+  // Only a campaign directory collapses. `docs/generated/` also holds the churning
+  // `memory-matrix.json`, so collapsing IT would rebuild the whole Rust graph on selector edits.
+  assert.throws(
+    () => insertEvidenceCopy(dockerfile, "docs/generated/memory-calibration-evidence.json"),
+    /not a docs\/calibration/,
+    "a non-campaign path is refused rather than collapsed into a directory COPY",
+  );
+});
+
+// sc-22738. Docker's overlay driver refuses a stage past ~125 layers, and the failure is a
+// `max depth exceeded` while PREPARING the build — no compile error, no bad line to find. The
+// per-corpus COPY form reached 141 instructions in `builder` and 143 in `candle-builder` on this
+// campaign alone. 100 is the ceiling this file's directory-COPY form must keep every stage under.
+test("no Rust Dockerfile stage approaches Docker's overlay layer limit", async () => {
+  const dockerfile = await readFile(path.join(ROOT, DOCKERFILE_PATH), "utf8");
+  const stages = new Map();
+  let stage = null;
+  for (const line of dockerfile.split("\n")) {
+    const from = /^FROM\s+(\S+)(?:\s+AS\s+(\S+))?/.exec(line);
+    if (from) {
+      stage = from[2] ?? from[1];
+      if (!stages.has(stage)) stages.set(stage, 0);
+      continue;
+    }
+    if (stage !== null && /^(RUN|COPY|ADD)\s/.test(line)) stages.set(stage, stages.get(stage) + 1);
+  }
+  assert.ok(stages.has("builder") && stages.has("candle-builder"), "both Rust builder stages parse");
+  for (const [name, count] of stages) {
+    assert.ok(count < 100, `stage ${name} declares ${count} layer instructions, over the 100 ceiling`);
+  }
+  // The mechanism that keeps it there: evidence is copied by campaign directory, never per corpus.
+  const perCorpus = dockerfile
+    .split("\n")
+    .filter((line) => /^COPY docs\/calibration\/[^/ ]+\/[^ ]+ /.test(line));
+  assert.deepEqual(perCorpus, [], "calibration evidence is copied by directory, one layer per campaign");
 });
 
 test("a campaign directory's ingested bundles mark their anchors as already captured", async () => {
@@ -4384,7 +4417,12 @@ test("an anchor commit carries the new corpus's COPY line in both Docker builder
     .map((match) => match[1]);
   assert.ok(embeds.includes("docs/calibration/sc-stub/z-image-turbo-q4-mlx-evidence.json"));
   for (const embed of embeds) {
-    const copy = `COPY ${embed} ./${embed.slice(0, embed.lastIndexOf("/") + 1)}`;
+    // A calibration campaign reaches the builders as its DIRECTORY (sc-22738); `docs/generated/`
+    // stays per file. Either way the predicate is the same: present in both builder stages.
+    const directory = embed.slice(0, embed.lastIndexOf("/") + 1);
+    const copy = embed.startsWith("docs/calibration/")
+      ? `COPY ${directory} ./${directory}`
+      : `COPY ${embed} ./${directory}`;
     assert.equal(dockerfile.split(copy).length - 1, 2, `${embed} must reach both builder contexts`);
   }
   const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s", "HEAD");
@@ -4814,11 +4852,12 @@ test("a footprint hard stop is COMMITTED as a measured lower bound, through the 
       rust.includes('"docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"'),
       "the bound's corpus is compiled into the Rust loader, exactly as an anchor's is",
     );
-    // ...and is copied into both Docker builder stages by the same step (sc-22738), so a hard-stop
-    // commit is not a tree that reds `platform-review-contracts.test.mjs` until someone repairs it.
+    // ...and its campaign directory is copied into both Docker builder stages by the same step
+    // (sc-22738), so a hard-stop commit is not a tree that reds `platform-review-contracts.test.mjs`
+    // until someone repairs it.
     const dockerfile = await readFile(path.join(checkout.root, DOCKERFILE_PATH), "utf8");
     assert.equal(
-      dockerfile.split("COPY docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json ./docs/calibration/sc-stub/").length - 1,
+      dockerfile.split("COPY docs/calibration/sc-stub/ ./docs/calibration/sc-stub/").length - 1,
       2,
     );
     assert.ok(shown.includes(DOCKERFILE_PATH), "the Dockerfile is in the bound's commit");

@@ -1,0 +1,360 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/minimax-h3-mlx",
+        "resolvedRevision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
+      "capturedAt": "2026-09-07T09:01:08Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:minimax-h3-joint-av",
+        "blockers": [
+          "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preGenerateActivePeak",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 58866722828
+          },
+          {
+            "name": "conditioningCloseActive",
+            "unit": "bytes",
+            "value": 154124300
+          },
+          {
+            "name": "conditioningCloseCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 27042740394
+          },
+          {
+            "name": "denoiseCloseActive",
+            "unit": "bytes",
+            "value": 8568844
+          },
+          {
+            "name": "denoiseCloseCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 6505489244
+          },
+          {
+            "name": "decodeCloseActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "decodeCloseCache",
+            "unit": "bytes",
+            "value": 8568832
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 58875291660
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 61874372608
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 58866722828
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 1177334456
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 58866722828
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 72
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 78
+          },
+          {
+            "name": "videoLatentFrames",
+            "unit": "count",
+            "value": 37
+          },
+          {
+            "name": "audioLatentFrames",
+            "unit": "count",
+            "value": 207
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 124
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "audioSamples",
+            "unit": "count",
+            "value": 330666
+          },
+          {
+            "name": "audioSampleRate",
+            "unit": "count",
+            "value": 32000
+          },
+          {
+            "name": "audioChannels",
+            "unit": "count",
+            "value": 2
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "textEncoderFromTierTree",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "stagedDitBytes",
+            "unit": "bytes",
+            "value": 35301925252
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 33712078489
+          },
+          {
+            "name": "sharedVideoVaeBytes",
+            "unit": "bytes",
+            "value": 10415558888
+          },
+          {
+            "name": "sharedAudioVaeBytes",
+            "unit": "bytes",
+            "value": 605429340
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "minimax-h3-ref-mlx-q8-576x320-f124-fps24-seed17137",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-1fe61810eb5afc302049",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/minimax-h3-mlx@137ce668c55a20bc0935fd1cf2a3de8448abb7f4:q8+partition:transformer_ref+text_encoder:tier+shared:MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ad77ff02ed3e9cf344b3",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 58866722828,
+          "allocatorBytes": 58866722828,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 6505489244,
+          "allocatorBytes": 6514058076,
+          "reclaimableBytes": 8568832
+        },
+        "denoise": {
+          "activeBytes": 27042740394,
+          "allocatorBytes": 27042740394,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 58866722828,
+          "allocatorBytes": 58875291660,
+          "reclaimableBytes": 8568832
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 61874372608,
+        "decode": 6845104128,
+        "denoise": 28454158336,
+        "overall": 61874372608
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, tier, staged components and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "26dc83568c7c7e2a3a7d038ca9da062ef52f4f62f690ea68eb5d67fa97303dfa",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2e3f3e5f225fe7721acd68502b15fee520d2c4837d97f39ed5faacc51b226a27",
+          "revision": "31faf6f62c0d453abe56925c34c3879ffd1c31de"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 61874372608,
+          "name": "exact_fit",
+          "predictedBytes": 61874372608,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the registered MiniMax-H3 admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the registered MiniMax-H3 admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX MiniMax-H3 base-only t2va text-to-audio-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 124,
+          "height": 320,
+          "width": 576
+        },
+        "mode": "reference_to_video",
+        "modelId": "minimax_h3_ref",
+        "overlay": "none",
+        "provider": "minimax_h3",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

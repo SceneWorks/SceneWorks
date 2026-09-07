@@ -92,15 +92,20 @@ COPY config ./config
 # here, or the Docker build breaks while `cargo build` on a checkout stays green — the
 # two see different trees. Embeds inside `mod tests` are exempt: this stage builds
 # `--release` without tests.
+#
+# `docs/calibration/<campaign>/` is copied as a DIRECTORY, one line per campaign — unlike
+# `docs/generated/`, whose per-file lines exist to keep the churning `memory-matrix.json` out of the
+# layer. A campaign directory is append-only immutable evidence, so nothing in it invalidates this
+# layer that the image does not already depend on. It used to be one COPY per corpus, and the
+# sc-22738 campaign's 112 anchors pushed this stage past Docker's overlay layer limit (~125): the
+# `parity-docker` lane died with `max depth exceeded` on layer 126/143 rather than any build error.
+# Adding a campaign is one new line here; adding an anchor to an existing campaign is none.
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
-COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/
-COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
-COPY docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
+COPY docs/calibration/sc-18791/ ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
@@ -226,16 +231,14 @@ COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # The builtin catalog, embedded via include_str! by sceneworks-core (see above).
 COPY config ./config
-# Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above).
+# Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above, which
+# also records why `docs/calibration/<campaign>/` is a directory COPY and `docs/generated/` is not).
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
-COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/
-COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
-COPY docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
-COPY docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
+COPY docs/calibration/sc-18791/ ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
