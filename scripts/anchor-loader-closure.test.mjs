@@ -31,6 +31,7 @@ import {
   anchorMeasurementRevision,
   assertEngineIdMatchesPlan,
   assertModelIsNamedByEntryPoints,
+  narrowEntryPointsAtRevision,
   buildAnchorLoaderConfig,
   calibrationPlanAnchors,
   indexCurrencyAttestations,
@@ -488,10 +489,15 @@ function packagedStore() {
       corpora.set(cited, JSON.parse(readFileSync(path.join(root, cited), "utf8")));
     }
   }
+  // sc-22738: `engineId` travels with the entry points, exactly as the CLI passes it. Dropping it
+  // here made every catalog alias look like a declaration naming its own id, so the literal rule
+  // was asked for "z_image_edit" — a string the inference tree never spells at any revision — and
+  // the stamp threw on data the shipped CLI stamps cleanly. A helper that does not reproduce the
+  // declaration faithfully tests a configuration nothing runs.
   const declared = Object.fromEntries(
     Object.entries(config.models).map(([model, entry]) => [
       model,
-      { entryPoints: entry.entryPoints },
+      { ...(entry.engineId ? { engineId: entry.engineId } : {}), entryPoints: entry.entryPoints },
     ]),
   );
   const attestations = indexCurrencyAttestations(
@@ -543,15 +549,30 @@ test("every packaged anchor's key is the derivation at ITS OWN measurement revis
   );
   // And no UNATTESTED anchor reads current unless its measurement revision's closure really equals
   // the pin's: currency by attestation is the only other way to be current, and it is declared.
+  //
+  // sc-22738: AN ANCHOR MEASURED AT THE PIN ITSELF SATISFIES THAT, it does not violate it. Its
+  // measurement revision's closure IS the pin's, so reading current is trivially true rather than
+  // tautological — and a re-measure at the current pin is the normal product of a rerun campaign,
+  // not a defect. This loop used to refuse one outright, which made the suite red the moment a
+  // campaign captured fresh evidence at the pin. The tautology it was reaching for — every anchor
+  // stamped with the pin's digest regardless of when it was measured — is caught by `stale` above,
+  // which requires the store to still carry an anchor whose loader has genuinely moved.
   for (const anchor of store.anchors) {
     if (anchor.source.currencyAttestation) continue;
     const declaredAtPin = config.models[`${anchor.modelId}:${anchor.backend}`].digest;
     if (anchor.source.loaderClosureDigest === declaredAtPin) {
       const measured = anchorMeasurementRevision(anchor, corpora.get(anchor.source.path));
-      assert.notEqual(
-        measured,
-        PIN,
-        `${anchor.id}: measured at the pin itself, so currency is a value against itself here`,
+      assert.equal(
+        measured === PIN ||
+          stampAnchorStore({
+            repo,
+            store: { ...store, anchors: [anchor], exceededBounds: [] },
+            declared,
+            corpora,
+          }).report[0].digest === declaredAtPin,
+        true,
+        `${anchor.id}: reads current, but its own measurement revision does not derive the pin's ` +
+          "digest — the recorded key is not the derivation at the measurement",
       );
     }
   }
@@ -721,6 +742,77 @@ test("a catalog alias declares the engine id it resolves to, and that id must be
   const aliased = loaderClosureText({ model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints, files });
   assert.ok(aliased.includes("\n# engine: z_image_turbo\n"));
   assert.notEqual(aliased.replace("z_image_edit", "z_image_turbo"), plain, "the alias line keeps the two closures distinct even over identical files");
+});
+
+// sc-22738. The literal rule is a property of the CURRENT declaration at the CURRENT pin. Walking
+// back to an anchor's own measurement revision reaches trees that predate it, where the alias's
+// engine id may not be spelled anywhere yet — `z_image_turbo` is carried by both Z-Image entry
+// points at the pin and by neither at `bb2bc989`. Asserting the pinned rule while standing in that
+// tree threw and took the whole stamp down with it.
+test("a historical revision that does not name an alias narrows the unit, it does not throw", () => {
+  const entryPoints = ["crates/x/src/model.rs", "crates/x/src/memory_strategy.rs"];
+  const treeOf = (bodies) => ({
+    paths: () => [],
+    contentId: (file) => `c:${file}`,
+    has: (file) => Object.hasOwn(bodies, file),
+    read: (files) => new Map(files.map((file) => [file, bodies[file] ?? ""])),
+  });
+  const alias = { model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints };
+  const named = treeOf({
+    "crates/x/src/model.rs": 'pub const MODEL_ID: &str = "z_image_turbo";',
+    "crates/x/src/memory_strategy.rs": "// nothing named here",
+  });
+  const historical = treeOf({
+    "crates/x/src/model.rs": "// this id does not exist yet",
+    "crates/x/src/memory_strategy.rs": "// nothing named here",
+  });
+
+  // AT THE PIN THE RULE STILL BITES. Dropping the assertion from the derivation must red this.
+  assert.throws(
+    () => anchorLoaderDigests({ ...alias, declared: { [alias.model]: alias }, tree: historical, planAnchors: {} }),
+    /never carry the literal "z_image_turbo"/,
+    "the pinned-revision assertion is what catches an entry point that digests the wrong loader",
+  );
+
+  // AT A HISTORICAL REVISION THE SAME RULE NARROWS. Both entry points exist, neither names the
+  // engine id, so neither can key this model there — reported exactly like an absent one.
+  const narrowed = narrowEntryPointsAtRevision({ ...alias, tree: historical });
+  assert.deepEqual(narrowed.entryPoints, []);
+  assert.deepEqual(narrowed.narrowed, [
+    { file: "crates/x/src/model.rs", reason: 'does not carry the literal "z_image_turbo"' },
+    { file: "crates/x/src/memory_strategy.rs", reason: 'does not carry the literal "z_image_turbo"' },
+  ]);
+  // A file that is absent narrows for the other reason, and the two compose.
+  const partial = narrowEntryPointsAtRevision({
+    ...alias,
+    tree: treeOf({ "crates/x/src/model.rs": "// not named yet" }),
+  });
+  assert.deepEqual(partial.entryPoints, []);
+  assert.deepEqual(partial.narrowed.map((entry) => entry.reason), [
+    "absent",
+    'does not carry the literal "z_image_turbo"',
+  ]);
+
+  // THE NARROWED UNIT IS DERIVABLE AND REPRODUCIBLE, not an error: same files, same rule, same
+  // digest twice — and never equal to the digest over a list the tree can key, so the anchor reads
+  // NOT CURRENT rather than blowing the walk up.
+  const derive = (tree, points) =>
+    anchorLoaderDigests({
+      declared: { [alias.model]: { engineId: alias.engineId, entryPoints: points } },
+      tree,
+      planAnchors: {},
+      assertNamed: false,
+    }).get(alias.model).digest;
+  const degenerate = derive(historical, narrowed.entryPoints);
+  assert.equal(degenerate, derive(historical, narrowed.entryPoints), "the narrowed key is reproducible");
+  assert.notEqual(degenerate, derive(named, narrowEntryPointsAtRevision({ ...alias, tree: named }).entryPoints));
+
+  // AND THE RULE IS STILL `some()`, NOT PER-FILE. One entry point naming the id vouches for the
+  // list, so a survivor that does not itself carry the literal is KEPT — five shipped units
+  // (flux2_dev:mlx, krea_2_raw:mlx, z_image:mlx, z_image_turbo:candle, bernini:mlx) depend on this
+  // at the pin itself, and narrowing per file would silently re-key anchors that are not stale.
+  assert.deepEqual(narrowEntryPointsAtRevision({ ...alias, tree: named }).entryPoints, entryPoints);
+  assert.deepEqual(narrowEntryPointsAtRevision({ ...alias, tree: named }).narrowed, []);
 });
 
 // The alias is a REDIRECT of the literal rule at another model's loader, so the shape checks above
