@@ -17,6 +17,8 @@ import {
   prepareLtx25CaptureArtifacts, validateBundle, validateRecord, validatePlan,
   validatePhysicalMlxAvContentsAgainstRecord,
   validateSourceSessionFiles,
+  METAL_REFUSAL_TOLERANCE, METAL_SUBMISSIONS_IGNORED_CODE, METAL_SUBMISSIONS_IGNORED_PHRASE,
+  metalSubmissionsIgnored, parseWatchdogPeak, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
 
 /**
@@ -2856,4 +2858,195 @@ test("every adapter calibration record fragment carries only properties the reco
     /if !matches!\(admission, LtxRunAdmission::Ordinary\) \{\n\s+fragment\["output"\] = json!\(\{/,
     "the LTX campaign carrier must still publish the output descriptor its own validator reads",
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a process-scoped Metal refusal as the SECOND admissible source of a measured bound.
+// ---------------------------------------------------------------------------------------------
+
+/** This host's figures, from the flux2_dev:bf16:mlx refusal of 2026-09-06. */
+const REFUSAL_WIRED_LIMIT_BYTES = 87_044_670_532;
+const REFUSAL_PEAK_BYTES = 86_988_010_336;
+const REFUSAL_STDERR =
+  'Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured '
+  + 'FLUX.2-dev render: "[METAL] Command buffer execution failed: Ignored (for causing '
+  + 'prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). '
+  + 'at /out/mlx-c-staged/mlx/c/transforms.cpp:73"';
+
+/** A guard event stream that never hard-stopped: the shape a refused render leaves behind. */
+function refusalEventStream(peak = REFUSAL_PEAK_BYTES) {
+  return [
+    { event: "started", pid: 1 },
+    { event: "sample", phase: "before_child_release", physicalFootprintBytes: 29_065_792 },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: Math.floor(peak / 2) },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: peak },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: peak - 406_425_840 },
+    // The process is torn down while the sampler runs on: the LAST sample reads the husk.
+    { event: "sample", phase: "runtime", physicalFootprintBytes: 29_327_936 },
+  ].map((event) => JSON.stringify(event)).join("\n");
+}
+
+async function refusalFixture({ events = refusalEventStream(), stderr = REFUSAL_STDERR } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "metal-refusal-"));
+  const eventFile = path.join(dir, "watchdog.jsonl");
+  const stderrFile = path.join(dir, "provider-stderr.txt");
+  await writeFile(eventFile, `${events}\n`);
+  await writeFile(stderrFile, stderr);
+  return { dir, eventFile, stderrFile };
+}
+
+async function recordRefusal({ overrides = {}, fixture } = {}) {
+  const cleanRepo = await cleanFixtureRepo();
+  const key = "fixture_model:bf16:mlx";
+  const files = fixture ?? await refusalFixture();
+  return recordExceededBound({
+    plan: anchorPlanFixture(key),
+    anchorKey: key,
+    // A truthy first argument makes the fixture probe answer with the MLX-shaped hardware, whose
+    // `wiredLimitBytes` is this host's own 87,044,670,532.
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      files.dir,
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    watchdogEventFile: files.eventFile,
+    artifact: { repository: "SceneWorks/fixture-mlx", resolvedRevision: "d".repeat(40), variant: "bf16" },
+    providerStderrFile: files.stderrFile,
+    wiredLimitBytes: REFUSAL_WIRED_LIMIT_BYTES,
+    closureDigestFor: stubClosureDigest,
+    ...overrides,
+  });
+}
+
+test("the refusal signature needs BOTH the IOGPU status code and the phrase", () => {
+  assert.equal(metalSubmissionsIgnored(REFUSAL_STDERR), true);
+  assert.equal(metalSubmissionsIgnored(`(00000004:${METAL_SUBMISSIONS_IGNORED_PHRASE})`), true);
+  // Prose about the hazard is not the hazard: this very repository names the phrase in comments,
+  // the runbook and a memory note, and none of those stderrs suffered a refusal.
+  assert.equal(metalSubmissionsIgnored(`see ${METAL_SUBMISSIONS_IGNORED_PHRASE} in the runbook`), false);
+  assert.equal(metalSubmissionsIgnored(`status ${METAL_SUBMISSIONS_IGNORED_CODE} from the driver`), false);
+  assert.equal(metalSubmissionsIgnored(""), false);
+  assert.equal(metalSubmissionsIgnored(undefined), false);
+});
+
+test("the bound's footprint is the sampler's PEAK, never its last reading", () => {
+  assert.deepEqual(parseWatchdogPeak(refusalEventStream()), {
+    observedFootprintBytes: REFUSAL_PEAK_BYTES,
+    samples: 5,
+  });
+  // The husk the sampler reads after the teardown is the LAST sample and 29 MB; a bound built on it
+  // would state an inequality three orders of magnitude below what the render actually reached.
+  assert.notEqual(parseWatchdogPeak(refusalEventStream()).observedFootprintBytes, 29_327_936);
+  assert.throws(
+    () => parseWatchdogPeak(JSON.stringify({ event: "started" })),
+    /carries no sample/,
+  );
+  assert.throws(
+    () => parseWatchdogPeak(JSON.stringify({ event: "sample", physicalFootprintBytes: 0 })),
+    /non-positive physical footprint/,
+  );
+});
+
+test("a process-scoped Metal refusal at the wired limit records a bound whose ceiling is its own witnessed peak", async () => {
+  const bundle = await recordRefusal();
+  assert.equal(bundle.records.length, 0);
+  const [bound] = bundle.exceededBounds;
+  assert.equal(bound.observedFootprintBytes, REFUSAL_PEAK_BYTES);
+  // NOT the wired limit. The run was observed 56,660,196 bytes short of it, and
+  // `sceneworks_core::memory_anchor` refuses a row whose footprint is under its own ceiling — so
+  // the ceiling recorded is the highest line the samples witness the run crossing. The limit
+  // itself is carried on `hardware.wiredLimitBytes` and named in the reason.
+  assert.equal(bound.ceilingBytes, REFUSAL_PEAK_BYTES);
+  assert.ok(bound.observedFootprintBytes >= bound.ceilingBytes, "the store-side inequality holds");
+  assert.equal(
+    bound.reason,
+    `metal_submissions_ignored:observed_${REFUSAL_PEAK_BYTES}:wired_limit_${REFUSAL_WIRED_LIMIT_BYTES}`,
+  );
+  assert.equal(bound.hardware.wiredLimitBytes, REFUSAL_WIRED_LIMIT_BYTES);
+  assert.match(bound.providerStderrSha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    bound.providerStderrSha256,
+    createHash("sha256").update(REFUSAL_STDERR).digest("hex"),
+    "the refusal's own witness is hashed, so a bound's stated cause can be re-read",
+  );
+  assert.match(bound.eventFileSha256, /^[0-9a-f]{64}$/);
+  assert.equal(bound.referenceCount, 0);
+  // And the whole bundle is admissible to the same validator every retained corpus is held to.
+  assert.equal(validateBundle(bundle), bundle);
+});
+
+test("only a refusal taken AT the wired limit bounds anything; the tolerance is 2% of the limit", async () => {
+  // The measured gap — 0.065% — is comfortably inside the band.
+  const inside = await recordRefusal();
+  assert.equal(inside.exceededBounds[0].observedFootprintBytes, REFUSAL_PEAK_BYTES);
+  assert.equal(METAL_REFUSAL_TOLERANCE, 0.02);
+  // One byte inside the floor still classifies…
+  const floor = Math.floor(REFUSAL_WIRED_LIMIT_BYTES * (1 - METAL_REFUSAL_TOLERANCE));
+  const atFloor = await recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(floor) }) });
+  assert.equal(atFloor.exceededBounds[0].observedFootprintBytes, floor);
+  // …and one byte outside it does not. A GPU fault taken well below the limit measured no ceiling,
+  // and laundering it into a memory bound would refuse production on evidence about the driver.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(floor - 1) }) }),
+    /more than 2% under the 87044670532-byte wired limit/,
+  );
+});
+
+test("a bound is refused unless the refusal, the wired limit and the host all corroborate", async () => {
+  // No signature: a capture that died of something else states no bound.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ stderr: "Error: adapter exited 1: out of disk" }) }),
+    /carries no Metal submissions-ignored refusal/,
+  );
+  // The phrase without the driver's status code is prose, not a refusal.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ stderr: `saw ${METAL_SUBMISSIONS_IGNORED_PHRASE}` }) }),
+    /carries no Metal submissions-ignored refusal/,
+  );
+  // A wired limit that is not the one this adapter probes: the host's Metal policy moved, and
+  // neither reading speaks for the run.
+  await assert.rejects(
+    recordRefusal({ overrides: { wiredLimitBytes: REFUSAL_WIRED_LIMIT_BYTES + 1 } }),
+    /is not the wired limit this adapter probes/,
+  );
+  await assert.rejects(
+    recordRefusal({ overrides: { wiredLimitBytes: null } }),
+    /--wired-limit-bytes must be a positive safe integer/,
+  );
+  // A peak above the whole host is not a reading of that host.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(137_438_953_473) }) }),
+    /exceeds the whole capture host's memory/,
+  );
+  // And with neither a hard stop nor a stderr to read, there is nothing to record at all.
+  await assert.rejects(
+    recordRefusal({ overrides: { providerStderrFile: null } }),
+    /records no watchdog hard stop, and no --provider-stderr/,
+  );
+});
+
+test("a bound's reason is one of the two enumerated causes, never free text", async () => {
+  const bundle = await recordRefusal();
+  assert.equal(validateBundle(bundle), bundle);
+  for (const reason of [
+    "metal refused the submissions",
+    "metal_submissions_ignored",
+    `metal_submissions_ignored:observed_${REFUSAL_PEAK_BYTES}`,
+    "",
+  ]) {
+    const tampered = structuredClone(bundle);
+    tampered.exceededBounds[0].reason = reason;
+    assert.throws(
+      () => validateBundle(tampered),
+      /does not match pattern|is too short/,
+      `reason ${JSON.stringify(reason)} must be refused`,
+    );
+  }
+  // The guard's own hard-stop spelling is the other admissible cause.
+  const hardStopReason = structuredClone(bundle);
+  hardStopReason.exceededBounds[0].reason = "physical_footprint_at_or_above_94822600832:observed_97147294328";
+  hardStopReason.exceededBounds[0].id = "exc-0000000000000000dead";
+  assert.throws(() => validateBundle(hardStopReason), /id is not the digest of its own identity/);
 });

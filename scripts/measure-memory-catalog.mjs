@@ -38,6 +38,10 @@ import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir } from "nod
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+// ONE spelling of the refusal signature, shared with the arm that records it (sc-22738). The runner
+// classifies a failure by it and the harness re-checks the same stderr before writing a bound, so a
+// second transcription here would be a way for the two to disagree about what a refusal even is.
+import { metalSubmissionsIgnored } from "./memory-calibration-harness.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/memory-calibration-plan.json";
@@ -2058,6 +2062,13 @@ export async function watchdogHardStop(eventFile) {
 }
 
 /**
+ * How a process-scoped Metal refusal is named on a row and in a commit subject (sc-22738). The
+ * machine-readable spelling lives on the bound itself (`metal_submissions_ignored:observed_…`); this
+ * is the human one, and it is a constant so the outcome table in the runbook has something to match.
+ */
+export const METAL_REFUSAL = "Metal refused this process's submissions at the host's wired limit";
+
+/**
  * Whether a capture of this anchor runs under the footprint guard: EVERY capture on Darwin. A
  * candle capture running on a Mac draws from the same unified pool the sampler measures, so the
  * host-RAM hazard is the same whichever adapter is under the harness (sc-22738 review); the guard
@@ -2125,6 +2136,12 @@ export async function measureAnchor(row, context) {
   const exceededOutput = path.join(workDir, "captures", `${slug}-exceeded.json`);
   const exceededEvidenceRelative = `${campaignDir}/${slug}-exceeded-evidence.json`;
   const started = Date.now();
+  // sc-22738: the previous ATTEMPT's Metal refusal, read once and cleared here, so this anchor's own
+  // outcome is the only thing that can leave the flag set for the anchor after it. Read at the top
+  // rather than cleared on every exit path: there are eight of those, and a missed one would silently
+  // turn "two in a row" into "two in this run".
+  const previousMetalRefusal = state.metalRefusedLast ?? null;
+  state.metalRefusedLast = null;
   // sc-22738: the Dockerfile moves with the packaged-source list, on BOTH commit paths — an embed
   // the image does not copy is a red `platform-review-contracts` suite on a commit already made.
   const touched = [ANCHOR_STORE_PATH, MATRIX_PATH, MATRIX_MD_PATH, PACKAGED_SOURCES_PATH, DOCKERFILE_PATH];
@@ -2226,6 +2243,10 @@ export async function measureAnchor(row, context) {
   if (row.physical) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
   if (row.ltx25SnapshotRoot) captureArgs.push("--ltx25-snapshot-root", row.ltx25SnapshotRoot);
   const watchdogEvents = path.join(workDir, "logs", `${slug}-watchdog.jsonl`);
+  const providerStderrFile = path.join(workDir, "logs", `${slug}-provider-stderr.txt`);
+  // The host's Metal wired ceiling as THIS anchor's probe read it, kept for the refusal arm below:
+  // the bound is keyed on the limit the refused render actually ran under, not on a later reading.
+  let probedHardware = null;
   try {
     if (guardsCapture(row.key)) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
@@ -2233,6 +2254,7 @@ export async function measureAnchor(row, context) {
       const hardware = await probeAdapter(providerCommand(args.adapter), {
         cwd: root, env, wiredLimitRequired: anchorParts(row.key).backend === "mlx",
       });
+      probedHardware = hardware;
       const guard = watchdogGuard({ hardware, eventFile: watchdogEvents });
       // The guard APPENDS to its event log; this capture's verdict must not read an earlier one's.
       await rm(watchdogEvents, { force: true });
@@ -2245,15 +2267,54 @@ export async function measureAnchor(row, context) {
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
-    if (!hardStop) return finish("capture_failed", failureReason(error));
+    // sc-22738 (measured 2026-09-06): the SECOND way a run ends having measured a bound. Metal
+    // refused this process's submissions once its working set reached the host's wired limit —
+    // `flux2_dev:bf16:mlx` at 775 s, sampled peak 86,988,010,336 against an 87,044,670,532-byte
+    // limit — while the guard, whose kill line is far higher and whose quantity counts non-Metal
+    // pages too, never fired. Nothing in the event log names it, so the adapter's own stderr is the
+    // witness, and until now it read as an ordinary `capture_failed` while production went on
+    // admitting the identical request at the ladder's bf16 rung.
+    const refused = !hardStop && guardsCapture(row.key) && metalSubmissionsIgnored(error.stderr ?? error.message);
+    // Whether the PREVIOUS anchor of this run refused the same way; cleared for every anchor at the
+    // top of its own attempt, so the count is over consecutive attempts rather than over the run.
+    const refusedBefore = previousMetalRefusal;
+    if (refused) state.metalRefusedLast = row.key;
+    if (!hardStop && !refused) return finish("capture_failed", failureReason(error));
+    // DISCRIMINATE THE SCOPE. One refusal is process-scoped: Metal ignored the submissions of the
+    // process that had exhausted the wired limit, and the next anchor committed normally four
+    // minutes later. The SAME string is also what a wedged HOST says — the GPU stays in the
+    // error state and refuses every process until the machine is rebooted (`SubmissionsIgnored`
+    // has two scopes) — and on a wedged host every remaining anchor would "measure" a bound at
+    // whatever footprint it happened to reach, filling the store with inequalities about the
+    // driver rather than about the models. Two in a row is the discriminator: it stops the walk
+    // and names the reboot instead of recording a second bound.
+    if (refused && refusedBefore) {
+      state.halt =
+        `${refusedBefore} and then ${row.key} both failed with the Metal submissions-ignored `
+        + "refusal: two consecutive refusals are a WEDGED HOST, not two process-scoped bounds. The "
+        + "GPU stays in its error state until the machine is REBOOTED; reboot, then re-run the walk. "
+        + "No bound was recorded for either anchor beyond the first.";
+      return finish("capture_failed", `${METAL_REFUSAL} on the anchor after ${refusedBefore}; halting the walk`);
+    }
+    const cause = hardStop ?? METAL_REFUSAL;
     // sc-22738: the run established one fact — this cell's peak is AT LEAST the footprint the
     // guard saw — and until now that fact died with the process. Record it as evidence through
     // the same check → ingest → extract → stamp → matrix → commit path a completed capture takes,
     // so production stops admitting the request the host had to kill.
     if (!row.artifact) {
-      return finish("capture_failed", `${hardStop}; no artifact binding for this row to bound it against`);
+      return finish("capture_failed", `${cause}; no artifact binding for this row to bound it against`);
     }
-    if (!args.commit) return finish("exceeded", hardStop);
+    if (!args.commit) return finish("exceeded", cause);
+    // The refusal arm's witness is the adapter's stderr, so it is written out for the harness to
+    // re-check and hash rather than passed through a shell argument.
+    const refusalArgs = [];
+    if (refused) {
+      await writeFile(providerStderrFile, String(error.stderr ?? error.message ?? ""));
+      refusalArgs.push(
+        "--provider-stderr", providerStderrFile,
+        "--wired-limit-bytes", String(probedHardware?.wiredLimitBytes ?? 0),
+      );
+    }
     try {
       await exec(process.execPath, [
         HARNESS, "record-exceeded", "--plan", PLAN_PATH, "--anchor", row.key,
@@ -2261,10 +2322,11 @@ export async function measureAnchor(row, context) {
         "--sceneworks-repo", root, "--inference-repo", path.resolve(args.inferenceRepo),
         "--watchdog-events", watchdogEvents,
         "--artifact", JSON.stringify(row.artifact),
+        ...refusalArgs,
         "--output", exceededOutput,
       ], { env, log });
     } catch (recordError) {
-      return finish("capture_failed", `${hardStop}; recording it failed: ${failureReason(recordError)}`);
+      return finish("capture_failed", `${cause}; recording it failed: ${failureReason(recordError)}`);
     }
     return ingestAndCommit({
       captureOutput: exceededOutput,
@@ -2273,9 +2335,9 @@ export async function measureAnchor(row, context) {
       status: "committed_exceeded",
       subject: `exceeded bound for ${row.key}`,
       message:
-        `chore(${args.campaign}): record the ${row.key} footprint hard stop as a measured bound\n\n` +
+        `chore(${args.campaign}): record the ${row.key} ${refused ? "Metal refusal" : "footprint hard stop"} as a measured bound\n\n` +
         `Captured by scripts/measure-memory-catalog.mjs at inference ${inferencePin}. ` +
-        `${hardStop}. Evidence: ${exceededEvidenceRelative}; anchor store, currency stamp and ` +
+        `${cause}. Evidence: ${exceededEvidenceRelative}; anchor store, currency stamp and ` +
         "matrix regenerated.",
     });
   }
@@ -2408,7 +2470,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   for (const sub of ["logs", "captures", "raw"]) await mkdir(path.join(args.workDir, sub), { recursive: true });
-  const state = { commits: [], halt: null, stopRequested: false };
+  const state = { commits: [], halt: null, stopRequested: false, metalRefusedLast: null };
   const onInterrupt = () => {
     if (state.stopRequested) { process.stderr.write("\nsecond interrupt: exiting now; the adapter in flight is NOT killed\n"); process.exit(130); }
     state.stopRequested = true;

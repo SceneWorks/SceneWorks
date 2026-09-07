@@ -105,6 +105,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),
