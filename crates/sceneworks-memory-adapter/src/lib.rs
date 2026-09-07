@@ -7,6 +7,7 @@
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "3b922bac6094e06f98bb2598a6d6fe10dc92739e";
@@ -1426,8 +1427,38 @@ fn gated_fragment_body(parts: PlainGatedFragment<'_>) -> Value {
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
+    // The failure line FIRST, informational notes after it. `measure-memory-catalog.mjs` names a
+    // failed capture by the FIRST line the adapter wrote to stderr, so a per-render note printed the
+    // moment the render returned would be the line the runner quotes for a capture that failed after
+    // it — which is how eighteen sc-22738 Mage refusals were reported as a GPU-view coherence
+    // statistic rather than as the lifecycle refusal that actually stopped them.
     eprintln!("memory-strategy provider adapter: {}", message.as_ref());
+    flush_deferred_notes();
     std::process::exit(1);
+}
+
+/// Informational, non-failing render notes, held until the process is done (sc-22738).
+///
+/// See [`fail`] for why they are not printed where they are produced. Notes are flushed by [`fail`]
+/// and by [`flush_deferred_notes`], which the adapter binaries call on the success path.
+static DEFERRED_NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record one informational note for emission after the process's outcome is known.
+pub fn defer_note(note: impl Into<String>) {
+    if let Ok(mut notes) = DEFERRED_NOTES.lock() {
+        notes.push(note.into());
+    }
+}
+
+/// Emit every deferred note, prefixed so it reads as informational, and clear the buffer.
+pub fn flush_deferred_notes() {
+    let notes = match DEFERRED_NOTES.lock() {
+        Ok(mut notes) => std::mem::take(&mut *notes),
+        Err(_) => Vec::new(),
+    };
+    for note in notes {
+        eprintln!("memory-strategy provider adapter: note: {note}");
+    }
 }
 
 /// The allocator counters an MLX phase window is opened against, abstracted so the ORDER in which

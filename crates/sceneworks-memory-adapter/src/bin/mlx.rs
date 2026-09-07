@@ -3184,17 +3184,19 @@ fn gpu_view_retries() -> (u64, u64) {
     )
 }
 
-/// Print the render's GPU-view retry incidence to stderr — the harness log is where the Mac2
-/// reproducer's expected outcome ("pass, with non-zero retries") is read. Always printed, so a
-/// zero reads as "the guard ran and saw nothing" rather than as silence.
+/// Record the render's GPU-view retry incidence — the harness log is where the Mac2 reproducer's
+/// expected outcome ("pass, with non-zero retries") is read. Always recorded, so a zero reads as
+/// "the guard ran and saw nothing" rather than as silence.
+///
+/// DEFERRED, not printed here (sc-22738). This is informational, and a capture that fails after the
+/// render must be named on stderr by its own failure, not by this line — see [`protocol::fail`].
 fn report_gpu_view_retries(before: (u64, u64)) {
     let after = gpu_view_retries();
-    eprintln!(
-        "memory-strategy provider adapter: GPU-view coherence retries during this render: \
-         mlx_gen={} mlx_llm={} (sc-22414)",
+    protocol::defer_note(format!(
+        "GPU-view coherence retries during this render: mlx_gen={} mlx_llm={} (sc-22414)",
         after.0.saturating_sub(before.0),
         after.1.saturating_sub(before.1),
-    );
+    ));
 }
 
 /// Combine the generator and request-scope terminals without losing either failure. A provider
@@ -11160,8 +11162,11 @@ struct MageArm {
     edit: bool,
     /// The engine's own published default step count for this variant (`MageVariant::default_steps`)
     /// for the distilled members, whose 4-step Decoupled-DMD schedule IS the recipe the product
-    /// issues; two steps for the undistilled members, the shape every other image arm here uses
-    /// (the first `Step` closes conditioning, the second gives denoise its own measured interval).
+    /// issues; two steps for the undistilled members, the shape every other image arm here uses.
+    /// Two is also the minimum that leaves the first `Progress::Step` with a render still ahead of
+    /// it, which is what makes the second measured window non-empty (see
+    /// [`MAGE_ENGINE_BOUNDARIES`]: the first `Step` fires only AFTER a full denoise step, so it is
+    /// not the conditioning/denoise edge and this arm no longer files it as one).
     steps: u32,
     /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
     /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
@@ -11650,6 +11655,90 @@ fn mage_complete_sweep(request: &Value) -> Result<Value, String> {
     Ok(sweep)
 }
 
+/// WHICH LIFECYCLE BOUNDARIES THE PINNED MAGE-FLOW ENGINE ACTUALLY EMITS (sc-22738).
+///
+/// `mlx-gen-mage` at the pinned revision hands `on_progress` to exactly two pipeline entries on the
+/// PRODUCTION `Generator::generate` path, and both are denoise-step bars:
+///
+/// * `src/pipeline.rs:260` — `Progress::Step` per generation denoise step (`denoise_generation_phase`);
+/// * `src/pipeline.rs:447` — `Progress::Step` per edit denoise step (`denoise_edit_phase`).
+///
+/// The only `Progress::Decoding` the crate constructs is at `src/pipeline.rs:1226`, inside
+/// `generate_batch_trace_with_memory` — a TRACE entry point the registry-loaded generator never
+/// reaches. `Generator::generate` (`src/model.rs:1460-1630`) instead drives
+/// `gen_core::residency::run_staged_request_scoped`
+/// (`crates/contracts/gen-core/src/residency.rs:509-601`) and passes a decode closure that DISCARDS
+/// the progress sink it is handed (`model.rs:1532`, `:1602` — `|view, denoised, _|`), so no
+/// `Progress::Decoding` is emitted on any of the six routes, on either mode. That is the whole
+/// defect: this arm cut the denoise phase on `Progress::Decoding`, so `denoise.active` was
+/// structurally 0 on every Mage capture and the arm refused a render that had already completed.
+///
+/// The conditioning/denoise edge is not bounded either, and for a second, independent reason. Every
+/// checked-in `mage_flow*:*:mlx` plan row selects `MemoryStrategy::Resident`, and
+/// `MemoryProviderContract::generation_memory` maps Resident onto `stage_residency == false`
+/// (`gen-core/src/memory_strategy.rs:1815-1823`), which takes the WARM arm of
+/// `run_staged_request_scoped` (`residency.rs:531-548`). There `ensure_warm_locked`
+/// (`residency.rs:351,359`) emits `Loading(TextEncoder)` and `Loading(Renderer)` back to back
+/// BEFORE the prompt is encoded, and loads the DiT and VAE between them, so `Loading(Renderer)`
+/// precedes the conditioning phase rather than closing it. The first `Progress::Step` then fires
+/// only AFTER a full denoise step, with the whole renderer resident. Neither event is the
+/// conditioning peak, so this arm measures neither.
+///
+/// This is an ENGINE gap, not a route difference: all six members share one `generate` body and one
+/// contract that declares the full `[Conditioning, Denoise, Decode]` envelope. Closing it is an
+/// inference-side change (pass the progress sink into the decode closure, and emit the staged
+/// `Loading` pair on the resident arm) and therefore a pin bump.
+const MAGE_ENGINE_BOUNDARIES: &str = concat!(
+    "the pinned mlx-gen-mage production path emits only per-step `Progress::Step` bars ",
+    "(pipeline.rs:260, :447) — its decode closure discards the progress sink (model.rs:1532, ",
+    ":1602), so no `Progress::Decoding` is ever delivered, and on the Resident selection the two ",
+    "`Progress::Loading` events both precede the prompt encode (residency.rs:351,359). No boundary ",
+    "therefore exists at the conditioning/denoise edge or at the denoise/decode edge. This record ",
+    "attributes the two windows the engine does close — through the first denoise step, and from ",
+    "there to completion — and reports all three declared lifecycle phases as UNATTRIBUTED rather ",
+    "than as zero peaks. The two windows partition the whole render, so the overall ceiling this ",
+    "record prices is unaffected and remains conservative."
+);
+
+/// Whether this route's engine bounds all three declared lifecycle phases.
+///
+/// False on every Mage member at this pin ([`MAGE_ENGINE_BOUNDARIES`]) — the six share one
+/// `generate` body, so there is nothing to differentiate. It is keyed on the ARM nonetheless, so a
+/// member whose engine does deliver the boundaries goes back onto the strict three-phase grading by
+/// changing one row rather than by rewriting the capture, and so the relaxed rule can never be
+/// applied blanket-wise to a route that is fully bounded.
+fn mage_route_bounds_every_declared_phase(arm: MageArm) -> bool {
+    let _ = arm;
+    false
+}
+
+/// The zero-active-peak refusal, over the windows this route's engine actually closes.
+///
+/// On a fully bounded route the three windows ARE the three declared phases and every one of them
+/// must be non-zero — the check this arm has always had. On a route the engine does not bound, the
+/// mid capture is the one taken at `Progress::Decoding`; it is never delivered, so requiring it
+/// would refuse every completed capture. The two windows that DO close are still required, so this
+/// is not a blanket allowance: a collapse in either of them is still a collapse.
+///
+/// Returns `None` when every required window reported a non-zero active peak.
+fn mage_zero_phase_error(
+    bounded: bool,
+    through_first_step: u64,
+    decoding_boundary: u64,
+    tail: u64,
+) -> Option<String> {
+    let collapsed = if bounded {
+        [through_first_step, decoding_boundary, tail].contains(&0)
+    } else {
+        [through_first_step, tail].contains(&0)
+    };
+    collapsed.then(|| {
+        "a synchronized Mage-Flow lifecycle phase reported a zero active peak; the engine stopped \
+         emitting a boundary and the attribution collapsed"
+            .to_owned()
+    })
+}
+
 /// One Mage-Flow anchor capture, on any of the six catalog ids, at any shipped tier.
 ///
 /// E4: the generator comes from `catalog.media().load(arm.provider, &spec)` — the same registry load
@@ -11765,11 +11854,15 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         resident_credit_bytes,
     );
 
-    let conditioning = Cell::new(PhaseMemory {
+    // The two boundaries this arm cuts on. On a route whose engine bounds every declared phase they
+    // ARE `conditioning` and `denoise`; on this pin they are the two windows named in
+    // [`MAGE_ENGINE_BOUNDARIES`] — `Progress::Decoding` is never delivered, so `decoding_boundary`
+    // stays at its zero and the tail capture covers everything after the first denoise step.
+    let through_first_step = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
     });
-    let denoise = Cell::new(PhaseMemory {
+    let decoding_boundary = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
     });
@@ -11782,24 +11875,31 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         None,
         &mut |progress| match progress {
             Progress::Step { current: 1, .. } => {
-                conditioning.set(PhaseMemory::capture());
+                through_first_step.set(PhaseMemory::capture());
                 reset_peak_memory();
             }
             Progress::Decoding => {
-                denoise.set(PhaseMemory::capture());
+                decoding_boundary.set(PhaseMemory::capture());
                 reset_peak_memory();
             }
             _ => {}
         },
     )?)?;
-    let decode = PhaseMemory::capture();
-    let conditioning = conditioning.get();
-    let denoise = denoise.get();
-    if [conditioning.active, denoise.active, decode.active].contains(&0) {
-        return Err(
-            "a synchronized Mage-Flow lifecycle phase reported a zero active peak".to_owned(),
-        );
+    let tail = PhaseMemory::capture();
+    let through_first_step = through_first_step.get();
+    let decoding_boundary = decoding_boundary.get();
+    let bounded = mage_route_bounds_every_declared_phase(arm);
+    if let Some(error) = mage_zero_phase_error(
+        bounded,
+        through_first_step.active,
+        decoding_boundary.active,
+        tail.active,
+    ) {
+        return Err(error);
     }
+    // The names the receipt is built from. They are the declared phases only on a bounded route;
+    // the unbounded branch below never files them under a phase key.
+    let (conditioning, denoise, decode) = (through_first_step, decoding_boundary, tail);
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
@@ -11975,6 +12075,56 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         );
     }
 
+    // WHAT THIS RECORD FILES, over the boundaries the engine gave it (sc-22738).
+    //
+    // A full `predictedPeakBytes` / `observedMemory` decomposition is a claim that all three
+    // declared phases were measured, and on this pin none of them was ([`MAGE_ENGINE_BOUNDARIES`]).
+    // `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so a
+    // partial decomposition is not a record at all — the choice is the ceiling alone or invented
+    // phase numbers, and this files the ceiling. It is the same ceiling either way: `overall` is the
+    // maximum over windows that partition the whole render. The per-phase measurements
+    // `extract-memory-anchors.mjs#PHASE_MEASUREMENTS` and `memory_anchor::validate_anchor` mint an
+    // anchor from are WITHHELD, so the cell classifies analytically instead of anchoring on a
+    // fabricated zero; what the two windows did measure is still published, under names that say
+    // what they are, and the blocker states the gap in the record itself.
+    let (predicted_peaks_json, observed_memory_json, lifecycle_measurements, lifecycle_blockers) =
+        if bounded {
+            (
+                predicted_peaks.json(),
+                json!({
+                    "conditioning": conditioning.json(),
+                    "denoise": denoise.json(),
+                    "decode": decode.json(),
+                    "overall": overall.json(),
+                }),
+                vec![
+                    ("conditioningActivePeak", "bytes", conditioning.active),
+                    ("denoiseActivePeak", "bytes", denoise.active),
+                    ("decodeActivePeak", "bytes", decode.active),
+                ],
+                Vec::new(),
+            )
+        } else {
+            (
+                predicted_peaks.overall_only_json(),
+                // `RuntimeObservedMemory` carries the ACTIVE peak and nothing else — the allocator
+                // envelope stays in the diagnostics, where `overallAllocatorEnvelope` publishes it.
+                json!({ "overall": { "activeBytes": overall.active } }),
+                vec![
+                    ("conditioningPhaseUnattributed", "count", 1),
+                    ("denoisePhaseUnattributed", "count", 1),
+                    ("decodePhaseUnattributed", "count", 1),
+                    (
+                        "throughFirstDenoiseStepWindowActivePeak",
+                        "bytes",
+                        through_first_step.active,
+                    ),
+                    ("postFirstDenoiseStepWindowActivePeak", "bytes", tail.active),
+                ],
+                vec![MAGE_ENGINE_BOUNDARIES.to_owned()],
+            )
+        };
+
     let mut fragment = json!({
         "status": "complete",
         "strategy": strategy,
@@ -11994,13 +12144,8 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
             { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
             { "name": "loadability", "result": "passed" }
         ],
-        "predictedPeakBytes": predicted_peaks.json(),
-        "observedMemory": {
-            "conditioning": conditioning.json(),
-            "denoise": denoise.json(),
-            "decode": decode.json(),
-            "overall": overall.json(),
-        },
+        "predictedPeakBytes": predicted_peaks_json,
+        "observedMemory": observed_memory_json,
         "quality": {
             "contract": "same seed, prompt, sampling, precision, staged components, and loaded provider; selected rung versus unselected request",
             "identicalInputs": true,
@@ -12029,11 +12174,8 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
             "executed",
-            [],
+            lifecycle_blockers,
             [
-                ("conditioningActivePeak", "bytes", conditioning.active),
-                ("denoiseActivePeak", "bytes", denoise.active),
-                ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 // An edit capture conditions on exactly one reference image; a text-to-image
                 // capture on none. Read off the arm the LOAD resolved, so a record can never claim
@@ -12042,7 +12184,9 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
                 // Both shared components are staged explicitly — never left to the loader's
                 // flat-layout fallback, which the split rehost cannot satisfy.
                 ("stagedComponents", "count", 2),
-            ],
+            ]
+            .into_iter()
+            .chain(lifecycle_measurements),
         ),
         "capturedAt": protocol::captured_at(),
     });
@@ -12738,6 +12882,222 @@ mod mage_tests {
                 );
             }
         }
+    }
+
+    /// sc-22738 — every Mage route is graded on the windows the PINNED ENGINE closes.
+    ///
+    /// All eighteen `mage_flow*:*:mlx` anchors rendered for 11–62 s and were then refused for a
+    /// zero active peak. The peak was zero because `Progress::Decoding` is never delivered on the
+    /// production path (see [`MAGE_ENGINE_BOUNDARIES`]): the crate constructs it only inside
+    /// `generate_batch_trace_with_memory`, and `Generator::generate`'s decode closure discards the
+    /// progress sink it is handed. The arm was grading six routes against a boundary set no Mage
+    /// route emits.
+    #[test]
+    fn every_mage_route_is_graded_on_the_windows_the_engine_closes() {
+        for arm in MAGE_ARMS {
+            assert!(
+                !mage_route_bounds_every_declared_phase(arm),
+                "{}: the pinned engine delivers no `Progress::Decoding` on the production path; \
+                 requiring it refuses every completed capture",
+                arm.provider
+            );
+            // The exact shape the campaign hit: a completed render whose only zero is the capture
+            // taken at a boundary the engine never emits.
+            assert_eq!(
+                mage_zero_phase_error(
+                    mage_route_bounds_every_declared_phase(arm),
+                    41_000_000_000,
+                    0,
+                    38_000_000_000
+                ),
+                None,
+                "{}: a capture that measured both closed windows must file",
+                arm.provider
+            );
+            // The two windows that DO close are still required, so this is not a blanket allowance.
+            for (label, first, tail) in [
+                ("the through-first-step window", 0_u64, 38_000_000_000_u64),
+                ("the post-first-step window", 41_000_000_000, 0),
+            ] {
+                assert!(
+                    mage_zero_phase_error(
+                        mage_route_bounds_every_declared_phase(arm),
+                        first,
+                        12_000_000_000,
+                        tail
+                    )
+                    .is_some(),
+                    "{}: {label} is closed by the engine and a zero there is still a collapse",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// The relaxed rule is keyed on the route's boundary set and CANNOT leak onto a route that is
+    /// fully bounded: applied there, a capture missing the `Progress::Decoding` peak still refuses,
+    /// with the refusal text the campaign logs already carry.
+    #[test]
+    fn a_fully_bounded_route_still_refuses_any_zero_phase() {
+        let refusal = mage_zero_phase_error(true, 41_000_000_000, 0, 38_000_000_000)
+            .expect("a bounded route refuses a capture with an unmeasured phase");
+        assert_eq!(
+            refusal,
+            "a synchronized Mage-Flow lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+        );
+        assert_eq!(
+            mage_zero_phase_error(true, 41_000_000_000, 12_000_000_000, 38_000_000_000),
+            None
+        );
+    }
+
+    /// WHY the Mage receipt is published overall-only rather than with the unmeasured keys dropped.
+    ///
+    /// `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so a
+    /// partial decomposition is not a record at all. The choice is therefore between the ceiling
+    /// alone and fabricated phase numbers, and this pins the first.
+    #[test]
+    fn an_unattributed_mage_phase_is_published_as_a_ceiling_not_as_a_zero() {
+        use sceneworks_core::memory_calibration::{ObservedMemory, PredictedPeakBytes};
+
+        let peaks = PredictedPhasePeaks {
+            conditioning: 1,
+            denoise: 2,
+            decode: 3,
+            overall: 4,
+        };
+        let overall_only: PredictedPeakBytes =
+            serde_json::from_value(peaks.overall_only_json()).expect("overall-only prediction");
+        assert_eq!(overall_only.overall(), 4);
+        assert!(
+            overall_only.full().is_none(),
+            "an overall-only receipt must not read as a decomposition"
+        );
+        // The shape the arm CANNOT file, and the reason the ceiling is filed instead.
+        assert!(
+            serde_json::from_value::<PredictedPeakBytes>(
+                json!({ "denoise": 2, "decode": 3, "overall": 4 })
+            )
+            .is_err(),
+            "a partial decomposition is not a receipt shape; dropping the unmeasured key is not an \
+             option"
+        );
+        let window = PhaseMemory {
+            active: 41_000_000_000,
+            cache: 3,
+        };
+        let observed: ObservedMemory =
+            serde_json::from_value(json!({ "overall": { "activeBytes": window.active } }))
+                .expect("overall-only");
+        assert!(observed.full().is_none());
+        assert_eq!(observed.overall_non_reclaimable_bytes(), window.active);
+    }
+
+    /// The arm ACTS on the attribution rather than merely computing it: the receipt is the ceiling,
+    /// the anchor-minting phase measurements are withheld, both measured windows are published under
+    /// names that say what they are, and the gap is stated in the record's own blocker. Read the way
+    /// the sibling guards in this file read an arm — the measured render needs real weights.
+    #[test]
+    fn the_mage_receipt_withholds_the_keys_an_anchor_would_be_minted_from() {
+        let source = include_str!("mlx.rs");
+        let start = source
+            .find("\nfn run_mage_provider(")
+            .expect("the arm still exists");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the arm's body closes")];
+        assert!(
+            body.contains("predicted_peaks.overall_only_json()"),
+            "an unbounded route must file the ceiling rather than a four-key decomposition"
+        );
+        for declaration in [
+            "(\"conditioningPhaseUnattributed\", \"count\", 1)",
+            "(\"denoisePhaseUnattributed\", \"count\", 1)",
+            "(\"decodePhaseUnattributed\", \"count\", 1)",
+            "\"throughFirstDenoiseStepWindowActivePeak\"",
+            "\"postFirstDenoiseStepWindowActivePeak\"",
+            "vec![MAGE_ENGINE_BOUNDARIES.to_owned()]",
+        ] {
+            assert!(
+                body.contains(declaration),
+                "the unattributed phases, the measured windows and the blocker must all be \
+                 declared; missing {declaration}"
+            );
+        }
+        // The anchor-minting measurements must appear ONLY inside the `if bounded { … }` arm — not
+        // merely after the branch opens. Emitting one in the shared diagnostics list, which sits
+        // below the whole `if`/`else`, is exactly how a fabricated phase peak would reach a record.
+        let opened = body
+            .find("        if bounded {")
+            .expect("the receipt is keyed on the engine's boundary set");
+        let closed = opened
+            + body[opened..]
+                .find("\n        } else {")
+                .expect("the bounded arm closes");
+        for anchor_key in [
+            "(\"conditioningActivePeak\", \"bytes\", conditioning.active)",
+            "(\"denoiseActivePeak\", \"bytes\", denoise.active)",
+            "(\"decodeActivePeak\", \"bytes\", decode.active)",
+        ] {
+            let found: Vec<usize> = body
+                .match_indices(anchor_key)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(!found.is_empty(), "{anchor_key} is gone entirely");
+            assert!(
+                found
+                    .iter()
+                    .all(|index| (opened..closed).contains(index)),
+                "the anchor-minting measurement {anchor_key} must only be emitted where the engine \
+                 bounded that phase"
+            );
+        }
+    }
+
+    /// sc-22738 — the render's informational coherence note is DEFERRED, so a capture that fails
+    /// after the render is named on stderr by its own failure. The runner reads the first stderr
+    /// line, and eighteen Mage refusals were reported as a coherence statistic because this line
+    /// went out the moment `generate` returned.
+    #[test]
+    fn the_coherence_note_is_deferred_rather_than_printed_at_the_render() {
+        let source = include_str!("mlx.rs");
+        let start = source
+            .find("fn report_gpu_view_retries(")
+            .expect("the reporter still exists");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the reporter's body closes")];
+        assert!(
+            body.contains("protocol::defer_note("),
+            "the coherence note must be deferred"
+        );
+        assert!(
+            !body.contains("eprintln!"),
+            "the coherence note must not be written to stderr at the render"
+        );
+        // And the deferred buffer is flushed on both terminals: `main` emits it on the success path,
+        // and `protocol::fail` emits it AFTER the failure line — the ordering that makes the
+        // runner's "first stderr line" name the real failure.
+        assert!(source.contains("protocol::flush_deferred_notes();"));
+        let protocol_source = include_str!("../lib.rs");
+        let fail = protocol_source
+            .find("pub fn fail(")
+            .expect("the failure terminal still exists");
+        let failure_line = protocol_source[fail..]
+            .find("eprintln!(\"memory-strategy provider adapter: {}\"")
+            .expect("the failure line");
+        let flush = protocol_source[fail..]
+            .find("flush_deferred_notes();")
+            .expect("the notes are flushed on the failure path");
+        assert!(
+            failure_line < flush,
+            "the failure line must be written BEFORE the deferred notes"
+        );
     }
 }
 
@@ -21352,6 +21712,8 @@ fn main() {
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
+    // The success path has no failure line to sit behind, so the deferred render notes go out here.
+    protocol::flush_deferred_notes();
     protocol::write_response(&response).unwrap_or_else(|error| protocol::fail(error));
 }
 

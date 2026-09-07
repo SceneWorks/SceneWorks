@@ -28,6 +28,8 @@ import {
   anchorParts,
   anchorSlug,
   appendPackagedSource,
+  writePackagedSource,
+  RUSTFMT_EDITION,
   capturedInCampaign,
   classifyAnchor,
   compiledInferencePin,
@@ -67,6 +69,7 @@ import {
   watchdogCeilings,
   watchdogGuard,
   watchdogHardStop,
+  METAL_REFUSAL,
   MINIMAX_UPSTREAM_ROOT_FILES,
   MINIMAX_TEXT_ENCODER_CONFIG,
   MINIMAX_TIER_DIT_FILES,
@@ -1270,6 +1273,63 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
     ),
     "a mention outside the list must not suppress the append",
   );
+});
+
+/** A throwaway checkout carrying just what `writePackagedSource` reads: the file and rustfmt's config. */
+async function packagedSourceFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-packaged-fmt-"));
+  await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
+  const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
+  await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
+  await writeFile(
+    path.join(root, "rustfmt.toml"),
+    await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
+  );
+  return { root, source, file: path.join(root, PACKAGED_SOURCES_PATH) };
+}
+
+// sc-22738: the one-line tuple the append writes fits `max_width` only while the corpus name is
+// short. `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so
+// the runner committed a tree whose `cargo fmt --check` reds the `parity-rust` lane — after the
+// push. Every shorter name in the campaign happened to fit, which is why it surfaced this late.
+test("packaging a long-named corpus leaves memory_anchor.rs rustfmt-clean", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/flux2-dev-bf16-mlx-exceeded-evidence.json";
+  assert.ok(
+    `        include_str!("../../../${relative}"),`.length > 100,
+    "the fixture path must be long enough to exceed max_width on one line",
+  );
+  assert.equal(await writePackagedSource(root, relative), true);
+  // The gate itself, not a re-implementation of its width rule.
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+  const written = await readFile(file, "utf8");
+  assert.ok(
+    written.includes(
+      ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n"),
+    ),
+    "rustfmt wrapped the argument onto its own line",
+  );
+  // The mutation this guards: the append's own output — the format step skipped — is what red the
+  // lane, so `rustfmt --check` must reject it.
+  await writeFile(file, appendPackagedSource(source, relative));
+  await assert.rejects(
+    execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]),
+    "an unformatted append must not pass the parity lane's check",
+  );
+});
+
+test("packaging a short-named corpus is byte-identical to the bare append", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/qwen-image-q4-mlx-evidence.json";
+  assert.equal(await writePackagedSource(root, relative), true);
+  assert.equal(await readFile(file, "utf8"), appendPackagedSource(source, relative));
+  // Already packaged: nothing is rewritten, so nothing is reformatted either.
+  assert.equal(await writePackagedSource(root, relative), false);
+});
+
+test("the edition the runner formats with is the one rustfmt.toml declares", async () => {
+  const config = await readFile(path.join(ROOT, "rustfmt.toml"), "utf8");
+  assert.equal(config.match(/^edition\s*=\s*"([^"]+)"$/m)?.[1], RUSTFMT_EDITION);
 });
 
 // sc-22738: the embed and the Docker COPY lines are ONE step. `platform-review-contracts.test.mjs`
@@ -3819,17 +3879,42 @@ async function stubCheckout() {
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
+      // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
+      if (process.env.STUB_CAPTURE_METAL_REFUSAL) {
+        console.error('Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured render: "[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). at /out/mlx-c-staged/mlx/c/transforms.cpp:73"');
+        process.exit(1);
+      }
       await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null }] }));
     } else if (command === "record-exceeded") {
       const events = (await readFile(value("--watchdog-events"), "utf8")).trim().split("\\n").map(JSON.parse);
       const stop = events.find((event) => event.event === "hard_stop");
-      const [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+      let observed;
+      let ceiling;
+      let reason;
+      if (stop) {
+        [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+        reason = stop.reason;
+      } else {
+        // The refusal arm: no hard stop, so the witnesses the runner must have handed over are the
+        // adapter's stderr and the wired limit its probe read. Missing either is a stub failure,
+        // which is how this stub proves the runner really passed them.
+        const stderr = await readFile(value("--provider-stderr") ?? "/nonexistent", "utf8");
+        const wired = Number(value("--wired-limit-bytes"));
+        if (!stderr.includes("00000004") || !stderr.includes("kIOGPUCommandBufferCallbackErrorSubmissionsIgnored")) {
+          console.error("Error: stub record-exceeded was given no refusal to read"); process.exit(1);
+        }
+        if (!Number.isSafeInteger(wired) || wired <= 0) { console.error("Error: stub record-exceeded got no --wired-limit-bytes"); process.exit(1); }
+        observed = Math.max(...events.filter((event) => event.event === "sample").map((event) => event.physicalFootprintBytes));
+        ceiling = observed;
+        reason = "metal_submissions_ignored:observed_" + observed + ":wired_limit_" + wired;
+      }
       await writeFile(value("--output"), JSON.stringify({
         records: [],
         exceededBounds: [{
           id: "exc-stub", backend: "mlx", artifact: JSON.parse(value("--artifact")),
           target: { modelId: "z_image_turbo", tier: "q4" },
-          observedFootprintBytes: Number(observed), ceilingBytes: Number(ceiling), reason: stop.reason,
+          observedFootprintBytes: Number(observed), ceilingBytes: Number(ceiling), reason,
         }],
       }));
     } else if (command === "ingest") {
@@ -4375,5 +4460,126 @@ test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the
     assert.equal(status, "", "a stopped capture leaves the checkout clean for the next anchor");
   } finally {
     delete process.env.STUB_PROBE_MEMORY_BYTES;
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a PROCESS-SCOPED Metal refusal, the second way a run ends having measured a bound.
+// ---------------------------------------------------------------------------------------------
+
+test("a Metal submissions-ignored refusal is COMMITTED as a measured bound at the wired limit", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  // NO hard stop: the guard's ceiling stays where the incident puts it, so the only thing that ends
+  // this capture is the adapter's own refusal — exactly the flux2_dev:bf16:mlx shape.
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const row = {
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot,
+      env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    };
+    const context = stubContext(checkout);
+    const refused = await measureAnchor(row, context);
+    // THE defect: a refusal the guard never saw used to be an ordinary `capture_failed`, so the
+    // store kept no trace and production kept admitting the request Metal had just refused.
+    assert.equal(refused.status, "committed_exceeded", refused.reason);
+    assert.equal(context.state.commits.length, 1, "the refusal is one commit, like an anchor");
+    assert.equal(context.state.halt, null, "one refusal is process-scoped and does not stop the walk");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+    const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s%n%b", "HEAD");
+    assert.match(shown, /chore\(sc-stub\): record the z_image_turbo:q4:mlx Metal refusal as a measured bound/);
+    assert.ok(shown.includes(METAL_REFUSAL), "the commit body names the refusal, not a watchdog stop");
+    const bundle = JSON.parse(await readFile(
+      path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"), "utf8",
+    ));
+    const [bound] = bundle.exceededBounds;
+    // The figures the runner's witnesses produced: the sampler's PEAK, and the wired limit its own
+    // probe read (87,044,670,532 on the stub, this host's figure).
+    assert.match(bound.reason, /^metal_submissions_ignored:observed_\d+:wired_limit_87044670532$/);
+    assert.ok(bound.observedFootprintBytes > 0);
+    assert.equal(
+      bound.ceilingBytes, bound.observedFootprintBytes,
+      "no guard fired, so the highest line the run is witnessed to have crossed is its own peak",
+    );
+    assert.equal(Number(/observed_(\d+)/.exec(bound.reason)[1]), bound.observedFootprintBytes);
+    // The refusal's witness is written where the harness can re-read and hash it.
+    const stderr = await readFile(path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-provider-stderr.txt"), "utf8");
+    assert.match(stderr, /00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored/);
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
+  }
+});
+
+test("a capture that fails WITHOUT the refusal signature is still a capture_failed, never a bound", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  process.env.STUB_CAPTURE_FAILS = "1";
+  try {
+    const context = stubContext(checkout);
+    const failed = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    // The discrimination this story turns on, stated as its own case: an artifact-bound row that
+    // fails is NOT thereby a bound. Only the signature makes it one.
+    assert.equal(failed.status, "capture_failed");
+    assert.equal(failed.reason, "Error: stub capture refused");
+    assert.equal(context.state.commits.length, 0);
+    assert.equal(context.state.metalRefusedLast, null, "a non-refusal clears the consecutive-refusal flag");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_FAILS;
+  }
+});
+
+test("two consecutive Metal refusals are a WEDGED HOST: the walk halts naming the reboot instead of recording a second bound", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const context = stubContext(checkout);
+    const artifact = { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" };
+    const first = await measureAnchor(
+      { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: {}, artifact }, context,
+    );
+    assert.equal(first.status, "committed_exceeded", first.reason);
+    assert.equal(context.state.metalRefusedLast, "z_image_turbo:q4:mlx");
+    const second = await measureAnchor(
+      { key: "z_image_turbo:bf16:mlx", physical: false, tierRoot, env: {}, artifact }, context,
+    );
+    // `SubmissionsIgnored` has two scopes. The first refusal was the process's; a second in a row
+    // is the GPU's, and every remaining anchor would otherwise "measure" a bound about the driver.
+    assert.equal(second.status, "capture_failed", second.reason);
+    assert.match(second.reason, /halting the walk/);
+    assert.equal(context.state.commits.length, 1, "no second bound was recorded");
+    assert.ok(context.state.halt, "the walk is halted");
+    assert.match(context.state.halt, /REBOOT/i, "the halt names the reboot the host needs");
+    assert.match(context.state.halt, /z_image_turbo:q4:mlx and then z_image_turbo:bf16:mlx/);
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
+  }
+});
+
+test("a refusal on a no-commit run surfaces as `exceeded` naming the Metal refusal, tree left clean", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const refused = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    assert.equal(refused.status, "exceeded");
+    assert.equal(refused.reason, METAL_REFUSAL);
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
   }
 });
