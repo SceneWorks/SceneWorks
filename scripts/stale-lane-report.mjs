@@ -612,8 +612,11 @@ export function bespokePreGateProviders(cleaned, consts, label, gateStarts = [],
   // The second alternative used to be a bare `^if\s+let\s+Some\(`, which is not the rule this
   // function states: `return Err(…)` is a REFUSAL, not a dispatch, and a refusal names no provider
   // for this report to read. sc-22738 added exactly such a pre-gate — the measured-lower-bound
-  // capture refusal, `if let Some(refusal) = exceeded_bound_capture_refusal(request)? { return
-  // Err(refusal); }` — and the over-broad candidate made it throw as an unreadable dispatch shape.
+  // capture refusal, `if let Some(refusal) = exceeded_bound_capture_refusal_in(store, closures,
+  // request)? { return Err(refusal); }`, now inside the MLX adapter's `run_with` (the entry `run`
+  // tail-calls it, and `run_with` carries the gate, so the pre-gate region of `run` is empty and
+  // the report is unchanged) — and the over-broad candidate made it throw as an unreadable
+  // dispatch shape.
   // Narrowed to what the doc comment above already says, so a refusal pre-gate is ordinary code.
   const candidate = new RegExp(
     String.raw`\{\s*${DISPATCH}\s*\}$|^if\s+let\s+Some\([\s\S]*\breturn\s+${CALL}\s*\(`,

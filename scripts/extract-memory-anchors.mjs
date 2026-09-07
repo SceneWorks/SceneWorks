@@ -361,6 +361,14 @@ export function anchorCandidate(record, corpus) {
     residentSetSeen:
       backend === "mlx" &&
       (measured.get("residentSetMaterializedBeforeWindow") ?? 0) >= 1,
+    // sc-22738: when and on how large a host the render COMPLETED — the two terms
+    // `retainExceededBounds` needs to decide whether this record retires a measured lower bound on
+    // the same cell. `null` where the record states none; a record with no timestamp supersedes
+    // nothing.
+    capturedAt: typeof record.capturedAt === "string" ? record.capturedAt : null,
+    hostMemoryBytes: Number.isInteger(record.hardware?.memoryBytes)
+      ? record.hardware.memoryBytes
+      : null,
     sourcePath: corpus.path,
     sourceSha256: corpus.sha256,
     recordId,
@@ -686,6 +694,112 @@ const exceededBoundId = (entry, cell) =>
     entry.calibrationFingerprint,
     entry.id,
   ].join(":");
+
+/**
+ * The axes a measured lower bound is keyed on — exactly `ExceededBoundQuery`'s identity conjuncts
+ * (`memory_anchor.rs`), spelled once for both a retained bound entry and a completed record's
+ * candidate so the two can be compared. Geometry is deliberately NOT in the key: it is compared
+ * by coverage, not equality (see `retainExceededBounds`).
+ */
+const boundIdentity = ({
+  modelId,
+  backend,
+  tier,
+  transformerVariant,
+  decoder,
+  provider,
+  mode,
+  overlay,
+  referenceCount,
+}) =>
+  [
+    modelId,
+    backend,
+    tier,
+    transformerVariant ?? "-",
+    decoder ?? "-",
+    provider,
+    mode,
+    overlay ?? "-",
+    referenceCount,
+  ].join(":");
+
+const entryIdentity = (entry) =>
+  boundIdentity({
+    modelId: entry.target.modelId,
+    backend: entry.backend,
+    tier: entry.target.tier,
+    transformerVariant: entry.target.transformerVariant ?? null,
+    decoder: entry.target.decoder ?? null,
+    provider: entry.target.provider,
+    mode: entry.target.mode,
+    overlay:
+      entry.target.overlay && entry.target.overlay !== "none"
+        ? entry.target.overlay
+        : null,
+    referenceCount: entry.referenceCount,
+  });
+
+const entryCapturedAt = (entry) =>
+  typeof entry.capturedAt === "string" ? entry.capturedAt : null;
+
+/**
+ * Which retained `exceededBounds` entries still stand as evidence (sc-22738).
+ *
+ * A bound is a MEASUREMENT — "this cell's peak is at or above X on a host of H bytes" — and it is
+ * retired the only way the standing rule allows a measurement to be retired: by a later
+ * measurement of the same cell. The runtime never demotes a stale bound on currency; a stale bound
+ * therefore has to be lifted HERE, by the evidence a re-measurement produces, or it can never be
+ * lifted at all. Two rules, both keyed on the bound's own identity axes:
+ *
+ * 1. A COMPLETED render supersedes a bound. A record of the same cell whose geometry covers the
+ *    bound's on every axis, captured LATER than the stop, on a host NO LARGER than the one that
+ *    was stopped, proves the cell completes where the bound said it could not; the bound is
+ *    retired. The host term is why: a completion on a 512 GiB host says nothing about the 128 GiB
+ *    host the inequality was measured on. Every completed record counts, not only the cell's
+ *    representative anchor — an overlay render supersedes an overlay bound, and only that.
+ * 2. A LATER STOP replaces an earlier one at the same geometry. Two bounds of one identity at one
+ *    geometry are one fact measured twice; the later measurement stands and the earlier is
+ *    dropped, whichever footprint was larger — the earlier was taken under a loader the later run
+ *    has since re-measured. Bounds at DIFFERENT geometries all stay: a cell stopped at more than
+ *    one geometry carries the strongest true inequality for each (`binding_exceeded_bound`).
+ *
+ * `bounds` are `{ entry, corpus, cell }` triples; `completed` are `anchorCandidate` results.
+ * Entries with no `capturedAt` are never superseded and never supersede — ordering is the whole
+ * claim, so a record that cannot be ordered cannot make it. Returns the retained triples in the
+ * order given.
+ */
+export function retainExceededBounds(bounds, completed) {
+  const latestStopAt = new Map();
+  for (const { entry } of bounds) {
+    const at = entryCapturedAt(entry);
+    if (at === null) continue;
+    const { width, height, frames } = entry.target.geometry;
+    const key = `${entryIdentity(entry)}|${width}x${height}x${frames}`;
+    const seen = latestStopAt.get(key);
+    if (seen === undefined || at > seen) latestStopAt.set(key, at);
+  }
+  return bounds.filter(({ entry }) => {
+    const at = entryCapturedAt(entry);
+    if (at === null) return true;
+    const identity = entryIdentity(entry);
+    const { width, height, frames } = entry.target.geometry;
+    if (latestStopAt.get(`${identity}|${width}x${height}x${frames}`) !== at) return false;
+    const stoppedHost = entry.hardware?.memoryBytes;
+    return !completed.some(
+      (candidate) =>
+        candidate.capturedAt !== null &&
+        candidate.capturedAt > at &&
+        boundIdentity(candidate) === identity &&
+        candidate.geometry.width >= width &&
+        candidate.geometry.height >= height &&
+        candidate.geometry.frames >= frames &&
+        Number.isInteger(candidate.hostMemoryBytes) &&
+        Number.isInteger(stoppedHost) &&
+        candidate.hostMemoryBytes <= stoppedHost,
+    );
+  });
+}
 
 /**
  * One bundle `exceededBounds` entry as the store carries it (sc-22738).
@@ -1572,11 +1686,15 @@ export async function buildAnchorStore({
     stagedExemptLanes,
   );
   const byIdentity = new Map();
+  // sc-22738: EVERY completed render of a packaged corpus, overlay or not, catalog-resolved or
+  // not — the population a measured lower bound can be superseded from (`retainExceededBounds`).
+  const completedRenders = [];
   for (const corpus of corpora) {
     if (!packagedSources.has(corpus.path)) continue;
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null) continue;
+      completedRenders.push(candidate);
       // An OVERLAY render measures a different resident set (krea's q4 MLX evidence is
       // control-branch-only, under its own `*_control` provider). Anchoring the base cell from it
       // would let one provider's measurement answer for another's render, which is exactly what
@@ -1724,8 +1842,11 @@ export async function buildAnchorStore({
   //    handshake against the compiled-in file, so an unpackaged corpus would make the store
   //    unloadable exactly as an unpackaged anchor would. A bound for a coordinate the routing
   //    catalog does not resolve is dropped for the same reason an anchor for one is: the request
-  //    it would refuse cannot be made.
-  const exceededBounds = [];
+  //    it would refuse cannot be made. A bound a LATER completed render of the cell has superseded,
+  //    or a later stop at the same geometry has replaced, is retired here (`retainExceededBounds`):
+  //    the runtime never demotes a bound on currency, so re-measurement is the only way one is
+  //    ever lifted, and this is where the re-measurement's evidence does the lifting.
+  const retainedBounds = [];
   for (const corpus of corpora) {
     if (!packagedSources.has(corpus.path)) continue;
     for (const entry of corpus.exceededBounds) {
@@ -1733,9 +1854,12 @@ export async function buildAnchorStore({
         cellKey(entry.target.modelId, entry.backend, entry.target.tier),
       );
       if (!cell) continue;
-      exceededBounds.push(exceededBoundRow(entry, corpus, cell, previousStore));
+      retainedBounds.push({ entry, corpus, cell });
     }
   }
+  const exceededBounds = retainExceededBounds(retainedBounds, completedRenders).map(
+    ({ entry, corpus, cell }) => exceededBoundRow(entry, corpus, cell, previousStore),
+  );
   exceededBounds.sort((left, right) => compareText(left.id, right.id));
 
   return {
