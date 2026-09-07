@@ -838,16 +838,22 @@ SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier 
 # and sampler faults that persist for `--telemetry-fault-window` (60 s) of WALL CLOCK with no good
 # sample, which stops as `telemetry_lost` carrying its `telemetryFaultHistory`. Every sampler
 # failure path — a `/usr/bin/footprint` timeout or non-zero exit, a parse failure, the aggregate
-# telemetry deadline, the host free-memory probe — shares that one window, and NONE of them
-# escalates on its own: a tolerated tick emits `telemetry_fault` and keeps the previous good sample
-# as the current reading. A false hard stop is a process-group SIGKILL through a live Metal command
-# buffer, which has wedged this host's GPU; a late stop is the cheaper failure. The cadence is one
-# tick per `--sample-interval` (2 s) and each probe inside a tick — census, footprint, host
-# pressure — gets its own full `--telemetry-timeout` (10 s), with the aggregate staleness deadline
-# derived as three of those, never shorter than one full sample. Both defaults matter: at 0.25 s /
-# 1 s shared across the probes, `footprint` on a 38 GB process received 0.31 s of budget and
-# `bernini:q4:mlx` was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside
-# 1.2 s.
+# telemetry deadline, the host free-memory probe, the `/bin/ps` process-group census — shares that
+# one window, and NONE of them escalates on its own: a tolerated tick emits `telemetry_fault` and
+# keeps the previous good sample as the current reading. A false hard stop is a process-group
+# SIGKILL through a live Metal command buffer, which has wedged this host's GPU; a late stop is the
+# cheaper failure. The cadence is one tick per `--sample-interval` (2 s) and each probe inside a
+# tick — census, footprint, host pressure — gets its own full `--telemetry-timeout` (10 s), with
+# the aggregate staleness deadline derived as three of those, never shorter than one full sample.
+# The census carries that same budget (`CENSUS_TIMEOUT_SECONDS`, adopted from
+# `--telemetry-timeout`), not the 1 s it used to hard-code, and a census that FAILS is an UNKNOWN
+# view in which the previous census stands: only a SUCCESSFUL census that lacks the root, or the
+# guarded child reporting its exit, is root loss. `monitor_failure` is reserved for an exception
+# that is not a telemetry source failing at all. Every default matters: at 0.25 s / 1 s shared
+# across the probes, `footprint` on a 38 GB process received 0.31 s of budget and `bernini:q4:mlx`
+# was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside 1.2 s; with the
+# census still on 1 s, `bernini:q8:mlx` was SIGKILLed 85 minutes in at a steady 52 GB by a single
+# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`).
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
