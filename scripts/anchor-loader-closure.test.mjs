@@ -678,16 +678,34 @@ test("an entry point absent at a historical revision narrows the unit, it does n
   // `memory_strategy.rs` postdates the LTX-2.3 capture. The entry-point list is part of the hashed
   // text, so a closure derived over a shorter list cannot equal the pin's, and the anchor reads
   // NOT CURRENT. That is the truth about it, and it must not be an error.
-  const { store, corpora, declared, revisions } = packagedStore();
+  const { store, corpora, declared, revisions, stampable } = packagedStore();
   if (!requireRevisions(t, revisions)) return;
-  const ltx23 = store.anchors.filter((anchor) => anchor.modelId === "ltx_2_3");
-  assert.ok(ltx23.length > 0, "the packaged store must carry an ltx_2_3 anchor");
   const { report } = stampAnchorStore({ repo, store, declared, corpora });
-  const row = report.find((entry) => entry.id === ltx23[0].id);
-  const historical = gitTree(repo, row.revision);
-  const absent = config.models["ltx_2_3:mlx"].entryPoints.filter((file) => !historical.has(file));
-  assert.ok(absent.length > 0, "this case needs an entry point that really is absent back then");
-  assert.notEqual(row.digest, config.models["ltx_2_3:mlx"].digest);
+  // sc-22738: WHICH anchor is the historical one is a property of the corpus, not of a model id or
+  // a position. The 2026-09-07 MLX rerun recaptured `ltx_2_3:*:mlx` at the pin, so "the first
+  // ltx_2_3 anchor" stopped being the sc-18808 staged capture that predates `memory_strategy.rs` —
+  // that anchor is still packaged, later in the list. Find the case by the historical tree.
+  const laneOf = (id) => {
+    const anchor = stampable.find((candidate) => candidate.id === id);
+    return `${anchor.modelId}:${anchor.backend}`;
+  };
+  const absentAt = (row) => {
+    const historical = gitTree(repo, row.revision);
+    return (config.models[laneOf(row.id)]?.entryPoints ?? []).filter((file) => !historical.has(file)).sort();
+  };
+  const historicalRows = report.filter((row) => absentAt(row).length > 0);
+  assert.ok(
+    historicalRows.length > 0,
+    "this case needs an anchor measured before one of its lane's entry points existed",
+  );
+  for (const row of historicalRows) {
+    assert.deepEqual(
+      row.narrowed.filter((entry) => entry.reason === "absent").map((entry) => entry.file).sort(),
+      absentAt(row),
+      `${row.id} reports every entry point absent at ${row.revision.slice(0, 8)} as narrowing`,
+    );
+    assert.notEqual(row.digest, config.models[laneOf(row.id)].digest, `${row.id} cannot be keyed like the pin`);
+  }
 });
 
 test("an entry point that never names the model is refused", { skip }, () => {
