@@ -1150,7 +1150,10 @@ export function validateBundle(bundle) {
  * One exceeded bound's invariants beyond the schema's shape (sc-22738).
  *
  * All three are about the inequality being a real one. A footprint under the ceiling did not come
- * from a hard stop; a footprint above the whole host is not a reading of that host; and an id that
+ * from a hard stop — EQUAL is admissible and is what a `metal_submissions_ignored` bound records,
+ * because a refusal the guard never saw is witnessed only up to the sampler's own peak, and that
+ * peak is then both the reading and the highest line the run is known to have crossed; a footprint
+ * above the whole host is not a reading of that host; and an id that
  * is not the content digest of the bound's own identity would let two different measurements share
  * a row. The Rust loader re-checks the first two against this very file, so a bundle that passes
  * here and a store row that passes there cannot disagree.
@@ -2060,6 +2063,132 @@ export function parseWatchdogHardStop(body) {
 }
 
 /**
+ * The two tokens Metal's process-scoped refusal is identified by (sc-22738, measured 2026-09-06).
+ *
+ * BOTH are required. The phrase alone appears in prose — this file, the runbook, a memory note —
+ * and a stderr that merely mentions the failure mode is not one that suffered it; the IOGPU status
+ * code is what the driver itself emits alongside it. Requiring the pair is what keeps a log line
+ * about the hazard from being mistaken for the hazard.
+ */
+export const METAL_SUBMISSIONS_IGNORED_CODE = "00000004";
+export const METAL_SUBMISSIONS_IGNORED_PHRASE = "kIOGPUCommandBufferCallbackErrorSubmissionsIgnored";
+
+/**
+ * Whether a provider's captured stderr carries Metal's submissions-ignored refusal.
+ *
+ * `[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors)
+ * (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)` — the engine surfaces it verbatim
+ * out of mlx-c, so the adapter's exit-1 stderr is the only witness there is. The guard sees nothing:
+ * it never fired, because `phys_footprint` never reached the kill line.
+ */
+export function metalSubmissionsIgnored(stderr) {
+  const text = String(stderr ?? "");
+  return text.includes(METAL_SUBMISSIONS_IGNORED_CODE) && text.includes(METAL_SUBMISSIONS_IGNORED_PHRASE);
+}
+
+/**
+ * How far BELOW the wired limit the last good sample may sit and still be read as a wired-limit
+ * refusal: 2% (sc-22738).
+ *
+ * Derived from the sampler, not chosen for comfort. The guard samples every 2 s, so the reading is
+ * always at least one interval stale by the time Metal refuses. On the `flux2_dev:bf16:mlx` refusal
+ * this rule was written from, the terminal climb was 679,821,816 bytes in 2.22 s (~306 MB/s), so one
+ * interval of lag is ~612 MB — 0.70% of this host's 87,044,670,532-byte wired limit — and the peak
+ * actually landed 56,660,196 bytes (0.065%) under it. 2% is ~2.8 intervals at that rate: loose
+ * enough that a faster terminal climb still classifies, tight enough that a refusal taken WELL below
+ * the limit is not laundered into a memory bound. A refusal outside the band is refused here and
+ * stays a `capture_failed`: it was a GPU fault of some other kind, and nothing measured a ceiling.
+ */
+export const METAL_REFUSAL_TOLERANCE = 0.02;
+
+/**
+ * The peak `phys_footprint` the guard sampled, and the number of samples behind it (sc-22738).
+ *
+ * The PEAK, not the last sample: a refused process is torn down while the sampler is still running,
+ * so the tail of the stream reads the shrinking husk (29 MB on the flux2 refusal) rather than the
+ * render. A stream with no sample states no footprint and is refused rather than defaulted.
+ */
+export function parseWatchdogPeak(body) {
+  let peak = null;
+  let samples = 0;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event !== "sample") continue;
+    samples += 1;
+    const footprint = event.physicalFootprintBytes;
+    if (!Number.isSafeInteger(footprint) || footprint <= 0) {
+      fail(`watchdog sample states a non-positive physical footprint ${JSON.stringify(footprint)}`);
+    }
+    if (peak === null || footprint > peak) peak = footprint;
+  }
+  if (peak === null) fail("the watchdog event log carries no sample, so it states no footprint at all");
+  return { observedFootprintBytes: peak, samples };
+}
+
+/**
+ * A process-scoped Metal refusal read as a measured bound (sc-22738, measured 2026-09-06).
+ *
+ * WHAT THE RUN PROVED. `flux2_dev:bf16:mlx` rendered for 775 s under the guard, reached a sampled
+ * peak of 86,988,010,336 bytes — 0.065% under this host's 87,044,670,532-byte Metal wired limit —
+ * and the adapter then exited 1 with the driver's own submissions-ignored refusal. The guard never
+ * fired (its kill line is 94,822,600,832), so `parseWatchdogHardStop` reads nothing and the run used
+ * to end as `capture_failed` with the store keeping no trace, while production went on admitting
+ * the identical request at the ladder's bf16 rung.
+ *
+ * WHICH FIGURES THE BOUND CARRIES, AND WHY NOT THE WIRED LIMIT. `observedFootprintBytes` is the peak
+ * the sampler actually read, and `ceilingBytes` is that same figure — the highest line the run is
+ * WITNESSED to have crossed. Recording the wired limit as the ceiling would state that the run got
+ * past a line it was only ever observed 56 MB short of, and `sceneworks_core::memory_anchor`'s
+ * loader refuses exactly that (`observed_footprint_bytes < ceiling_bytes`). The limit is not lost:
+ * it is carried on `hardware.wiredLimitBytes`, named in `reason`, and — as `wiredLimitBytes` — is
+ * the term the tolerance band above is measured against, so a reader sees the whole gap.
+ *
+ * The two quantities are not interchangeable for a further reason `watchdogCeilings` already states:
+ * `phys_footprint` counts every non-Metal page the group owns, the wired limit ceilings Metal
+ * buffers alone. Their near-coincidence here is corroboration that the refusal was memory pressure,
+ * which is all the tolerance band is asked to decide.
+ */
+function metalRefusalBound({ eventBody, providerStderr, wiredLimitBytes, hardware }) {
+  if (!metalSubmissionsIgnored(providerStderr)) {
+    fail(
+      "the captured provider stderr carries no Metal submissions-ignored refusal " +
+        `(${METAL_SUBMISSIONS_IGNORED_CODE}:${METAL_SUBMISSIONS_IGNORED_PHRASE}); a failure that ` +
+        "names no refusal states no bound",
+    );
+  }
+  if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) {
+    fail("--wired-limit-bytes must be a positive safe integer");
+  }
+  // The runner passes the limit its OWN probe read before the capture; the probe above read it
+  // again after. A host whose Metal policy moved between the two is a host neither reading speaks
+  // for, so the bound is refused rather than keyed on whichever figure arrived last.
+  if (hardware.wiredLimitBytes !== wiredLimitBytes) {
+    fail(
+      `--wired-limit-bytes ${wiredLimitBytes} is not the wired limit this adapter probes ` +
+        `(${hardware.wiredLimitBytes}); the host's Metal ceiling moved during the capture`,
+    );
+  }
+  const { observedFootprintBytes } = parseWatchdogPeak(eventBody);
+  if (observedFootprintBytes > hardware.memoryBytes) {
+    fail(`peak footprint ${observedFootprintBytes} exceeds the whole capture host's memory`);
+  }
+  const floor = Math.floor(wiredLimitBytes * (1 - METAL_REFUSAL_TOLERANCE));
+  if (observedFootprintBytes < floor) {
+    fail(
+      `peak footprint ${observedFootprintBytes} is more than ${METAL_REFUSAL_TOLERANCE * 100}% under ` +
+        `the ${wiredLimitBytes}-byte wired limit (floor ${floor}); this refusal was not taken at the ` +
+        "wired limit, so it bounds nothing",
+    );
+  }
+  return {
+    observedFootprintBytes,
+    ceilingBytes: observedFootprintBytes,
+    reason: `metal_submissions_ignored:observed_${observedFootprintBytes}:wired_limit_${wiredLimitBytes}`,
+  };
+}
+
+/**
  * Turn ONE footprint hard stop into retained evidence (sc-22738, epic 22723 E4/E5).
  *
  * Before this arm existed a hard stop stamped NOTHING. The capture process group was killed, the
@@ -2077,6 +2206,7 @@ export function parseWatchdogHardStop(body) {
  */
 export async function recordExceededBound({
   plan, anchorKey, providerCommand, sceneWorksRepo, inferenceRepo, watchdogEventFile, artifact,
+  providerStderrFile = null, wiredLimitBytes = null,
   closureDigestFor = null, executeProvider = execute, now = () => new Date(),
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) {
@@ -2088,8 +2218,18 @@ export async function recordExceededBound({
     text(artifact[field], `artifact.${field}`);
   }
   const eventBody = await readFile(watchdogEventFile, "utf8");
+  // TWO admissible sources, in this order. The guard's own hard stop is the authoritative one: it
+  // states both figures itself. A process-scoped Metal refusal is the alternative — the guard never
+  // fired, so the run's only witnesses are the sampler's stream and the adapter's stderr — and it is
+  // consulted ONLY when there is no hard stop to read.
   const stop = parseWatchdogHardStop(eventBody);
-  if (!stop) fail(`${watchdogEventFile} records no watchdog hard stop`);
+  const providerStderr = providerStderrFile === null ? null : await readFile(providerStderrFile, "utf8");
+  if (!stop && providerStderr === null) {
+    fail(
+      `${watchdogEventFile} records no watchdog hard stop, and no --provider-stderr was given to ` +
+        "read a process-scoped refusal out of",
+    );
+  }
   const repositories = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
   const probeOutput = await executeProvider(
     providerCommand[0],
@@ -2104,6 +2244,9 @@ export async function recordExceededBound({
   const digestForLane = planned.evidenceScope === "authoritative"
     ? await resolveDigest(lane, repositories.inference.revision)
     : undefined;
+  const measured = stop ?? metalRefusalBound({
+    eventBody, providerStderr, wiredLimitBytes, hardware: probe.hardware,
+  });
   const bound = {
     logicalCaseId: planned.logicalCaseId,
     backend: planned.backend,
@@ -2123,10 +2266,15 @@ export async function recordExceededBound({
     // bound one can produce — is reference-free. Stated as a field rather than assumed because the
     // store keys on it: a reference-carrying request must not inherit a reference-free bound.
     referenceCount: 0,
-    observedFootprintBytes: stop.observedFootprintBytes,
-    ceilingBytes: stop.ceilingBytes,
-    reason: stop.reason,
+    observedFootprintBytes: measured.observedFootprintBytes,
+    ceilingBytes: measured.ceilingBytes,
+    reason: measured.reason,
     eventFileSha256: createHash("sha256").update(eventBody).digest("hex"),
+    // The refusal's own witness, hashed for the same reason the event log is: a bound whose stated
+    // cause cannot be re-read is a claim standing on nothing.
+    ...(stop || providerStderr === null
+      ? {}
+      : { providerStderrSha256: createHash("sha256").update(providerStderr).digest("hex") }),
     calibrationFingerprint: planned.calibrationFingerprint,
     capturedAt: now().toISOString(),
     harnessVersion: HARNESS_VERSION,
@@ -2532,6 +2680,10 @@ async function main() {
       inferenceRepo: path.resolve(value("--inference-repo")),
       watchdogEventFile: path.resolve(value("--watchdog-events") ?? fail("--watchdog-events is required")),
       artifact: JSON.parse(value("--artifact") ?? fail("--artifact is required")),
+      // Both optional and both only consulted when the guard's log carries no hard stop: the
+      // process-scoped Metal refusal arm (sc-22738).
+      providerStderrFile: value("--provider-stderr") ? path.resolve(value("--provider-stderr")) : null,
+      wiredLimitBytes: value("--wired-limit-bytes") ? Number(value("--wired-limit-bytes")) : null,
     }));
   }
   fail("usage: capture|record-exceeded|check|ingest|plan (see docs/memory-calibration-harness.md)");
