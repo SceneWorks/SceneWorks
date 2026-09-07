@@ -193,6 +193,7 @@
       }
     },
     "sourceOutput": {
+      "description": "One typed receipt of a physical source session. `request` names the committed `<session>.request.json`. A rendered output (`selected_*` / `reference_*`) is a content-addressed receipt — digest, byte length, geometry and frames are in the filename and the fields — and is NOT part of the committed tree (sc-22738): the bytes are verified against it at capture and at ingest, then left in the capture directory.",
       "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
       "allOf": [
         {

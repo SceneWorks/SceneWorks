@@ -351,7 +351,9 @@ uploads the evidence JSON together with a repository-relative receipt tree conta
 request, raw provider response, and selected/reference RGB outputs. The three session outputs are a
 closed typed set (`request`, `selected_rgb`, `reference_rgb`) with unique paths; RGB filenames include
 their logical case, role, dimensions, and content SHA-256, and receipt creation never overwrites
-different existing bytes. The adapter independently emits each RGB digest and byte count; capture
+different existing bytes. The rendered outputs are verified against those receipts at capture and at
+`ingest --source-root`, and are never committed (sc-22738): the receipt is the evidence, and
+`validateSourceSessionFiles` accepts a bundle whose renders are absent from the tree. The adapter independently emits each RGB digest and byte count; capture
 fails if the post-provider bytes, the attestation, and the content-addressed filename disagree. The
 request must be canonical JSON matching the one evidence record bound to the session. Every newly planned q4/bf16
 record carries `sourceProvenance: physical_mlx_v1`. Receipt validation reconstructs the complete

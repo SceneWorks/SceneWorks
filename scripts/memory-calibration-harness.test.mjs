@@ -1767,6 +1767,34 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   assert.equal(validateBundle(result), result);
   assert.equal(await validateSourceSessionFiles(result, rawLogDir), result);
 
+  // sc-22738: the rendered outputs are never committed; a tree holding only the session log and the
+  // request receipt validates on the outputs' digest receipts. The raw capture directory is held to
+  // the stricter rule at ingest (`requireRenderedOutputs`), and a render that IS present is still
+  // read and checked against its digest.
+  const receiptsOnly = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-only-"));
+  await mkdir(path.join(receiptsOnly, sourcePathPrefix), { recursive: true });
+  const committedRequest = session.outputs.find((output) => output.role === "request");
+  for (const relative of [session.sourcePath, committedRequest.path]) {
+    await writeFile(path.join(receiptsOnly, relative), await readFile(path.join(rawLogDir, relative)));
+  }
+  assert.equal(await validateSourceSessionFiles(result, receiptsOnly), result);
+  await assert.rejects(
+    validateSourceSessionFiles(result, receiptsOnly, null, { requireRenderedOutputs: true }),
+    /missing immutable source receipt .*selected_rgb/,
+  );
+  assert.equal(await validateSourceSessionFiles(result, rawLogDir, null, { requireRenderedOutputs: true }), result);
+  const renderedOutput = session.outputs.find((output) => output.role === "selected_rgb");
+  await writeFile(path.join(receiptsOnly, renderedOutput.path), "not the attested bytes");
+  await assert.rejects(
+    validateSourceSessionFiles(result, receiptsOnly),
+    /no longer matches its SHA-256 receipt/,
+  );
+  // The request receipt is never optional.
+  const noRequest = await mkdtemp(path.join(tmpdir(), "physical-mlx-no-request-"));
+  await mkdir(path.join(noRequest, sourcePathPrefix), { recursive: true });
+  await writeFile(path.join(noRequest, session.sourcePath), await readFile(path.join(rawLogDir, session.sourcePath)));
+  await assert.rejects(validateSourceSessionFiles(result, noRequest), /missing immutable source receipt .*request\.json/);
+
   const semanticTamper = structuredClone(result);
   const semanticSession = semanticTamper.sourceSessions[0];
   const semanticRecord = semanticTamper.records[0];
@@ -1927,8 +1955,15 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   missingOutput.sourceSessions[0].outputs[1].sha256 = "0".repeat(64);
   missingOutput.sourceSessions[0].outputs[1].path =
     `${sourcePathPrefix}/${record.logicalCaseId}-selected_rgb-1024x1024-${"0".repeat(64)}.rgb`;
+  // sc-22738: a rendered output's absence is no longer a failure by itself, so the re-pointed
+  // receipt is caught one check later, where the provider's own stdout attestation disagrees with
+  // it; the raw capture directory (ingest) still fails on the absence first.
   await assert.rejects(
     validateSourceSessionFiles(missingOutput, rawLogDir),
+    /provider response output attestation does not match the session receipt/,
+  );
+  await assert.rejects(
+    validateSourceSessionFiles(missingOutput, rawLogDir, null, { requireRenderedOutputs: true }),
     /missing immutable source receipt/,
   );
 

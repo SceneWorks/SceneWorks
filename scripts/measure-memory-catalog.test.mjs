@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, writeFile, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -89,6 +89,9 @@ import {
   DOCKERFILE_PATH,
   DOCKERFILE_EMBED_ANCHOR,
   insertEvidenceCopy,
+  receiptDisposition,
+  assertStageable,
+  MAX_STAGED_FILE_BYTES,
   readExceededBounds,
 } from "./measure-memory-catalog.mjs";
 import {
@@ -4445,19 +4448,81 @@ test("a failed derivation step rolls the tree back to HEAD and keeps the raw cap
   }
 });
 
-test("a source-capture anchor's gitignored .log receipt is copied beside the evidence and force-added", async () => {
+test("a source-capture anchor's gitignored .log receipt is copied beside the evidence and force-added; its rendered outputs are not", async () => {
   const checkout = await stubCheckout();
   const row = { key: "z_image_turbo:q4:mlx", sourceCapture: true, env: {} };
   const context = stubContext(checkout);
-  // The harness would write the receipt under <rawLogDir>/<campaignDir>/; emulate that.
+  // The harness would write the receipts under <rawLogDir>/<campaignDir>/; emulate that, with the
+  // rendered selected/reference outputs the physical MLX arms write beside them (sc-22738: the
+  // LTX-2.5 A/V pair is 165–176 MB EACH and GitHub refused the three commits that carried it).
   const rawLogDir = path.join(checkout.workDir, "raw", "z-image-turbo-q4-mlx");
-  await mkdir(path.join(rawLogDir, "docs/calibration/sc-stub"), { recursive: true });
-  await writeFile(path.join(rawLogDir, "docs/calibration/sc-stub/session-1.log"), "receipt");
+  const receipts = path.join(rawLogDir, "docs/calibration/sc-stub");
+  await mkdir(receipts, { recursive: true });
+  const session = "ims-0123456789abcdef0123";
+  const rendered = [
+    `implan-0123456789abcdef0123-selected_av-512x768-f145-${"a".repeat(64)}.avbin`,
+    `implan-0123456789abcdef0123-reference_av-512x768-f145-${"a".repeat(64)}.avbin`,
+    `implan-0123456789abcdef0123-selected_rgb-1024x1024-${"b".repeat(64)}.rgb`,
+    "render.png", "latents.npy", "audio.wav",
+  ];
+  await writeFile(path.join(receipts, `${session}.log`), "receipt");
+  await writeFile(path.join(receipts, `${session}.request.json`), "{}");
+  for (const name of rendered) await writeFile(path.join(receipts, name), "rendered bytes");
   const result = await measureAnchor(row, context);
   assert.equal(result.status, "committed", result.reason);
-  const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s", "HEAD");
-  assert.ok(shown.includes("docs/calibration/sc-stub/session-1.log"), "the *.log receipt is committed despite the ignore rule");
+  // `--name-only`: `--stat` abbreviates long paths, and every name below is a long one.
+  const { stdout: shown } = await checkout.git("show", "--name-only", "--format=%s", "HEAD");
+  assert.ok(shown.includes(`docs/calibration/sc-stub/${session}.log`), "the *.log receipt is committed despite the ignore rule");
+  assert.ok(shown.includes(`docs/calibration/sc-stub/${session}.request.json`), "and the request receipt beside it");
+  const { stdout: tracked } = await checkout.git("ls-files", "docs/calibration/sc-stub");
+  const committed = await readdir(path.join(checkout.root, "docs/calibration/sc-stub"));
+  for (const name of rendered) {
+    assert.ok(!shown.includes(name), `${name} is not in the commit`);
+    assert.ok(!tracked.includes(name), `${name} is not tracked`);
+    assert.ok(!committed.includes(name), `${name} never entered the evidence directory`);
+  }
   assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  const log = await readFile(result.log, "utf8");
+  for (const name of rendered) assert.ok(log.includes(`excluded rendered output ${name}`), `the anchor log names the excluded ${name}`);
+});
+
+// sc-22738: the ceiling behind the rule above, as a refusal in its own right — a runner that somehow
+// reaches `git add` with a render in hand stops before the commit exists, not at the push.
+test("the ingest refuses to stage any file over 50 MB, rolls back, and names the file", async () => {
+  assert.equal(MAX_STAGED_FILE_BYTES, 50 * 1024 * 1024);
+  assert.equal(receiptDisposition("ims-0123456789abcdef0123.log"), "receipt");
+  assert.equal(receiptDisposition("ims-0123456789abcdef0123.request.json"), "receipt");
+  for (const name of [
+    `implan-0123456789abcdef0123-selected_av-512x768-f145-${"a".repeat(64)}.avbin`,
+    `implan-0123456789abcdef0123-reference_rgb-1024x1024-${"b".repeat(64)}.rgb`,
+    "session.log", "ims-0123456789abcdef0123.png", "ims-0123456789abcdef0123.log.bak",
+  ]) assert.equal(receiptDisposition(name), "rendered_output", name);
+
+  const checkout = await stubCheckout();
+  const row = { key: "z_image_turbo:q4:mlx", sourceCapture: true, env: {} };
+  const context = stubContext(checkout);
+  const receipts = path.join(checkout.workDir, "raw", "z-image-turbo-q4-mlx", "docs/calibration/sc-stub");
+  await mkdir(receipts, { recursive: true });
+  // A receipt-shaped name carrying one byte over the ceiling (sparse, so the test costs no disk).
+  const oversized = path.join(receipts, "ims-0123456789abcdef0123.log");
+  const handle = await open(oversized, "w");
+  await handle.truncate(MAX_STAGED_FILE_BYTES + 1);
+  await handle.close();
+  assert.equal((await stat(oversized)).size, MAX_STAGED_FILE_BYTES + 1);
+  await assert.rejects(
+    assertStageable(path.dirname(receipts), ["sc-stub"]),
+    /refusing to stage 1 file\(s\) over the 52428800-byte \(50 MB\) staging ceiling[\s\S]*sc-stub\/ims-0123456789abcdef0123\.log \(52428801 bytes\)/,
+  );
+  await assertStageable(path.dirname(receipts), ["sc-stub"], MAX_STAGED_FILE_BYTES + 1);
+
+  const result = await measureAnchor(row, context);
+  assert.equal(result.status, "ingest_failed");
+  assert.match(result.reason, /refusing to stage 1 file\(s\) over the 52428800-byte \(50 MB\) staging ceiling/);
+  assert.equal(context.state.commits.length, 0, "no commit was made");
+  assert.equal(context.state.halt, null);
+  assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "rollback left a clean tree");
+  const { stdout: tracked } = await checkout.git("ls-files", "docs/calibration/sc-stub");
+  assert.equal(tracked, "", "nothing under the campaign directory was staged");
 });
 
 // sc-22738. The defect this story fixes, driven end to end: `ltx_2_5:*:mlx` classified runnable,
