@@ -20509,51 +20509,89 @@ fn krea_realtime_load_spec(tier: &str) -> Result<KreaRealtimeArtifact, String> {
     })
 }
 
-/// The admission context for the Krea Realtime safety scenarios.
+/// The admission SURFACE the plan's target declares.
 ///
-/// `mode` IS AN EVIDENCE KEY, not a label, for the reason spelled out at [`minimax_context`]: the
-/// shipped video funnel asks under `"text_to_video"` and types it with `memory_mode_from_mode_key`,
-/// which maps every non-canonical key to [`MemoryMode::Other`]. This capture carries that spelling
-/// so a probe run here answers the question the runtime actually asks.
-fn krea_realtime_context(
-    selection: MemorySelection,
-    calibration: &MemoryCalibrationIdentity,
-    fingerprint: &str,
-    geometry: KreaRealtimeGeometry,
-    total_bytes: u64,
-    predicted_peak_bytes: u64,
-) -> MemoryRunContext {
-    MemoryRunContext {
-        selection,
-        optimization_authority: MemoryOptimizationAuthority::Calibrated,
-        calibration_abi: calibration.abi,
-        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
-        // call site passes `calibration.fingerprint`.
-        calibration_fingerprint: fingerprint.to_owned(),
-        load_shape: calibration.load_shape,
-        mode: MemoryMode::Other("text_to_video".to_owned()),
-        has_reference: false,
-        use_pid: false,
-        has_phases: true,
-        geometry: MemoryGeometry {
-            width: geometry.width,
-            height: geometry.height,
-            batch: 1,
-            frames: geometry.frames,
-            reference_count: 0,
-        },
-        overlay: None,
-        budget: MemoryBudget {
-            total_bytes,
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        predicted_peak_bytes,
-        cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-22735@{}", protocol::INFERENCE_PIN),
-    }
+/// Read back off the target rather than inferred from [`validate_krea_realtime_target`]'s refusals,
+/// so [`krea_realtime_probes_admission`] is a decision computed from the request the arm was handed
+/// and not a constant a future reference-carrying anchor could inherit silently.
+struct KreaRealtimeSurface {
+    mode: String,
+    reference_count: u32,
 }
+
+fn krea_realtime_target_surface(request: &Value) -> Result<KreaRealtimeSurface, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?
+        .to_owned();
+    let mut reference_count = 0_u32;
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            let declared = value
+                .as_u64()
+                .and_then(|count| u32::try_from(count).ok())
+                .ok_or_else(|| {
+                    format!("planned.target.{field} must be a non-negative integer when declared")
+                })?;
+            reference_count = reference_count.max(declared);
+        }
+    }
+    Ok(KreaRealtimeSurface {
+        mode,
+        reference_count,
+    })
+}
+
+/// Whether production would ask the Krea Realtime provider's admission gate anything at all about
+/// this request. The twin of [`bernini_probes_admission`], and false for the same reason.
+///
+/// THE ENGINE SIDE. `mlx-gen-krea-realtime`'s registered `safety_check`
+/// (`crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs:686-694` at inference
+/// `3b922bac`) admits exactly two request modes — `image_to_video` and `video_to_video` — and
+/// refuses every other key BY NAME (`crossed resident request mode`) before it reaches the shared
+/// `default_memory_strategy_safety_check`. It then requires `reference_count == 1` and an
+/// `evidence_revision` sealed under
+/// `provider-resident-video-request-v3:krea_realtime_14b:mode=…:shape=…:`.
+///
+/// THE WORKER SIDE agrees. `video_jobs/krea_realtime.rs` builds its `VideoGenInput` with
+/// `..VideoGenInput::default()` and never sets `memory_context`, so nothing but
+/// `video_admission.rs` can fill it — and the context that path builds carries
+/// `mode = MemoryMode::Other("text_to_video")`, `reference_count = 0` and an `evidence_revision`
+/// that is a curve/anchor id or `video-estimate-floor-v1`
+/// (`video_admission.rs#admit_video_generation_with_curves_and_profiles`), never that sealed
+/// receipt. A reference-free t2v render therefore reaches the engine through
+/// `memory_strategy::generate_with_scope`'s no-context early return; the gate is asked nothing.
+///
+/// sc-22738 probed that surface anyway, and all three `krea_realtime_14b:*:mlx` anchors died on the
+/// FIRST probe — after a full 14B weight load — with "admission rejected a fitting probe budget".
+/// The arm now asks the gate exactly what the worker asks it. It does NOT synthesize a
+/// reference-carrying surface to make the gate answer: that would measure an admission decision the
+/// product never makes for this request, and the anchor would then carry an admission
+/// characterization no shipped path exercises.
+fn krea_realtime_probes_admission(mode: &str, reference_count: u32) -> bool {
+    matches!(mode, "image_to_video" | "video_to_video") || reference_count > 0
+}
+
+/// What the record says about the admission scenarios it did not run, and why. Stated once and
+/// carried into every `not_run` reason, the lifecycle blocker and the diagnostics.
+const KREA_REALTIME_ADMISSION_BLOCKER: &str = concat!(
+    "reference-free Krea Realtime has NO admission surface in production: ",
+    "`mlx-gen-krea-realtime`'s registered safety_check admits only the image_to_video and ",
+    "video_to_video routes carrying exactly one reference under a sealed ",
+    "provider-resident-video-request-v3 receipt, and refuses every other request mode by name; ",
+    "the worker's own t2v path leaves VideoGenInput::memory_context unset, and the context ",
+    "video_admission.rs would build carries text_to_video, reference_count 0 and a curve/anchor ",
+    "evidence id rather than that receipt. This arm therefore asks the admission gate nothing, ",
+    "exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence ",
+    "scenarios are unexecuted rather than answered on a surface production never presents. This ",
+    "anchor prices the RESIDENT load of the plain reference-free t2v ladder and claims nothing ",
+    "about any optimized rung or admission decision"
+);
 
 fn krea_realtime_request(geometry: KreaRealtimeGeometry, fps: u32, seed: u64) -> GenerationRequest {
     GenerationRequest {
@@ -20601,6 +20639,7 @@ fn krea_realtime_complete_sweep(request: &Value) -> Result<Value, String> {
 /// decides which rungs are capturable, and this provider registers a resident-only witness.
 fn run_krea_realtime(request: &Value) -> Result<Value, String> {
     let geometry = validate_krea_realtime_target(request)?;
+    let surface = krea_realtime_target_surface(request)?;
     protocol::validate_plain_overlay_target(request, KREA_REALTIME_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
     if load_shape != LoadShape::EagerMaterialization {
@@ -20697,40 +20736,23 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
         );
     }
 
-    // Admission hygiene on the LOADED provider, through its OWN registered check: it must accept a
-    // fitting probe (so the two rejections below are evidence rather than a blanket refusal), reject
-    // an unknown/zero budget, and reject a mutated calibration fingerprint.
-    let probe = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        generator.memory_strategy_safety_check(&krea_realtime_context(
-            selection,
-            calibration,
-            fingerprint,
-            geometry,
-            total_bytes,
-            predicted,
-        ))
-    };
-    if !matches!(
-        probe(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(
-            "Krea Realtime admission rejected a fitting probe budget; the scenario rejections \
-             below would be a blanket refusal, not evidence"
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        probe(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("Krea Realtime admission accepted an unknown/zero memory budget".to_owned());
-    }
-    if !matches!(
-        probe("stale-krea-realtime-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("Krea Realtime admission accepted stale calibration evidence".to_owned());
+    // The arm's admission decision, taken the way the WORKER takes it (sc-22738): see
+    // [`krea_realtime_probes_admission`]. On every cell this arm can plan the answer is `false` —
+    // the reference-free t2v route has no admission surface on either side of the seam — so nothing
+    // is asked of the provider's safety check and the render below runs resident exactly as
+    // production runs it. The record says so rather than claiming an admission result it never got.
+    //
+    // A `true` answer would mean the plan reached this arm with a reference-carrying Krea Realtime
+    // target, which `validate_krea_realtime_target` has already refused BY NAME: i2v warms the
+    // causal KV cache from the encoded still and v2v runs a strength-controlled init, so such a
+    // request seals a different evidence identity and needs its own capture, not a probe
+    // synthesized here. It is refused rather than assumed away.
+    if krea_realtime_probes_admission(&surface.mode, surface.reference_count) {
+        return Err(format!(
+            "{KREA_REALTIME_PROVIDER}: production WOULD build a Krea Realtime memory context for \
+             this surface, but this arm measures only the reference-free t2v ladder; a \
+             reference-carrying anchor seals its own evidence identity and needs its own capture"
+        ));
     }
 
     // Three phase peaks off the boundaries the shipped `generate` already emits, cut exactly the way
@@ -20858,13 +20880,10 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
             overall.active
         ));
     }
-    // The exact-fit probe, on the LOADED generator and against the MEASURED evidence.
-    if !matches!(
-        probe(&calibration.fingerprint, predicted, predicted),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err("Krea Realtime admission rejected an exact-fit calibrated budget".to_owned());
-    }
+    // No exact-fit probe against the MEASURED evidence either, and for the same reason the three
+    // pre-render scenarios are unexecuted: the gate this arm would ask refuses the reference-free
+    // t2v surface by name, so an answer here would characterize a decision production never takes.
+    // See [`KREA_REALTIME_ADMISSION_BLOCKER`].
 
     // Warm repeat determinism + cleanup bounds on this exact loaded provider.
     clear_cache();
@@ -20928,14 +20947,27 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
         );
     }
 
-    let lifecycle_blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. This record claims nothing about them"
+    let lifecycle_blocker = format!(
+        concat!(
+            "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+            "provider; it opens no memory-strategy request scope and injects no calibration ",
+            "fault, so the scoped cancellation and authorized-error scenarios and their recovery ",
+            "renders are unexecuted. This record claims nothing about them. ",
+            // sc-22738: stated in the same breath as the lifecycle exclusion because it is the
+            // same kind of claim — what this record deliberately does NOT say.
+            "Additionally: {}"
+        ),
+        KREA_REALTIME_ADMISSION_BLOCKER,
     );
+    let lifecycle_blocker = lifecycle_blocker.as_str();
+    // GATED, not `runtime_complete` (sc-22738). Runtime activation is exactly the claim that the
+    // provider's admission gate accepted an exact-fit budget and rejected the two mutations, and
+    // this capture asked it nothing — because production asks it nothing for this request. The
+    // MEASUREMENT is unaffected and is carried in full: `observedMemory` and `predictedPeakBytes`
+    // are the resident-load prices this anchor exists to publish, and `extract-memory-anchors.mjs`
+    // reads them off this record exactly as it reads them off a runtime-complete one.
     let mut fragment = json!({
-        "status": "runtime_complete",
+        "status": "gated",
         "strategy": strategy,
         // From the CONTRACT's own calibration identity, never copied from the plan: a receipt may
         // only testify to the materialization shape its own run used (sc-16482).
@@ -20947,9 +20979,9 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
         },
         "sweep": krea_realtime_complete_sweep(request)?,
         "scenarios": [
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed", "reason": "the loaded Krea Realtime generator rejected a zero/unknown budget" },
-            { "name": "stale_evidence", "result": "passed", "reason": "the loaded Krea Realtime generator rejected a mutated calibration fingerprint" },
+            { "name": "exact_fit", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
+            { "name": "unknown_budget", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
+            { "name": "stale_evidence", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
             { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -24452,6 +24484,122 @@ mod krea_realtime_tests {
     fn the_realtime_provider_id_is_the_engines_own() {
         assert_eq!(KREA_REALTIME_PROVIDER, mlx_gen_krea_realtime::MODEL_ID);
         assert_eq!(KREA_REALTIME_PROVIDER, "krea_realtime_14b");
+    }
+
+    /// sc-22738. THE decision this fix is about: for every planned `krea_realtime_14b:*:mlx` cell
+    /// the arm's answer to "does this capture ask Krea Realtime's admission gate anything?" must be
+    /// the answer PRODUCTION gives for the same request shape — and today, on every cell this arm
+    /// can plan, that answer is NO.
+    ///
+    /// sc-22735 asked the gate on the anchor's own reference-free t2v surface, which the engine's
+    /// route gate refuses by name, and all three anchors died with "admission rejected a fitting
+    /// probe budget" after a full 14B weight load. The remedy is not a surface that makes the gate
+    /// answer — production never presents one for this request — it is to skip the probe exactly
+    /// where production skips the context.
+    #[test]
+    fn the_arm_asks_the_admission_gate_exactly_what_production_asks_it() {
+        // The plan's own rows, read rather than restated: every one is reference-free t2v, so the
+        // arm's decision on every schedulable cell is the one asserted below.
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut planned_rows = 0;
+        for (key, row) in plan["anchors"].as_object().expect("anchors object") {
+            if row["provider"].as_str() != Some(KREA_REALTIME_PROVIDER) || !key.ends_with(":mlx") {
+                continue;
+            }
+            let mode = row["mode"].as_str().expect("a plan row declares a mode");
+            let references = row["referenceCount"].as_u64().unwrap_or(0) as u32;
+            assert!(
+                !krea_realtime_probes_admission(mode, references),
+                "{key}: a reference-free Krea Realtime capture must not probe admission"
+            );
+            planned_rows += 1;
+        }
+        assert_eq!(
+            planned_rows, 3,
+            "the plan must still carry the three MLX Krea Realtime rows this case decides for"
+        );
+
+        // The predicate over both of its axes, not just today's rows: the two routes the engine's
+        // gate names probe, every other mode key does not, and a reference count above zero probes
+        // on any mode — so a reference-carrying anchor can never inherit the skip silently.
+        // (The route list itself is bound to the pinned engine's own `safety_check` by
+        // `the Krea Realtime arm's admitted routes are the pinned engine's own` in
+        // scripts/measure-memory-catalog.test.mjs, which reads the engine source.)
+        for mode in [
+            "image_to_video",
+            "video_to_video",
+            "text_to_video",
+            "text_to_image",
+            "edit",
+        ] {
+            for reference_count in [0, 1, 4] {
+                let admitted_route = matches!(mode, "image_to_video" | "video_to_video");
+                assert_eq!(
+                    krea_realtime_probes_admission(mode, reference_count),
+                    admitted_route || reference_count > 0,
+                    "{mode}/refs={reference_count}: the arm's mirror of the engine's route gate \
+                     has drifted"
+                );
+            }
+        }
+
+        // The arm's own target validation refuses every surface the predicate answers `true` for,
+        // so the refusal branch is unreachable from a plan row rather than merely unused: a
+        // reference-carrying Krea Realtime capture is a different anchor, not a mode flag.
+        for (field, value) in [
+            ("mode", json!("image_to_video")),
+            ("referenceCount", json!(1)),
+        ] {
+            let mut request = planned_request();
+            request["planned"]["target"][field] = value;
+            assert!(
+                validate_krea_realtime_target(&request).is_err(),
+                "{field}: a surface the gate would answer for must be refused by name"
+            );
+        }
+
+        // …and the arm ACTS on that decision. The predicate is only the answer; a body that still
+        // called the provider's admission gate, or a record that still claimed the three admission
+        // scenarios passed, would be the sc-22735 defect wearing the sc-22738 predicate. The
+        // measured render needs real weights, so the body is read as source.
+        let source = include_str!("mlx.rs");
+        let start = source
+            .find("\nfn run_krea_realtime(")
+            .expect("the arm still exists");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the arm's body closes")];
+        assert!(
+            !body.contains("safety_check"),
+            "the Krea Realtime arm asks the provider's admission gate something again; production \
+             asks it nothing for a reference-free t2v request"
+        );
+        assert!(
+            body.contains("\"status\": \"gated\""),
+            "a capture that ran no admission probe cannot file a runtime-activating record"
+        );
+        for scenario in ["exact_fit", "unknown_budget", "stale_evidence"] {
+            assert!(
+                body.contains(&format!(
+                    "{{ \"name\": \"{scenario}\", \"result\": \"not_run\", \"reason\": \
+                     KREA_REALTIME_ADMISSION_BLOCKER }}"
+                )),
+                "the {scenario} scenario must be reported unexecuted, with the reason production \
+                 gives for it"
+            );
+        }
+        assert!(
+            KREA_REALTIME_ADMISSION_BLOCKER
+                .contains("reference-free Krea Realtime has NO admission surface")
+                && KREA_REALTIME_ADMISSION_BLOCKER.contains("prices the RESIDENT load"),
+            "the record must state why it ran no probe and what it does price: \
+             {KREA_REALTIME_ADMISSION_BLOCKER}"
+        );
     }
 }
 
