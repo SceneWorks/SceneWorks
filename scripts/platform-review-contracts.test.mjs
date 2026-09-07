@@ -1227,8 +1227,11 @@ test("Rust Docker builders copy every production generated embed from sceneworks
     [
       ...coreSources
         .join("\n")
+        // sc-22738: `\s*` around the literal, because rustfmt wraps the argument onto its own line
+        // once the path pushes the call past `max_width`. Anchored to `("` this test went blind to
+        // exactly the long-named campaign corpora, and stopped requiring their Docker COPY lines.
         .matchAll(
-          /include_str!\("\.\.\/\.\.\/\.\.\/(docs\/(?:generated|calibration)\/[^"\n]+)"\)/g,
+          /include_str!\(\s*"\.\.\/\.\.\/\.\.\/(docs\/(?:generated|calibration)\/[^"\n]+)"\s*\)/g,
         ),
     ].map((match) => match[1]),
   );
@@ -1241,6 +1244,12 @@ test("Rust Docker builders copy every production generated embed from sceneworks
   assert(
     generatedEmbeds.has("docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
     "the memory-anchor store must compile its retained LTX-2.5 evidence source (sc-22507)",
+  );
+  assert(
+    generatedEmbeds.has(
+      "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
+    ),
+    "an embed whose argument rustfmt wrapped onto its own line must still be seen (sc-22738)",
   );
 
   const dockerfile = await source("docker/rust.Dockerfile");

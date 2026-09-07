@@ -866,6 +866,33 @@ SCENEWORKS_LTX_TEXT_ENCODER_ROOT=/abs/path/.../snapshots/<rev>/gemma
 # the manifest pins `01df27d3…`; `hf download --revision 01df27d3… --include 'q8/*' --include 'q4/*'`
 # re-links them at the manifest revision for **zero bytes**, because the blobs are shared (sc-18810).
 
+# memory-mlx-adapter — ltx_2_5 (SC-18783; the arm with NO `SCENEWORKS_LTX25_*` family for you to
+# set). Every artifact variable below is derived and exported by the HARNESS from
+# `--ltx25-snapshot-root` — repository, revision, the `<transformerVariant>/<tier>` root, the shared
+# enhancer's bytes/digest, the dev refinement adapter's bytes/digest — and `ltx25ProviderEnvironment`
+# DELETES any inherited copy first, so exporting them by hand does nothing. What the operator (or, in
+# a catalog walk, `measure-memory-catalog.mjs`) still owes the arm is the RAW-LOG PAIR:
+SCENEWORKS_MEMORY_CAPTURE_DIR=/absolute/path/outside/both/checkouts/raw
+SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX=docs/calibration/<campaign>
+# sc-22738: `mlx_ltx25.rs#prepare_source_capture` `required_env`s BOTH, unconditionally and before
+# the load, because this arm emits a `physical_mlx` sourceCapture on every run — it persists the
+# canonical selected/reference AV pair under `<capture-dir>/<source-prefix>`. It is the SECOND arm
+# that does so; the Qwen MLX arm (`qwen_source_capture`) is the other, and no third arm on either
+# lane does. The three `ltx_2_5:*:mlx` anchors booked on 2026-09-06 all died on
+# `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — bf16 after 883 s,
+# because the harness re-hashes the ~90 GB snapshot before the adapter is ever spawned — since the
+# catalog runner set the pair for `qwen_image` alone. `PROVIDER_FAMILIES.ltx_2_5` now declares
+# `sourceCapture: true` and the runner derives the pair (and `--raw-log-dir` /
+# `--source-path-prefix`, and `ingest --source-root`, and the receipt copy into the campaign
+# directory) from that flag; a test walks the MLX dispatch and reds if the declared set ever stops
+# matching the arms that really emit. This is NOT the Qwen `physical` currency rule: the harness
+# demands a validated physical source session before it calls an anchor current for
+# `modelId === "qwen_image"` only, so LTX-2.5 writes the receipt without owing it for currency.
+#
+# The Candle arm (`ltx_2_5_distilled`) emits NO sourceCapture, so it must be given NEITHER the pair
+# nor `--raw-log-dir`: `capturePlannedCase` refuses a configured raw-log directory whose provider
+# returned no source capture, which is the same failure from the other side.
+
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 
@@ -1113,6 +1140,12 @@ to `$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
 resume, no reuse assessment and no batch. Capturing a second cell means running the command a second
 time with a different `--anchor`, producing a second file.
 
+The arms that need the raw-log pair are exactly the MLX arms that EMIT a provider `sourceCapture`:
+`qwen_image` (`mlx.rs#qwen_source_capture`) and `ltx_2_5` (`mlx_ltx25.rs#prepare_source_capture`,
+sc-22738). Both `required_env` the capture directory before the load and refuse without it; the
+coupling is enforced from the other side too, so passing `--raw-log-dir` to any OTHER arm makes the
+harness refuse the render. See the LTX-2.5 block under "Adapter environment".
+
 For physical MLX capture, the raw-log directory must also stay outside the checkout. Run
 `scripts/hash-artifact-inventory.mjs --root <exact-tier-root> --github-env <env-file>` once before
 the campaign, export the two inventory values it reports, and set
@@ -1218,10 +1251,10 @@ are SUCCESS — the walk's exit code is 2 only if some anchor ended outside this
 | outcome | what happened | tree |
 |---|---|---|
 | `committed` | the render finished, and its record, packaged-source entry, re-derived store, stamp and matrix landed as one commit | one commit |
-| `committed_exceeded` | the footprint watchdog HARD-STOPPED the render, and the stop landed as a **measured lower bound** (sc-22738) through the same ingest path | one commit |
+| `committed_exceeded` | the render ENDED AT A CEILING — the footprint watchdog hard-stopped it, or Metal refused this process's submissions at the host's wired limit — and that landed as a **measured lower bound** (sc-22738) through the same ingest path | one commit |
 | `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
-| `exceeded` | `--no-commit`: the guard hard-stopped the render; the stop is named on the row but there is nowhere to put it | clean |
-| `capture_failed` | the capture died for a reason that is NOT a footprint stop (or is one the row cannot bind an artifact for) | clean |
+| `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
+| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop nor a wired-limit refusal (or is one the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
 
@@ -1285,7 +1318,66 @@ node scripts/memory-calibration-harness.mjs record-exceeded \
 It runs no render. It probes the adapter for the host's hardware (the same `action: "probe"` a
 capture takes first), reads the guard's `hard_stop` event for both figures, and binds the artifact
 the runner had set up — there is no provider fragment to trust, because there is no completed run.
-A log with no `hard_stop` is refused rather than turned into a bound from its last sample.
+A log with no `hard_stop` and no `--provider-stderr` is refused rather than turned into a bound from
+its last sample.
+
+#### The SECOND kind of ceiling: a process-scoped Metal refusal (sc-22738, measured 2026-09-06)
+
+`flux2_dev:bf16:mlx` rendered for 775 s on the 128 GiB Mac, its watchdog stream peaked at
+**86,988,010,336** bytes — 0.065% under this host's Metal wired limit of **87,044,670,532** — and
+the adapter then exited 1 carrying the engine's own error:
+
+```
+[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors)
+(00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)
+```
+
+The guard never fired: its kill line is 94,822,600,832, and `phys_footprint` is not the quantity
+Metal ceilings anyway. So `hard_stop` reads nothing, the walk recorded `capture_failed`, nothing
+reached the store — and production would admit the identical request (an image render at the
+ladder's bf16 rung with no measured MLX anchor) and fail the same way.
+
+**The rule.** A capture whose provider stderr carries BOTH the IOGPU status code `00000004` and the
+phrase `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored`, on a run whose guard log has NO
+`hard_stop`, is recorded through the same `record-exceeded` → ingest → commit path, with two extra
+arguments the runner supplies from its own pre-capture probe:
+
+```bash
+  --provider-stderr /abs/path/to/<anchor>-provider-stderr.txt \
+  --wired-limit-bytes 87044670532
+```
+
+**Which figures the bound carries, and the tolerance.**
+
+- `observedFootprintBytes` is the watchdog stream's **peak** sample — never its last, which reads the
+  torn-down husk (29 MB on the flux2 run).
+- `ceilingBytes` is that **same peak**, not the wired limit. The run was only ever observed 56,660,196
+  bytes short of the limit, and `sceneworks_core::memory_anchor` refuses a row whose footprint is
+  under its own ceiling, so recording the limit there would state a crossing nothing witnessed. The
+  limit is not lost: it is on `hardware.wiredLimitBytes` and spelled into the reason.
+- `reason` is `metal_submissions_ignored:observed_<peak>:wired_limit_<limit>`; the schema admits only
+  this and the guard's own `physical_footprint_at_or_above_<ceiling>:observed_<footprint>`.
+- `providerStderrSha256` hashes the refusal's witness, as `eventFileSha256` does the guard's.
+- **Tolerance: the peak must be at or above 98% of the wired limit** (`METAL_REFUSAL_TOLERANCE`,
+  2%). The sampler runs every 2 s, so its reading is always at least one interval stale when Metal
+  refuses; the flux2 terminal climb was ~306 MB/s, i.e. ~612 MB (0.70%) of lag per interval, and the
+  actual gap was 0.065%. 2% is ~2.8 intervals — loose enough for a faster terminal climb, tight
+  enough that a GPU fault taken well below the limit is NOT laundered into a memory bound. Outside
+  the band the record is refused and the anchor stays `capture_failed`.
+- `--wired-limit-bytes` must equal the limit the adapter probes inside `record-exceeded`. A host
+  whose Metal policy moved between the capture and the record is one neither reading speaks for.
+
+**Process-scoped vs WEDGED HOST — the discriminator is two in a row.** `SubmissionsIgnored` has two
+scopes. On the flux2 run it was the process's: the next anchor (`krea_2_raw:bf16:mlx`) committed
+normally four minutes later. The same string is also what a **wedged host** says — the GPU stays in
+its error state and refuses every process until the machine is **rebooted** — and on a wedged host
+every remaining anchor would "measure" a bound at whatever footprint it happened to reach, filling
+the store with inequalities about the driver rather than about the models.
+
+So: **one refusal is a bound; two consecutive refusals halt the walk.** The second one is a
+`capture_failed`, records nothing, and sets `state.halt` naming the reboot, which makes the run exit
+non-zero after the summary. Reboot the host, then re-run the walk — the first anchor's bound is
+already committed and its cell will classify `exceeded_current`, so the walk resumes past it.
 
 ### 6a-bis. The whole catalog on a runner — `memory-catalog-campaign.yml` (sc-22738)
 

@@ -516,8 +516,16 @@
         "referenceCount": { "type": "integer", "minimum": 0 },
         "observedFootprintBytes": { "type": "integer", "exclusiveMinimum": 0 },
         "ceilingBytes": { "type": "integer", "exclusiveMinimum": 0 },
-        "reason": { "type": "string", "minLength": 1 },
+        "reason": {
+          "$comment": "sc-22738: the bound's CAUSE, in one of exactly two spellings, because there are exactly two ways a run can end having measured a lower bound. `physical_footprint_at_or_above_<ceiling>:observed_<footprint>` is scripts/memory-calibration-watchdog.py's own hard-stop reason, verbatim. `metal_submissions_ignored:observed_<peak>:wired_limit_<limit>` is a PROCESS-SCOPED Metal refusal (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored) taken at the host's Metal wired limit, where the guard never fired and the witnesses are the sampler's peak and the adapter's stderr. Both figures are spelled into the string so a store row's cause survives without the bundle beside it. A free-text reason is refused: an unenumerated cause is a bound nobody can re-derive.",
+          "type": "string",
+          "pattern": "^(physical_footprint_at_or_above_[0-9]+:observed_[0-9]+|metal_submissions_ignored:observed_[0-9]+:wired_limit_[0-9]+)$"
+        },
         "eventFileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "providerStderrSha256": {
+          "$comment": "sc-22738: the sha256 of the provider stderr the refusal was read out of. Present only on a `metal_submissions_ignored` bound, where the adapter's stderr — not the guard's event log — is what witnessed the cause.",
+          "type": "string", "pattern": "^[0-9a-f]{64}$"
+        },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "const": "sceneworks-memory-v5" }

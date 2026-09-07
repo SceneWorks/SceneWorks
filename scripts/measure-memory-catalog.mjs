@@ -38,6 +38,10 @@ import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir } from "nod
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+// ONE spelling of the refusal signature, shared with the arm that records it (sc-22738). The runner
+// classifies a failure by it and the harness re-checks the same stderr before writing a bound, so a
+// second transcription here would be a way for the two to disagree about what a refusal even is.
+import { metalSubmissionsIgnored } from "./memory-calibration-harness.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/memory-calibration-plan.json";
@@ -624,18 +628,32 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
 /**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
- * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
- * (the Qwen MLX source capture, mlx.rs `qwen_source_capture`): the harness REQUIRES a sourceCapture
- * whenever `--raw-log-dir` is given, so the raw-log pair and `SCENEWORKS_MEMORY_CAPTURE_DIR` must be
- * passed for that arm and for no other.
+ * under "Adapter environment".
+ *
+ * `sourceCapture` marks an MLX arm that emits a provider `sourceCapture` fragment. The coupling the
+ * harness enforces is BIDIRECTIONAL (`capturePlannedCase`): `--raw-log-dir` without a sourceCapture
+ * fails, and a sourceCapture without the raw-log pair fails too. So exactly these arms get
+ * `SCENEWORKS_MEMORY_CAPTURE_DIR` + `SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`, the harness's
+ * `--raw-log-dir`/`--source-path-prefix`, `ingest --source-root`, and the receipt copy into the
+ * campaign directory — and no other arm gets any of them.
+ *
+ * sc-22738: this used to be spelled `physical`, which conflated the emission with the CURRENCY rule
+ * below and so bound the pair to `qwen_image` alone. `crates/.../bin/mlx_ltx25.rs` has emitted a
+ * `physical_mlx` sourceCapture since SC-18783 and `required_env`s the capture dir unconditionally
+ * (`prepare_source_capture`), so all three `ltx_2_5:*:mlx` captures died on
+ * `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — for `bf16` after 883s,
+ * because the harness re-hashes the ~90GB LTX-2.5 snapshot before the adapter is ever spawned. The
+ * two facts are now two flags, and `every MLX arm that emits a sourceCapture declares it`
+ * (measure-memory-catalog.test.mjs) derives the expected set from the adapter sources.
+ *
+ * `physical` is the narrower CURRENCY rule: the harness demands a validated physical source session
+ * before it will call an anchor current, and it scopes that demand to `modelId === "qwen_image"`
+ * alone (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), which a test
+ * below binds this table to. `physical` therefore implies `sourceCapture`; the reverse does not
+ * hold, and LTX-2.5 is the arm that proves it. `physical` is NOT inherited by a sibling family.
  *
  * Rows are keyed by PROVIDER by default; sc-22729 adds MODEL-keyed rows (which must declare their
  * `provider`) for the case where several catalog models ride one engine id. See `familyFor`.
- *
- * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
- * scopes the receipt requirement to `modelId === "qwen_image"` alone
- * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
- * binds this table to that predicate.
  *
  * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
  * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
@@ -664,7 +682,10 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * this table's spelling.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
-  qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
+  qwen_image: {
+    env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"],
+    sourceCapture: true, physical: true,
+  },
   // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
   // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
   // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
@@ -901,8 +922,16 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // the stock enhancer co-requisite `load_artifact` demands of every load. Neither is inside the
   // load root, so the snapshot probe above cannot see them; without these an anchor whose planned
   // cases include the dev variant classified `runnable` and failed after the booked session opened.
+  //
+  // sc-22738: the MLX arm emits a `physical_mlx` sourceCapture on EVERY run (`mlx_ltx25.rs`
+  // `prepare_source_capture` → `source_capture`, which persists the canonical selected/reference AV
+  // pair under `$SCENEWORKS_MEMORY_CAPTURE_DIR/$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`), so it needs
+  // exactly the raw-log provenance the Qwen MLX arm needs — but NOT the qwen-only currency receipt
+  // rule, which is why this is `sourceCapture` and not `physical`. The candle row below emits none
+  // (`candle.rs` has no sourceCapture site), so it must NOT be given the pair: the harness refuses a
+  // `--raw-log-dir` whose provider returned no sourceCapture.
   ltx_2_5: {
-    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"],
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"], sourceCapture: true,
     requiredSnapshotEntries: [
       { path: LTX25_DEV_REFINEMENT_LORA },
       { path: LTX25_ENHANCER_DIR, dir: true },
@@ -1445,7 +1474,13 @@ async function firstExistingDirectory(candidates) {
  */
 export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
-  const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
+  const row = {
+    key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [],
+    // sc-22738: an arm that emits a provider `sourceCapture` is the one that needs the raw-log pair
+    // and the capture-dir environment. Defaulted here so no early-return row can reach
+    // `measureAnchor` with the flag undefined; both terminal paths below set it from the family.
+    sourceCapture: false, physical: false,
+  };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
   const family = familyFor(parts.modelId, planned.provider, families);
   // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
@@ -1529,7 +1564,8 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       };
     }
     row.ltx25SnapshotRoot = snapshot;
-    row.physical = false;
+    row.sourceCapture = backend === "mlx" && family.sourceCapture === true;
+    row.physical = backend === "mlx" && family.physical === true;
     // sc-22738: the weights identity a footprint hard stop would be bound against. It is the
     // runner's binding of what it set up for the capture, not a provider attestation — a killed
     // run attests nothing — so it names exactly the snapshot the row resolved above. LTX-2.5 rows
@@ -1771,6 +1807,7 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
     row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
+  row.sourceCapture = backend === "mlx" && family.sourceCapture === true;
   row.physical = backend === "mlx" && family.physical === true;
   // sc-22738: see the LTX-2.5 branch — the tier root this row resolved, named so a hard stop can
   // state WHICH weights reached the footprint it bounds. `measureAnchor` fills the inventory digest
@@ -1817,6 +1854,55 @@ export function appendPackagedSource(source, relativePath) {
   if (opener === -1) fail("PACKAGED_MEMORY_ANCHOR_SOURCES entry is not a `    (` tuple");
   const at = start + opener;
   return `${source.slice(0, at)}${entry}\n${source.slice(at)}`;
+}
+
+/**
+ * The edition `rustfmt` is invoked with, bound to `rustfmt.toml` by a test.
+ *
+ * `cargo fmt` passes the workspace edition explicitly; a bare `rustfmt` would fall back to the
+ * config file's, so the two are stated in one place and asserted equal rather than left to drift.
+ */
+export const RUSTFMT_EDITION = "2021";
+
+/**
+ * Format one Rust file in place with `rustfmt`, or fail the run.
+ *
+ * A campaign host always has the toolchain the same run builds with, so an absent or failing
+ * `rustfmt` is a broken host, not a condition to route around: formatting silently skipped would
+ * put the tree back in the state this exists to prevent.
+ */
+export async function formatRustSource(file) {
+  try {
+    // `cwd` is the file's directory so `rustfmt.toml` is discovered from its ancestors, exactly as
+    // `cargo fmt` resolves it for the crate.
+    await run("rustfmt", ["--edition", RUSTFMT_EDITION, file], { cwd: path.dirname(file) });
+  } catch (error) {
+    fail(`rustfmt could not format ${file}: ${error.message}`);
+  }
+}
+
+/**
+ * Package `relativePath` into [`PACKAGED_SOURCES_PATH`] and leave the file rustfmt-stable.
+ *
+ * The append writes the tuple on one line (sc-22738), which fits `max_width = 100` only while the
+ * corpus name is short: `docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json` makes
+ * the `include_str!` line 101 columns and rustfmt wants it wrapped, so the runner's own commit red
+ * the `parity-rust` lane's `cargo fmt --check` — on a tree it had already pushed. Earlier commits
+ * passed only because their names happened to be a few characters shorter.
+ *
+ * The width rule is therefore not re-implemented here: rustfmt itself is run over the written file,
+ * so whatever the checked-in `rustfmt.toml` says — now or after a config change — is what lands.
+ *
+ * Returns whether the file changed; a corpus already packaged rewrites (and reformats) nothing.
+ */
+export async function writePackagedSource(root, relativePath) {
+  const file = path.join(root, PACKAGED_SOURCES_PATH);
+  const source = await readFile(file, "utf8");
+  const appended = appendPackagedSource(source, relativePath);
+  if (appended === source) return false;
+  await writeFile(file, appended);
+  await formatRustSource(file);
+  return true;
 }
 
 /**
@@ -2077,6 +2163,13 @@ export async function watchdogHardStop(eventFile) {
 }
 
 /**
+ * How a process-scoped Metal refusal is named on a row and in a commit subject (sc-22738). The
+ * machine-readable spelling lives on the bound itself (`metal_submissions_ignored:observed_…`); this
+ * is the human one, and it is a constant so the outcome table in the runbook has something to match.
+ */
+export const METAL_REFUSAL = "Metal refused this process's submissions at the host's wired limit";
+
+/**
  * Whether a capture of this anchor runs under the footprint guard: EVERY capture on Darwin. A
  * candle capture running on a Mac draws from the same unified pool the sampler measures, so the
  * host-RAM hazard is the same whichever adapter is under the harness (sc-22738 review); the guard
@@ -2124,11 +2217,43 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
   }
 }
 
-/** The first line of a child's stderr that names the failure, not the Node banner after it. */
+/** Longest failure reason a summary row carries. The ONLY bound: never a delimiter, see below. */
+export const FAILURE_REASON_LIMIT = 300;
+
+/**
+ * The LAST line of a child's stderr that names the failure, not the Node banner after it.
+ *
+ * sc-22738: this used to take the FIRST line matching `/^(Error|…Error|fatal|error)\b/`, falling
+ * back to the first non-banner line. Both arms read the wrong end of the message. The harness
+ * rejects a failed provider with `${command} exited ${code}: ${stderr.trim()}` — the adapter's WHOLE
+ * stderr, many lines, terminal error last — and adapters print informational lines before it. Every
+ * Mage anchor in the 09-06 campaign therefore reported `capture_failed` with
+ * `GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)`, the sc-22414
+ * coherence tally the adapter prints on the way out, while the actual refusal —
+ * `a synchronized Mage-Flow lifecycle phase reported a zero active peak` — sat on the next line and
+ * reached no summary row. Reading from the END gets the adapter's terminal error under both
+ * shapes, because Node's own frames and version banner are the only thing that follows it.
+ *
+ * The full stderr is unchanged and still in the anchor log; this only picks what the one-line
+ * summary quotes. It is bounded by LENGTH alone — never truncated at a `;` or a `)`, because both
+ * occur inside real adapter messages (`mlx_gen=0 mlx_llm=0 (sc-22414)`) and cutting there loses the
+ * half that names the cell.
+ */
 export function failureReason(error) {
-  const lines = String(error.stderr ?? error.message ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
-  const named = lines.find((line) => /^(Error|[A-Za-z]*Error|fatal|error)\b/.test(line));
-  return (named ?? lines.find((line) => !/^(at |Node\.js v)/.test(line)) ?? "unknown failure").slice(0, 300);
+  const stderr = String(error.stderr ?? "");
+  // No child stderr means the runner itself refused (`fail`), and those messages are ONE statement
+  // that may wrap — "post-steps changed paths this run does not own:" and then the paths. Keeping
+  // only the last line would drop the sentence and quote a bare path, so join instead.
+  if (!stderr.trim()) {
+    return String(error.message ?? "unknown failure")
+      .split("\n").map((line) => line.trim()).filter(Boolean)
+      .join(" ").slice(0, FAILURE_REASON_LIMIT) || "unknown failure";
+  }
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(at |Node\.js v)/.test(line));
+  return (lines.at(-1) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
 }
 
 export async function measureAnchor(row, context) {
@@ -2144,6 +2269,12 @@ export async function measureAnchor(row, context) {
   const exceededOutput = path.join(workDir, "captures", `${slug}-exceeded.json`);
   const exceededEvidenceRelative = `${campaignDir}/${slug}-exceeded-evidence.json`;
   const started = Date.now();
+  // sc-22738: the previous ATTEMPT's Metal refusal, read once and cleared here, so this anchor's own
+  // outcome is the only thing that can leave the flag set for the anchor after it. Read at the top
+  // rather than cleared on every exit path: there are eight of those, and a missed one would silently
+  // turn "two in a row" into "two in this run".
+  const previousMetalRefusal = state.metalRefusedLast ?? null;
+  state.metalRefusedLast = null;
   // sc-22738: the Dockerfile moves with the packaged-source list, on BOTH commit paths — an embed
   // the image does not copy is a red `platform-review-contracts` suite on a commit already made.
   const touched = [ANCHOR_STORE_PATH, MATRIX_PATH, MATRIX_MD_PATH, PACKAGED_SOURCES_PATH, DOCKERFILE_PATH];
@@ -2164,7 +2295,7 @@ export async function measureAnchor(row, context) {
     // the guarded render had open rather than a revision that could resolve to several trees.
     if (row.artifact) row.artifact = { ...row.artifact, inventorySha256: inventory.sha256 };
   }
-  if (row.physical) {
+  if (row.sourceCapture) {
     env.SCENEWORKS_MEMORY_CAPTURE_DIR = rawLogDir;
     env.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX = campaignPrefix;
   }
@@ -2182,7 +2313,7 @@ export async function measureAnchor(row, context) {
       await exec(process.execPath, [
         HARNESS, "ingest", "--input", input, ...sourceRoot, "--output", target,
       ], { log });
-      if (row.physical && status === "committed") {
+      if (row.sourceCapture && status === "committed") {
         const receipts = path.join(rawLogDir, campaignDir);
         try {
           for (const name of await readdir(receipts)) {
@@ -2193,8 +2324,7 @@ export async function measureAnchor(row, context) {
           fail(`copy physical receipts from ${receipts}: ${error.message}`);
         }
       }
-      const rust = await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8");
-      await writeFile(path.join(root, PACKAGED_SOURCES_PATH), appendPackagedSource(rust, target));
+      await writePackagedSource(root, target);
       // The same corpus, into both Docker builder contexts. Idempotent, so a re-ingest of a bundle
       // already packaged rewrites nothing.
       const dockerfile = await readFile(path.join(root, DOCKERFILE_PATH), "utf8");
@@ -2242,9 +2372,13 @@ export async function measureAnchor(row, context) {
     "--sceneworks-repo", root, "--inference-repo", path.resolve(args.inferenceRepo),
     "--output", captureOutput,
   ];
-  if (row.physical) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
+  if (row.sourceCapture) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
   if (row.ltx25SnapshotRoot) captureArgs.push("--ltx25-snapshot-root", row.ltx25SnapshotRoot);
   const watchdogEvents = path.join(workDir, "logs", `${slug}-watchdog.jsonl`);
+  const providerStderrFile = path.join(workDir, "logs", `${slug}-provider-stderr.txt`);
+  // The host's Metal wired ceiling as THIS anchor's probe read it, kept for the refusal arm below:
+  // the bound is keyed on the limit the refused render actually ran under, not on a later reading.
+  let probedHardware = null;
   try {
     if (guardsCapture(row.key)) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
@@ -2252,6 +2386,7 @@ export async function measureAnchor(row, context) {
       const hardware = await probeAdapter(providerCommand(args.adapter), {
         cwd: root, env, wiredLimitRequired: anchorParts(row.key).backend === "mlx",
       });
+      probedHardware = hardware;
       const guard = watchdogGuard({ hardware, eventFile: watchdogEvents });
       // The guard APPENDS to its event log; this capture's verdict must not read an earlier one's.
       await rm(watchdogEvents, { force: true });
@@ -2264,15 +2399,54 @@ export async function measureAnchor(row, context) {
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
-    if (!hardStop) return finish("capture_failed", failureReason(error));
+    // sc-22738 (measured 2026-09-06): the SECOND way a run ends having measured a bound. Metal
+    // refused this process's submissions once its working set reached the host's wired limit —
+    // `flux2_dev:bf16:mlx` at 775 s, sampled peak 86,988,010,336 against an 87,044,670,532-byte
+    // limit — while the guard, whose kill line is far higher and whose quantity counts non-Metal
+    // pages too, never fired. Nothing in the event log names it, so the adapter's own stderr is the
+    // witness, and until now it read as an ordinary `capture_failed` while production went on
+    // admitting the identical request at the ladder's bf16 rung.
+    const refused = !hardStop && guardsCapture(row.key) && metalSubmissionsIgnored(error.stderr ?? error.message);
+    // Whether the PREVIOUS anchor of this run refused the same way; cleared for every anchor at the
+    // top of its own attempt, so the count is over consecutive attempts rather than over the run.
+    const refusedBefore = previousMetalRefusal;
+    if (refused) state.metalRefusedLast = row.key;
+    if (!hardStop && !refused) return finish("capture_failed", failureReason(error));
+    // DISCRIMINATE THE SCOPE. One refusal is process-scoped: Metal ignored the submissions of the
+    // process that had exhausted the wired limit, and the next anchor committed normally four
+    // minutes later. The SAME string is also what a wedged HOST says — the GPU stays in the
+    // error state and refuses every process until the machine is rebooted (`SubmissionsIgnored`
+    // has two scopes) — and on a wedged host every remaining anchor would "measure" a bound at
+    // whatever footprint it happened to reach, filling the store with inequalities about the
+    // driver rather than about the models. Two in a row is the discriminator: it stops the walk
+    // and names the reboot instead of recording a second bound.
+    if (refused && refusedBefore) {
+      state.halt =
+        `${refusedBefore} and then ${row.key} both failed with the Metal submissions-ignored `
+        + "refusal: two consecutive refusals are a WEDGED HOST, not two process-scoped bounds. The "
+        + "GPU stays in its error state until the machine is REBOOTED; reboot, then re-run the walk. "
+        + "No bound was recorded for either anchor beyond the first.";
+      return finish("capture_failed", `${METAL_REFUSAL} on the anchor after ${refusedBefore}; halting the walk`);
+    }
+    const cause = hardStop ?? METAL_REFUSAL;
     // sc-22738: the run established one fact — this cell's peak is AT LEAST the footprint the
     // guard saw — and until now that fact died with the process. Record it as evidence through
     // the same check → ingest → extract → stamp → matrix → commit path a completed capture takes,
     // so production stops admitting the request the host had to kill.
     if (!row.artifact) {
-      return finish("capture_failed", `${hardStop}; no artifact binding for this row to bound it against`);
+      return finish("capture_failed", `${cause}; no artifact binding for this row to bound it against`);
     }
-    if (!args.commit) return finish("exceeded", hardStop);
+    if (!args.commit) return finish("exceeded", cause);
+    // The refusal arm's witness is the adapter's stderr, so it is written out for the harness to
+    // re-check and hash rather than passed through a shell argument.
+    const refusalArgs = [];
+    if (refused) {
+      await writeFile(providerStderrFile, String(error.stderr ?? error.message ?? ""));
+      refusalArgs.push(
+        "--provider-stderr", providerStderrFile,
+        "--wired-limit-bytes", String(probedHardware?.wiredLimitBytes ?? 0),
+      );
+    }
     try {
       await exec(process.execPath, [
         HARNESS, "record-exceeded", "--plan", PLAN_PATH, "--anchor", row.key,
@@ -2280,10 +2454,11 @@ export async function measureAnchor(row, context) {
         "--sceneworks-repo", root, "--inference-repo", path.resolve(args.inferenceRepo),
         "--watchdog-events", watchdogEvents,
         "--artifact", JSON.stringify(row.artifact),
+        ...refusalArgs,
         "--output", exceededOutput,
       ], { env, log });
     } catch (recordError) {
-      return finish("capture_failed", `${hardStop}; recording it failed: ${failureReason(recordError)}`);
+      return finish("capture_failed", `${cause}; recording it failed: ${failureReason(recordError)}`);
     }
     return ingestAndCommit({
       captureOutput: exceededOutput,
@@ -2292,15 +2467,15 @@ export async function measureAnchor(row, context) {
       status: "committed_exceeded",
       subject: `exceeded bound for ${row.key}`,
       message:
-        `chore(${args.campaign}): record the ${row.key} footprint hard stop as a measured bound\n\n` +
+        `chore(${args.campaign}): record the ${row.key} ${refused ? "Metal refusal" : "footprint hard stop"} as a measured bound\n\n` +
         `Captured by scripts/measure-memory-catalog.mjs at inference ${inferencePin}. ` +
-        `${hardStop}. Evidence: ${exceededEvidenceRelative}; anchor store, currency stamp and ` +
+        `${cause}. Evidence: ${exceededEvidenceRelative}; anchor store, currency stamp and ` +
         "matrix regenerated.",
     });
   }
 
   // 2. check the raw bundle before touching the tree.
-  const sourceRoot = row.physical ? ["--source-root", rawLogDir] : [];
+  const sourceRoot = row.sourceCapture ? ["--source-root", rawLogDir] : [];
   try {
     await exec(process.execPath, [HARNESS, "check", "--input", captureOutput, ...sourceRoot], { log });
   } catch (error) {
@@ -2412,7 +2587,7 @@ export async function main(argv = process.argv.slice(2)) {
   const runnable = rows.filter((row) => row.status === "runnable");
   if (args.dryRun) {
     for (const row of runnable) {
-      process.stdout.write(`${row.key}\n  physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)}\n`);
+      process.stdout.write(`${row.key}\n  sourceCapture=${row.sourceCapture} physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)}\n`);
       for (const root of row.roots) process.stdout.write(`  ${root.label}: ${root.path}\n`);
       for (const [name, value] of Object.entries(row.env)) process.stdout.write(`  ${name}=${value}\n`);
     }
@@ -2427,7 +2602,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   for (const sub of ["logs", "captures", "raw"]) await mkdir(path.join(args.workDir, sub), { recursive: true });
-  const state = { commits: [], halt: null, stopRequested: false };
+  const state = { commits: [], halt: null, stopRequested: false, metalRefusedLast: null };
   const onInterrupt = () => {
     if (state.stopRequested) { process.stderr.write("\nsecond interrupt: exiting now; the adapter in flight is NOT killed\n"); process.exit(130); }
     state.stopRequested = true;

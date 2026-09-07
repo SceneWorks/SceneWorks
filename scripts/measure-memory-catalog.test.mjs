@@ -28,12 +28,15 @@ import {
   anchorParts,
   anchorSlug,
   appendPackagedSource,
+  writePackagedSource,
+  RUSTFMT_EDITION,
   capturedInCampaign,
   classifyAnchor,
   compiledInferencePin,
   familyFor,
   hubRoots,
   failureReason,
+  FAILURE_REASON_LIMIT,
   extractSeedingNewAnchors,
   SEED_DIGEST,
   SENSENOVA_DISTILL_MERGED_MARKER,
@@ -62,6 +65,7 @@ import {
   watchdogCeilings,
   watchdogGuard,
   watchdogHardStop,
+  METAL_REFUSAL,
   MINIMAX_UPSTREAM_ROOT_FILES,
   MINIMAX_TEXT_ENCODER_CONFIG,
   MINIMAX_TIER_DIT_FILES,
@@ -380,6 +384,7 @@ test("classification: runnable anchors carry the adapter env family and the cano
   const qwen = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
   assert.equal(qwen.status, "runnable");
   assert.equal(qwen.physical, true, "the Qwen MLX arm needs the physical receipt session");
+  assert.equal(qwen.sourceCapture, true, "and therefore the raw-log pair the receipt is written into");
   assert.deepEqual(qwen.env, {
     SCENEWORKS_QWEN_IMAGE_REPOSITORY: "SceneWorks/qwen-image-mlx",
     SCENEWORKS_QWEN_IMAGE_REVISION: REVISION,
@@ -388,14 +393,24 @@ test("classification: runnable anchors carry the adapter env family and the cano
 
   const minimax = await classifyAnchor("minimax_h3:q4:mlx", { provider: "minimax_h3" }, context);
   assert.equal(minimax.status, "runnable");
-  assert.equal(minimax.physical, false, "only the Qwen arm emits a sourceCapture; a raw-log pair would make the harness refuse the render");
+  assert.equal(minimax.physical, false);
+  assert.equal(minimax.sourceCapture, false, "the MiniMax arm emits no sourceCapture; a raw-log pair would make the harness refuse the render");
   assert.equal(minimax.env.SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT, snapshotPath(hub, "MiniMaxAI/MiniMax-H3", UPSTREAM));
   assert.equal(minimax.env.SCENEWORKS_MINIMAX_H3_UPSTREAM_REVISION, UPSTREAM);
 
   const ltx = await classifyAnchor("ltx_2_5:q4:mlx", { provider: "ltx_2_5" }, context);
   assert.equal(ltx.status, "runnable");
   assert.equal(ltx.ltx25SnapshotRoot, snapshotPath(hub, "SceneWorks/ltx-2.5-mlx", REVISION));
-  assert.deepEqual(ltx.env, {}, "the harness binds LTX-2.5 itself");
+  assert.deepEqual(ltx.env, {}, "the harness binds LTX-2.5's artifact roots itself");
+  // sc-22738: NOT `physical` (the harness demands the currency receipt for qwen_image alone) but it
+  // does emit a sourceCapture, so `measureAnchor` owes it the capture-dir pair.
+  assert.equal(ltx.physical, false);
+  assert.equal(ltx.sourceCapture, true, "mlx_ltx25.rs emits a physical_mlx sourceCapture on every run");
+  const ltxCandle = await classifyAnchor("ltx_2_5:q4:candle", { provider: "ltx_2_5_distilled" }, {
+    ...context, backend: "candle",
+  });
+  assert.equal(ltxCandle.status, "runnable", ltxCandle.reason);
+  assert.equal(ltxCandle.sourceCapture, false, "the candle LTX-2.5 arm emits none; a raw-log pair would make the harness refuse it");
 
   const missingTier = await classifyAnchor("qwen_image:q8:mlx", { provider: "qwen_image" }, context);
   assert.equal(missingTier.status, "weights_missing");
@@ -645,7 +660,8 @@ test("the qwen edit family derives the tier root on both lanes, and Lightning al
     const planned = { provider: "qwen_image_edit", mode: "edit_image" };
     const base = await classifyAnchor(`qwen_image_edit_2511:q4:${backend}`, planned, context);
     assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
-    assert.equal(base.physical, false, "only the qwen_image MLX arm emits a sourceCapture");
+    assert.equal(base.physical, false);
+    assert.equal(base.sourceCapture, false, "the edit arm emits no sourceCapture, whatever it shares with qwen_image");
     assert.deepEqual(base.env, {
       SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY: "SceneWorks/qwen-image-edit-2511-mlx",
       SCENEWORKS_QWEN_IMAGE_EDIT_REVISION: REVISION,
@@ -816,6 +832,145 @@ test("only the family the harness demands a physical receipt for is marked physi
     named,
     "a family marked physical that the harness does not demand a receipt for would make every capture of it fail",
   );
+});
+
+// sc-22738. `sourceCapture` is the SECOND half of that rule, and the half the campaign proved was
+// missing: it says the arm emits a provider `sourceCapture`, which is what obliges the runner to
+// pass `SCENEWORKS_MEMORY_CAPTURE_DIR`/`_SOURCE_PATH_PREFIX` and the harness's
+// `--raw-log-dir`/`--source-path-prefix`. The coupling is enforced in BOTH directions
+// (`capturePlannedCase`), so an over-declaration is as fatal as an under-declaration: this is a set
+// equality, never a subset.
+//
+// The expected side is DERIVED from the adapter, not spelled here — the mistake being fixed was a
+// hand-kept flag that said "qwen only" while `mlx_ltx25.rs` had emitted a `physical_mlx`
+// sourceCapture since SC-18783. The walk starts at each `match provider` arm's own entry function
+// and follows calls through the MLX bin and its `#[path]` sibling modules, so an arm that grows an
+// emission (or loses one) moves this case with no edit here.
+function stripRustCommentsForScan(source) {
+  return source.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/** Rust with every `#[cfg(test)] mod …{…}` removed — and nothing else: `#[cfg(test)] const X …;`
+ *  carries no block, and slicing at the attribute would eat the provider-id consts after it. */
+function stripRustTestModules(source) {
+  const marker = "#[cfg(test)]";
+  for (let from = 0; ;) {
+    const at = source.indexOf(marker, from);
+    if (at === -1) return source;
+    if (!/^\s*(?:pub\s+)?mod\s+/.test(source.slice(at + marker.length))) {
+      from = at + marker.length;
+      continue;
+    }
+    const open = source.indexOf("{", at);
+    let depth = 0;
+    let i = open;
+    for (; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") { depth -= 1; if (!depth) break; }
+    }
+    source = source.slice(0, at) + source.slice(i + 1);
+    from = at;
+  }
+}
+
+/** `name -> body` for every top-level `fn` in one Rust source, keyed as the caller spells it. */
+function rustFunctionBodies(source, qualify = (name) => name) {
+  const bodies = new Map();
+  const declaration = /^(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s+([a-z_][A-Za-z0-9_]*)/gm;
+  for (let match; (match = declaration.exec(source));) {
+    const open = source.indexOf("{", match.index);
+    if (open === -1) continue;
+    let depth = 0;
+    let i = open;
+    for (; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") { depth -= 1; if (!depth) break; }
+    }
+    bodies.set(qualify(match[1]), source.slice(open, i + 1));
+  }
+  return bodies;
+}
+
+const RUST_CALL = /\b((?:[a-z_][A-Za-z0-9_]*::)?[a-z_][A-Za-z0-9_]*)\s*\(/g;
+
+test("every MLX adapter arm that emits a provider sourceCapture is declared, and no other", async () => {
+  const binDir = path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin");
+  const members = (await readdir(binDir)).filter(
+    (name) => name === "mlx.rs" || name.startsWith("mlx_"),
+  ).sort();
+  assert.ok(members.length >= 2, "expected the mlx bin plus its #[path] arm modules");
+  const sources = new Map();
+  for (const name of members) {
+    sources.set(name, stripRustTestModules(stripRustCommentsForScan(
+      await readFile(path.join(binDir, name), "utf8"),
+    )));
+  }
+  // Every sibling is indexed under the module path the bin calls it by, so a NEW arm module that
+  // emits is walked rather than silently unreachable.
+  const bodies = new Map();
+  for (const [name, source] of sources) {
+    const module = name === "mlx.rs" ? null : name.slice(0, -3);
+    for (const [fn, body] of rustFunctionBodies(source, (id) => (module ? `${module}::${id}` : id))) {
+      bodies.set(fn, body);
+    }
+  }
+  const emitters = [...sources].filter(([, source]) => source.includes('"sourceCapture"')).map(([name]) => name);
+  assert.ok(emitters.length > 0, "no MLX source emits a sourceCapture at all; the scan reads nothing");
+
+  const consts = new Map(
+    [...sources.get("mlx.rs").matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([^"]*)"\s*;/g)]
+      .map((match) => [match[1], match[2]]),
+  );
+  const armsFor = new Map();
+  const dispatch = /(?:^|\n)\s*(?:"([a-z0-9_]+)"|([A-Z][A-Z0-9_]*))\s*=>\s*((?:[a-z_][A-Za-z0-9_]*::)?[a-z_][A-Za-z0-9_]*)\(request\)/g;
+  for (const match of sources.get("mlx.rs").matchAll(dispatch)) {
+    const provider = match[1] ?? consts.get(match[2]);
+    if (!provider || !bodies.has(match[3])) continue;
+    if (!armsFor.has(provider)) armsFor.set(provider, new Set());
+    armsFor.get(provider).add(match[3]);
+  }
+  // Not vacuous: the parse must find the whole shipped dispatch, not a handful of arms.
+  assert.ok(armsFor.size >= 40, `the dispatch parse found only ${armsFor.size} provider arms`);
+
+  const reaches = (entry) => {
+    const seen = new Set();
+    const stack = [entry];
+    while (stack.length > 0) {
+      const name = stack.pop();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const body = bodies.get(name);
+      if (body === undefined) continue;
+      if (body.includes('"sourceCapture"')) return true;
+      for (const call of body.matchAll(RUST_CALL)) if (bodies.has(call[1])) stack.push(call[1]);
+    }
+    return false;
+  };
+  const emitting = [...armsFor]
+    .filter(([, entries]) => [...entries].some(reaches))
+    .map(([provider]) => provider)
+    .sort();
+
+  const declared = Object.entries(PROVIDER_FAMILIES)
+    .filter(([, family]) => family.sourceCapture)
+    .map(([id, family]) => family.provider ?? id)
+    .sort();
+  assert.deepEqual(
+    declared,
+    emitting,
+    "a declared arm that emits nothing makes the harness refuse the render, and an emitting arm " +
+      "left undeclared dies on `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set`",
+  );
+
+  // Every emitting arm must also declare the MLX lane, since that is the only lane this walk reads.
+  for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
+    if (!family.sourceCapture) continue;
+    assert.ok(family.arms.includes("mlx"), `${id}: sourceCapture is an MLX-arm fact`);
+  }
+  // `physical` is the narrower currency rule and cannot hold without the receipt being emitted.
+  for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
+    if (family.physical) assert.equal(family.sourceCapture, true, `${id}: physical implies sourceCapture`);
+  }
 });
 
 // The Lightning distill LoRA is the one artifact in this table the MANIFEST does not ship, so the
@@ -1081,6 +1236,9 @@ test("the LTX-2.5 family derives the same snapshot root on both lanes, under eac
       assert.equal(row.ltx25SnapshotRoot, expected, "the harness is handed the snapshot, not a tier root");
       assert.deepEqual(row.env, {}, "LTX-2.5 carries no adapter env family; the harness binds it");
       assert.equal(row.physical, false);
+      // sc-22738: the MLX arm emits a `physical_mlx` sourceCapture on every run and the Candle arm
+      // emits none, so the raw-log pair is owed to one lane and refused on the other.
+      assert.equal(row.sourceCapture, backend === "mlx", `${backend} ${tier}`);
     }
     // The other lane's engine id must NOT be served here: an arm is per-family, not per-model.
     const crossed = await classifyAnchor(
@@ -1265,6 +1423,63 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
     ),
     "a mention outside the list must not suppress the append",
   );
+});
+
+/** A throwaway checkout carrying just what `writePackagedSource` reads: the file and rustfmt's config. */
+async function packagedSourceFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-packaged-fmt-"));
+  await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
+  const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
+  await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
+  await writeFile(
+    path.join(root, "rustfmt.toml"),
+    await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
+  );
+  return { root, source, file: path.join(root, PACKAGED_SOURCES_PATH) };
+}
+
+// sc-22738: the one-line tuple the append writes fits `max_width` only while the corpus name is
+// short. `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so
+// the runner committed a tree whose `cargo fmt --check` reds the `parity-rust` lane — after the
+// push. Every shorter name in the campaign happened to fit, which is why it surfaced this late.
+test("packaging a long-named corpus leaves memory_anchor.rs rustfmt-clean", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/flux2-dev-bf16-mlx-exceeded-evidence.json";
+  assert.ok(
+    `        include_str!("../../../${relative}"),`.length > 100,
+    "the fixture path must be long enough to exceed max_width on one line",
+  );
+  assert.equal(await writePackagedSource(root, relative), true);
+  // The gate itself, not a re-implementation of its width rule.
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+  const written = await readFile(file, "utf8");
+  assert.ok(
+    written.includes(
+      ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n"),
+    ),
+    "rustfmt wrapped the argument onto its own line",
+  );
+  // The mutation this guards: the append's own output — the format step skipped — is what red the
+  // lane, so `rustfmt --check` must reject it.
+  await writeFile(file, appendPackagedSource(source, relative));
+  await assert.rejects(
+    execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]),
+    "an unformatted append must not pass the parity lane's check",
+  );
+});
+
+test("packaging a short-named corpus is byte-identical to the bare append", async () => {
+  const { root, source, file } = await packagedSourceFixture();
+  const relative = "docs/calibration/sc-99999/qwen-image-q4-mlx-evidence.json";
+  assert.equal(await writePackagedSource(root, relative), true);
+  assert.equal(await readFile(file, "utf8"), appendPackagedSource(source, relative));
+  // Already packaged: nothing is rewritten, so nothing is reformatted either.
+  assert.equal(await writePackagedSource(root, relative), false);
+});
+
+test("the edition the runner formats with is the one rustfmt.toml declares", async () => {
+  const config = await readFile(path.join(ROOT, "rustfmt.toml"), "utf8");
+  assert.equal(config.match(/^edition\s*=\s*"([^"]+)"$/m)?.[1], RUSTFMT_EDITION);
 });
 
 // sc-22738: the embed and the Docker COPY lines are ONE step. `platform-review-contracts.test.mjs`
@@ -3689,6 +3904,36 @@ test("failure reasons name the thrown error, not the Node banner after it", () =
   ].join("\n");
   assert.equal(failureReason({ stderr, message: "node exited 1" }), "Error: memory-strategy calibration: imc-1.hardware.model must be a non-empty string");
   assert.equal(failureReason({ message: "plain" }), "plain");
+
+  // sc-22738. The harness rejects a failed provider with the adapter's WHOLE stderr, terminal error
+  // LAST, and adapters print informational lines on the way out. Reading from the front made every
+  // Mage anchor in the 09-06 campaign report the sc-22414 coherence tally as its failure while the
+  // real refusal never reached a summary row.
+  const mage = [
+    "file:///x/harness.mjs:1962",
+    "        : reject(new Error(msg));",
+    "Error: memory-mlx-adapter exited 1: GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)",
+    "a synchronized Mage-Flow lifecycle phase reported a zero active peak",
+    "    at ChildProcess.<anonymous> (file:///x/harness.mjs:1962:11)",
+    "",
+    "Node.js v24.15.0",
+  ].join("\n");
+  assert.equal(
+    failureReason({ stderr: mage, message: "node exited 1" }),
+    "a synchronized Mage-Flow lifecycle phase reported a zero active peak",
+  );
+
+  // Bounded by LENGTH alone: a `;` or a `)` inside a real adapter message is content, not a cut.
+  const delimited = "Error: adapter refused; the wired ceiling (87044670532 bytes) was already breached";
+  assert.equal(failureReason({ stderr: delimited }), delimited);
+  assert.equal(failureReason({ stderr: "x\n" + "y".repeat(400) }).length, FAILURE_REASON_LIMIT);
+
+  // The runner's OWN refusals arrive with no child stderr and wrap across lines; they stay whole.
+  assert.equal(
+    failureReason({ message: "post-steps changed paths this run does not own:\n?? docs/generated/stray.json" }),
+    "post-steps changed paths this run does not own: ?? docs/generated/stray.json",
+  );
+  assert.equal(failureReason({ stderr: "   \n" }), "unknown failure");
 });
 
 // A hermetic checkout: stub harness + derivation scripts standing in for the real ones, so the
@@ -3707,17 +3952,54 @@ async function stubCheckout() {
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
-      await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null }] }));
+      // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
+      // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
+      if (process.env.STUB_CAPTURE_METAL_REFUSAL) {
+        console.error('Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured render: "[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). at /out/mlx-c-staged/mlx/c/transforms.cpp:73"');
+        process.exit(1);
+      }
+      // sc-22738: the two MLX arms that emit a provider sourceCapture (mlx.rs qwen_source_capture,
+      // mlx_ltx25.rs prepare_source_capture) required_env the capture dir UNCONDITIONALLY, before
+      // the load -- they do not wait to be asked for a receipt. Both stderr lines below are
+      // verbatim from the 2026-09-06 campaign, in order: the informational sc-22414 tally the
+      // adapter always prints, then the refusal that actually killed all three ltx_2_5 anchors.
+      const captureDir = process.env.SCENEWORKS_MEMORY_CAPTURE_DIR ?? null;
+      const sourcePathPrefix = process.env.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX ?? null;
+      if (/^(ltx_2_5|qwen_image):/.test(value("--anchor") ?? "") && !captureDir) {
+        console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
+        console.error("memory-strategy provider adapter: required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set");
+        process.exit(1);
+      }
+      await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null, captureDir, sourcePathPrefix, rawLogDir: value("--raw-log-dir") ?? null }] }));
     } else if (command === "record-exceeded") {
       const events = (await readFile(value("--watchdog-events"), "utf8")).trim().split("\\n").map(JSON.parse);
       const stop = events.find((event) => event.event === "hard_stop");
-      const [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+      let observed;
+      let ceiling;
+      let reason;
+      if (stop) {
+        [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+        reason = stop.reason;
+      } else {
+        // The refusal arm: no hard stop, so the witnesses the runner must have handed over are the
+        // adapter's stderr and the wired limit its probe read. Missing either is a stub failure,
+        // which is how this stub proves the runner really passed them.
+        const stderr = await readFile(value("--provider-stderr") ?? "/nonexistent", "utf8");
+        const wired = Number(value("--wired-limit-bytes"));
+        if (!stderr.includes("00000004") || !stderr.includes("kIOGPUCommandBufferCallbackErrorSubmissionsIgnored")) {
+          console.error("Error: stub record-exceeded was given no refusal to read"); process.exit(1);
+        }
+        if (!Number.isSafeInteger(wired) || wired <= 0) { console.error("Error: stub record-exceeded got no --wired-limit-bytes"); process.exit(1); }
+        observed = Math.max(...events.filter((event) => event.event === "sample").map((event) => event.physicalFootprintBytes));
+        ceiling = observed;
+        reason = "metal_submissions_ignored:observed_" + observed + ":wired_limit_" + wired;
+      }
       await writeFile(value("--output"), JSON.stringify({
         records: [],
         exceededBounds: [{
           id: "exc-stub", backend: "mlx", artifact: JSON.parse(value("--artifact")),
           target: { modelId: "z_image_turbo", tier: "q4" },
-          observedFootprintBytes: Number(observed), ceilingBytes: Number(ceiling), reason: stop.reason,
+          observedFootprintBytes: Number(observed), ceilingBytes: Number(ceiling), reason,
         }],
       }));
     } else if (command === "ingest") {
@@ -3930,9 +4212,9 @@ test("a failed derivation step rolls the tree back to HEAD and keeps the raw cap
   }
 });
 
-test("a physical anchor's gitignored .log receipt is copied beside the evidence and force-added", async () => {
+test("a source-capture anchor's gitignored .log receipt is copied beside the evidence and force-added", async () => {
   const checkout = await stubCheckout();
-  const row = { key: "z_image_turbo:q4:mlx", physical: true, env: {} };
+  const row = { key: "z_image_turbo:q4:mlx", sourceCapture: true, env: {} };
   const context = stubContext(checkout);
   // The harness would write the receipt under <rawLogDir>/<campaignDir>/; emulate that.
   const rawLogDir = path.join(checkout.workDir, "raw", "z-image-turbo-q4-mlx");
@@ -3943,6 +4225,41 @@ test("a physical anchor's gitignored .log receipt is copied beside the evidence 
   const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s", "HEAD");
   assert.ok(shown.includes("docs/calibration/sc-stub/session-1.log"), "the *.log receipt is committed despite the ignore rule");
   assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+});
+
+// sc-22738. The defect this story fixes, driven end to end: `ltx_2_5:*:mlx` classified runnable,
+// was scheduled, and died inside the adapter on
+// `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — for bf16 after 883
+// seconds, because the harness re-hashes the LTX-2.5 snapshot before the adapter is ever spawned.
+// The row flag is what the runner reads, so drive `measureAnchor` with it set and with it dropped:
+// the second half is the mutation, and it reproduces the exact failure the campaign hit.
+test("an ltx_2_5 mlx anchor's capture carries the capture-dir pair its arm requires", async () => {
+  const checkout = await stubCheckout();
+  const key = "ltx_2_5:q4:mlx";
+  const slug = anchorSlug(key);
+  const context = stubContext(checkout);
+  const rawLogDir = path.join(checkout.workDir, "raw", slug);
+  await mkdir(path.join(rawLogDir, "docs/calibration/sc-stub"), { recursive: true });
+  const result = await measureAnchor(
+    { key, sourceCapture: true, physical: false, ltx25SnapshotRoot: "/snapshot", env: {} },
+    context,
+  );
+  assert.equal(result.status, "committed", result.reason);
+  const evidence = JSON.parse(await readFile(
+    path.join(checkout.root, `docs/calibration/sc-stub/${slug}-evidence.json`),
+    "utf8",
+  ));
+  assert.equal(evidence.records[0].captureDir, rawLogDir, "the arm was handed its raw-log directory");
+  assert.equal(evidence.records[0].sourcePathPrefix, "docs/calibration/sc-stub", "and the campaign prefix it writes under");
+  assert.equal(evidence.records[0].rawLogDir, rawLogDir, "and the harness was told to expect the receipt there");
+
+  // MUTATION: the pre-fix runner, which set the pair for the qwen_image family alone.
+  const dropped = await measureAnchor(
+    { key, sourceCapture: false, physical: false, ltx25SnapshotRoot: "/snapshot", env: {} },
+    stubContext(await stubCheckout()),
+  );
+  assert.equal(dropped.status, "capture_failed");
+  assert.match(dropped.reason, /required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set/);
 });
 
 test("seeding retries extraction only for the new-anchor refusal and never re-seeds an id twice", async () => {
@@ -4263,5 +4580,126 @@ test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the
     assert.equal(status, "", "a stopped capture leaves the checkout clean for the next anchor");
   } finally {
     delete process.env.STUB_PROBE_MEMORY_BYTES;
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a PROCESS-SCOPED Metal refusal, the second way a run ends having measured a bound.
+// ---------------------------------------------------------------------------------------------
+
+test("a Metal submissions-ignored refusal is COMMITTED as a measured bound at the wired limit", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  // NO hard stop: the guard's ceiling stays where the incident puts it, so the only thing that ends
+  // this capture is the adapter's own refusal — exactly the flux2_dev:bf16:mlx shape.
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const row = {
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot,
+      env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    };
+    const context = stubContext(checkout);
+    const refused = await measureAnchor(row, context);
+    // THE defect: a refusal the guard never saw used to be an ordinary `capture_failed`, so the
+    // store kept no trace and production kept admitting the request Metal had just refused.
+    assert.equal(refused.status, "committed_exceeded", refused.reason);
+    assert.equal(context.state.commits.length, 1, "the refusal is one commit, like an anchor");
+    assert.equal(context.state.halt, null, "one refusal is process-scoped and does not stop the walk");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+    const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s%n%b", "HEAD");
+    assert.match(shown, /chore\(sc-stub\): record the z_image_turbo:q4:mlx Metal refusal as a measured bound/);
+    assert.ok(shown.includes(METAL_REFUSAL), "the commit body names the refusal, not a watchdog stop");
+    const bundle = JSON.parse(await readFile(
+      path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"), "utf8",
+    ));
+    const [bound] = bundle.exceededBounds;
+    // The figures the runner's witnesses produced: the sampler's PEAK, and the wired limit its own
+    // probe read (87,044,670,532 on the stub, this host's figure).
+    assert.match(bound.reason, /^metal_submissions_ignored:observed_\d+:wired_limit_87044670532$/);
+    assert.ok(bound.observedFootprintBytes > 0);
+    assert.equal(
+      bound.ceilingBytes, bound.observedFootprintBytes,
+      "no guard fired, so the highest line the run is witnessed to have crossed is its own peak",
+    );
+    assert.equal(Number(/observed_(\d+)/.exec(bound.reason)[1]), bound.observedFootprintBytes);
+    // The refusal's witness is written where the harness can re-read and hash it.
+    const stderr = await readFile(path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-provider-stderr.txt"), "utf8");
+    assert.match(stderr, /00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored/);
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
+  }
+});
+
+test("a capture that fails WITHOUT the refusal signature is still a capture_failed, never a bound", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  process.env.STUB_CAPTURE_FAILS = "1";
+  try {
+    const context = stubContext(checkout);
+    const failed = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    // The discrimination this story turns on, stated as its own case: an artifact-bound row that
+    // fails is NOT thereby a bound. Only the signature makes it one.
+    assert.equal(failed.status, "capture_failed");
+    assert.equal(failed.reason, "Error: stub capture refused");
+    assert.equal(context.state.commits.length, 0);
+    assert.equal(context.state.metalRefusedLast, null, "a non-refusal clears the consecutive-refusal flag");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_FAILS;
+  }
+});
+
+test("two consecutive Metal refusals are a WEDGED HOST: the walk halts naming the reboot instead of recording a second bound", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const context = stubContext(checkout);
+    const artifact = { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" };
+    const first = await measureAnchor(
+      { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: {}, artifact }, context,
+    );
+    assert.equal(first.status, "committed_exceeded", first.reason);
+    assert.equal(context.state.metalRefusedLast, "z_image_turbo:q4:mlx");
+    const second = await measureAnchor(
+      { key: "z_image_turbo:bf16:mlx", physical: false, tierRoot, env: {}, artifact }, context,
+    );
+    // `SubmissionsIgnored` has two scopes. The first refusal was the process's; a second in a row
+    // is the GPU's, and every remaining anchor would otherwise "measure" a bound about the driver.
+    assert.equal(second.status, "capture_failed", second.reason);
+    assert.match(second.reason, /halting the walk/);
+    assert.equal(context.state.commits.length, 1, "no second bound was recorded");
+    assert.ok(context.state.halt, "the walk is halted");
+    assert.match(context.state.halt, /REBOOT/i, "the halt names the reboot the host needs");
+    assert.match(context.state.halt, /z_image_turbo:q4:mlx and then z_image_turbo:bf16:mlx/);
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
+  }
+});
+
+test("a refusal on a no-commit run surfaces as `exceeded` naming the Metal refusal, tree left clean", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
+  process.env.STUB_CAPTURE_METAL_REFUSAL = "1";
+  try {
+    const refused = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    assert.equal(refused.status, "exceeded");
+    assert.equal(refused.reason, METAL_REFUSAL);
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "");
+  } finally {
+    delete process.env.STUB_CAPTURE_METAL_REFUSAL;
   }
 });
