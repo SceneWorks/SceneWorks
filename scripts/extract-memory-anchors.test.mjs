@@ -38,6 +38,7 @@ import {
   manifestTierEvidence,
   manifestSequentialRow,
   isReceiptPricedRoute,
+  retainExceededBounds,
   RECEIPT_PRICED_ROUTES,
   packagedAnchorSources,
   providerByteConstants,
@@ -471,6 +472,143 @@ const record = (overrides = {}) => ({
     ],
   },
   ...overrides,
+});
+
+// ---------------------------------------------------------------------------------------------
+// Measured lower bounds are retired by re-measurement, and only by re-measurement (sc-22738).
+// ---------------------------------------------------------------------------------------------
+
+/** One retained `exceededBounds` entry: the bernini bf16 stop, at `capturedAt`, on `hostBytes`. */
+const stop = (id, capturedAt, overrides = {}) => ({
+  entry: {
+    id,
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    calibrationFingerprint: "bernini-v1",
+    capturedAt,
+    referenceCount: 0,
+    observedFootprintBytes: 97_147_294_328,
+    ceilingBytes: 94_822_600_832,
+    hardware: { memoryBytes: 137_438_953_472 },
+    reason: "physical_footprint_at_or_above_94822600832:observed_97147294328",
+    target: {
+      modelId: "bernini",
+      tier: "bf16",
+      mode: "text_to_video",
+      provider: "bernini",
+      overlay: "none",
+      geometry: { width: 848, height: 480, frames: 49 },
+    },
+    ...overrides,
+  },
+  corpus: { path: `docs/calibration/sc-1/${id}.json`, sha256: "a".repeat(64) },
+  cell: { modelId: "bernini", modelFamily: "bernini" },
+});
+
+/** A COMPLETED render of the same cell, as `anchorCandidate` reports it. */
+const completion = (capturedAt, overrides = {}) =>
+  anchorCandidate(
+    record({
+      id: `imc-${capturedAt}`,
+      capturedAt,
+      hardware: { memoryBytes: 137_438_953_472 },
+      target: {
+        modelId: "bernini",
+        tier: "bf16",
+        mode: "text_to_video",
+        provider: "bernini",
+        geometry: { width: 848, height: 480, frames: 49 },
+      },
+      ...overrides,
+    }),
+    corpus,
+  );
+
+test("a later completed render of the cell retires the bound; an earlier one does not", () => {
+  const bound = stop("exc-1", "2026-09-06T10:00:00.000Z");
+  assert.deepEqual(retainExceededBounds([bound], []), [bound], "no completion, the bound stands");
+  assert.deepEqual(
+    retainExceededBounds([bound], [completion("2026-09-07T10:00:00.000Z")]),
+    [],
+    "a completion AFTER the stop proves the cell completes: the bound is retired",
+  );
+  assert.deepEqual(
+    retainExceededBounds([bound], [completion("2026-09-05T10:00:00.000Z")]),
+    [bound],
+    "a completion BEFORE the stop is what the stop superseded, not the other way round",
+  );
+  // The candidate carries the two terms the rule needs, read from the record.
+  const later = completion("2026-09-07T10:00:00.000Z");
+  assert.equal(later.capturedAt, "2026-09-07T10:00:00.000Z");
+  assert.equal(later.hostMemoryBytes, 137_438_953_472);
+});
+
+test("a completion supersedes only on a host no larger, at covering geometry, of the same identity", () => {
+  const bound = stop("exc-1", "2026-09-06T10:00:00.000Z");
+  const later = "2026-09-07T10:00:00.000Z";
+  for (const [label, candidate] of [
+    ["a 512 GiB host says nothing about the 128 GiB host that was stopped",
+      completion(later, { hardware: { memoryBytes: 549_755_813_888 } })],
+    ["a shorter clip is below the bound's geometry",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", geometry: { width: 848, height: 480, frames: 25 } } })],
+    ["another tier of the same model",
+      completion(later, { target: { modelId: "bernini", tier: "q4", mode: "text_to_video", provider: "bernini", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["another mode of the same model",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_image", provider: "bernini", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["an overlay render does not answer for the base cell",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["a record with no timestamp cannot be ordered and supersedes nothing",
+      completion(later, { capturedAt: undefined })],
+    ["a record with no host size cannot be graded against the stopped host",
+      completion(later, { hardware: {} })],
+  ]) {
+    assert.deepEqual(retainExceededBounds([bound], [candidate]), [bound], label);
+  }
+  // A smaller host and a larger geometry both still supersede: the inequality only gets stronger.
+  assert.deepEqual(
+    retainExceededBounds([bound], [
+      completion(later, { hardware: { memoryBytes: 68_719_476_736 }, target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", geometry: { width: 1280, height: 720, frames: 81 } } }),
+    ]),
+    [],
+  );
+  // An overlay BOUND is retired by an overlay completion of the same overlay, and only that.
+  const overlayBound = stop("exc-o", "2026-09-06T10:00:00.000Z", {
+    target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } },
+  });
+  assert.deepEqual(retainExceededBounds([overlayBound], [completion(later)]), [overlayBound]);
+  assert.deepEqual(
+    retainExceededBounds([overlayBound], [
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } } }),
+    ]),
+    [],
+  );
+});
+
+test("a later stop at the same geometry replaces the earlier one; other geometries all stay", () => {
+  const earlier = stop("exc-1", "2026-09-06T10:00:00.000Z", { observedFootprintBytes: 99_000_000_000 });
+  const later = stop("exc-2", "2026-09-07T10:00:00.000Z", { observedFootprintBytes: 95_000_000_000 });
+  assert.deepEqual(
+    retainExceededBounds([earlier, later], []),
+    [later],
+    "the later measurement stands even though the earlier footprint was larger: it was taken under a loader the later run re-measured",
+  );
+  assert.deepEqual(retainExceededBounds([later, earlier], []), [later], "order-independent");
+  const wider = stop("exc-3", "2026-09-05T10:00:00.000Z", {
+    target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "none", geometry: { width: 1280, height: 720, frames: 81 } },
+  });
+  assert.deepEqual(
+    retainExceededBounds([earlier, later, wider], []),
+    [later, wider],
+    "a stop at another geometry is another inequality and stays",
+  );
+  const undated = stop("exc-4", undefined);
+  assert.deepEqual(
+    retainExceededBounds([undated, later], []),
+    [undated, later],
+    "an entry with no timestamp is neither replaced nor a replacement",
+  );
+  // A completion after the later stop retires it, and the earlier one is already gone.
+  assert.deepEqual(retainExceededBounds([earlier, later], [completion("2026-09-08T10:00:00.000Z")]), []);
 });
 
 test("a record missing any phase peak cannot anchor", () => {

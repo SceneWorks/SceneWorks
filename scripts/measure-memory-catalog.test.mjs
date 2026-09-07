@@ -1575,6 +1575,17 @@ test("a CURRENT exceeded bound is a captured cell; a stale bound leaves the anch
     "the closure digest is looked up per (model, LANE); the mlx digest does not keep a candle bound current",
   );
   assert.equal((await readExceededBounds(await mkdtemp(path.join(tmpdir(), "catalog-empty-")))).size, 0);
+  // sc-22738: a cell with a stale bound BESIDE a current one is exceeded_current whichever row sorts
+  // last — the adapter's seam consults only the current bounds, and this index must agree with it.
+  const stale = { ...bound, source: { ...bound.source, loaderClosureDigest: "c".repeat(64) } };
+  for (const rows of [[bound, stale], [stale, bound]]) {
+    await seed(rows);
+    const indexed = await readExceededBounds(storeRoot);
+    assert.equal(indexed.size, 1);
+    assert.equal(indexed.get("bernini:bf16:mlx").current, true, `order ${rows.indexOf(bound)}: any current bound keeps the cell exceeded_current`);
+  }
+  await seed([stale, { ...stale, observedFootprintBytes: 1 }]);
+  assert.equal((await readExceededBounds(storeRoot)).get("bernini:bf16:mlx").current, false, "two stale bounds stay stale");
 
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };

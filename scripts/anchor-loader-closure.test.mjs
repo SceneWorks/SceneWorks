@@ -665,11 +665,14 @@ test("an attestation without its justification, or of its own measurement revisi
     () => indexCurrencyAttestations({ attestations: [entry, entry] }),
     /is attested twice/,
   );
-  // The checked-in file itself is well-formed, and every entry names a packaged anchor.
+  // The checked-in file itself is well-formed, and every entry names a packaged row — an anchor or,
+  // since sc-22738, a measured lower bound: both are stamped by the same walk and attested from
+  // this one file, so an entry naming neither would be silently inert in `--stamp-anchors`.
   const indexed = indexCurrencyAttestations(config);
   const store = JSON.parse(readFileSync(path.join(root, "config/memory-anchors.json"), "utf8"));
+  const packaged = [...store.anchors, ...(store.exceededBounds ?? [])];
   for (const id of indexed.keys()) {
-    assert.ok(store.anchors.some((anchor) => anchor.id === id), `${id} is not a packaged anchor`);
+    assert.ok(packaged.some((row) => row.id === id), `${id} is not a packaged anchor or exceeded bound`);
   }
 });
 

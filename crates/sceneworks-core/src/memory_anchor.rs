@@ -930,16 +930,24 @@ pub struct MemoryAnchorStore {
 /// NOT a point a law may fit, and NOT a substitute for a [`MemoryAnchor`]: it prices no estimate,
 /// widens no envelope and enters no derivation. Its ONLY consumer is the pre-load refusal
 /// ([`ExceededBound::required_bytes`]), which is why every field it carries is either identity or
-/// the inequality's own terms. A completed capture of the same cell later adds a real anchor
-/// beside it; the bound stays, because it stays true.
+/// the inequality's own terms.
+///
+/// IT IS RETIRED ONLY BY RE-MEASUREMENT (sc-22738). A LATER completed capture of the same cell —
+/// same identity axes, geometry covering the bound's, on a host no larger than the one that was
+/// stopped — supersedes it: `scripts/extract-memory-anchors.mjs` (`retainExceededBounds`) drops
+/// the bound from the store and the anchor stands in its place. A later stop at the same geometry
+/// replaces the earlier bound rather than sitting beside it. Stops at other geometries all stay,
+/// each the strongest true inequality for its own point. Nothing else lifts a bound.
 ///
 /// IT BINDS REGARDLESS OF CURRENCY (sc-22738). The bound carries the same
 /// [`AnchorSource::loader_closure_digest`] an anchor does, and for the same reason: so the probe
 /// tooling can tell when the loader that produced it has moved and the cell is worth stopping at
-/// again. The runtime never reads that key. A bound whose closure has moved refuses exactly what
-/// it refused the day it was measured, because the alternative — a shared-engine fix silently
-/// re-admitting the very request a host was already unable to finish — is the failure the bound
-/// exists to prevent.
+/// again — the runner (`measure-memory-catalog.mjs`) then classifies the cell runnable and the
+/// MLX memory adapter's pre-load refusal lets it through to the guarded capture, whose outcome
+/// supersedes the bound as above. The runtime never reads that key. A bound whose closure has
+/// moved refuses exactly what it refused the day it was measured, because the alternative — a
+/// shared-engine fix silently re-admitting the very request a host was already unable to finish —
+/// is the failure the bound exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExceededBound {
@@ -1444,6 +1452,53 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     Ok(store)
 }
 
+/// An attestation is a justification or it is nothing (sc-22667): both revisions must be real
+/// and distinct, and the reading of the diff must be stated. What is NOT checked here is whether
+/// the attested revision equals the pin — that is the currency verdict, reported by the probe
+/// tooling and never a load failure, exactly as a mismatched digest is. One check for both row
+/// kinds that carry an [`AnchorSource`]: an anchor and a measured lower bound are stamped by the
+/// same walk (`anchor-loader-closure.mjs --stamp-anchors`) and attested from the same file.
+fn validate_currency_attestation(
+    kind: &str,
+    id: &str,
+    source: &AnchorSource,
+) -> Result<(), String> {
+    let Some(attestation) = &source.currency_attestation else {
+        return Ok(());
+    };
+    for (field, revision) in [
+        ("measuredRevision", &attestation.measured_revision),
+        ("attestedRevision", &attestation.attested_revision),
+    ] {
+        if !is_revision(revision) {
+            return Err(format!(
+                "{kind} {id} currency attestation {field} {revision:?} is not a 40-hex revision"
+            ));
+        }
+    }
+    if attestation.measured_revision == attestation.attested_revision {
+        return Err(format!(
+            "{kind} {id} currency attestation attests its own measurement revision {}",
+            attestation.measured_revision
+        ));
+    }
+    for (field, value) in [
+        ("attestedAt", &attestation.attested_at),
+        ("story", &attestation.story),
+        ("class", &attestation.class),
+        ("why", &attestation.why),
+        ("witness", &attestation.witness),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "{kind} {id} currency attestation states no {field} — an attestation without its \
+                 justification is a re-stamp"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The exceeded-bound half of the store's invariants (sc-22738).
 ///
 /// The handshake is the anchor's, narrowed to the fields the inequality is made of: the cited
@@ -1456,6 +1511,7 @@ fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
         if let Some(previous) = seen.insert(bound.id.clone(), &bound.id) {
             return Err(format!("duplicate exceeded bound {previous}"));
         }
+        validate_currency_attestation("exceeded bound", &bound.id, &bound.source)?;
         if bound.geometry.width == 0 || bound.geometry.height == 0 || bound.geometry.frames == 0 {
             return Err(format!(
                 "exceeded bound {} has a degenerate geometry",
@@ -1707,45 +1763,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             anchor.id, anchor.source.loader_closure_digest
         ));
     }
-    // An attestation is a justification or it is nothing (sc-22667): both revisions must be real
-    // and distinct, and the reading of the diff must be stated. What is NOT checked here is
-    // whether the attested revision equals the pin — that is the currency verdict, reported at
-    // admission and never a load failure, exactly as a mismatched digest is.
-    if let Some(attestation) = &anchor.source.currency_attestation {
-        for (field, revision) in [
-            ("measuredRevision", &attestation.measured_revision),
-            ("attestedRevision", &attestation.attested_revision),
-        ] {
-            if !is_revision(revision) {
-                return Err(format!(
-                    "memory anchor {} currency attestation {field} {revision:?} is not a 40-hex \
-                     revision",
-                    anchor.id
-                ));
-            }
-        }
-        if attestation.measured_revision == attestation.attested_revision {
-            return Err(format!(
-                "memory anchor {} currency attestation attests its own measurement revision {}",
-                anchor.id, attestation.measured_revision
-            ));
-        }
-        for (field, value) in [
-            ("attestedAt", &attestation.attested_at),
-            ("story", &attestation.story),
-            ("class", &attestation.class),
-            ("why", &attestation.why),
-            ("witness", &attestation.witness),
-        ] {
-            if value.trim().is_empty() {
-                return Err(format!(
-                    "memory anchor {} currency attestation states no {field} — an attestation \
-                     without its justification is a re-stamp",
-                    anchor.id
-                ));
-            }
-        }
-    }
+    validate_currency_attestation("memory anchor", &anchor.id, &anchor.source)?;
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
         .find(|(path, _)| *path == anchor.source.path)
@@ -4240,34 +4258,97 @@ mod tests {
         let pin = pin["inferenceRevision"]
             .as_str()
             .expect("the closure file names its pin");
-        let attested: Vec<&MemoryAnchor> = store
+        // sc-22738: a measured lower bound is attested from the same file and stamped by the same
+        // walk, so it is held to the same contradiction check — an attested bound that reads stale
+        // would be one the probe tooling re-measures on the strength of a justification saying it
+        // need not.
+        let attested: Vec<(&str, AnchorBackend, &AnchorSource)> = store
             .anchors
             .iter()
-            .filter(|anchor| anchor.source.currency_attestation.is_some())
+            .map(|anchor| (anchor.id.as_str(), anchor.backend, &anchor.source))
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter()
+                    .map(|bound| (bound.id.as_str(), bound.backend, &bound.source)),
+            )
+            .filter(|(_, _, source)| source.currency_attestation.is_some())
             .collect();
-        for anchor in &attested {
-            let attestation = anchor.source.currency_attestation.as_ref().unwrap();
+        for (id, backend, source) in &attested {
+            let attestation = source.currency_attestation.as_ref().unwrap();
+            let model_id = id
+                .strip_prefix("exceeded:")
+                .unwrap_or(id)
+                .split(':')
+                .next()
+                .unwrap();
+            let is_current = closures.digest_for(model_id, *backend)
+                == Some(source.loader_closure_digest.as_str());
             // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
-            // An attestation of an older revision would leave the anchor stale AND claim a
+            // An attestation of an older revision would leave the row stale AND claim a
             // justification — the contradiction this test exists to catch.
             assert_eq!(
-                anchor_is_current(anchor, &closures),
+                is_current,
                 attestation.attested_revision == pin,
-                "{}: attested at {} against pin {pin} but is_current={}",
-                anchor.id,
+                "{id}: attested at {} against pin {pin} but is_current={is_current}",
                 attestation.attested_revision,
-                anchor_is_current(anchor, &closures)
             );
             assert!(
                 matches!(
                     attestation.class.as_str(),
                     "accounting-only" | "witnessed-unchanged"
                 ),
-                "{}: attestation class {:?} is not one the doctrine names",
-                anchor.id,
+                "{id}: attestation class {:?} is not one the doctrine names",
                 attestation.class
             );
         }
+    }
+
+    /// sc-22738: the attestation shape is validated on a BOUND exactly as on an anchor — a bound
+    /// is the row kind where a silently-accepted malformed justification would keep a refusal
+    /// current on nothing.
+    #[test]
+    fn a_malformed_currency_attestation_on_a_bound_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let bounds = store["exceededBounds"]
+            .as_array()
+            .expect("the packaged store carries exceeded bounds");
+        assert!(!bounds.is_empty());
+        let attested = bounds
+            .iter()
+            .position(|bound| bound["source"]["currencyAttestation"].is_object());
+        let index = attested.unwrap_or(0);
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            let source = &mut doctored["exceededBounds"][index]["source"];
+            if attested.is_none() {
+                source["currencyAttestation"] = serde_json::json!({
+                    "measuredRevision": "1".repeat(40),
+                    "attestedRevision": "2".repeat(40),
+                    "attestedAt": "2026-09-07",
+                    "story": "sc-22738",
+                    "class": "accounting-only",
+                    "why": "test",
+                    "witness": "test",
+                });
+            }
+            patch(&mut source["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("exceeded bound"), "{error}");
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
+        assert!(
+            error.contains("attests its own measurement revision"),
+            "{error}"
+        );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
     }
 
     /// The attestation's shape is validated at load like the digest's: a revision that is not a
