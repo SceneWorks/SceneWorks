@@ -1225,6 +1225,20 @@ are SUCCESS — the walk's exit code is 2 only if some anchor ended outside this
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
 
+A cell can also end before it starts. `--list` classifies an anchor whose store already carries a
+**current** measured lower bound as `exceeded_current`, and such a row is never in the runnable set —
+with or without `--skip-current`, so it reaches none of the outcomes above and cannot move the exit
+code. That is deliberate: the host has already established the one fact a re-run could establish
+(the peak at this geometry is at or above a footprint it had to stop), so booking it again spends
+another guarded render — 76 minutes for the `bernini:bf16:mlx` stop — to learn nothing. Until
+sc-22738 it classified `runnable`, because a bound's bundle has an EMPTY `records` array and the
+matrix publishes only anchors, so neither index the classifier consulted could see it.
+
+Currency is the SAME rule an anchor's is: the bound's `source.loaderClosureDigest` against the digest
+`config/anchor-loader-closures.json` carries for that `(model, lane)`. A pin bump or a closure edit
+that stales the bound — the same event that stops it refusing anything in production — puts the cell
+straight back to `runnable`, with no edit to the runner.
+
 **`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
 `capture_failed` that stamped nothing at all: the store kept no trace, and production went on
 admitting the very request the host had just been unable to finish. `bernini:bf16:mlx` is the case
@@ -2194,7 +2208,10 @@ affected ones in the same commit.
 > nothing else. What DOES move is `docker/rust.Dockerfile`, which must copy the new corpus into both
 > builder contexts (`platform-review-contracts.test.mjs` reds otherwise), and the compiled-in list
 > in `memory_anchor.rs`, which must stay SORTED — `appendPackagedSource` inserts in place for
-> exactly that reason.
+> exactly that reason. **The runner writes both COPY lines itself** (`insertEvidenceCopy`, added in
+> the same step as the embed and carried in the same commit), on the completed-capture path as much
+> as on the hard-stop one — before that, every anchor commit landed a tree that reds the
+> platform-review suite until someone added the lines by hand.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
 simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).

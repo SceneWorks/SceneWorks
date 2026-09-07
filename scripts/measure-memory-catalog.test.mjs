@@ -72,6 +72,12 @@ import {
   LTX25_ENHANCER_DIR,
   INSTANTID_IDENTITY_BUNDLE_FILES,
   INSTANTID_CONTROLNET_WEIGHT_FILE,
+  ANCHOR_STORE_PATH,
+  ANCHOR_LOADER_CONFIG_PATH,
+  DOCKERFILE_PATH,
+  DOCKERFILE_EMBED_ANCHOR,
+  insertEvidenceCopy,
+  readExceededBounds,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -1260,6 +1266,43 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
   );
 });
 
+// sc-22738: the embed and the Docker COPY lines are ONE step. `platform-review-contracts.test.mjs`
+// ("Rust Docker builders copy every production generated embed from sceneworks-core") requires each
+// `include_str!` in `memory_anchor.rs` to be copied into BOTH builder stages, and packaging a corpus
+// without them reds that suite on a commit the runner has already made.
+test("a new evidence corpus is copied into both Rust builder stages, in place and idempotently", async () => {
+  const dockerfile = await readFile(path.join(ROOT, DOCKERFILE_PATH), "utf8");
+  const relative = "docs/calibration/sc-22738/aaa-first-mlx-evidence.json";
+  const line = `COPY ${relative} ./docs/calibration/sc-22738/`;
+  const once = insertEvidenceCopy(dockerfile, relative);
+  assert.equal(once.split(`\n${line}\n`).length - 1, 2, "one line per builder stage");
+  assert.equal(insertEvidenceCopy(once, relative), once, "idempotent");
+  const lines = once.split("\n");
+  for (const index of lines.flatMap((text, at) => (text === line ? [at] : []))) {
+    assert.ok(lines[index - 1].startsWith("COPY "), "inserted inside the stage's COPY run, never after it");
+    assert.ok(lines[index + 1].startsWith("COPY "), "inserted inside the stage's COPY run, never before it");
+  }
+  // Sorted WITHIN its own directory group, which is what keeps a campaign's corpora readable as one
+  // block rather than interleaved with `docs/generated/`.
+  const group = lines.filter((text) => text.startsWith("COPY docs/calibration/sc-22738/"));
+  assert.ok(group.length >= 4, "the campaign group holds the shipped bound plus the new corpus, per stage");
+  assert.deepEqual(group.slice(0, group.length / 2), [...group.slice(0, group.length / 2)].sort());
+  assert.equal(group[0], line, "a corpus that sorts first lands first");
+  // A directory with no lines yet joins the other `docs/calibration/` lines rather than the end.
+  const fresh = "docs/calibration/sc-99999/x-evidence.json";
+  const freshLine = `COPY ${fresh} ./docs/calibration/sc-99999/`;
+  const withFresh = insertEvidenceCopy(dockerfile, fresh).split("\n");
+  assert.equal(withFresh.filter((text) => text === freshLine).length, 2);
+  for (const index of withFresh.flatMap((text, at) => (text === freshLine ? [at] : []))) {
+    assert.ok(withFresh[index - 1].startsWith("COPY docs/calibration/"), "it lands beside the other calibration corpora");
+  }
+  assert.throws(
+    () => insertEvidenceCopy(`FROM rust AS builder\n${DOCKERFILE_EMBED_ANCHOR}\nRUN cargo build\n`, relative),
+    /not the two builder stages/,
+    "a Dockerfile whose two stages cannot be found reds the run instead of committing an uncopied embed",
+  );
+});
+
 test("a campaign directory's ingested bundles mark their anchors as already captured", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "catalog-campaign-"));
   const dir = "docs/calibration/sc-1";
@@ -1273,6 +1316,87 @@ test("a campaign directory's ingested bundles mark their anchors as already capt
   assert.equal((await capturedInCampaign(root, "docs/calibration/absent")).size, 0);
 });
 
+// sc-22738. A bound's bundle has an EMPTY `records` array and the matrix publishes only anchors,
+// so neither of the two indexes `classifyAnchor` consulted could see a cell the host had already
+// proved it cannot finish: `--list` said `runnable`, and the next `--skip-current` re-run would
+// book the same guarded render again (76 minutes for the bernini bf16 stop). Currency is the same
+// rule a record's is, so a bound that stales stops classifying and the cell is capturable again.
+test("a CURRENT exceeded bound is a captured cell; a stale bound leaves the anchor runnable", async () => {
+  const storeRoot = await mkdtemp(path.join(tmpdir(), "catalog-bounds-"));
+  await mkdir(path.join(storeRoot, "config"), { recursive: true });
+  const digest = "b".repeat(64);
+  const bound = {
+    modelId: "bernini", tier: "bf16", backend: "mlx", observedFootprintBytes: 97147294328,
+    source: {
+      path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json",
+      loaderClosureDigest: digest,
+    },
+  };
+  const seed = async (rows) => {
+    await writeFile(path.join(storeRoot, ANCHOR_STORE_PATH), JSON.stringify({ anchors: [], exceededBounds: rows }));
+    await writeFile(path.join(storeRoot, ANCHOR_LOADER_CONFIG_PATH), JSON.stringify({ models: { "bernini:mlx": { digest } } }));
+  };
+  await seed([bound]);
+  const currentBounds = await readExceededBounds(storeRoot);
+  assert.deepEqual([...currentBounds.keys()], ["bernini:bf16:mlx"]);
+  assert.equal(currentBounds.get("bernini:bf16:mlx").current, true);
+  assert.equal(currentBounds.get("bernini:bf16:mlx").source, bound.source.path);
+  await seed([{ ...bound, source: { ...bound.source, loaderClosureDigest: "c".repeat(64) } }]);
+  assert.equal((await readExceededBounds(storeRoot)).get("bernini:bf16:mlx").current, false, "a bound measured under another loader closure is stale");
+  await seed([{ ...bound, backend: "candle" }]);
+  assert.equal(
+    (await readExceededBounds(storeRoot)).get("bernini:bf16:candle").current, false,
+    "the closure digest is looked up per (model, LANE); the mlx digest does not keep a candle bound current",
+  );
+  assert.equal((await readExceededBounds(await mkdtemp(path.join(tmpdir(), "catalog-empty-")))).size, 0);
+
+  const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
+  const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
+  const key = "z_image_turbo:q4:candle";
+  const bounded = await classifyAnchor(key, { provider: "z_image_turbo" }, {
+    ...base,
+    bounds: new Map([[key, { current: true, source: "docs/calibration/sc-1/z-exceeded-evidence.json" }]]),
+  });
+  assert.equal(bounded.status, "exceeded_current");
+  assert.equal(bounded.current, true);
+  assert.match(bounded.reason, /exceeded bound recorded at the pinned inference revision/);
+  assert.match(bounded.reason, /docs\/calibration\/sc-1\/z-exceeded-evidence\.json/);
+  const staleRow = await classifyAnchor(key, { provider: "z_image_turbo" }, {
+    ...base,
+    bounds: new Map([[key, { current: false, source: "docs/calibration/sc-1/z-exceeded-evidence.json" }]]),
+  });
+  assert.equal(staleRow.status, "runnable", "a stale bound classifies nothing");
+  assert.equal(
+    (await classifyAnchor(key, { provider: "z_image_turbo" }, base)).status, "runnable",
+    "a cell with no bound at all is untouched",
+  );
+});
+
+// The same question against the REAL committed store, through the walk that schedules the captures:
+// a cell whose bound is current is never in the runnable set — with or without `--skip-current`,
+// because there is nothing left for a re-run to establish.
+test("the committed exceeded bound keeps its own cell out of the runnable set of a real --list", async () => {
+  const bounds = await readExceededBounds();
+  assert.ok(bounds.size > 0, "the shipped store carries at least one measured lower bound");
+  for (const skipCurrent of [false, true]) {
+    const { rows } = await planRun({ backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent, models: [] });
+    for (const [key, bound] of bounds) {
+      const row = rows.find((candidate) => candidate.key === key);
+      if (!row || row.backend !== "mlx") continue;
+      if (bound.current) {
+        assert.equal(row.status, "exceeded_current", `${key} carries a current bound`);
+        assert.equal(row.current, true);
+      } else {
+        assert.notEqual(row.status, "exceeded_current", `${key}'s bound is stale, so the cell is capturable again`);
+      }
+    }
+    assert.ok(
+      !rows.filter((row) => row.status === "runnable").some((row) => bounds.get(row.key)?.current),
+      "no cell with a current bound is scheduled for a capture",
+    );
+  }
+});
+
 test("every provider the committed plan declares is either served by a family row or refused by name", async () => {
   const plan = await readPlan();
   const models = await readManifestModels();
@@ -1281,7 +1405,10 @@ test("every provider the committed plan declares is either served by a family ro
     const keys = Object.keys(plan.anchors).filter((key) => key.endsWith(`:${backend}`));
     assert.deepEqual(rows.map((row) => row.key), keys.sort(), `${backend}: one row per plan anchor`);
     for (const row of rows) {
-      assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status), `${row.key}: ${row.status}`);
+      // sc-22738: `exceeded_current` is the seventh — a cell whose measured lower bound is current
+      // is answered by the store rather than by a root, so it resolves none (the branch below
+      // excludes it for the same reason `lane_undeclared` is excluded).
+      assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared", "provider_undeclared", "exceeded_current"].includes(row.status), `${row.key}: ${row.status}`);
       if (row.status === "lane_undeclared") assert.match(row.reason, /anchor-loader-closures\.json/);
       if (row.status === "provider_undeclared") assert.match(row.reason, /inference-provider-closures\.json/);
       // sc-22729/sc-22734: the family is resolved by the SAME rule classification uses — model-keyed when
@@ -1290,7 +1417,7 @@ test("every provider the committed plan declares is either served by a family ro
       const family = familyFor(row.modelId, row.provider);
       if (row.status === "no_adapter_arm") {
         assert.equal(family?.arms.includes(backend) ?? false, false);
-      } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
+      } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared", "exceeded_current"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
         tierDownload(models, row.modelId, family.repo, row.tier);
         assert.ok(row.roots.length > 0, `${row.key} names the root it would load`);
@@ -1525,7 +1652,12 @@ async function computeMeasurabilityGaps() {
   for (const cell of await shippedTieredCells()) {
     const row = rows.get(cell.key);
     const status = row?.status ?? (plan.anchors[cell.key] ? "unclassified" : "no_plan_anchor");
-    if (!["runnable", "weights_missing"].includes(status)) {
+    // sc-22738: `exceeded_current` joins the two. The gap set counts cells the campaign cannot
+    // REACH — a missing arm, an undeclared lane, an unbindable artifact — and a cell whose current
+    // measured lower bound is already in the store is the opposite of unreached: it has evidence,
+    // and re-running it could only re-establish the same inequality. A bound that stales puts the
+    // cell straight back into `runnable`, so the gap set still sees it the moment it is capturable.
+    if (!["runnable", "weights_missing", "exceeded_current"].includes(status)) {
       gaps.push({ ...cell, status, reason: row?.reason ?? `${PLAN_PATH} declares no anchor ${cell.key}` });
     }
   }
@@ -3494,6 +3626,30 @@ async function stubCheckout() {
   await writeFile(path.join(root, "docs/generated/memory-matrix.json"), "{}\n");
   await writeFile(path.join(root, "docs/generated/memory-matrix.md"), "# matrix\n");
   await writeFile(path.join(root, ".gitignore"), "*.log\n");
+  // sc-22738: the two Rust builder stages, in the shape `docker/rust.Dockerfile` really has — one
+  // contiguous run of evidence `COPY` lines per stage, opened by the memory-calibration evidence
+  // line. Every `include_str!` the ingest compiles in has to reach BOTH of them.
+  await mkdir(path.join(root, "docker"), { recursive: true });
+  await writeFile(path.join(root, DOCKERFILE_PATH), [
+    "FROM rust:1-bookworm AS builder",
+    "COPY config ./config",
+    "# Generated calibration inputs embedded by sceneworks-core.",
+    "COPY docs/generated/memory-calibration-evidence.json ./docs/generated/",
+    "COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/",
+    "COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/",
+    "",
+    "RUN cargo build --release",
+    "",
+    "FROM nvidia/cuda:12.9.1-devel-ubuntu22.04 AS candle-builder",
+    "COPY config ./config",
+    "# Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above).",
+    "COPY docs/generated/memory-calibration-evidence.json ./docs/generated/",
+    "COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/",
+    "COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/",
+    "",
+    "RUN cargo build --release",
+    "",
+  ].join("\n"));
   await writeFile(path.join(root, PACKAGED_SOURCES_PATH), [
     "const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[",
     "    (",
@@ -3547,6 +3703,34 @@ test("one anchor lands as one commit carrying the evidence, the packaged-source 
   const evidence = JSON.parse(await readFile(path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-evidence.json"), "utf8"));
   assert.equal(evidence.records[0].env, tierRoot, "the derived adapter environment reached the provider");
   assert.ok((await stat(result.log)).size > 0, "the per-anchor log was written");
+});
+
+// sc-22738: the gap this story closes on the ORDINARY commit path too. Every campaign commit added
+// an `include_str!` and left `docker/rust.Dockerfile` alone, so each one landed a tree that reds
+// `platform-review-contracts.test.mjs`; PR #2759 and the bernini q4 seed both had to add the two
+// COPY lines by hand afterwards. The assertion below is that suite's own predicate, applied to the
+// tree this run produced.
+test("an anchor commit carries the new corpus's COPY line in both Docker builder stages", async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  const row = { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot } };
+  const context = stubContext(checkout);
+  assert.equal((await measureAnchor(row, context)).status, "committed");
+  const dockerfile = await readFile(path.join(checkout.root, DOCKERFILE_PATH), "utf8");
+  const rust = await readFile(path.join(checkout.root, PACKAGED_SOURCES_PATH), "utf8");
+  const embeds = [...rust.matchAll(/include_str!\("\.\.\/\.\.\/\.\.\/(docs\/(?:generated|calibration)\/[^"\n]+)"\)/g)]
+    .map((match) => match[1]);
+  assert.ok(embeds.includes("docs/calibration/sc-stub/z-image-turbo-q4-mlx-evidence.json"));
+  for (const embed of embeds) {
+    const copy = `COPY ${embed} ./${embed.slice(0, embed.lastIndexOf("/") + 1)}`;
+    assert.equal(dockerfile.split(copy).length - 1, 2, `${embed} must reach both builder contexts`);
+  }
+  const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s", "HEAD");
+  assert.ok(shown.includes(DOCKERFILE_PATH), "the Dockerfile moves in the SAME commit as the embed");
+  assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "nothing is left behind for a by-hand repair");
 });
 
 test("a --no-commit run captures and checks, then stops with a clean tree so the next anchor can still be captured", async () => {
@@ -3862,6 +4046,14 @@ test("a footprint hard stop is COMMITTED as a measured lower bound, through the 
       rust.includes('"docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"'),
       "the bound's corpus is compiled into the Rust loader, exactly as an anchor's is",
     );
+    // ...and is copied into both Docker builder stages by the same step (sc-22738), so a hard-stop
+    // commit is not a tree that reds `platform-review-contracts.test.mjs` until someone repairs it.
+    const dockerfile = await readFile(path.join(checkout.root, DOCKERFILE_PATH), "utf8");
+    assert.equal(
+      dockerfile.split("COPY docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json ./docs/calibration/sc-stub/").length - 1,
+      2,
+    );
+    assert.ok(shown.includes(DOCKERFILE_PATH), "the Dockerfile is in the bound's commit");
     const bundle = JSON.parse(await readFile(
       path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"), "utf8",
     ));
