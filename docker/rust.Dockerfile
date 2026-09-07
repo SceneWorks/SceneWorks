@@ -100,6 +100,7 @@ COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/cali
 COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
+COPY docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
@@ -234,6 +235,7 @@ COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/cali
 COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
+COPY docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json ./docs/calibration/sc-22738/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
