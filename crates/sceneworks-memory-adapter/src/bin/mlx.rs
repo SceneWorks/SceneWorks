@@ -1272,31 +1272,8 @@ mod tests {
         for record in evidence.records.iter().filter(|record| {
             record.backend == Backend::Mlx && record.target.mode == "text_to_image"
         }) {
-            // A record whose ENGINE bounds only some of the three declared phases publishes the
-            // overall-only shape and says so in its diagnostics (sc-22738 — the still Bernini
-            // member: `bernini_requires_bounded_conditioning_peak`). There is no decomposition to
-            // run the counterfactual over, and inventing one is exactly what that arm refuses to
-            // do, so such a record is skipped — but only on its own declaration. An overall-only
-            // record that does NOT declare an unattributed phase is a decomposition that went
-            // missing, and still fails here.
             let observed = match &record.observed_memory {
-                RequiredNullable::Value(observed) => match observed.full() {
-                    Some(observed) => observed,
-                    None => {
-                        assert!(
-                            record.diagnostics.as_ref().is_some_and(|diagnostics| {
-                                diagnostics.measurements.iter().any(|measurement| {
-                                    measurement.name == "conditioningPhaseUnattributed"
-                                        && measurement.value == 1
-                                })
-                            }),
-                            "{} carries overall-only image telemetry without declaring an \
-                             unattributed phase",
-                            record.id
-                        );
-                        continue;
-                    }
-                },
+                RequiredNullable::Value(observed) => observed.full().expect("full image telemetry"),
                 RequiredNullable::Null => panic!("{} has null image telemetry", record.id),
             };
             image_records += 1;
@@ -3336,19 +3313,6 @@ impl PredictedPhasePeaks {
             "decode": self.decode,
             "overall": self.overall,
         })
-    }
-
-    /// The receipt an arm files when its engine does not bound every declared phase (sc-22738).
-    ///
-    /// `memory_calibration::PredictedPeakBytes` accepts exactly two shapes — the full four-key
-    /// decomposition or an overall-only object — and a partial decomposition deserializes as
-    /// NEITHER (both variants are `deny_unknown_fields`). An arm that measured only some of the
-    /// phases therefore publishes the ceiling and omits the decomposition, rather than filling the
-    /// unmeasured phase with a zero that reads as "this phase cost nothing". The ceiling itself is
-    /// identical: it is taken over the phases that WERE bounded, and on such an engine one of those
-    /// windows contains the unbounded phase.
-    fn overall_only_json(self) -> Value {
-        json!({ "overall": self.overall })
     }
 }
 
@@ -11501,10 +11465,9 @@ struct MageArm {
     /// The engine's own published default step count for this variant (`MageVariant::default_steps`)
     /// for the distilled members, whose 4-step Decoupled-DMD schedule IS the recipe the product
     /// issues; two steps for the undistilled members, the shape every other image arm here uses.
-    /// Two is also the minimum that leaves the first `Progress::Step` with a render still ahead of
-    /// it, which is what makes the second measured window non-empty (see
-    /// [`MAGE_ENGINE_BOUNDARIES`]: the first `Step` fires only AFTER a full denoise step, so it is
-    /// not the conditioning/denoise edge and this arm no longer files it as one).
+    /// The conditioning/denoise edge is cut on the engine's `Loading(Renderer)` boundary, not on
+    /// the first `Progress::Step` (which fires only AFTER a full denoise step — sc-22738), so both
+    /// steps land in the denoise window.
     steps: u32,
     /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
     /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
@@ -12096,90 +12059,6 @@ fn mage_complete_sweep(request: &Value) -> Result<Value, String> {
     Ok(sweep)
 }
 
-/// WHICH LIFECYCLE BOUNDARIES THE PINNED MAGE-FLOW ENGINE ACTUALLY EMITS (sc-22738).
-///
-/// `mlx-gen-mage` at the pinned revision hands `on_progress` to exactly two pipeline entries on the
-/// PRODUCTION `Generator::generate` path, and both are denoise-step bars:
-///
-/// * `src/pipeline.rs:260` — `Progress::Step` per generation denoise step (`denoise_generation_phase`);
-/// * `src/pipeline.rs:447` — `Progress::Step` per edit denoise step (`denoise_edit_phase`).
-///
-/// The only `Progress::Decoding` the crate constructs is at `src/pipeline.rs:1226`, inside
-/// `generate_batch_trace_with_memory` — a TRACE entry point the registry-loaded generator never
-/// reaches. `Generator::generate` (`src/model.rs:1460-1630`) instead drives
-/// `gen_core::residency::run_staged_request_scoped`
-/// (`crates/contracts/gen-core/src/residency.rs:509-601`) and passes a decode closure that DISCARDS
-/// the progress sink it is handed (`model.rs:1532`, `:1602` — `|view, denoised, _|`), so no
-/// `Progress::Decoding` is emitted on any of the six routes, on either mode. That is the whole
-/// defect: this arm cut the denoise phase on `Progress::Decoding`, so `denoise.active` was
-/// structurally 0 on every Mage capture and the arm refused a render that had already completed.
-///
-/// The conditioning/denoise edge is not bounded either, and for a second, independent reason. Every
-/// checked-in `mage_flow*:*:mlx` plan row selects `MemoryStrategy::Resident`, and
-/// `MemoryProviderContract::generation_memory` maps Resident onto `stage_residency == false`
-/// (`gen-core/src/memory_strategy.rs:1815-1823`), which takes the WARM arm of
-/// `run_staged_request_scoped` (`residency.rs:531-548`). There `ensure_warm_locked`
-/// (`residency.rs:351,359`) emits `Loading(TextEncoder)` and `Loading(Renderer)` back to back
-/// BEFORE the prompt is encoded, and loads the DiT and VAE between them, so `Loading(Renderer)`
-/// precedes the conditioning phase rather than closing it. The first `Progress::Step` then fires
-/// only AFTER a full denoise step, with the whole renderer resident. Neither event is the
-/// conditioning peak, so this arm measures neither.
-///
-/// This is an ENGINE gap, not a route difference: all six members share one `generate` body and one
-/// contract that declares the full `[Conditioning, Denoise, Decode]` envelope. Closing it is an
-/// inference-side change (pass the progress sink into the decode closure, and emit the staged
-/// `Loading` pair on the resident arm) and therefore a pin bump.
-const MAGE_ENGINE_BOUNDARIES: &str = concat!(
-    "the pinned mlx-gen-mage production path emits only per-step `Progress::Step` bars ",
-    "(pipeline.rs:260, :447) — its decode closure discards the progress sink (model.rs:1532, ",
-    ":1602), so no `Progress::Decoding` is ever delivered, and on the Resident selection the two ",
-    "`Progress::Loading` events both precede the prompt encode (residency.rs:351,359). No boundary ",
-    "therefore exists at the conditioning/denoise edge or at the denoise/decode edge. This record ",
-    "attributes the two windows the engine does close — through the first denoise step, and from ",
-    "there to completion — and reports all three declared lifecycle phases as UNATTRIBUTED rather ",
-    "than as zero peaks. The two windows partition the whole render, so the overall ceiling this ",
-    "record prices is unaffected and remains conservative."
-);
-
-/// Whether this route's engine bounds all three declared lifecycle phases.
-///
-/// False on every Mage member at this pin ([`MAGE_ENGINE_BOUNDARIES`]) — the six share one
-/// `generate` body, so there is nothing to differentiate. It is keyed on the ARM nonetheless, so a
-/// member whose engine does deliver the boundaries goes back onto the strict three-phase grading by
-/// changing one row rather than by rewriting the capture, and so the relaxed rule can never be
-/// applied blanket-wise to a route that is fully bounded.
-fn mage_route_bounds_every_declared_phase(arm: MageArm) -> bool {
-    let _ = arm;
-    false
-}
-
-/// The zero-active-peak refusal, over the windows this route's engine actually closes.
-///
-/// On a fully bounded route the three windows ARE the three declared phases and every one of them
-/// must be non-zero — the check this arm has always had. On a route the engine does not bound, the
-/// mid capture is the one taken at `Progress::Decoding`; it is never delivered, so requiring it
-/// would refuse every completed capture. The two windows that DO close are still required, so this
-/// is not a blanket allowance: a collapse in either of them is still a collapse.
-///
-/// Returns `None` when every required window reported a non-zero active peak.
-fn mage_zero_phase_error(
-    bounded: bool,
-    through_first_step: u64,
-    decoding_boundary: u64,
-    tail: u64,
-) -> Option<String> {
-    let collapsed = if bounded {
-        [through_first_step, decoding_boundary, tail].contains(&0)
-    } else {
-        [through_first_step, tail].contains(&0)
-    };
-    collapsed.then(|| {
-        "a synchronized Mage-Flow lifecycle phase reported a zero active peak; the engine stopped \
-         emitting a boundary and the attribution collapsed"
-            .to_owned()
-    })
-}
-
 /// The scenario verdicts a completed Mage capture files.
 ///
 /// WHY THIS IS A FUNCTION AND NOT AN INLINE LITERAL (sc-22738). The list is the input to
@@ -12326,15 +12205,20 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         resident_credit_bytes,
     );
 
-    // The two boundaries this arm cuts on. On a route whose engine bounds every declared phase they
-    // ARE `conditioning` and `denoise`; on this pin they are the two windows named in
-    // [`MAGE_ENGINE_BOUNDARIES`] — `Progress::Decoding` is never delivered, so `decoding_boundary`
-    // stays at its zero and the tail capture covers everything after the first denoise step.
-    let through_first_step = Cell::new(PhaseMemory {
+    // Three phase peaks cut on the lifecycle boundaries the pinned engine emits on the PRODUCTION
+    // `Generator::generate` path (sc-22738, inference #963 at e16c6a55e): every checked-in Mage plan
+    // row selects `MemoryStrategy::Resident`, i.e. the warm arm of
+    // `gen_core::residency::run_staged_request_scoped`, which now opens the renderer phase with
+    // `Loading(Renderer)` AFTER the prompt encode (`residency.rs` warm arms) — so that event IS the
+    // conditioning/denoise edge — and `mlx-gen-mage`'s decode closures forward the progress sink,
+    // so `Progress::Decoding` (`pipeline.rs` `decode_generation_phase` / `decode_edit_phase`) closes
+    // denoise. The first `Progress::Step` is deliberately NOT cut on: it fires only after a full
+    // denoise step, with the whole renderer resident, and is not the conditioning peak.
+    let conditioning = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
     });
-    let decoding_boundary = Cell::new(PhaseMemory {
+    let denoise = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
     });
@@ -12346,32 +12230,27 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         &context,
         None,
         &mut |progress| match progress {
-            Progress::Step { current: 1, .. } => {
-                through_first_step.set(PhaseMemory::capture());
+            Progress::Loading(LoadPhase::Renderer) => {
+                conditioning.set(PhaseMemory::capture());
                 reset_peak_memory();
             }
             Progress::Decoding => {
-                decoding_boundary.set(PhaseMemory::capture());
+                denoise.set(PhaseMemory::capture());
                 reset_peak_memory();
             }
             _ => {}
         },
     )?)?;
-    let tail = PhaseMemory::capture();
-    let through_first_step = through_first_step.get();
-    let decoding_boundary = decoding_boundary.get();
-    let bounded = mage_route_bounds_every_declared_phase(arm);
-    if let Some(error) = mage_zero_phase_error(
-        bounded,
-        through_first_step.active,
-        decoding_boundary.active,
-        tail.active,
-    ) {
-        return Err(error);
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Mage-Flow lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
     }
-    // The names the receipt is built from. They are the declared phases only on a bounded route;
-    // the unbounded branch below never files them under a phase key.
-    let (conditioning, denoise, decode) = (through_first_step, decoding_boundary, tail);
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
@@ -12556,58 +12435,14 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         );
     }
 
-    // WHAT THIS RECORD FILES, over the boundaries the engine gave it (sc-22738).
-    //
-    // A full `predictedPeakBytes` / `observedMemory` decomposition is a claim that all three
-    // declared phases were measured, and on this pin none of them was ([`MAGE_ENGINE_BOUNDARIES`]).
-    // `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so a
-    // partial decomposition is not a record at all — the choice is the ceiling alone or invented
-    // phase numbers, and this files the ceiling. It is the same ceiling either way: `overall` is the
-    // maximum over windows that partition the whole render. The per-phase measurements
-    // `extract-memory-anchors.mjs#PHASE_MEASUREMENTS` and `memory_anchor::validate_anchor` mint an
-    // anchor from are WITHHELD, so the cell classifies analytically instead of anchoring on a
-    // fabricated zero; what the two windows did measure is still published, under names that say
-    // what they are, and the blocker states the gap in the record itself.
-    let (predicted_peaks_json, observed_memory_json, lifecycle_measurements, lifecycle_blockers) =
-        if bounded {
-            (
-                predicted_peaks.json(),
-                json!({
-                    "conditioning": conditioning.json(),
-                    "denoise": denoise.json(),
-                    "decode": decode.json(),
-                    "overall": overall.json(),
-                }),
-                vec![
-                    ("conditioningActivePeak", "bytes", conditioning.active),
-                    ("denoiseActivePeak", "bytes", denoise.active),
-                    ("decodeActivePeak", "bytes", decode.active),
-                ],
-                Vec::new(),
-            )
-        } else {
-            (
-                predicted_peaks.overall_only_json(),
-                // `RuntimeObservedMemory` carries the ACTIVE peak and nothing else — the allocator
-                // envelope stays in the diagnostics, where `overallAllocatorEnvelope` publishes it.
-                json!({ "overall": { "activeBytes": overall.active } }),
-                vec![
-                    ("conditioningPhaseUnattributed", "count", 1),
-                    ("denoisePhaseUnattributed", "count", 1),
-                    ("decodePhaseUnattributed", "count", 1),
-                    (
-                        "throughFirstDenoiseStepWindowActivePeak",
-                        "bytes",
-                        through_first_step.active,
-                    ),
-                    ("postFirstDenoiseStepWindowActivePeak", "bytes", tail.active),
-                ],
-                vec![MAGE_ENGINE_BOUNDARIES.to_owned()],
-            )
-        };
+    let lifecycle_measurements = [
+        ("conditioningActivePeak", "bytes", conditioning.active),
+        ("denoiseActivePeak", "bytes", denoise.active),
+        ("decodeActivePeak", "bytes", decode.active),
+    ];
     // The finding rides on the SAME record the measurement does, so a reader of this cell cannot
     // see the peak without seeing that the engine's model did not cover it.
-    let mut lifecycle_blockers = lifecycle_blockers;
+    let mut lifecycle_blockers: Vec<String> = Vec::new();
     lifecycle_blockers.extend(model_shortfall_blocker);
     // ...and the same pair machine-readably, so a consumer can size the gap without parsing prose.
     let model_measurements = [
@@ -12634,8 +12469,13 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         },
         "sweep": mage_complete_sweep(request)?,
         "scenarios": mage_scenarios(predicted),
-        "predictedPeakBytes": predicted_peaks_json,
-        "observedMemory": observed_memory_json,
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
         "quality": {
             "contract": "same seed, prompt, sampling, precision, staged components, and loaded provider; selected rung versus unselected request",
             "identicalInputs": true,
@@ -13667,122 +13507,15 @@ mod mage_tests {
         }
     }
 
-    /// sc-22738 — every Mage route is graded on the windows the PINNED ENGINE closes.
-    ///
-    /// All eighteen `mage_flow*:*:mlx` anchors rendered for 11–62 s and were then refused for a
-    /// zero active peak. The peak was zero because `Progress::Decoding` is never delivered on the
-    /// production path (see [`MAGE_ENGINE_BOUNDARIES`]): the crate constructs it only inside
-    /// `generate_batch_trace_with_memory`, and `Generator::generate`'s decode closure discards the
-    /// progress sink it is handed. The arm was grading six routes against a boundary set no Mage
-    /// route emits.
+    /// sc-22738 — every Mage route is graded on all three declared lifecycle phases, each cut on a
+    /// boundary the pinned engine emits on the production path (inference #963 at e16c6a55e:
+    /// `Loading(Renderer)` after the prompt encode on the Resident warm arm, `Progress::Decoding`
+    /// from the decode closure). The pin before it bounded neither edge and this arm filed an
+    /// overall-only ceiling with the phases declared unattributed; that relaxation is gone, and a
+    /// zero in any phase is again a refusal. Read the way the sibling guards in this file read an
+    /// arm — the measured render needs real weights.
     #[test]
-    fn every_mage_route_is_graded_on_the_windows_the_engine_closes() {
-        for arm in MAGE_ARMS {
-            assert!(
-                !mage_route_bounds_every_declared_phase(arm),
-                "{}: the pinned engine delivers no `Progress::Decoding` on the production path; \
-                 requiring it refuses every completed capture",
-                arm.provider
-            );
-            // The exact shape the campaign hit: a completed render whose only zero is the capture
-            // taken at a boundary the engine never emits.
-            assert_eq!(
-                mage_zero_phase_error(
-                    mage_route_bounds_every_declared_phase(arm),
-                    41_000_000_000,
-                    0,
-                    38_000_000_000
-                ),
-                None,
-                "{}: a capture that measured both closed windows must file",
-                arm.provider
-            );
-            // The two windows that DO close are still required, so this is not a blanket allowance.
-            for (label, first, tail) in [
-                ("the through-first-step window", 0_u64, 38_000_000_000_u64),
-                ("the post-first-step window", 41_000_000_000, 0),
-            ] {
-                assert!(
-                    mage_zero_phase_error(
-                        mage_route_bounds_every_declared_phase(arm),
-                        first,
-                        12_000_000_000,
-                        tail
-                    )
-                    .is_some(),
-                    "{}: {label} is closed by the engine and a zero there is still a collapse",
-                    arm.provider
-                );
-            }
-        }
-    }
-
-    /// The relaxed rule is keyed on the route's boundary set and CANNOT leak onto a route that is
-    /// fully bounded: applied there, a capture missing the `Progress::Decoding` peak still refuses,
-    /// with the refusal text the campaign logs already carry.
-    #[test]
-    fn a_fully_bounded_route_still_refuses_any_zero_phase() {
-        let refusal = mage_zero_phase_error(true, 41_000_000_000, 0, 38_000_000_000)
-            .expect("a bounded route refuses a capture with an unmeasured phase");
-        assert_eq!(
-            refusal,
-            "a synchronized Mage-Flow lifecycle phase reported a zero active peak; the engine \
-             stopped emitting a boundary and the attribution collapsed"
-        );
-        assert_eq!(
-            mage_zero_phase_error(true, 41_000_000_000, 12_000_000_000, 38_000_000_000),
-            None
-        );
-    }
-
-    /// WHY the Mage receipt is published overall-only rather than with the unmeasured keys dropped.
-    ///
-    /// `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so a
-    /// partial decomposition is not a record at all. The choice is therefore between the ceiling
-    /// alone and fabricated phase numbers, and this pins the first.
-    #[test]
-    fn an_unattributed_mage_phase_is_published_as_a_ceiling_not_as_a_zero() {
-        use sceneworks_core::memory_calibration::{ObservedMemory, PredictedPeakBytes};
-
-        let peaks = PredictedPhasePeaks {
-            conditioning: 1,
-            denoise: 2,
-            decode: 3,
-            overall: 4,
-        };
-        let overall_only: PredictedPeakBytes =
-            serde_json::from_value(peaks.overall_only_json()).expect("overall-only prediction");
-        assert_eq!(overall_only.overall(), 4);
-        assert!(
-            overall_only.full().is_none(),
-            "an overall-only receipt must not read as a decomposition"
-        );
-        // The shape the arm CANNOT file, and the reason the ceiling is filed instead.
-        assert!(
-            serde_json::from_value::<PredictedPeakBytes>(
-                json!({ "denoise": 2, "decode": 3, "overall": 4 })
-            )
-            .is_err(),
-            "a partial decomposition is not a receipt shape; dropping the unmeasured key is not an \
-             option"
-        );
-        let window = PhaseMemory {
-            active: 41_000_000_000,
-            cache: 3,
-        };
-        let observed: ObservedMemory =
-            serde_json::from_value(json!({ "overall": { "activeBytes": window.active } }))
-                .expect("overall-only");
-        assert!(observed.full().is_none());
-        assert_eq!(observed.overall_non_reclaimable_bytes(), window.active);
-    }
-
-    /// The arm ACTS on the attribution rather than merely computing it: the receipt is the ceiling,
-    /// the anchor-minting phase measurements are withheld, both measured windows are published under
-    /// names that say what they are, and the gap is stated in the record's own blocker. Read the way
-    /// the sibling guards in this file read an arm — the measured render needs real weights.
-    #[test]
-    fn the_mage_receipt_withholds_the_keys_an_anchor_would_be_minted_from() {
+    fn every_mage_route_cuts_every_declared_phase_on_an_engine_boundary() {
         let source = include_str!("mlx.rs");
         let start = source
             .find("\nfn run_mage_provider(")
@@ -13792,50 +13525,27 @@ mod mage_tests {
                 + source[start..]
                     .find("\n}\n")
                     .expect("the arm's body closes")];
-        assert!(
-            body.contains("predicted_peaks.overall_only_json()"),
-            "an unbounded route must file the ceiling rather than a four-key decomposition"
-        );
-        for declaration in [
-            "(\"conditioningPhaseUnattributed\", \"count\", 1)",
-            "(\"denoisePhaseUnattributed\", \"count\", 1)",
-            "(\"decodePhaseUnattributed\", \"count\", 1)",
-            "\"throughFirstDenoiseStepWindowActivePeak\"",
-            "\"postFirstDenoiseStepWindowActivePeak\"",
-            "vec![MAGE_ENGINE_BOUNDARIES.to_owned()]",
-        ] {
-            assert!(
-                body.contains(declaration),
-                "the unattributed phases, the measured windows and the blocker must all be \
-                 declared; missing {declaration}"
-            );
-        }
-        // The anchor-minting measurements must appear ONLY inside the `if bounded { … }` arm — not
-        // merely after the branch opens. Emitting one in the shared diagnostics list, which sits
-        // below the whole `if`/`else`, is exactly how a fabricated phase peak would reach a record.
-        let opened = body
-            .find("        if bounded {")
-            .expect("the receipt is keyed on the engine's boundary set");
-        let closed = opened
-            + body[opened..]
-                .find("\n        } else {")
-                .expect("the bounded arm closes");
-        for anchor_key in [
+        for cut in [
+            "Progress::Loading(LoadPhase::Renderer) => {",
+            "Progress::Decoding => {",
+            "if [conditioning.active, denoise.active, decode.active].contains(&0) {",
             "(\"conditioningActivePeak\", \"bytes\", conditioning.active)",
             "(\"denoiseActivePeak\", \"bytes\", denoise.active)",
             "(\"decodeActivePeak\", \"bytes\", decode.active)",
         ] {
-            let found: Vec<usize> = body
-                .match_indices(anchor_key)
-                .map(|(index, _)| index)
-                .collect();
-            assert!(!found.is_empty(), "{anchor_key} is gone entirely");
             assert!(
-                found
-                    .iter()
-                    .all(|index| (opened..closed).contains(index)),
-                "the anchor-minting measurement {anchor_key} must only be emitted where the engine \
-                 bounded that phase"
+                body.contains(cut),
+                "the strict three-phase capture lost {cut}"
+            );
+        }
+        for relaxation in [
+            "Progress::Step { current: 1, .. } =>",
+            "PhaseUnattributed",
+            "overall_only_json",
+        ] {
+            assert!(
+                !body.contains(relaxation),
+                "the Mage arm must not grade on {relaxation} again"
             );
         }
     }
@@ -19643,80 +19353,6 @@ fn bernini_request(
     }
 }
 
-/// WHICH LIFECYCLE BOUNDARIES THE PINNED BERNINI ENGINE ACTUALLY EMITS (sc-22738).
-///
-/// `mlx-gen-bernini` at the pinned revision constructs a `Progress` value in exactly three places,
-/// and hands `on_progress` to nothing else:
-///
-/// * `src/bernini.rs:868` — `Progress::Step` for the MAR planning loop (`1..=planning_step`);
-/// * `src/bernini.rs:1052` — `Progress::Step` for the renderer denoise (`planning_step+1..=total`),
-///   the SAME folded bar (F-038);
-/// * `src/bernini.rs:1077` — `Progress::Decoding`, immediately before the z16 VAE decode.
-///
-/// It emits **no `Progress::Loading(_)` at all**, on either route: unlike every other MLX arm in
-/// this file it does not drive `gen_core::residency::run_two_phase`
-/// (`crates/contracts/gen-core/src/residency.rs:622,642`), which is what mints
-/// `Loading(TextEncoder)` / `Loading(Renderer)` for the providers that do.
-///
-/// So the conditioning→denoise EDGE has no boundary. The edge is real — `generate_impl` drops the
-/// Qwen2.5-VL planner and `clear_cache()`s at `bernini.rs:894-901`, encodes the UMT5-XXL prompt and
-/// drops it at `:902-921`, and only then loads the two ~28 GB experts at `:1000-1017` — but no
-/// event is emitted anywhere between the last planner `Step` and the first denoise `Step`, and the
-/// first denoise `Step` fires AFTER both experts are resident. Cutting on it would charge 56 GB of
-/// renderer weights to the conditioning phase; cutting on the first planner `Step` would drop the
-/// UMT5-XXL text encoder, the largest conditioning component, into denoise. Neither is the
-/// conditioning peak, so this arm measures neither and says so.
-///
-/// This is an ENGINE gap, not a route difference: the contract declares the full
-/// `[Conditioning, Denoise, Decode]` envelope for both members
-/// (`mlx-gen-bernini/src/memory_strategy.rs:1121-1135,1148-1153`) while the pipeline bounds only
-/// two of the three. Closing it is an inference-side change (emit the two `Loading` phases at the
-/// stage-2 and stage-3 entries) and therefore a pin bump.
-const BERNINI_ENGINE_BOUNDARIES: &str = concat!(
-    "the pinned mlx-gen-bernini pipeline emits only `Progress::Step` (one folded bar) and a ",
-    "single `Progress::Decoding` (bernini.rs:868, :1052, :1077) — it never emits ",
-    "`Progress::Loading(_)`, so no boundary exists at the conditioning/denoise edge. This record ",
-    "therefore attributes the pre-decode window and the decode window, the two phases the engine ",
-    "does bound, and reports the conditioning phase as UNATTRIBUTED rather than as a zero peak. ",
-    "The pre-decode window strictly contains the conditioning phase, so the overall ceiling this ",
-    "record prices is unaffected and remains conservative."
-);
-
-/// Whether this arm REFUSES a capture that carries no engine-bounded conditioning peak.
-///
-/// The pinned engine bounds no conditioning phase on EITHER route ([`BERNINI_ENGINE_BOUNDARIES`]).
-/// The two members are nonetheless treated differently, deliberately:
-///
-/// * the VIDEO member keeps the strict three-phase requirement it has always had. With no
-///   conditioning boundary that requirement REFUSES rather than files — the conservative
-///   direction, and the state this story leaves it in until the engine emits the boundary;
-/// * the STILL member, whose captures complete on this host, files the two phases the engine does
-///   bound and declares the third unattributed, so nothing downstream can read a false zero.
-fn bernini_requires_bounded_conditioning_peak(arm: BerniniArm) -> bool {
-    arm.model_id == BERNINI_VIDEO_MODEL_ID
-}
-
-/// The zero-active-peak refusal, over the phases this arm requires the engine to have bounded.
-///
-/// Returns `None` when every required phase reported a non-zero active peak.
-fn bernini_zero_phase_error(
-    arm: BerniniArm,
-    conditioning: u64,
-    denoise: u64,
-    decode: u64,
-) -> Option<String> {
-    let collapsed = if bernini_requires_bounded_conditioning_peak(arm) {
-        [conditioning, denoise, decode].contains(&0)
-    } else {
-        [denoise, decode].contains(&0)
-    };
-    collapsed.then(|| {
-        "a synchronized Bernini lifecycle phase reported a zero active peak; the engine stopped \
-         emitting a boundary and the attribution collapsed"
-            .to_owned()
-    })
-}
-
 fn bernini_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= BERNINI_MAX_THRESHOLD
         && mean <= BERNINI_MEAN_THRESHOLD
@@ -19933,14 +19569,15 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
     let denoise = denoise.get();
     let conditioning_close = conditioning_close.get();
     let denoise_close = denoise_close.get();
-    // Over the phases the PINNED engine actually bounds for this member — see
-    // [`BERNINI_ENGINE_BOUNDARIES`] and [`bernini_requires_bounded_conditioning_peak`]. `denoise`
-    // is the peak over the whole pre-decode window (the capture at `Progress::Decoding` is the
-    // first read since the pre-generate reset), so it strictly contains the conditioning phase.
-    if let Some(error) =
-        bernini_zero_phase_error(arm, conditioning.active, denoise.active, decode.active)
-    {
-        return Err(error);
+    // All three declared phases, on both routes: the pinned `mlx-gen-bernini` `generate_impl`
+    // (inference #963 at e16c6a55e) emits `Loading(TextEncoder)` before the planner load and
+    // `Loading(Renderer)` at the expert loads, so the conditioning/denoise edge is bounded again.
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Bernini lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
     }
     // The engine's own decoded depth for this request, NOT the requested count: Bernini's z16
     // decode is NON-causal, so it materializes four output frames per latent frame and a 49-frame
@@ -19976,37 +19613,13 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
     // `every_receipt_builder_is_bound_to_its_lane_prediction_wrapper` reads every `predicted_peaks`
     // binding in this file, and a binding that merely selects between the two wrappers is not one
     // it can tell from a bypass.
-    //
-    // The still member additionally publishes its receipt in the OVERALL-ONLY shape (sc-22738): a
-    // full `predictedPeakBytes` / `observedMemory` decomposition is a claim that all three declared
-    // phases were measured, and on this engine the conditioning one was not. The overall ceiling is
-    // unchanged — it is taken over the same phases either way, and the pre-decode window contains
-    // the conditioning phase — so nothing about what this record prices is weakened; what changes
-    // is that no consumer can read a conditioning peak of zero off it.
-    let (predicted_peaks_json, observed_memory_json, predicted) =
-        if arm.model_id == BERNINI_IMAGE_MODEL_ID {
-            let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
-            (
-                predicted_peaks.overall_only_json(),
-                // `RuntimeObservedMemory` carries the ACTIVE peak and nothing else — the allocator
-                // envelope stays in the diagnostics, where `overallAllocatorEnvelope` already
-                // publishes it.
-                json!({ "overall": { "activeBytes": overall.active } }),
-                predicted_peaks.overall,
-            )
-        } else {
-            let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
-            (
-                predicted_peaks.json(),
-                json!({
-                    "conditioning": conditioning.json(),
-                    "denoise": denoise.json(),
-                    "decode": decode.json(),
-                    "overall": overall.json(),
-                }),
-                predicted_peaks.overall,
-            )
-        };
+    let (predicted_peaks_json, predicted) = if arm.model_id == BERNINI_IMAGE_MODEL_ID {
+        let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+        (predicted_peaks.json(), predicted_peaks.overall)
+    } else {
+        let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+        (predicted_peaks.json(), predicted_peaks.overall)
+    };
     // The same two ceilings `memory-calibration-harness.mjs#assertResidencyFitsHardware` applies —
     // checked HERE so a capture that cannot be admitted fails loudly during the campaign rather
     // than producing a well-formed record the harness rejects afterwards.
@@ -20100,41 +19713,11 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             "implementable — they are not run here, and this record claims nothing about them. ",
             // sc-22738: stated in the same breath as the lifecycle exclusion because it is the
             // same kind of claim — what this record deliberately does NOT say.
-            "Additionally: {}{}"
+            "Additionally: {}"
         ),
-        BERNINI_ADMISSION_BLOCKER,
-        // sc-22738, same kind of claim again: a phase the engine does not bound is named here
-        // rather than left to be inferred from a measurement that is simply absent.
-        if bernini_requires_bounded_conditioning_peak(arm) {
-            String::new()
-        } else {
-            format!(" Additionally: {BERNINI_ENGINE_BOUNDARIES}")
-        }
+        BERNINI_ADMISSION_BLOCKER
     );
     let lifecycle_blocker = lifecycle_blocker.as_str();
-    // The conditioning-phase measurements are the keys `extract-memory-anchors.mjs`
-    // (`PHASE_MEASUREMENTS`) and `memory_anchor::validate_anchor` mint an anchor from, so they are
-    // published ONLY when the engine bounded that phase. Withholding them on the still route makes
-    // the record un-anchorable, which is the correct outcome for a decomposition the engine never
-    // gave — and strictly better than an anchor keyed on a fabricated zero. What the window DID
-    // measure is still published, under a name that says what it is.
-    let conditioning_measurements: Vec<(&'static str, &'static str, u64)> =
-        if bernini_requires_bounded_conditioning_peak(arm) {
-            vec![
-                ("conditioningActivePeak", "bytes", conditioning.active),
-                (
-                    "conditioningCloseActive",
-                    "bytes",
-                    conditioning_close.active,
-                ),
-                ("conditioningCloseCache", "bytes", conditioning_close.cache),
-            ]
-        } else {
-            vec![
-                ("conditioningPhaseUnattributed", "count", 1),
-                ("preDecodeWindowActivePeak", "bytes", denoise.active),
-            ]
-        };
     // GATED, not `runtime_complete` (sc-22738). Runtime activation is exactly the claim that the
     // provider's admission gate accepted an exact-fit budget and rejected the two mutations, and
     // this capture asked it nothing — because production asks it nothing for this request. The
@@ -20163,7 +19746,12 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
         ],
         "predictedPeakBytes": predicted_peaks_json,
-        "observedMemory": observed_memory_json,
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
         "quality": {
             "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame",
             "identicalInputs": true,
@@ -20188,6 +19776,9 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 ("preRungActiveAfterClear", "bytes", pre_rung_active),
                 ("preRungCacheAfterClear", "bytes", pre_rung_cache),
                 ("preGenerateActivePeak", "bytes", pre_generate.active),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("conditioningCloseActive", "bytes", conditioning_close.active),
+                ("conditioningCloseCache", "bytes", conditioning_close.cache),
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("denoiseCloseActive", "bytes", denoise_close.active),
                 ("denoiseCloseCache", "bytes", denoise_close.cache),
@@ -20214,9 +19805,7 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 ("renderedFrames", "count", u64::from(expected_frames)),
                 ("requestedFrames", "count", u64::from(geometry.frames)),
                 ("outputFps", "count", u64::from(fps)),
-            ]
-            .into_iter()
-            .chain(conditioning_measurements),
+            ],
         ),
         "capturedAt": protocol::captured_at(),
     });
@@ -32370,127 +31959,14 @@ mod exceeded_bound_tests {
         assert!(refusal.contains("Refusing before the load"), "{refusal}");
     }
 
-    /// sc-22738 — the still route is graded on the phases the PINNED ENGINE BOUNDS.
-    ///
-    /// All three `bernini_image:*:mlx` anchors rendered for ~8 minutes and were then refused for a
-    /// zero conditioning active peak. The peak was zero because the pinned `mlx-gen-bernini`
-    /// pipeline emits no `Progress::Loading(_)` at all (see [`BERNINI_ENGINE_BOUNDARIES`]), so the
-    /// boundary this arm cut the conditioning phase on was never delivered — the arm was grading a
-    /// route against a phase set copied from a provider that drives the shared residency seam.
+    /// sc-22738 — both Bernini routes are graded on all three declared lifecycle phases again. The
+    /// pin before e16c6a55e emitted no `Progress::Loading(_)` from `mlx-gen-bernini`, so the still
+    /// member filed an overall-only ceiling with the conditioning phase declared unattributed;
+    /// inference #963 emits `Loading(TextEncoder)` before the planner load and `Loading(Renderer)`
+    /// at the expert loads on both routes, and this arm cuts on them. Read the way the sibling
+    /// guards in this file read `run_bernini` — the measured render needs real weights.
     #[test]
-    fn the_still_route_is_graded_on_the_two_phases_the_engine_bounds() {
-        assert!(
-            !bernini_requires_bounded_conditioning_peak(BERNINI_IMAGE_ARM),
-            "the pinned engine bounds no conditioning phase on the still route; requiring one \
-             refuses every completed still capture"
-        );
-        // The exact shape the campaign hit: a completed render whose only zero is the phase the
-        // engine never bounded.
-        assert_eq!(
-            bernini_zero_phase_error(BERNINI_IMAGE_ARM, 0, 66_000_000_000, 71_000_000_000),
-            None,
-            "a still capture that measured both bounded phases must file"
-        );
-        // The phases the engine DOES bound are still required, so this is not a blanket allowance.
-        for (label, denoise, decode) in [
-            ("the pre-decode window", 0_u64, 71_000_000_000_u64),
-            ("the decode window", 66_000_000_000, 0),
-        ] {
-            assert!(
-                bernini_zero_phase_error(BERNINI_IMAGE_ARM, 12_000_000_000, denoise, decode)
-                    .is_some(),
-                "{label} is bounded by the engine and a zero there is still a collapse"
-            );
-        }
-    }
-
-    /// The VIDEO member's check is untouched: it keeps the strict three-phase requirement, which
-    /// with no conditioning boundary REFUSES rather than files. That is the conservative direction
-    /// and is deliberate — a video record is what the video admission law prices, and it will not
-    /// be minted off an unmeasured phase. Applying the still rule to a 49-frame request reds here.
-    #[test]
-    fn the_video_route_still_refuses_any_zero_phase() {
-        assert!(bernini_requires_bounded_conditioning_peak(
-            BERNINI_VIDEO_ARM
-        ));
-        let refusal =
-            bernini_zero_phase_error(BERNINI_VIDEO_ARM, 0, 66_000_000_000, 71_000_000_000)
-                .expect("the video member refuses a capture with an unmeasured conditioning phase");
-        assert_eq!(
-            refusal,
-            "a synchronized Bernini lifecycle phase reported a zero active peak; the engine \
-             stopped emitting a boundary and the attribution collapsed",
-            "the video member's refusal text is the one the campaign logs already carry"
-        );
-        assert_eq!(
-            bernini_zero_phase_error(
-                BERNINI_VIDEO_ARM,
-                12_000_000_000,
-                66_000_000_000,
-                71_000_000_000
-            ),
-            None
-        );
-    }
-
-    /// WHY the still receipt is published overall-only rather than with one key dropped.
-    ///
-    /// `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so a
-    /// three-of-four decomposition is not a record at all. The choice is therefore between the
-    /// ceiling alone and a fabricated conditioning number, and this pins the first.
-    #[test]
-    fn an_unattributed_phase_is_published_as_a_ceiling_not_as_a_zero() {
-        use sceneworks_core::memory_calibration::{ObservedMemory, PredictedPeakBytes};
-
-        let peaks = PredictedPhasePeaks {
-            conditioning: 1,
-            denoise: 2,
-            decode: 3,
-            overall: 4,
-        };
-        let overall_only: PredictedPeakBytes =
-            serde_json::from_value(peaks.overall_only_json()).expect("overall-only prediction");
-        assert_eq!(overall_only.overall(), 4);
-        assert!(
-            overall_only.full().is_none(),
-            "an overall-only receipt must not read as a decomposition"
-        );
-        assert!(serde_json::from_value::<PredictedPeakBytes>(peaks.json())
-            .expect("full prediction")
-            .full()
-            .is_some());
-        // The shape the arm CANNOT file, and the reason the ceiling is filed instead.
-        assert!(
-            serde_json::from_value::<PredictedPeakBytes>(
-                json!({ "denoise": 2, "decode": 3, "overall": 4 })
-            )
-            .is_err(),
-            "a partial decomposition is not a receipt shape; dropping one key is not an option"
-        );
-
-        let window = PhaseMemory {
-            active: 66_000_000_000,
-            cache: 3,
-        };
-        let observed: ObservedMemory =
-            serde_json::from_value(json!({ "overall": { "activeBytes": window.active } }))
-                .expect("overall-only");
-        assert!(observed.full().is_none());
-        assert_eq!(observed.overall_non_reclaimable_bytes(), window.active);
-        assert!(serde_json::from_value::<ObservedMemory>(json!({
-            "denoise": window.json(),
-            "decode": window.json(),
-            "overall": window.json(),
-        }))
-        .is_err());
-    }
-
-    /// The arm ACTS on the attribution, not merely computes it: the still receipt is the ceiling,
-    /// the anchor-minting conditioning measurements are withheld, and what the window did measure
-    /// is published under a name that says what it is. Read the way the sibling guards in this file
-    /// read `run_bernini` — the measured render needs real weights and cannot run here.
-    #[test]
-    fn the_still_receipt_withholds_the_keys_an_anchor_would_be_minted_from() {
+    fn both_bernini_routes_cut_every_declared_phase_on_an_engine_boundary() {
         let source = include_str!("mlx.rs");
         let start = source
             .find("\nfn run_bernini(")
@@ -32500,25 +31976,30 @@ mod exceeded_bound_tests {
                 + source[start..]
                     .find("\n}\n")
                     .expect("the arm's body closes")];
-        assert!(
-            body.contains("predicted_peaks.overall_only_json()"),
-            "the still member must file the ceiling rather than a four-key decomposition"
-        );
-        assert!(
-            body.contains("(\"conditioningPhaseUnattributed\", \"count\", 1)")
-                && body.contains("(\"preDecodeWindowActivePeak\", \"bytes\", denoise.active)"),
-            "the unattributed phase must be declared, and the window that was measured named"
-        );
-        let conditioning_key = "(\"conditioningActivePeak\", \"bytes\", conditioning.active)";
-        let guarded = body
-            .find("if bernini_requires_bounded_conditioning_peak(arm) {")
-            .expect("the measurements are keyed on the engine's boundary set");
-        assert!(
-            body.match_indices(conditioning_key)
-                .all(|(index, _)| index > guarded),
-            "the anchor-minting conditioning measurement must only be emitted where the engine \
-             bounded that phase"
-        );
+        for cut in [
+            "Progress::Loading(LoadPhase::TextEncoder) => {",
+            "Progress::Loading(LoadPhase::Renderer) => {",
+            "Progress::Decoding => {",
+            "if [conditioning.active, denoise.active, decode.active].contains(&0) {",
+            "(\"conditioningActivePeak\", \"bytes\", conditioning.active)",
+        ] {
+            assert!(
+                body.contains(cut),
+                "the strict three-phase capture lost {cut}"
+            );
+        }
+        for relaxation in [
+            "PhaseUnattributed",
+            "overall_only_json",
+            "BERNINI_VIDEO_MODEL_ID ==",
+            "requires_bounded",
+        ] {
+            assert!(
+                !body.contains(relaxation),
+                "the Bernini arm must not grade one route more loosely than the other again \
+                 ({relaxation})"
+            );
+        }
     }
 
     /// Everything the bound does NOT claim still captures: a bigger host, a shorter clip, another
