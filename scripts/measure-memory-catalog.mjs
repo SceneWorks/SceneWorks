@@ -119,6 +119,82 @@ export const SDXL_ROUTES_UNCHECKED =
   `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${SDXL_ROUTES_PATH}, so the `
   + "engine's route revision was not compared with the shipped one; classified as if the engine agrees";
 
+export const WAN_MLX_LOADER_PATH = "crates/media/mlx-gen/mlx-gen-wan/src/model.rs";
+
+export const WAN_MLX_SEAL_UNCHECKED =
+  `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${WAN_MLX_LOADER_PATH}, so `
+  + "the pinned Wan MLX loaders were not asked which routes seal a memory receipt; classified as if "
+  + "every declared route seals one";
+
+/**
+ * The provider ids whose `mlx-gen-wan` LOADER seals a memory receipt at this pin (sc-22738).
+ *
+ * A REGISTERED memory-strategy contract is not a published one. `mlx-gen-wan/src/lib.rs` registers
+ * `i2v_memory_strategy::{t2v_14b,i2v_14b}::MEMORY_REGISTRATION` alike, so the source text the
+ * anchor loader closure names as the memory-strategy entry point — the file
+ * `readDeclaredStrategySupport` reads — is IDENTICAL for the two A14B routes and can never tell
+ * them apart. The divergence lives one file over, in the loader: a route whose `load_*` does not
+ * call `i2v_memory_strategy::prepare` hands back a generator whose
+ * `Generator::memory_strategy_contract()` is `None`, refuses every optimized rung with "has no
+ * prepared I2V memory receipt", and opens no request scope. The capture arm then refuses the cell
+ * AFTER a multi-minute load ("loaded … exposed no memory-strategy contract"), which is exactly the
+ * booked-capture-that-cannot-finish this classifier exists to prevent.
+ *
+ * Nothing here is a curated list of routes: the sealing call sites name a provider-id const, the
+ * const's value is read out of the same file, and a route that starts (or stops) sealing moves the
+ * classification on its own at the next pin. It is fail-closed — a `prepare` call whose provider
+ * const this file does not define, or a source that seals nothing at all, THROWS rather than
+ * reporting "no evidence".
+ */
+export function parseWanMlxSealedProviders(source, sourcePath = WAN_MLX_LOADER_PATH) {
+  const text = stripRustComments(source);
+  const sealed = new Set();
+  for (const [, constant] of text.matchAll(/\bi2v_memory_strategy::prepare\(\s*spec\s*,\s*(\w+)\s*\)/g)) {
+    const declared = new RegExp(`\\bconst\\s+${constant}\\s*:\\s*&str\\s*=\\s*"([^"]+)"`).exec(text);
+    if (!declared) {
+      return fail(
+        `${sourcePath} seals a Wan memory receipt for ${constant}, which this file declares no `
+          + "`const … : &str` value for, so the provider id it seals cannot be read. Teach "
+          + "parseWanMlxSealedProviders the new shape — an unreadable seal must never be treated as "
+          + "'no evidence'.",
+      );
+    }
+    sealed.add(declared[1]);
+  }
+  if (sealed.size === 0) {
+    return fail(
+      `${sourcePath} calls i2v_memory_strategy::prepare for no route at all, which no shipped `
+        + "revision of mlx-gen-wan does. Either the loaders moved or this parser no longer reads "
+        + "them; refusing to report every Wan MLX route as unsealed on a parser failure.",
+    );
+  }
+  return sealed;
+}
+
+/**
+ * The sealing routes at `inferenceRepo`, or `null` when no inference checkout is reachable. `null`
+ * is NOT a refusal — see `WAN_MLX_SEAL_UNCHECKED`.
+ */
+export async function readWanMlxSealedProviders(inferenceRepo = process.env.INFERENCE_REPO) {
+  if (!inferenceRepo) return null;
+  try {
+    return parseWanMlxSealedProviders(await readFile(path.join(inferenceRepo, WAN_MLX_LOADER_PATH), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+/** Why the MLX lane cannot capture `provider` at this pin, or `null` when it can. */
+export function wanMlxSealGap(provider, sealed) {
+  if (sealed.has(provider)) return null;
+  return `the pinned mlx-gen-wan loader (${WAN_MLX_LOADER_PATH}) seals no memory receipt for `
+    + `${provider}, so the LOADED provider publishes no memory-strategy contract however the `
+    + "registry declares one: the capture arm refuses the cell after the load ("
+    + `"loaded ${provider} exposed no memory-strategy contract"). The MLX lane cannot measure this `
+    + "route at this pin.";
+}
+
 /**
  * Why the candle lane cannot route `modelId` today, or `null` when it can.
  *
@@ -952,6 +1028,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // different checkpoints, and a plan for one satisfied by another's weights would re-label its
   // peaks.
   wan2_2_ti2v_5b: {
+    // sc-22738: this route's MLX generator publishes a memory-strategy contract only if the
+    // pinned `mlx-gen-wan` loader seals its receipt — see `parseWanMlxSealedProviders`.
+    wanMlxSeal: true,
     env: "WAN22_TI2V_5B_MLX", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", arms: ["mlx", "candle"],
     artifacts: {
       candle: {
@@ -961,6 +1040,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
     },
   },
   wan2_2_t2v_14b: {
+    // sc-22738: this route's MLX generator publishes a memory-strategy contract only if the
+    // pinned `mlx-gen-wan` loader seals its receipt — see `parseWanMlxSealedProviders`.
+    wanMlxSeal: true,
     env: "WAN22_T2V_A14B_MLX", repo: "SceneWorks/wan2.2-t2v-a14b-mlx", arms: ["mlx", "candle"],
     artifacts: {
       candle: {
@@ -970,6 +1052,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
     },
   },
   wan2_2_i2v_14b: {
+    // sc-22738: this route's MLX generator publishes a memory-strategy contract only if the
+    // pinned `mlx-gen-wan` loader seals its receipt — see `parseWanMlxSealedProviders`.
+    wanMlxSeal: true,
     env: "WAN22_I2V_A14B_MLX", repo: "SceneWorks/wan2.2-i2v-a14b-mlx", arms: ["mlx", "candle"],
     artifacts: {
       candle: {
@@ -1443,7 +1528,7 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, wanMlxSealed = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
@@ -1470,6 +1555,17 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     } else {
       const drift = sdxlCandleRouteDrift(parts.modelId, parts.tier, sdxlRoutes, models);
       if (drift) return { ...row, status: "harness_unsupported", reason: drift };
+    }
+  }
+  // sc-22738: the same shape again, on the MLX Wan lane. Declaration is not reach — the registry's
+  // memory-strategy registration is shared by routes whose loaders do not all seal a receipt — so
+  // the fact is read from the loader itself rather than from the declaration.
+  if (family?.wanMlxSeal && backend === "mlx") {
+    if (wanMlxSealed === null) {
+      row.routeCheck = WAN_MLX_SEAL_UNCHECKED;
+    } else {
+      const gap = wanMlxSealGap(planned.provider, wanMlxSealed);
+      if (gap) return { ...row, status: "harness_unsupported", reason: gap };
     }
   }
   if (!family || !family.arms.includes(backend)) {
@@ -2344,6 +2440,9 @@ export async function planRun(args, root = ROOT) {
   // sc-22729: the engine's own SDXL route table, read from the pinned inference checkout. `null`
   // when there is none to read — see `SDXL_ROUTES_UNCHECKED`.
   const sdxlRoutes = await readSdxlCandleRoutes(args.inferenceRepo ?? process.env.INFERENCE_REPO);
+  // sc-22738: which Wan MLX routes the pinned loader actually seals a receipt for. `null` when there
+  // is no checkout to read — see `WAN_MLX_SEAL_UNCHECKED`.
+  const wanMlxSealed = await readWanMlxSealedProviders(args.inferenceRepo ?? process.env.INFERENCE_REPO);
   const keys = Object.keys(plan.anchors).sort();
   if (args.anchors) {
     for (const key of args.anchors) if (!plan.anchors[key]) fail(`--anchors names ${key}, which the plan does not declare`);
@@ -2355,7 +2454,7 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, bounds, declaredLanes, declaredProviders, sdxlRoutes });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, bounds, declaredLanes, declaredProviders, sdxlRoutes, wanMlxSealed });
     if (row.status === "other_backend" && !args.anchors) continue;
     // An unperformed route-revision comparison is reported on the row it did not happen for, so a
     // run without an inference checkout cannot silently look like a run that proved the engine agrees.
