@@ -1312,13 +1312,29 @@ footprint plus the lane's activation allowance.
 - **Production**: `video_admission::exceeded_bound_refusal` refuses before the load, ahead of the
   ladder — a measurement has no estimate margin to be forgiven inside, so it decides before any
   estimate is priced and an analytic estimate for the cell is simply outranked.
-- **Capture**: `mlx.rs#exceeded_bound_capture_refusal`, at the one seam every provider arm passes
-  through, so the next campaign refuses the same render in milliseconds instead of re-burning 72
-  minutes and putting the host's GPU at risk again.
+- **Capture**: `mlx.rs#exceeded_bound_capture_refusal_in`, at the one seam every provider arm
+  passes through (`run_with`), so the next campaign refuses the same render in milliseconds instead
+  of re-burning 72 minutes and putting the host's GPU at risk again — **only while the bound is
+  current**. This seam is probe tooling, and it states the same contract the catalog walk states: a
+  bound whose `source.loaderClosureDigest` equals the digest `config/anchor-loader-closures.json`
+  declares for its `(model, lane)` at the pin classifies the cell `exceeded_current` (never
+  scheduled) and is refused here if handed over anyway; a bound that has **staled** classifies
+  nothing, is refused nowhere on the capture side, and the guarded capture runs. Its outcome
+  supersedes the bound: a completed capture retires it (`extract-memory-anchors.mjs`
+  `retainExceededBounds` — same identity, geometry covering the bound's, later, on a host no
+  larger), a new stop replaces it at the new closure. Before this conjunct the walk listed a
+  stale-bounded cell `runnable` and the adapter refused it on `refuses_host` alone, so the row read
+  `capture_failed` and no bound could ever be lifted by re-measurement — the only way the standing
+  rule allows one to be lifted. Production is deliberately not mirrored on the conjunct: the
+  runtime keeps refusing on a stale bound until the store no longer carries it.
 
 Neither is a measurement gate (E5). A bound refuses exactly one thing — re-running a render this
 class of machine has already proven it cannot finish — and every cell no hard stop has ever bounded,
-which is all of them until one is, is untouched.
+which is all of them until one is, is untouched. A bound can also be attested past a pin bump like
+an anchor (`config/anchor-currency-attestations.json`, keyed by the bound's store id; stamped by the
+same `--stamp-anchors` walk): the claim is narrower — the closure diff cannot change the peak the
+stop was reached at — and, as for an anchor, it moves what the campaign schedules and nothing in the
+runtime.
 
 To record a stop by hand from a retained event log (what seeded the Bernini row):
 

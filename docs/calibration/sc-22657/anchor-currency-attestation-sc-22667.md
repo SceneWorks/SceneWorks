@@ -215,3 +215,43 @@ loaded, their order, their devices and the offload policy are byte-identical.
 (`attestedRevision` → `e16c6a55`, the reading appended to `why`); no file is added to any
 `filesChangedSinceMeasurement`. No re-measure was taken. Matrix after `--stamp-anchors`:
 `15 anchors, 10 stale, 5 current by attestation` (unchanged set).
+
+## Measured lower bounds attested at `e16c6a55` (sc-22738, 2026-09-07)
+
+A measured lower bound (`exceededBounds`, sc-22738) is stamped by the same `--stamp-anchors` walk
+as an anchor and reads its attestation from this same file, keyed by the bound's store id. It is
+held to the same two-gated doctrine, with one difference in what is claimed: an anchor's attestation
+says the loader still produces the measured *phase decomposition*; a bound's says the diff cannot
+change the *peak the stop was reached at*, so a re-run would only re-establish the same inequality
+and the probe tooling (`measure-memory-catalog.mjs` `exceeded_current`; the MLX memory adapter's
+pre-load refusal, which since this story refuses only a **current** bound) should not book the
+guarded render again. Nothing here reaches production: the runtime never demotes a stale bound and
+never reads currency, so an attestation changes what the campaign schedules and nothing else.
+
+Two bounds are on file in this tree, both measured at `3b922bac` on the 137,438,953,472-byte
+capture Mac; both are attested to `e16c6a55` with `class: accounting-only`, each closure read file
+by file against `3b922bac..e16c6a55`:
+
+| Bound | `closureFiles` ∩ `3b922bac..e16c6a55` | Reading |
+| --- | --- | --- |
+| `bernini:mlx` bf16 (`exc-15a6249c…`, 848x480x49, footprint hard stop at 97,147,294,328 B mid z16 VAE decode) | `gen-core/wan_i2v_memory.rs`, `mlx-gen-bernini/src/bernini.rs`, `mlx-gen-wan/src/{config,i2v_memory_strategy,memory_strategy,model}.rs` | `bernini.rs` is the only executed file that changed and its whole change is two `Progress::Loading` emissions (before the planner load, before the expert loads) plus an import and a weights-free test — instrumentation. `wan_i2v_memory.rs` is packed-tier contract pricing Bernini never calls (and this is the dense bf16 tier). The four `mlx-gen-wan` files change the TI2V-5B contract identity (`config.rs`, `memory_strategy.rs`), tests only (`i2v_memory_strategy.rs`), and `Wan14b`'s own loader/decode-tiling wrapper (`model.rs`), none of which Bernini links or calls (its decode tiling is `mlx_gen_bernini::memory_strategy::decode_tiling` / `TilingConfig::auto`). The z16 decode tile budget the stop was reached in — `mlx-gen-wan/src/pipeline.rs` `auto_tiling_budgeted_z16*`, `mlx-gen/src/vae_tiling.rs` — is not in the diff. |
+| `flux2_dev:mlx` bf16 (`exc-2c3953f5…`, 512x512x1, Metal submissions-ignored refusal at 86,988,010,336 B against the 87,044,670,532 B wired limit) | `gen-core/src/residency.rs` | `mlx-gen-flux2` drives `Residency` (`from_policy`, `sequential`; the bf16 resident load is the warm arm), so the moved boundaries are on its path — but the diff is the instrumentation-only reading recorded above: components loaded, order, devices, offload policy and every allocation are byte-identical, so the resident working set that reached the wired limit is the same working set. |
+
+No re-measure was taken for either; under the doctrine none is needed, because no changed file
+alters what is loaded or how much memory the peak path takes. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged — the matrix publishes anchors only);
+both bounds now stamp at the pin's declared digest and classify `exceeded_current` in the catalog
+walk.
+
+**Deliberately not attested here.** The sc-22738 MLX campaign branch (`story/sc-22738-mlx-rerun`)
+carries six more bounds measured at `3b922bac` — `bernini` q4/q8, `bernini_image` bf16,
+`krea_realtime_14b` bf16/q4/q8 — and the running campaign may add `wan_2_2_i2v_14b` bf16. Their
+evidence records are not in this tree, so an entry for them could not be checked against a record
+(`measuredRevision` must equal the cited record's revision) and would be silently inert in
+`--stamp-anchors` until the campaign branch merges. The per-lane reading is the same as the two
+rows above (`bernini_image:mlx` shares the Bernini closure; `krea_realtime_14b:mlx` intersects the
+diff only in the four `mlx-gen-wan` files and `wan_i2v_memory.rs`, and its decode tiling is the
+untouched `pipeline.rs` `auto_tiling_budgeted_z16_quality_overlap`; `wan_2_2_i2v_14b:mlx` reaches
+`model.rs`'s `a14b_decode_tiling`, whose `image_to_video` arm is the unchanged `decode_tiling` call
+and whose new `tile_vae_decode` door the I2V route does not take) — but the entries belong beside
+those records, in the branch that carries them.

@@ -22,8 +22,14 @@
 // A cell the store already carries a CURRENT measured lower bound for classifies `exceeded_current`
 // and is never scheduled, with or without `--skip-current` (sc-22738): the host has proved it cannot
 // finish there under this loader closure, and a re-run could only re-establish the same inequality.
-// A bound that has STALED classifies nothing, so the cell is capturable again the moment its
-// evidence stops speaking for production.
+// A bound that has STALED classifies nothing, so the cell is capturable again the moment the loader
+// closure it was measured under is no longer the one the pin loads. The MLX adapter's pre-load
+// refusal (`memory-mlx-adapter`, `exceeded_bound_capture_refusal_in`) states the SAME contract:
+// it refuses a covered request only while the bound is current, and lets a stale-bounded cell
+// through to the guarded capture, whose outcome supersedes the bound — a completed capture retires
+// it (`extract-memory-anchors.mjs`), a new stop records a new bound at the new closure. Currency is
+// this tooling's cue to re-measure and nothing else: production keeps refusing on a stale bound
+// until a re-measurement retires it from the store (the runtime never demotes a measurement).
 //
 // A cell whose PINNED ARTIFACT the production loader refuses classifies `artifact_unsupported`
 // (sc-22738): the anchor row carries the engine's own `unsupported:` sentence, nothing is recorded
@@ -1365,8 +1371,16 @@ export async function readExceededBounds(root = ROOT) {
   for (const bound of store.exceededBounds ?? []) {
     if (!bound.modelId || !bound.tier || !bound.backend) continue;
     const declared = closures.models?.[`${bound.modelId}:${bound.backend}`]?.digest;
-    bounds.set(`${bound.modelId}:${bound.tier}:${bound.backend}`, {
-      current: declared !== undefined && declared === bound.source?.loaderClosureDigest,
+    const current = declared !== undefined && declared === bound.source?.loaderClosureDigest;
+    const key = `${bound.modelId}:${bound.tier}:${bound.backend}`;
+    // A cell can carry more than one bound (stops at more than one geometry, or a stale stop
+    // beside the current one that superseded it at a wider geometry). The cell is `exceeded_current`
+    // if ANY of them is current — the adapter's seam consults only the current bounds, so this
+    // index must not let a stale row that happens to sort last overwrite a current one.
+    const previous = bounds.get(key);
+    if (previous?.current && !current) continue;
+    bounds.set(key, {
+      current,
       source: bound.source?.path ?? ANCHOR_STORE_PATH,
       observedFootprintBytes: bound.observedFootprintBytes ?? null,
     });

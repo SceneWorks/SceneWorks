@@ -1,5 +1,5 @@
 {
-  "_comment": "Memory-anchor CURRENCY ATTESTATIONS (sc-22667, epic sc-22657). An anchor's currency key is normally derived at its own measurement revision (scripts/anchor-loader-closure.mjs --stamp-anchors), so a pin bump that touches the model's loader closure stales it. This repository's invalidation doctrine is two-gated: a differing closure digest is not evidence that memory behaviour changed - only a load-or-device-path change without a behaviour witness is. An entry here records, per anchor, that the closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only (contract pricing, byte walkers, facts, tests, docs) or is witnessed unchanged by a re-measure on the same hardware; `--stamp-anchors` then derives that anchor's key at `attestedRevision` and copies the attestation into the store's `source.currencyAttestation`. The attestation is BOUNDED: it names one revision, `measuredRevision` must still equal the cited record's inference revision, and a later pin bump that moves the loader closure past `attestedRevision` stales the anchor again until it is re-read (a new entry) or re-captured (delete the entry). Never write one for a load-or-device-path change without a measured witness - that is the false green the currency key exists to prevent. Reviewed narrative: docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md (c6d6a4db, sc-22667; extended to 8a65db2a by the sc-22723 feature pin, and to 563c44e1, 3b922bac and e16c6a55 by the sc-22738 terminal pins).",
+  "_comment": "Memory-anchor CURRENCY ATTESTATIONS (sc-22667, epic sc-22657). An anchor's currency key is normally derived at its own measurement revision (scripts/anchor-loader-closure.mjs --stamp-anchors), so a pin bump that touches the model's loader closure stales it. This repository's invalidation doctrine is two-gated: a differing closure digest is not evidence that memory behaviour changed - only a load-or-device-path change without a behaviour witness is. An entry here records, per anchor, that the closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only (contract pricing, byte walkers, facts, tests, docs) or is witnessed unchanged by a re-measure on the same hardware; `--stamp-anchors` then derives that anchor's key at `attestedRevision` and copies the attestation into the store's `source.currencyAttestation`. The attestation is BOUNDED: it names one revision, `measuredRevision` must still equal the cited record's inference revision, and a later pin bump that moves the loader closure past `attestedRevision` stales the anchor again until it is re-read (a new entry) or re-captured (delete the entry). Never write one for a load-or-device-path change without a measured witness - that is the false green the currency key exists to prevent. Reviewed narrative: docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md (c6d6a4db, sc-22667; extended to 8a65db2a by the sc-22723 feature pin, and to 563c44e1, 3b922bac and e16c6a55 by the sc-22738 terminal pins; the two sc-22738 measured lower bounds on file at e16c6a55 are attested from 3b922bac by the same reading - a bound is stamped by the same --stamp-anchors walk and held to the same two-gated doctrine, and its attestation claims only that the diff cannot change the peak the stop was reached at).",
   "attestations": [
     {
       "anchorId": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
@@ -426,6 +426,58 @@
         {
           "path": "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
           "class": "accounting-only"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:bernini:mlx:bf16:base:base:bernini-image-bf16-mlx-dual-expert-ladder-v1:exc-15a6249c248c324c0fab",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): bernini:bf16:mlx at 848x480x49 was stopped by the footprint watchdog at 97,147,294,328 bytes on a 137,438,953,472-byte host at 3b922bac, mid z16 VAE decode. The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files; the intersection with this closure (bernini:mlx, 117 files) is six, read one by one. mlx-gen-bernini/src/bernini.rs is the generator body this bound was measured in and is the only executed file that changed: generate_impl gains on_progress(Progress::Loading(LoadPhase::TextEncoder)) before the planner load and on_progress(Progress::Loading(LoadPhase::Renderer)) before the expert loads, plus one import and one weights-free unit test; no load, load order, device, dtype, decode tiling or allocation changed - two report events and nothing else, which is the reports clause of this class. gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus its test - a contract pricing walker Bernini never calls (grep: no reference in mlx-gen-bernini/src), and this is a dense bf16 tier besides. mlx-gen-wan/src/config.rs: the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test, consumed only by mlx-gen-wan memory_strategy.rs canonical_config, the TI2V-5B contract identity Bernini never calls. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (+174 lines under mod tests). mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test - Bernini does not link mlx_gen_wan::memory_strategy. mlx-gen-wan/src/model.rs: load_t2v_14b seals the T2V-A14B receipt and a14b_decode_tiling wraps Wan14b::generate_impl decode tiling with the tile_vae_decode door - Bernini uses neither Wan14b nor either function (its decode tiling is mlx_gen_bernini::memory_strategy::decode_tiling or TilingConfig::auto, bernini.rs:1099-1106); the mlx_gen_wan::model items it does use (effective_te_quant, the VAE and transformer building blocks) are untouched. The z16 decode tile budget the stop was reached in - mlx-gen-wan/src/pipeline.rs auto_tiling_budgeted_z16* and mlx-gen/src/vae_tiling.rs, the budget computed before the KV cache exists - is not in the diff at all, so the decode that tripped the guard is byte-identical at e16c6a55. Every other closure file (gen-core, mlx-gen, core-llm, the rest of mlx-gen-wan and mlx-gen-bernini) is unchanged across the range.",
+      "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed except bernini.rs, whose only change is two Progress::Loading emissions (instrumentation). The peak-reaching path (dual-expert denoise then z16 VAE decode) is byte-identical, so a re-measure could only reproduce the stop. Deliberately NOT written for the sibling bounds recorded on story/sc-22738-mlx-rerun (bernini q4/q8, bernini_image bf16, krea_realtime_14b x3): their records are not in this tree.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only (packed-tier dense-head pricing in packed_transformer_bytes plus test; a Wan contract walker Bernini never calls; bf16 is a dense tier)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
+          "class": "accounting-only / instrumentation (two Progress::Loading emissions before the planner and expert loads, one import, one weights-free test; no load, order, device, tiling or allocation changed)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/config.rs",
+          "class": "accounting-only (LEGACY_INERT_CONFIG_KEYS + without_legacy_inert_keys + test; consumed only by the TI2V-5B contract identity, never by Bernini)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
+          "class": "accounting-only (canonical_config tolerates the inert max_area key for the TI2V-5B contract + test; Bernini does not link this module)"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-wan/src/model.rs",
+          "class": "accounting-only for this bound (load_t2v_14b seals the T2V-A14B receipt; a14b_decode_tiling wraps Wan14b decode tiling; Bernini uses neither Wan14b nor either function, and the items it uses are untouched)"
+        }
+      ]
+    },
+    {
+      "anchorId": "exceeded:flux2_dev:mlx:bf16:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:exc-2c3953f5b6d3a4680b35",
+      "measuredRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
+      "attestedRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+      "attestedAt": "2026-09-07",
+      "story": "sc-22738",
+      "class": "accounting-only",
+      "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): flux2_dev:bf16:mlx at 512x512x1 ended in the process-scoped Metal submissions-ignored refusal at a sampled footprint of 86,988,010,336 bytes against the 87,044,670,532-byte wired limit of a 137,438,953,472-byte host at 3b922bac. The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that peak, so a re-run under e16c6a55 would re-establish the same inequality. 3b922bac..e16c6a55 changes eleven inference files; the intersection with this closure (flux2_dev:mlx, 137 files) is exactly one, crates/contracts/gen-core/src/residency.rs, which mlx-gen-flux2 does drive (Residency::from_policy in model_control.rs, Residency::sequential; the bf16 resident load runs the warm arm). The diff is instrumentation-only, the same reading PR #2780 recorded for the five attested anchors: ensure_warm_locked drops its on_progress parameter and no longer emits Loading(TextEncoder)/Loading(Renderer) itself; the warm (!stage_residency) arms of run_request_scoped and run_staged_request_scoped emit Loading(TextEncoder) before the warm load and Loading(Renderer) after the prompt encode, gated on the new warm_needs_load; 147 of the 203 changed lines are unit tests. The components loaded, their order, their devices, the offload policy and every allocation are byte-identical, so the resident bf16 working set that reached the wired limit is the same working set at e16c6a55. The remaining ten changed files (gen-core wan_i2v_memory.rs, mlx-gen-bernini, mlx-gen-mage, mlx-gen-wan, one mlx-gen-flux real-weight test) are outside this closure.",
+      "witness": "None, and none is needed under the doctrine: the one changed closure file moves where two progress events are reported and nothing about what is loaded or how much memory it takes. Deliberately NOT extended to any bound recorded on story/sc-22738-mlx-rerun: those records are not in this tree.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/residency.rs",
+          "class": "accounting-only / instrumentation (Loading(TextEncoder)/Loading(Renderer) emission moved from ensure_warm_locked into the warm arms, gated on warm_needs_load; loads, order, devices, offload policy unchanged; 147 lines of new tests)"
         }
       ]
     }

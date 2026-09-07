@@ -21912,6 +21912,29 @@ fn exceeded_bound_headroom_bytes() -> u64 {
     )
 }
 
+/// The checked-in loader-closure declarations, parsed for THIS binary's currency question.
+/// `sceneworks-core` deliberately exposes no packaged accessor — the runtime must never read the
+/// declarations (sc-22738) — so the parse lives here, in the tooling that owns the question.
+fn packaged_anchor_loader_closures(
+) -> Result<sceneworks_core::memory_anchor::AnchorLoaderClosures, String> {
+    sceneworks_core::memory_anchor::load_anchor_loader_closures(
+        sceneworks_core::memory_anchor::PACKAGED_ANCHOR_LOADER_CLOSURES,
+    )
+    .map_err(|error| format!("packaged anchor loader closures: {error}"))
+}
+
+/// The runner's currency rule, restated for the store the adapter refuses from
+/// (`measure-memory-catalog.mjs` `readExceededBounds`): current iff the lane is declared and the
+/// declared digest equals the bound's. An undeclared lane is NOT current — exactly as the runner
+/// reads it — so a bound on a lane the declarations no longer name is re-measured, not refused.
+fn exceeded_bound_is_current(
+    bound: &sceneworks_core::memory_anchor::ExceededBound,
+    closures: &sceneworks_core::memory_anchor::AnchorLoaderClosures,
+) -> bool {
+    closures.digest_for(&bound.model_id, bound.backend)
+        == Some(bound.source.loader_closure_digest.as_str())
+}
+
 /// PRODUCTION'S measured-lower-bound refusal, mirrored on the capture side (sc-22738, epic 22723).
 ///
 /// THE INCIDENT THIS EXISTS FOR. `bernini:bf16:mlx` at 848x480x49 was admitted by production,
@@ -21924,25 +21947,42 @@ fn exceeded_bound_headroom_bytes() -> u64 {
 /// host's GPU at risk again.
 ///
 /// It is not a measurement gate (epic 22723 E5). It refuses exactly one thing: re-running a render
-/// this host has already proven it cannot finish. A host large enough to carry the bound is
-/// admitted and measures normally, and so is every cell no hard stop has ever bounded — which is
-/// all of them until one is.
+/// this host has already proven it cannot finish UNDER THE LOADER CLOSURE THIS RUN LOADS. A host
+/// large enough to carry the bound is admitted and measures normally, and so is every cell no hard
+/// stop has ever bounded — which is all of them until one is.
+///
+/// ONLY A CURRENT BOUND REFUSES HERE — THIS IS TOOLING, NOT THE RUNTIME (sc-22738). The runner
+/// (`measure-memory-catalog.mjs`, `readExceededBounds`/`classifyAnchor`) and this seam state ONE
+/// contract: a bound whose `source.loaderClosureDigest` still equals the digest
+/// `config/anchor-loader-closures.json` declares for its `(model, lane)` at the pinned inference
+/// revision is CURRENT — the cell classifies `exceeded_current`, is never scheduled, and is refused
+/// here in milliseconds if a campaign hands it over anyway. A bound that has STALED — the loader
+/// closure moved under a pin bump or a closure edit — classifies nothing in the runner and refuses
+/// nothing here: the capture proceeds under the footprint watchdog, and its outcome SUPERSEDES the
+/// bound as evidence (a completed capture retires it in `extract-memory-anchors.mjs`; a new stop
+/// records a new bound at the new closure). Before this conjunct existed the runner listed a
+/// stale-bounded cell `runnable` and this seam refused it on `ExceededBound::refuses_host` alone,
+/// so the runner reported `capture_failed` (`bernini_image:bf16:mlx` at e16c6a55e, bound
+/// `exc-55ce757827be31846a13` recorded at 3b922bac6) and NO bound could ever be lifted by
+/// re-measurement after an engine fix — which is the only mechanism the standing rule leaves for
+/// lifting one.
+///
+/// Production is deliberately NOT mirrored on the currency conjunct. The runtime never demotes a
+/// stale measurement: `video_admission`, `mlx_fit_gate` and `candle_memory_strategy` apply
+/// `ExceededBound::refuses_host` with no currency check and keep refusing on a stale bound until a
+/// re-measurement retires it from the store. Currency is the probe tooling's cue to re-capture,
+/// and this seam is probe tooling.
 ///
 /// The budget presented is the WHOLE host less the fixed unified reserve, i.e. the most generous
 /// budget a capture could ever be given: the runner starts each anchor on a quiet machine, and a
 /// refusal must mean "not even an empty host can carry this", never "the host was busy".
-fn exceeded_bound_capture_refusal(request: &Value) -> Result<Option<String>, String> {
-    let Some(store) = sceneworks_core::memory_anchor::packaged_memory_anchors() else {
-        return Ok(None);
-    };
-    exceeded_bound_capture_refusal_in(store, request)
-}
-
-/// [`exceeded_bound_capture_refusal`] against a caller-supplied store, so the decision can be
-/// graded on a stated store rather than on whatever the packaged one happens to carry at the
-/// current pin.
+///
+/// `run` drives this over the packaged store and the packaged declarations; the tests drive it
+/// over a stated store so the decision can be graded on a stated store rather than on whatever the
+/// packaged one happens to carry at the current pin.
 fn exceeded_bound_capture_refusal_in(
     store: &sceneworks_core::memory_anchor::MemoryAnchorStore,
+    closures: &sceneworks_core::memory_anchor::AnchorLoaderClosures,
     request: &Value,
 ) -> Result<Option<String>, String> {
     let planned = protocol::planned(request)?;
@@ -21977,8 +22017,25 @@ fn exceeded_bound_capture_refusal_in(
         Some("diffvae") => Some(sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae),
         _ => None,
     };
+    // The currency conjunct is applied BEFORE the binding lookup, not after it: `binding_exceeded_bound`
+    // returns the largest footprint among the bounds that cover the request, and grading currency
+    // on that one alone would let a stale wider stop shadow a current narrower one (the current
+    // bound would then refuse nothing while the runner classified the cell `exceeded_current`).
+    // Only the store's CURRENT bounds are consulted, so the two tools answer the same question.
+    let current = sceneworks_core::memory_anchor::MemoryAnchorStore {
+        schema_version: store.schema_version,
+        anchors: Vec::new(),
+        analytic_only: Vec::new(),
+        component_deltas: Vec::new(),
+        exceeded_bounds: store
+            .exceeded_bounds
+            .iter()
+            .filter(|bound| exceeded_bound_is_current(bound, closures))
+            .cloned()
+            .collect(),
+    };
     let Some(bound) =
-        store.binding_exceeded_bound(sceneworks_core::memory_anchor::ExceededBoundQuery {
+        current.binding_exceeded_bound(sceneworks_core::memory_anchor::ExceededBoundQuery {
             model_id,
             // See `ExceededBoundQuery`: a capture plan carries no catalog resolution, and both
             // omitted axes are functions of ones graded above.
@@ -22018,12 +22075,17 @@ fn exceeded_bound_capture_refusal_in(
         return Ok(None);
     }
     Ok(Some(format!(
-        "{model_id}:{tier}:mlx at {width}x{height}x{frames} carries a measured lower bound this \
-         host cannot carry: {bound} recorded {} bytes of physical footprint at {}x{}x{} on a \
-         {}-byte host without completing ({}). This capture needs at least {required_bytes} bytes \
-         and an empty host offers {budget_bytes}. Refusing before the load — production refuses \
-         this request too (video_admission::exceeded_bound_refusal), and re-running it would spend \
-         the session re-measuring a stop already on file.",
+        "{model_id}:{tier}:mlx at {width}x{height}x{frames} carries a CURRENT measured lower bound \
+         this host cannot carry: {bound} recorded {} bytes of physical footprint at {}x{}x{} on a \
+         {}-byte host without completing ({}), under the loader closure this run loads \
+         (config/anchor-loader-closures.json declares the same digest for {model_id}:mlx at the \
+         pinned inference revision). This capture needs at least {required_bytes} bytes and an \
+         empty host offers {budget_bytes}. Refusing before the load: the runner classifies this \
+         cell exceeded_current and never schedules it, and re-running it would spend the session \
+         re-measuring a stop already on file. Once the loader closure moves, the bound stales, the \
+         cell is runnable again and this seam refuses nothing — the capture then supersedes the \
+         bound. Production keeps refusing this request whether or not the bound is current \
+         (video_admission::exceeded_bound_refusal): the runtime never demotes a measurement.",
         bound.observed_footprint_bytes,
         bound.geometry.width,
         bound.geometry.height,
@@ -22035,11 +22097,31 @@ fn exceeded_bound_capture_refusal_in(
 }
 
 fn run(request: &Value) -> Result<Value, String> {
-    // sc-22738: the ONE seam every arm passes through. A cell a footprint hard stop has already
-    // bounded is refused here, before the provider is dispatched — generic by construction, so no
-    // arm has to remember to ask.
-    if let Some(refusal) = exceeded_bound_capture_refusal(request)? {
-        return Err(refusal);
+    let closures = packaged_anchor_loader_closures()?;
+    run_with(
+        sceneworks_core::memory_anchor::packaged_memory_anchors(),
+        &closures,
+        request,
+    )
+}
+
+/// [`run`] over a caller-supplied store and declarations, so the entry-point wiring can be driven
+/// with a bound whose currency is STATED rather than whatever the packaged store carries at the
+/// current pin (a packaged bound is stale on the pin after the one it was measured at, so a
+/// wiring test on the packaged store alone would go green by refusing nothing).
+fn run_with(
+    store: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    closures: &sceneworks_core::memory_anchor::AnchorLoaderClosures,
+    request: &Value,
+) -> Result<Value, String> {
+    // sc-22738: the ONE seam every arm passes through. A cell a CURRENT footprint hard stop has
+    // already bounded is refused here, before the provider is dispatched — generic by construction,
+    // so no arm has to remember to ask. A STALE bound refuses nothing: the capture proceeds and
+    // supersedes it (see `exceeded_bound_capture_refusal_in`).
+    if let Some(store) = store {
+        if let Some(refusal) = exceeded_bound_capture_refusal_in(store, closures, request)? {
+            return Err(refusal);
+        }
     }
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -31869,8 +31951,105 @@ mod exceeded_bound_tests {
     // Measured lower bounds, capture side (sc-22738, epic 22723)
     // ------------------------------------------------------------------------------------------
 
-    /// A store carrying the Bernini stop, keyed current against the PACKAGED loader closures so the
-    /// currency comparison the lookup makes is the real one.
+    /// The digest the test declarations carry for `bernini:mlx` — the bound below is CURRENT when
+    /// its own key equals this and STALE otherwise.
+    const DECLARED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    /// A key no declaration carries: the closure moved under a pin bump.
+    const MOVED: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// Loader-closure declarations naming exactly the lanes given, each at the stated digest — the
+    /// currency half of the comparison, stated rather than read from the packaged file so a test
+    /// can say "current" and "stale" outright.
+    fn closures_declaring(
+        lanes: &[(&str, &str)],
+    ) -> sceneworks_core::memory_anchor::AnchorLoaderClosures {
+        use sceneworks_core::memory_anchor as anchor;
+        anchor::AnchorLoaderClosures {
+            comment: String::new(),
+            digest_version: anchor::ANCHOR_LOADER_CLOSURE_VERSION.to_owned(),
+            inference_revision: "0".repeat(40),
+            models: lanes
+                .iter()
+                .map(|(lane, digest)| {
+                    (
+                        (*lane).to_owned(),
+                        anchor::AnchorLoaderClosure {
+                            engine_id: None,
+                            entry_points: vec!["crates/x/src/lib.rs".to_owned()],
+                            digest: (*digest).to_owned(),
+                            closure_file_count: 1,
+                            closure_files: vec!["crates/x/src/lib.rs".to_owned()],
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Declarations under which the Bernini bound below is CURRENT.
+    fn current_closures() -> sceneworks_core::memory_anchor::AnchorLoaderClosures {
+        closures_declaring(&[("bernini:mlx", DECLARED)])
+    }
+
+    /// One Bernini stop at `frames`, keyed at `digest`, observed at `footprint` bytes.
+    fn bernini_bound(
+        id: &str,
+        frames: u32,
+        footprint: u64,
+        digest: &str,
+    ) -> sceneworks_core::memory_anchor::ExceededBound {
+        use sceneworks_core::memory_anchor as anchor;
+        anchor::ExceededBound {
+            id: id.to_owned(),
+            model_id: "bernini".to_owned(),
+            model_family: "bernini".to_owned(),
+            route: "bernini".to_owned(),
+            provider: "bernini".to_owned(),
+            backend: anchor::AnchorBackend::Mlx,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video".to_owned(),
+            overlay: None,
+            reference_count: 0,
+            load_shape: anchor::AnchorLoadShape::EagerMaterialization,
+            geometry: anchor::AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames,
+                fps: None,
+            },
+            observed_footprint_bytes: footprint,
+            ceiling_bytes: 94_822_600_832,
+            host_memory_bytes: 137_438_953_472,
+            reason: format!("physical_footprint_at_or_above_94822600832:observed_{footprint}"),
+            source: anchor::AnchorSource {
+                path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                    .to_owned(),
+                sha256: "0".repeat(64),
+                record_id: "exc-0".to_owned(),
+                calibration_fingerprint: "fp".to_owned(),
+                loader_closure_digest: digest.to_owned(),
+                currency_attestation: None,
+            },
+        }
+    }
+
+    fn store_of(
+        bounds: Vec<sceneworks_core::memory_anchor::ExceededBound>,
+    ) -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        use sceneworks_core::memory_anchor as anchor;
+        anchor::MemoryAnchorStore {
+            schema_version: anchor::MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: Vec::new(),
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: bounds,
+        }
+    }
+
+    /// A store carrying the Bernini stop, keyed CURRENT against [`current_closures`]: the
+    /// currency comparison the lookup makes is the real one, over stated declarations.
     fn bernini_bound_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         use sceneworks_core::memory_anchor as anchor;
         anchor::MemoryAnchorStore {
@@ -31909,9 +32088,10 @@ mod exceeded_bound_tests {
                     sha256: "0".repeat(64),
                     record_id: "exc-0".to_owned(),
                     calibration_fingerprint: "fp".to_owned(),
-                    // Any well-formed digest: the bound binds regardless of currency (sc-22738),
-                    // and the mirror must match production in that.
-                    loader_closure_digest: "b".repeat(64),
+                    // CURRENT under `current_closures()` (sc-22738): the tooling seam refuses only
+                    // a current bound, so the store is keyed to the declaration on purpose.
+                    // Production binds regardless of currency; this mirror does not.
+                    loader_closure_digest: DECLARED.to_owned(),
                     currency_attestation: None,
                 },
             }],
@@ -31945,18 +32125,108 @@ mod exceeded_bound_tests {
         let store = bernini_bound_store();
         let refusal = exceeded_bound_capture_refusal_in(
             &store,
+            &current_closures(),
             &bernini_capture_request("bf16", 49, 137_438_953_472),
         )
         .expect("the predicate reads the request")
         .expect(
             "the same 128 GiB Mac that could not finish this render must not be given it again",
         );
-        assert!(refusal.contains("measured lower bound"), "{refusal}");
+        assert!(
+            refusal.contains("CURRENT measured lower bound"),
+            "{refusal}"
+        );
         assert!(
             refusal.contains("97147294328"),
             "it states the footprint: {refusal}"
         );
         assert!(refusal.contains("Refusing before the load"), "{refusal}");
+        // The message states the SAME contract the runner states: current ⇒ exceeded_current and
+        // never scheduled; stale ⇒ runnable and re-measured; production refuses either way.
+        assert!(refusal.contains("exceeded_current"), "{refusal}");
+        assert!(refusal.contains("the bound stales"), "{refusal}");
+        assert!(refusal.contains("runtime never demotes"), "{refusal}");
+    }
+
+    /// sc-22738: a STALE bound refuses nothing at this seam. The bound was measured under a loader
+    /// closure the pin no longer loads, so the only way to learn whether the cell still cannot
+    /// complete is to run it — under the watchdog — and let the outcome supersede the bound. Before
+    /// this conjunct the seam refused on `refuses_host` alone: the runner listed the cell runnable,
+    /// the adapter exited 1, the runner logged `capture_failed`, and no engine fix could ever lift a
+    /// bound (`bernini_image:bf16:mlx` at e16c6a55e). MUTATION: drop the currency conjunct from the
+    /// lookup (consult `store` instead of the current-only view) and this test reds.
+    #[test]
+    fn a_stale_bound_does_not_refuse_the_capture() {
+        let request = bernini_capture_request("bf16", 49, 137_438_953_472);
+        let stale = store_of(vec![bernini_bound("exc-stale", 49, 97_147_294_328, MOVED)]);
+        assert_eq!(
+            exceeded_bound_capture_refusal_in(&stale, &current_closures(), &request)
+                .expect("the predicate reads it"),
+            None,
+            "a bound whose loader closure moved must be re-measured, not refused",
+        );
+        // The SAME bound, keyed to the declaration, refuses — so the only thing that flipped the
+        // answer is currency.
+        let current = store_of(vec![bernini_bound(
+            "exc-current",
+            49,
+            97_147_294_328,
+            DECLARED,
+        )]);
+        assert!(
+            exceeded_bound_capture_refusal_in(&current, &current_closures(), &request)
+                .expect("the predicate reads it")
+                .is_some(),
+            "the identical bound under the declared closure refuses",
+        );
+    }
+
+    /// A lane the declarations no longer name is NOT current — the runner's `readExceededBounds`
+    /// reads `declared !== undefined && declared === digest`, and the mirror must not read a missing
+    /// declaration as a match.
+    #[test]
+    fn a_bound_on_an_undeclared_lane_is_stale_not_current() {
+        let request = bernini_capture_request("bf16", 49, 137_438_953_472);
+        let store = bernini_bound_store();
+        assert_eq!(
+            exceeded_bound_capture_refusal_in(
+                &store,
+                &closures_declaring(&[("bernini:candle", DECLARED)]),
+                &request
+            )
+            .expect("the predicate reads it"),
+            None,
+            "the mlx bound is undeclared under a candle-only declaration set",
+        );
+        assert_eq!(
+            exceeded_bound_capture_refusal_in(&store, &closures_declaring(&[]), &request)
+                .expect("the predicate reads it"),
+            None,
+        );
+    }
+
+    /// Currency is applied BEFORE the binding lookup. `binding_exceeded_bound` returns the LARGEST
+    /// covering footprint; if currency were graded on that one alone, a stale wider stop would
+    /// shadow a current narrower one and the seam would refuse nothing while the runner classified
+    /// the cell `exceeded_current`. MUTATION: grade currency after the lookup and this reds.
+    #[test]
+    fn a_stale_wider_bound_does_not_shadow_a_current_narrower_one() {
+        let request = bernini_capture_request("bf16", 49, 137_438_953_472);
+        let store = store_of(vec![
+            // Stale, at the request's own geometry, the larger footprint: the lookup's favourite.
+            bernini_bound("exc-stale-wide", 49, 97_147_294_328, MOVED),
+            // Current, measured at 25 frames (covers 49), smaller footprint — still refuses this
+            // 128 GiB host outright on `refuses_host`'s first disjunct.
+            bernini_bound("exc-current-narrow", 25, 90_000_000_000, DECLARED),
+        ]);
+        let refusal = exceeded_bound_capture_refusal_in(&store, &current_closures(), &request)
+            .expect("the predicate reads it")
+            .expect("the current bound binds and refuses");
+        assert!(
+            refusal.contains("exc-current-narrow"),
+            "the refusal names the CURRENT bound, not the stale one: {refusal}"
+        );
+        assert!(!refusal.contains("exc-stale-wide"), "{refusal}");
     }
 
     /// sc-22738 — both Bernini routes are graded on all three declared lifecycle phases again. The
@@ -32023,7 +32293,7 @@ mod exceeded_bound_tests {
             ),
         ] {
             assert_eq!(
-                exceeded_bound_capture_refusal_in(&store, &request)
+                exceeded_bound_capture_refusal_in(&store, &current_closures(), &request)
                     .expect("the predicate reads it"),
                 None,
                 "{label} must still be capturable",
@@ -32038,6 +32308,7 @@ mod exceeded_bound_tests {
         assert_eq!(
             exceeded_bound_capture_refusal_in(
                 &empty,
+                &current_closures(),
                 &bernini_capture_request("bf16", 49, 137_438_953_472)
             )
             .expect("the predicate reads it"),
@@ -32062,18 +32333,73 @@ mod exceeded_bound_tests {
     }
 
     /// THE WIRING, not the predicate. `exceeded_bound_capture_refusal_in` can be perfectly correct
-    /// and reach nothing: deleting the two lines that call it out of `fn run` left every other test
-    /// in this module green, because they all drive the predicate directly. This test drives `run`
-    /// itself with the shipped store and a request the packaged Bernini bound covers, and asserts
-    /// the refusal comes out of the ENTRY POINT — before any provider is dispatched, any weight is
-    /// opened, or any 72-minute render begins.
+    /// and reach nothing: deleting the lines that call it out of `run_with` leaves every other test
+    /// in this module green, because they all drive the predicate directly. This test drives the
+    /// entry point with a CURRENT bound and a request it covers, and asserts the refusal comes out
+    /// of the ENTRY POINT — before any provider is dispatched, any weight is opened, or any
+    /// 72-minute render begins. Driven through `run_with` with a stated store: the packaged
+    /// Bernini bound is stale on every pin after the one it was measured at, so `run` over the
+    /// packaged store would prove nothing here (see the sibling test for what it proves instead).
     #[test]
     fn the_capture_refusal_is_wired_into_the_run_entry_point() {
-        let error = run(&bernini_capture_request("bf16", 49, 137_438_953_472))
-            .expect_err("a bounded request must not reach a provider arm at all");
+        let error = run_with(
+            Some(&bernini_bound_store()),
+            &current_closures(),
+            &bernini_capture_request("bf16", 49, 137_438_953_472),
+        )
+        .expect_err("a bounded request must not reach a provider arm at all");
         assert!(
             error.contains("measured lower bound"),
             "the refusal must be the bound's, not a downstream arm's: {error}",
+        );
+    }
+
+    /// The other half of the wiring: a STALE bound lets the request THROUGH the seam into the
+    /// provider arm. The arm then fails on the test request's missing plan fields — which is the
+    /// point: the failure is the arm's, not the bound's, so the render would have been attempted.
+    /// (No weight is opened: `run_bernini` refuses a plan without a selection before any load.)
+    #[test]
+    fn a_stale_bound_lets_the_capture_through_the_run_entry_point() {
+        let stale = store_of(vec![bernini_bound("exc-stale", 49, 97_147_294_328, MOVED)]);
+        let error = run_with(
+            Some(&stale),
+            &current_closures(),
+            &bernini_capture_request("bf16", 49, 137_438_953_472),
+        )
+        .expect_err("the bare test request cannot complete a Bernini plan");
+        assert!(
+            !error.contains("measured lower bound"),
+            "a stale bound must not be the reason the capture stops: {error}",
+        );
+    }
+
+    /// The packaged store's own Bernini stop, through `run`: it was measured at inference
+    /// 3b922bac6 and the pin has moved since, so under the packaged declarations it is STALE and
+    /// `run` lets the request through to the arm. This is the shipped behaviour the story fixes —
+    /// a re-measurement can now lift the bound. If a later pin re-declares the closure at the
+    /// bound's digest (an attestation, or the loader returning to that source), the bound becomes
+    /// current again and this test's expectation flips with it: read the assertion message.
+    #[test]
+    fn the_packaged_bernini_bound_refuses_through_run_exactly_when_it_is_current() {
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store loads");
+        let closures = packaged_anchor_loader_closures().expect("the packaged closures parse");
+        let bound = store
+            .exceeded_bounds
+            .iter()
+            .find(|bound| {
+                bound.model_id == "bernini"
+                    && bound.tier == "bf16"
+                    && bound.backend == sceneworks_core::memory_anchor::AnchorBackend::Mlx
+            })
+            .expect("the bernini:bf16:mlx footprint hard stop is on file");
+        let current = exceeded_bound_is_current(bound, &closures);
+        let error = run(&bernini_capture_request("bf16", 49, 137_438_953_472))
+            .expect_err("either the bound refuses or the bare plan fails in the arm");
+        assert_eq!(
+            error.contains("measured lower bound"),
+            current,
+            "packaged bernini:bf16:mlx bound current={current} at this pin; run said: {error}",
         );
     }
 
