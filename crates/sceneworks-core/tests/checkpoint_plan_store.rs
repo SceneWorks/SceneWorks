@@ -19,8 +19,31 @@ use sceneworks_core::checkpoint_inspector::{
 use sceneworks_core::checkpoint_plan_store::{
     linked_checkpoint_id, managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore,
     CheckpointPlanVerificationEventV1, APPROVED_ROOTS_FILE, BINDINGS_DIR, CHECKPOINTS_DIR,
-    INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, STORE_LOCK_FILE,
+    INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, SOURCE_BINDINGS_SCHEMA_VERSION,
+    SOURCE_STAMP_GRANULARITY_NANOS, STORE_LOCK_FILE,
 };
+
+/// A clock offset far past [`SOURCE_STAMP_GRANULARITY_NANOS`]. A stamp captured through a store
+/// skewed by this is dated well after the mtime of the file it names, so it is outside the racy
+/// window on capture; a resolve through such a store re-dates whatever it refreshes the same way.
+/// Five seconds, not five milliseconds: the point is to be unambiguously outside the bound.
+const SETTLED_SKEW_NANOS: i64 = 5_000_000_000;
+
+/// A view of `store` whose stamps are dated outside the racy window — the fast path, reached
+/// without sleeping through [`SOURCE_STAMP_GRANULARITY_NANOS`].
+fn settled(store: &CheckpointPlanStore) -> CheckpointPlanStore {
+    store.with_clock_skew_nanos(SETTLED_SKEW_NANOS)
+}
+
+/// A view of `store` whose stamps are dated inside the racy window by construction.
+///
+/// A real compile spends tens of milliseconds inspecting and hashing before it samples its stamp,
+/// so on this host it usually lands outside the window on its own — "usually" being precisely the
+/// timing dependence this regression must not be built on. Skewing the clock backwards puts every
+/// stamp it captures unambiguously inside the window on every host.
+fn racy(store: &CheckpointPlanStore) -> CheckpointPlanStore {
+    store.with_clock_skew_nanos(-SETTLED_SKEW_NANOS)
+}
 
 /// Lowercase hex sha256, matching the digest form the plan store persists and reports.
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -432,8 +455,10 @@ fn same_size_replacement_inside_verification_window_refuses_without_persistence(
     // A stationary original source still compiles and resolves with its original digest and linked
     // provenance; the guard rejects only an unbound stamp, not a valid checkpoint.
     fs::write(&file, &original).unwrap();
-    let compiled = fx
-        .store
+    // Compiled through a settled clock so the stamp is dated clear of the racy window rather than
+    // relying on the compile happening to outrun a timestamp tick; the window has its own test.
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .unwrap();
     match &compiled.plan.layers[0].source {
@@ -449,7 +474,7 @@ fn same_size_replacement_inside_verification_window_refuses_without_persistence(
         }
         other => panic!("linked compile must retain linked provenance, got {other:?}"),
     }
-    let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+    let resolved = settled_store.resolve(&checkpoint_id).unwrap();
     assert!(!resolved.layers[0].rehashed);
 }
 
@@ -459,8 +484,11 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let file = fx.library_dir.join("kreamania.safetensors");
     write_krea_native_file(&file, 0x5a);
     let root = fx.store.approve_root(&fx.library_dir).unwrap();
-    let compiled = fx
-        .store
+    // Compiled through a settled clock so the persisted stamp is dated clear of the racy window
+    // from the start; this test is about stamp CONTENT, and the window itself is exercised by
+    // `resolve_reverifies_a_stamp_inside_the_racy_window` below.
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .unwrap();
 
@@ -489,9 +517,9 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let staging = fx.library_dir.join("kreamania.safetensors.staging");
     fs::write(&staging, &bytes).unwrap();
     fs::rename(&staging, &file).unwrap();
-    let rehashed = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    let rehashed = settled_store.resolve(&compiled.checkpoint_id).unwrap();
     assert!(rehashed.layers[0].rehashed, "a new entry must be re-hashed");
-    let again = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    let again = settled_store.resolve(&compiled.checkpoint_id).unwrap();
     assert!(!again.layers[0].rehashed, "the stamp was refreshed");
 
     // Same size, different bytes with a changed stamp (an in-place edit or a retargeted root):
@@ -558,6 +586,280 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
         fx.store.resolve(&compiled.checkpoint_id),
         Err(CheckpointPlanError::RootUnavailable { .. })
     ));
+}
+
+/// The persisted `bindings/<planId>.json` for `plan_id`.
+fn bindings_path(fx: &Fixture, plan_id: &str) -> PathBuf {
+    fx.data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(BINDINGS_DIR)
+        .join(format!("{plan_id}.json"))
+}
+
+fn bindings_json(fx: &Fixture, plan_id: &str) -> Value {
+    serde_json::from_str(&fs::read_to_string(bindings_path(fx, plan_id)).unwrap()).unwrap()
+}
+
+/// A stamp is only a cache key once it is old enough to be evidence: a resolve inside one timestamp
+/// tick of the source's mtime re-hashes and re-observes, and the refreshed observation is what
+/// makes the next resolve cheap (sc-21691, git's racy-index rule).
+#[test]
+fn resolve_reverifies_a_stamp_inside_the_racy_window() {
+    let fx = fixture("racy-window");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+
+    // A stamp captured inside the window: exactly the state a same-size rewrite can hide inside.
+    let racy_store = racy(&fx.store);
+    let compiled = racy_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let layer_id = compiled.plan.layers[0].layer_id.clone();
+
+    let persisted = bindings_json(&fx, &compiled.plan.plan_id);
+    assert_eq!(
+        persisted["schemaVersion"],
+        json!(SOURCE_BINDINGS_SCHEMA_VERSION),
+        "a compile persists bindings at the current stamp schema"
+    );
+    let observed = persisted["stamps"][&layer_id]["observedNanos"]
+        .as_i64()
+        .expect("every persisted stamp is dated");
+    let modified = persisted["stamps"][&layer_id]["modifiedNanos"]
+        .as_i64()
+        .expect("the fixture filesystem reports an mtime");
+    assert!(
+        observed - modified < SOURCE_STAMP_GRANULARITY_NANOS,
+        "the fixture must land inside the racy window or it proves nothing: \
+         observed {observed} is already {} ns past mtime {modified}",
+        observed - modified
+    );
+
+    assert!(
+        racy_store.resolve(&compiled.checkpoint_id).unwrap().layers[0].rehashed,
+        "a stamp younger than the timestamp granularity is re-verified"
+    );
+    assert!(
+        racy_store.resolve(&compiled.checkpoint_id).unwrap().layers[0].rehashed,
+        "a re-observation that is itself inside the window does not become a cache key"
+    );
+
+    // Re-verifying re-observes: once an observation is dated clear of the file's mtime the same
+    // unchanged file takes the fast path, so the rule costs one extra hash, not one per resolve.
+    let settled_store = settled(&fx.store);
+    assert!(
+        settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "the last observation persisted was still inside the window"
+    );
+    let refreshed = bindings_json(&fx, &compiled.plan.plan_id);
+    let refreshed_observed = refreshed["stamps"][&layer_id]["observedNanos"]
+        .as_i64()
+        .unwrap();
+    assert!(
+        refreshed_observed > observed,
+        "a re-verified stamp must be re-observed, or it can never leave the window"
+    );
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "outside the window the stamp is trusted and the hash is skipped"
+    );
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "the fast path is stable, not alternating"
+    );
+}
+
+/// The hole the rule closes: a stamp that MATCHES the file yet was captured inside the window is
+/// not evidence about its bytes. Reproduced through the store's rebind seam because a Unix `ctime`
+/// discriminates the replacement on its own — the seam puts every platform in the position
+/// Windows reaches unaided, where the racy-index rule is the only thing left standing.
+#[test]
+fn a_matching_stamp_inside_the_racy_window_refuses_replaced_bytes() {
+    let fx = fixture("racy-drift");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let layer_id = compiled.plan.layers[0].layer_id.clone();
+    let expected_sha256 = match &compiled.plan.layers[0].source {
+        SourceLocatorV1::Linked { fingerprint, .. } => fingerprint.clone(),
+        other => panic!("linked compile must carry a linked locator, got {other:?}"),
+    };
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "precondition: the compiled stamp is outside the window and would be trusted"
+    );
+
+    let original = fs::read(&file).unwrap();
+    let mut replacement = original.clone();
+    let last = replacement.len() - 1;
+    replacement[last] ^= 0xff;
+    assert_eq!(
+        replacement.len(),
+        original.len(),
+        "the fixture must be a same-size replacement or the stamp discriminates it on size"
+    );
+    let replacement_sha256 = sha256_hex(&replacement);
+    assert_ne!(replacement_sha256, expected_sha256);
+    fs::write(&file, &replacement).unwrap();
+
+    // The state a coarse-timestamp platform reaches by itself: the persisted stamp describes the
+    // file as it now stands (replaced), and was observed no later than the file's own mtime.
+    fx.store
+        .rebind_stamp_for_tests(&compiled.plan.plan_id, &layer_id, &file, 0)
+        .unwrap();
+
+    match settled_store.resolve(&compiled.checkpoint_id) {
+        Err(CheckpointPlanError::SourceDrifted {
+            checkpoint_id,
+            relative_path,
+            expected_sha256: refused_expected,
+            actual_sha256,
+        }) => {
+            assert_eq!(checkpoint_id, compiled.checkpoint_id);
+            assert_eq!(relative_path, "kreamania.safetensors");
+            assert_eq!(refused_expected, expected_sha256);
+            assert_eq!(
+                actual_sha256, replacement_sha256,
+                "the refusal must name the bytes on disk, not the stamp's claim about them"
+            );
+        }
+        other => panic!(
+            "a matching stamp inside the racy window must not stand in for a hash, got {other:?}"
+        ),
+    }
+
+    // Refused, and nothing about the refusal is persisted: the next resolve refuses identically
+    // rather than blessing the replacement through a refreshed stamp.
+    assert!(matches!(
+        settled_store.resolve(&compiled.checkpoint_id),
+        Err(CheckpointPlanError::SourceDrifted { .. })
+    ));
+}
+
+/// A bindings document from before stamps were dated cannot be reasoned about, so it is trusted for
+/// nothing: every layer is re-hashed once, and the document is rewritten at the current version.
+#[test]
+fn legacy_undated_bindings_are_reverified_once_then_rewritten() {
+    let fx = fixture("legacy-bindings");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let layer_id = compiled.plan.layers[0].layer_id.clone();
+
+    // Rewrite the persisted document as a v1 store would have left it: version 1, no observation.
+    let path = bindings_path(&fx, &compiled.plan.plan_id);
+    let mut legacy = bindings_json(&fx, &compiled.plan.plan_id);
+    legacy["schemaVersion"] = json!(1);
+    legacy["stamps"][&layer_id]
+        .as_object_mut()
+        .unwrap()
+        .remove("observedNanos")
+        .expect("the fixture must actually strip the field a v1 document never had");
+    fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+    assert!(
+        settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "an undated stamp is evidence of nothing and must be re-hashed"
+    );
+    let rewritten = bindings_json(&fx, &compiled.plan.plan_id);
+    assert_eq!(
+        rewritten["schemaVersion"],
+        json!(SOURCE_BINDINGS_SCHEMA_VERSION),
+        "the re-verified document is rewritten at the current version"
+    );
+    assert!(rewritten["stamps"][&layer_id]["observedNanos"].is_i64());
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "once, not on every resolve"
+    );
+}
+
+/// The version gate stands on its own, independently of whether the stamps inside happen to be
+/// datable: a document whose schema this build does not know may carry fields that mean something
+/// else, so nothing in it is a cache key — even a stamp that reads as dated and settled.
+#[test]
+fn bindings_at_an_unknown_schema_version_are_trusted_for_nothing() {
+    let fx = fixture("unknown-bindings-schema");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let layer_id = compiled.plan.layers[0].layer_id.clone();
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "precondition: at the current version this stamp is trusted"
+    );
+
+    let path = bindings_path(&fx, &compiled.plan.plan_id);
+    let mut future = bindings_json(&fx, &compiled.plan.plan_id);
+    future["schemaVersion"] = json!(SOURCE_BINDINGS_SCHEMA_VERSION + 1);
+    assert!(
+        future["stamps"][&layer_id]["observedNanos"].is_i64(),
+        "the fixture must leave a dated stamp, or the version gate is not what is under test"
+    );
+    fs::write(&path, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
+
+    assert!(
+        settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "a stamp from an unknown schema is re-verified however well dated it looks"
+    );
+    assert_eq!(
+        bindings_json(&fx, &compiled.plan.plan_id)["schemaVersion"],
+        json!(SOURCE_BINDINGS_SCHEMA_VERSION),
+        "and the document is rewritten at the version this build does understand"
+    );
+    assert!(
+        !settled_store
+            .resolve(&compiled.checkpoint_id)
+            .unwrap()
+            .layers[0]
+            .rehashed,
+        "once, not on every resolve"
+    );
 }
 
 #[test]
