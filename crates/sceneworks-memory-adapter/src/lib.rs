@@ -611,7 +611,88 @@ pub fn request_from_stdin() -> Result<Value, String> {
     serde_json::from_str(&input).map_err(|error| format!("parse provider request JSON: {error}"))
 }
 
+/// Every scalar quality metric a record can carry, in the order the harness names them.
+const QUALITY_METRICS: [&str; 6] = [
+    "maximumError",
+    "meanError",
+    "rootMeanSquareError",
+    "maximumErrorThreshold",
+    "meanErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+];
+
+/// The metrics `memory-calibration-harness.mjs` requires for a given record status —
+/// `validateComplete` reads four, `validateRuntimeComplete` reads all six. Every other status
+/// (`gated`, `declared`, the bounded-carrier statuses) carries no scalar quality metrics at all,
+/// so nothing is required of it here.
+fn required_quality_metrics(status: &str) -> &'static [&'static str] {
+    /// `validateComplete`'s four: the RMS pair is read only by the runtime-complete validator, so
+    /// requiring it of a `complete` record would refuse records the harness accepts today.
+    const COMPLETE: [&str; 4] = [
+        "maximumError",
+        "meanError",
+        "maximumErrorThreshold",
+        "meanErrorThreshold",
+    ];
+    match status {
+        "runtime_complete" => &QUALITY_METRICS,
+        "complete" => &COMPLETE,
+        _ => &[],
+    }
+}
+
+/// Refuse a record whose quality metrics are absent or non-finite BEFORE it is filed (E4/E5).
+///
+/// This exists because an adapter arm has exactly two ways to publish an unusable metric and both
+/// of them are silent at the source. A metric the arm never emits is simply missing, and — because
+/// `serde_json`'s `From<f64>` maps every non-finite float to `Value::Null` — a NaN or an infinity
+/// computed from an invalid comparison is written as `null` rather than failing to serialize. The
+/// harness sees the same thing in both cases and refuses the record with a message that cannot tell
+/// them apart, hundreds of GPU-seconds after the render that produced it (sc-22738: the SD3.5 arm
+/// emitted no `rootMeanSquareError` at all and three anchors were refused after a successful
+/// render). Checking here — at the ONE point every adapter binary files a record through — turns
+/// both into a refusal naming the metric and the status that requires it.
+///
+/// Only presence and finiteness are checked. Whether a metric is inside its threshold is the arm's
+/// own comparison, which it makes against its own named constants before building the fragment.
+pub fn validate_quality_metrics(response: &Value) -> Result<(), String> {
+    let Some(quality) = response.get("quality").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let required = required_quality_metrics(status);
+    for metric in QUALITY_METRICS {
+        let Some(value) = quality.get(metric) else {
+            if required.contains(&metric) {
+                return Err(format!(
+                    "a {status} record must carry quality.{metric}; the harness reads it and \
+                     refuses the record without it"
+                ));
+            }
+            continue;
+        };
+        // `null` here is the serialized form of a non-finite f64, not an authored null: `json!`
+        // cannot represent NaN or an infinity any other way.
+        let number = value.as_f64().ok_or_else(|| {
+            format!(
+                "quality.{metric} must be a nonnegative finite number, got {value} \
+                 (a non-finite comparison result serializes to null)"
+            )
+        })?;
+        if !number.is_finite() || number < 0.0 {
+            return Err(format!(
+                "quality.{metric} must be a nonnegative finite number, got {number}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn write_response(response: &Value) -> Result<(), String> {
+    validate_quality_metrics(response)?;
     serde_json::to_writer(io::stdout(), response)
         .map_err(|error| format!("write provider response JSON: {error}"))
 }
@@ -2151,6 +2232,110 @@ mod tests {
             .unwrap();
         assert_eq!(overlay["result"], "not_applicable");
         assert_ne!(overlay["result"], "not_run");
+    }
+
+    /// A runtime-complete quality block carrying every metric the harness reads.
+    fn runtime_complete_quality() -> Value {
+        json!({
+            "contract": "identical inputs",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": 0.01,
+            "meanError": 0.001,
+            "rootMeanSquareError": 0.002,
+            "maximumErrorThreshold": 3e-2,
+            "meanErrorThreshold": 3e-3,
+            "rootMeanSquareErrorThreshold": 3e-2,
+        })
+    }
+
+    fn record(status: &str, quality: Value) -> Value {
+        json!({ "status": status, "quality": quality })
+    }
+
+    #[test]
+    fn a_complete_quality_block_is_filed() {
+        validate_quality_metrics(&record("runtime_complete", runtime_complete_quality())).unwrap();
+    }
+
+    /// sc-22738's defect exactly: the arm emitted no `rootMeanSquareError`, the fragment serialized
+    /// happily, and three SD3.5 anchors were refused at the harness AFTER a successful render.
+    #[test]
+    fn a_runtime_complete_record_missing_the_rms_metric_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality
+            .as_object_mut()
+            .unwrap()
+            .remove("rootMeanSquareError");
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(error.contains("quality.rootMeanSquareError"), "{error}");
+        assert!(error.contains("runtime_complete"), "{error}");
+    }
+
+    #[test]
+    fn a_runtime_complete_record_missing_the_rms_threshold_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality
+            .as_object_mut()
+            .unwrap()
+            .remove("rootMeanSquareErrorThreshold");
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(
+            error.contains("quality.rootMeanSquareErrorThreshold"),
+            "{error}"
+        );
+    }
+
+    /// `json!` cannot represent NaN or an infinity, so an invalid comparison reaches the record as
+    /// `null` rather than as a serialization failure. That null is what has to be refused.
+    #[test]
+    fn a_non_finite_metric_is_refused_as_the_null_it_serializes_to() {
+        for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut quality = runtime_complete_quality();
+            quality["rootMeanSquareError"] = json!(non_finite);
+            assert_eq!(
+                quality["rootMeanSquareError"],
+                Value::Null,
+                "a non-finite f64 must serialize to null, which is what the guard sees"
+            );
+            let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+            assert!(error.contains("nonnegative finite number"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_negative_metric_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality["meanError"] = json!(-1e-9);
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(error.contains("quality.meanError"), "{error}");
+    }
+
+    /// `validateComplete` reads four metrics and never the RMS pair, so requiring it of a
+    /// `complete` record would refuse records the harness accepts today.
+    #[test]
+    fn a_complete_record_may_omit_the_rms_pair() {
+        let mut quality = runtime_complete_quality();
+        let object = quality.as_object_mut().unwrap();
+        object.remove("rootMeanSquareError");
+        object.remove("rootMeanSquareErrorThreshold");
+        validate_quality_metrics(&record("complete", quality.clone())).unwrap();
+        let mut missing_mean = quality;
+        missing_mean.as_object_mut().unwrap().remove("meanError");
+        let error = validate_quality_metrics(&record("complete", missing_mean)).unwrap_err();
+        assert!(error.contains("quality.meanError"), "{error}");
+    }
+
+    /// A gated record's quality block carries no scalar metrics at all.
+    #[test]
+    fn a_gated_record_carries_no_required_metrics() {
+        validate_quality_metrics(&record("gated", json!({ "result": "not_run" }))).unwrap();
+    }
+
+    /// A probe response has no quality block; the guard must not invent one.
+    #[test]
+    fn a_response_without_a_quality_block_is_filed() {
+        validate_quality_metrics(&json!({ "backends": ["mlx"] })).unwrap();
     }
 
     #[test]

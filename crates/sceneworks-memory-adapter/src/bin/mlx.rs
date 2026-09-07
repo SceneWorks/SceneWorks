@@ -19709,6 +19709,11 @@ struct Sd3Arm {
 const SD3_LARGE_PROVIDER: &str = "sd3_5_large";
 const SD3_LARGE_TURBO_PROVIDER: &str = "sd3_5_large_turbo";
 const SD3_MEDIUM_PROVIDER: &str = "sd3_5_medium";
+// The same reasoning as `SDXL_RMS_THRESHOLD`, which this arm's parity comparison is a twin of: RMS
+// is bounded by the same per-pixel envelope as maximum absolute error rather than by a tighter
+// SD3.5-specific tolerance invented ahead of a physical campaign. Both arms compare a selected rung
+// against the unselected request at the shared `MAX_THRESHOLD`/`MEAN_THRESHOLD` pair.
+const SD3_RMS_THRESHOLD: f64 = MAX_THRESHOLD;
 
 const SD3_LARGE_ARM: Sd3Arm = Sd3Arm {
     provider: SD3_LARGE_PROVIDER,
@@ -19953,6 +19958,23 @@ fn sd3_context(
 ///
 /// Loads through the production catalog (`runtime_macos::catalog().media()`) — the same seam the
 /// worker's `inference_runtime::load` uses — never a replica of the engine's loader.
+/// The SD3.5 arm's runtime-complete quality block. Split out of [`run_sd3`] so the shape a record
+/// is filed with can be asserted without real weights and a GPU — the defect this closes (sc-22738)
+/// was a MISSING field in exactly this literal, which only a physical render could reach.
+fn sd3_quality(maximum_error: f64, mean_error: f64, rms_error: f64) -> Value {
+    json!({
+        "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SD3.5 rung versus unselected request",
+        "identicalInputs": true,
+        "result": "passed",
+        "maximumError": maximum_error,
+        "meanError": mean_error,
+        "rootMeanSquareError": rms_error,
+        "maximumErrorThreshold": MAX_THRESHOLD,
+        "meanErrorThreshold": MEAN_THRESHOLD,
+        "rootMeanSquareErrorThreshold": SD3_RMS_THRESHOLD,
+    })
+}
+
 fn run_sd3(request: &Value) -> Result<Value, String> {
     // Refuse an unimplemented `(provider, mode)` BEFORE any environment or weight work — the arm
     // itself is taken off the resolved artifact below, once the tier and repository are bound.
@@ -20128,16 +20150,25 @@ fn run_sd3(request: &Value) -> Result<Value, String> {
             .generate(&sd3_request(arm, width, height), &mut |_| {})
             .map_err(|error| format!("generate unselected {} reference: {error}", arm.provider))?,
     )?;
-    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
-    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD {
+    // The RMS metric is measured, compared and published alongside max/mean because the
+    // runtime-complete quality shape requires all three
+    // (`memory-calibration-harness.mjs#validateRuntimeComplete`). Before sc-22738 this arm computed
+    // only max/mean through `image_max_mean_abs` and published no `rootMeanSquareError` at all, so
+    // three successfully rendered SD3.5 anchors were refused at record validation.
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD || rms_error > SD3_RMS_THRESHOLD
+    {
         return Err(format!(
-            "{} selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}",
+            "{} selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}",
             arm.provider
         ));
     }
     let mutated = qwen_negative_mutation(&selected);
-    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
-    if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if mutated_maximum <= MAX_THRESHOLD
+        && mutated_mean <= MEAN_THRESHOLD
+        && mutated_rms <= SD3_RMS_THRESHOLD
+    {
         return Err(format!(
             "{} output mutation did not breach the parity envelope",
             arm.provider
@@ -20176,15 +20207,7 @@ fn run_sd3(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SD3.5 rung versus unselected request",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "maximumErrorThreshold": MAX_THRESHOLD,
-            "meanErrorThreshold": MEAN_THRESHOLD,
-        },
+        "quality": sd3_quality(maximum_error, mean_error, rms_error),
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -20203,6 +20226,7 @@ fn run_sd3(request: &Value) -> Result<Value, String> {
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
             ],
         ),
         "capturedAt": protocol::captured_at(),
@@ -22247,6 +22271,87 @@ mod flux_one_tests {
 #[cfg(test)]
 mod sd3_tests {
     use super::*;
+
+    /// sc-22738. `sd3_5_large` at bf16, q4 and q8 rendered, then had their records refused at
+    /// `imc-*.quality.rootMeanSquareError must be a nonnegative finite number` — this arm published
+    /// max/mean only, and the runtime-complete quality contract reads three metrics. The assertion
+    /// is the shared filing guard rather than a hand-listed field set, so this test states the same
+    /// contract the harness does instead of a second copy of it.
+    #[test]
+    fn the_sd3_quality_block_carries_every_runtime_complete_metric() {
+        let quality = sd3_quality(0.004, 0.0005, 0.001);
+        protocol::validate_quality_metrics(&json!({
+            "status": "runtime_complete",
+            "quality": quality.clone(),
+        }))
+        .expect("the SD3.5 quality block must be fileable as a runtime-complete record");
+        assert_eq!(quality["rootMeanSquareError"], json!(0.001));
+        assert_eq!(
+            quality["rootMeanSquareErrorThreshold"],
+            json!(SD3_RMS_THRESHOLD)
+        );
+    }
+
+    /// The SD3.5 thresholds are the shared image envelope, and the RMS bound is the maximum one —
+    /// the same choice `SDXL_RMS_THRESHOLD` makes, and the reason neither arm invents a tolerance
+    /// ahead of a physical campaign.
+    #[test]
+    fn the_sd3_rms_threshold_is_the_shared_maximum_envelope() {
+        assert_eq!(SD3_RMS_THRESHOLD, MAX_THRESHOLD);
+        assert_eq!(SD3_RMS_THRESHOLD, SDXL_RMS_THRESHOLD);
+    }
+
+    /// The metric is measured by the SHARED helper, not by a second implementation: an identical
+    /// pair is zero on all three, and a uniform per-channel bias moves max, mean and RMS together.
+    #[test]
+    fn the_sd3_metric_helper_is_the_shared_max_mean_rms_comparison() {
+        let image = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176],
+        };
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&image, &image).unwrap();
+        assert_eq!((maximum, mean, rms), (0.0, 0.0, 0.0));
+
+        let mutated = qwen_negative_mutation(&image);
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&mutated, &image).unwrap();
+        for metric in [maximum, mean, rms] {
+            assert!(metric.is_finite(), "{metric}");
+            assert!(metric > SD3_RMS_THRESHOLD, "{metric}");
+        }
+        // A uniform bias makes all three the same number; anything else means the RMS accumulator
+        // is not walking the same pairs.
+        assert!((rms - mean).abs() < 1e-12);
+        assert!((maximum - mean).abs() < 1e-12);
+    }
+
+    /// An unusable comparison is a REFUSAL, not a silent metric: the shared helper refuses a shape
+    /// mismatch and an empty image outright, so no NaN or zero-length division can reach the record.
+    #[test]
+    fn the_sd3_metric_helper_refuses_an_uncomparable_pair() {
+        let left = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 1, 2, 3, 4, 5],
+        };
+        let right = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 1, 2],
+        };
+        assert!(image_max_mean_rms_abs(&left, &right)
+            .unwrap_err()
+            .contains("image shape mismatch"));
+
+        let empty = Image {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+        assert!(image_max_mean_rms_abs(&empty, &empty)
+            .unwrap_err()
+            .contains("image shape mismatch"));
+    }
 
     fn sd3_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
