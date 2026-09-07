@@ -2,8 +2,8 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    ComponentPrecisionFloor, GenerationMemory, LoadPhase, MemoryBudget, MemoryCacheState,
-    MemoryCalibrationIdentity, MemoryGeometry, MemoryMode, MemoryNumericTier,
+    Capabilities, ComponentPrecisionFloor, GenerationMemory, LoadPhase, MemoryBudget,
+    MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode, MemoryNumericTier,
     MemoryOptimizationAuthority, MemoryPhase, MemoryProviderContract, MemoryRunContext,
     MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, TransformerComponent,
@@ -895,6 +895,72 @@ fn probe() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-22738. EVERY SCENARIO LIST IN THIS BINARY DECLARES AN `overlay` ENTRY.
+    ///
+    /// `protocol::settle_plain_overlay_scenario` REPLACES an existing `overlay` scenario and
+    /// refuses — "provider fragment is missing the required overlay scenario" — a fragment that has
+    /// none. The refusal fires while the receipt is being built, i.e. AFTER a completed render, so
+    /// the whole cost of a capture is paid before the omission is visible: that is exactly how the
+    /// Mage arm cost eighteen 11-38 s renders. Nothing else in the binary asked this question
+    /// statically, so a nineteenth arm could repeat it.
+    ///
+    /// Every scenario array literal in this file must therefore carry either the placeholder or an
+    /// `overlay_scenario` binding (the shape `run_flux_one` and `run_qwen_edit_provider` use, where
+    /// the verdict is computed above the literal). The one dynamically-assembled list — the LTX
+    /// arm's, which assigns a `scenarios` binding — is not a literal and is not scanned; it builds
+    /// its entries through the same helper.
+    ///
+    /// MUTATION: deleting the `overlay` entry from any scenario literal, including
+    /// [`mage_scenarios`], reds this with that literal's line number.
+    #[test]
+    fn every_scenario_literal_declares_the_overlay_entry_the_protocol_settles() {
+        let source = include_str!("mlx.rs");
+        let mut scanned = 0_usize;
+        let mut cursor = 0_usize;
+        while let Some(offset) = source[cursor..].find("\"scenarios\": [") {
+            let start = cursor + offset + "\"scenarios\": [".len();
+            let mut depth = 1_usize;
+            let mut index = start;
+            for byte in source[start..].bytes() {
+                match byte {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                index += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            assert!(depth == 0, "an unbalanced scenario literal at byte {start}");
+            let block = &source[start..index];
+            let line = source[..start].lines().count();
+            assert!(
+                block.contains("\"name\": \"overlay\"") || block.contains("overlay_scenario"),
+                "the scenario literal at line {line} declares no overlay entry, so \
+                 settle_plain_overlay_scenario will refuse its fragment after the render"
+            );
+            scanned += 1;
+            cursor = index;
+        }
+        // Non-vacuous: this binary carries many arms, and a scan that matched none would be green.
+        assert!(
+            scanned >= 15,
+            "only {scanned} scenario literals were scanned; the guard has lost its subject"
+        );
+        // The one list that is NOT a literal here is the Mage arm's, hoisted into
+        // [`mage_scenarios`] so the settler can be run over it — assert it by calling it, rather
+        // than leaving the arm this guard exists for outside the guard's reach.
+        assert!(
+            mage_scenarios(0)
+                .as_array()
+                .expect("the Mage scenario list is an array")
+                .iter()
+                .any(|scenario| scenario["name"] == "overlay"),
+            "mage_scenarios declares no overlay entry"
+        );
+    }
 
     #[test]
     fn scoped_generation_preserves_generator_and_finish_failures() {
@@ -11215,6 +11281,12 @@ struct MageArm {
     /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
     /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
     /// silently measure a CFG branch the product does not run (or omit one it does).
+    ///
+    /// It is the SCALE, never the decision: whether a `guidance` reaches the engine at all is read
+    /// off the loaded descriptor's `supports_guidance`, exactly as production reads it
+    /// (`image_jobs/base.rs` `resolve_guidance`). On a distilled member the engine advertises
+    /// `supports_guidance: false` and refuses ANY scale — including this 1.0 — so the value here is
+    /// simply never sent. See [`mage_request`].
     guidance: f32,
     /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
     slug: &'static str,
@@ -11676,7 +11748,28 @@ fn mage_load_spec(
 /// and the encode half of the CoD autoencoder (`assemble` selects `VaePart::Both` on an edit
 /// variant) rather than text-to-image under an edit label. The reference is fitted to the target
 /// geometry, exactly as `image_jobs/base.rs` `fit_engine_image` fits it in production.
-fn mage_request(arm: MageArm, width: u32, height: u32, seed: u64) -> GenerationRequest {
+///
+/// GUIDANCE AND THE NEGATIVE PROMPT ARE READ OFF THE LOADED DESCRIPTOR, NOT OFF THE TABLE (sc-22738).
+/// The six `mage_flow*_turbo:*:mlx` cells were refused at request time with
+/// `unsupported: mage_flow_turbo: guidance is not supported`, before any render: the shared floor
+/// `gen-core/src/generator.rs:3216-3221` (`Capabilities::validate_request`) rejects
+/// `req.guidance.is_some() && !self.supports_guidance`, and `mlx-gen-mage`
+/// `src/model.rs:866-868` publishes `supports_negative_prompt`/`supports_guidance` as
+/// `!variant.is_distilled()` — false on Turbo and EditTurbo (`model.rs:747-749`).
+/// Production never sends either knob on such a route: `image_jobs/base.rs` `resolve_guidance`
+/// (:4632) returns `None` when `!model.supports_guidance()` and `resolve_negative_prompt` (:4870)
+/// returns `None` when `!model.supports_negative_prompt()`, and the generic MLX image path reads
+/// both through them (`generate_stream`, :8609 and :8659). This arm asks the SAME question of the
+/// SAME source — the descriptor the load resolved — so a capability the engine flips is followed
+/// rather than restated, and `arm.guidance` supplies the scale only where one is accepted (the role
+/// `model.default_guidance()` plays in production).
+fn mage_request(
+    arm: MageArm,
+    capabilities: &Capabilities,
+    width: u32,
+    height: u32,
+    seed: u64,
+) -> GenerationRequest {
     GenerationRequest {
         prompt: if arm.edit {
             MAGE_EDIT_PROMPT.to_owned()
@@ -11685,14 +11778,16 @@ fn mage_request(arm: MageArm, width: u32, height: u32, seed: u64) -> GenerationR
         },
         // The distilled members run with CFG genuinely off (`default_cfg` 1.0), at which the engine
         // builds no unconditional branch — a negative prompt there would be a claim about a branch
-        // the render does not execute.
-        negative_prompt: (arm.guidance > 1.0).then(|| "blurry, distorted, text".to_owned()),
+        // the render does not execute, and the same floor refuses it outright.
+        negative_prompt: capabilities
+            .supports_negative_prompt
+            .then(|| "blurry, distorted, text".to_owned()),
         width,
         height,
         count: 1,
         seed: Some(seed),
         steps: Some(arm.steps),
-        guidance: Some(arm.guidance),
+        guidance: capabilities.supports_guidance.then_some(arm.guidance),
         conditioning: if arm.edit {
             vec![Conditioning::Reference {
                 image: Image {
@@ -11857,6 +11952,34 @@ fn mage_zero_phase_error(
     })
 }
 
+/// The scenario verdicts a completed Mage capture files.
+///
+/// WHY THIS IS A FUNCTION AND NOT AN INLINE LITERAL (sc-22738). The list is the input to
+/// [`protocol::settle_plain_overlay_scenario`], which REPLACES the `overlay` entry with a verdict
+/// derived from `planned.target.overlay` — and REFUSES, with "provider fragment is missing the
+/// required overlay scenario", a fragment that has no `overlay` entry to replace. This arm's list
+/// omitted one, so all eighteen `mage_flow*:*:mlx` cells rendered for 11-38 s and were then refused
+/// while building the receipt. Every other arm in this binary declares the placeholder (some as an
+/// `overlay_scenario` binding); Mage was the only omission. Hoisting the list out of the `json!`
+/// literal lets the settler actually be run over it in a test, weights-free, which is what makes the
+/// omission catchable before a campaign pays for the render rather than after.
+///
+/// The verdict itself is NOT authored here: the placeholder is inert and the settler derives the
+/// real one from the plan row, so a Mage anchor re-planned with a material overlay fails closed
+/// instead of acquiring a `not_applicable` it did not earn.
+fn mage_scenarios(predicted: u64) -> Value {
+    json!([
+        { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+        { "name": "unknown_budget", "result": "passed" },
+        { "name": "stale_evidence", "result": "passed" },
+        { "name": "warm_repeat", "result": "passed" },
+        { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+        { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+        { "name": "loadability", "result": "passed" },
+        { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+    ])
+}
+
 /// One Mage-Flow anchor capture, on any of the six catalog ids, at any shipped tier.
 ///
 /// E4: the generator comes from `catalog.media().load(arm.provider, &spec)` — the same registry load
@@ -11906,6 +12029,9 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         .media()
         .load(arm.provider, &spec)
         .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    // The knobs the LOADED provider accepts. Read once, here, and passed to every request this
+    // capture builds — see [`mage_request`] for why the table cannot answer this question.
+    let capabilities = generator.descriptor().capabilities.clone();
     // The plan names a tier; the LOADED provider decides which of its components it holds ABOVE
     // that tier, and the request must carry those promotions or the shared tier check refuses it
     // (see [`active_component_floors`]).
@@ -11988,7 +12114,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let selected = one_image(scoped_generate(
         generator.as_ref(),
-        mage_request(arm, width, height, seed),
+        mage_request(arm, &capabilities, width, height, seed),
         &context,
         None,
         &mut |progress| match progress {
@@ -12103,7 +12229,10 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
 
     let baseline = one_image(
         generator
-            .generate(&mage_request(arm, width, height, seed), &mut |_| {})
+            .generate(
+                &mage_request(arm, &capabilities, width, height, seed),
+                &mut |_| {},
+            )
             .map_err(|error| format!("generate unselected Mage-Flow reference: {error}"))?,
     )?;
     let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
@@ -12115,7 +12244,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     }
     let warm = one_image(scoped_generate(
         generator.as_ref(),
-        mage_request(arm, width, height, seed),
+        mage_request(arm, &capabilities, width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -12125,7 +12254,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
         return Err("Mage-Flow warm repeat changed the deterministic output".to_owned());
     }
 
-    let cancelled = mage_request(arm, width, height, seed);
+    let cancelled = mage_request(arm, &capabilities, width, height, seed);
     let cancel_signal = cancelled.cancel.clone();
     let mut cancel_triggered = false;
     let cancel_error = scoped_generate(
@@ -12156,7 +12285,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     }
     let cancel_recovery = one_image(scoped_generate(
         generator.as_ref(),
-        mage_request(arm, width, height, seed),
+        mage_request(arm, &capabilities, width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -12168,7 +12297,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
 
     let injected = scoped_generate(
         generator.as_ref(),
-        mage_request(arm, width, height, seed),
+        mage_request(arm, &capabilities, width, height, seed),
         &context,
         Some(MemoryPhase::Denoise),
         &mut |_| {},
@@ -12181,7 +12310,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     }
     let error_recovery = one_image(scoped_generate(
         generator.as_ref(),
-        mage_request(arm, width, height, seed),
+        mage_request(arm, &capabilities, width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -12276,15 +12405,7 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
             "variant": tier,
         },
         "sweep": mage_complete_sweep(request)?,
-        "scenarios": [
-            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed" },
-            { "name": "stale_evidence", "result": "passed" },
-            { "name": "warm_repeat", "result": "passed" },
-            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
-            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
-            { "name": "loadability", "result": "passed" }
-        ],
+        "scenarios": mage_scenarios(predicted),
         "predictedPeakBytes": predicted_peaks_json,
         "observedMemory": observed_memory_json,
         "quality": {
@@ -12364,6 +12485,147 @@ mod mage_tests {
                 "fixture": format!("{slug}-mlx-{tier}-{}-seed{MAGE_SEED}-step{steps}", MAGE_EDGE),
             }
         })
+    }
+
+    /// The capability set the PINNED engine publishes for one member, restated so the request
+    /// builder can be driven without weights: `mlx-gen-mage` `src/model.rs:866-868` sets
+    /// `supports_negative_prompt` and `supports_guidance` alike to `!variant.is_distilled()`, and
+    /// `is_distilled` is exactly `Turbo | EditTurbo` (`model.rs:747-749`) — the two `*_turbo`
+    /// catalog ids. Every other capability stays at its conservative default; nothing here reads
+    /// one.
+    fn mage_capabilities(arm: MageArm) -> Capabilities {
+        let guided = !arm.provider.ends_with("turbo");
+        Capabilities {
+            supports_guidance: guided,
+            supports_negative_prompt: guided,
+            ..Capabilities::default()
+        }
+    }
+
+    /// sc-22738. THE RECEIPT CARRIES THE OVERLAY SCENARIO THE PROTOCOL SETTLES.
+    ///
+    /// All eighteen `mage_flow*:*:mlx` cells rendered and were then refused with "provider fragment
+    /// is missing the required overlay scenario": [`protocol::settle_plain_overlay_scenario`]
+    /// REPLACES an existing `overlay` entry and refuses a fragment that has none, and this arm's
+    /// scenario list was the only one in this binary that declared no placeholder. Run over the
+    /// real list, weights-free — the render is what made the omission expensive to find.
+    ///
+    /// MUTATIONS THIS PINS. Deleting the `overlay` entry from [`mage_scenarios`] reds the first
+    /// assertion with the production refusal verbatim. Authoring the verdict in the list instead of
+    /// letting the settler derive it reds the second, whose reason text only the settler writes.
+    /// Relaxing the settler so a material overlay is excused reds the third.
+    #[test]
+    fn the_mage_receipt_settles_the_overlay_scenario_from_the_declared_target() {
+        for arm in MAGE_ARMS {
+            let request = mage_planned(arm.provider, arm.provider, "bf16", arm.steps);
+            let mut fragment = json!({ "scenarios": mage_scenarios(1_024) });
+            protocol::settle_plain_overlay_scenario(&request, &mut fragment, arm.execution_path)
+                .unwrap_or_else(|error| {
+                    panic!("{} must settle its overlay scenario: {error}", arm.provider)
+                });
+            let overlay = fragment["scenarios"]
+                .as_array()
+                .expect("the settled fragment still carries a scenario array")
+                .iter()
+                .find(|scenario| scenario["name"] == "overlay")
+                .expect("the settled overlay scenario")
+                .clone();
+            assert_eq!(overlay["result"], "not_applicable");
+            let reason = overlay["reason"].as_str().expect("a settled reason");
+            assert!(
+                reason.contains(arm.execution_path)
+                    && reason.contains("no second resident network to measure"),
+                "the verdict must be the settler's, derived from the plan row, not authored in \
+                 the list: {reason}"
+            );
+            // A material overlay still fails closed rather than acquiring `not_applicable`.
+            let mut overlaid = request.clone();
+            overlaid["planned"]["target"]["overlay"] = json!("lora");
+            let mut fragment = json!({ "scenarios": mage_scenarios(1_024) });
+            assert!(
+                protocol::settle_plain_overlay_scenario(
+                    &overlaid,
+                    &mut fragment,
+                    arm.execution_path
+                )
+                .is_err(),
+                "{} must refuse a declared LoRA overlay it does not execute",
+                arm.provider
+            );
+        }
+    }
+
+    /// sc-22738. A DISTILLED MAGE ROUTE SENDS NO GUIDANCE AND NO NEGATIVE PROMPT.
+    ///
+    /// The six `mage_flow*_turbo:*:mlx` cells were refused at REQUEST time — before any render —
+    /// with `unsupported: mage_flow_turbo: guidance is not supported`. The shared engine floor
+    /// (`gen-core/src/generator.rs:3216-3221`) rejects a `guidance` on a provider whose
+    /// `Capabilities::supports_guidance` is false, and `mlx-gen-mage` `src/model.rs:866-868`
+    /// publishes both that flag and `supports_negative_prompt` as `!variant.is_distilled()`.
+    /// Production asks the loaded descriptor the same question (`image_jobs/base.rs`
+    /// `resolve_guidance` :4632, `resolve_negative_prompt` :4870, both read by `generate_stream`
+    /// :8609/:8659) and sends neither knob; this arm now does the same.
+    ///
+    /// MUTATIONS THIS PINS. Restoring `guidance: Some(arm.guidance)` — passing the scale on a
+    /// distilled route — reds the first assertion under the engine's own refusal condition.
+    /// Restoring `negative_prompt: (arm.guidance > 1.0).then(…)`, which reads the TABLE rather than
+    /// the descriptor, reds the second. Withholding both unconditionally reds the third and fourth,
+    /// so the fix cannot degenerate into dropping the knobs everywhere.
+    #[test]
+    fn a_distilled_mage_route_sends_no_guidance_and_no_negative_prompt() {
+        let distilled = Capabilities::default();
+        let guided = Capabilities {
+            supports_guidance: true,
+            supports_negative_prompt: true,
+            ..Capabilities::default()
+        };
+        for arm in MAGE_ARMS {
+            let refused = mage_request(arm, &distilled, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
+            assert_eq!(
+                refused.guidance, None,
+                "{} must send no guidance to a provider that does not accept one",
+                arm.provider
+            );
+            assert_eq!(
+                refused.negative_prompt, None,
+                "{} must send no negative prompt to a provider that does not accept one",
+                arm.provider
+            );
+            // The knobs are withheld on CAPABILITY, never on the member being an edit route or on
+            // the fixed prompt — both requests below are the same member.
+            let accepted = mage_request(arm, &guided, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
+            assert_eq!(
+                accepted.guidance,
+                Some(arm.guidance),
+                "{} must send its declared scale where the provider accepts one",
+                arm.provider
+            );
+            assert!(
+                accepted.negative_prompt.is_some(),
+                "{} must send its negative prompt where the provider accepts one",
+                arm.provider
+            );
+            assert_eq!(refused.steps, accepted.steps);
+            assert_eq!(refused.seed, accepted.seed);
+        }
+        // The engine's rule is `supports_guidance: !variant.is_distilled()`, and `is_distilled` is
+        // exactly `Turbo | EditTurbo` (`model.rs:747-749`) — so the two members production withholds
+        // the knobs from are the two `*_turbo` ids. Bound here so a seventh member cannot be added
+        // on the guided default by accident.
+        let distilled_ids = MAGE_ARMS
+            .into_iter()
+            .filter(|arm| arm.guidance == 1.0)
+            .map(|arm| arm.provider)
+            .collect::<Vec<_>>();
+        assert_eq!(distilled_ids, ["mage_flow_turbo", "mage_flow_edit_turbo"]);
+        for arm in MAGE_ARMS {
+            assert_eq!(
+                arm.provider.ends_with("turbo"),
+                arm.steps == 4,
+                "{} disagrees with the engine's distilled recipe",
+                arm.provider
+            );
+        }
     }
 
     /// Every registered Mage id reaches the arm, and a foreign one is refused BY NAME rather than
@@ -12932,7 +13194,8 @@ mod mage_tests {
     #[test]
     fn only_the_edit_members_carry_a_reference_and_only_the_undistilled_a_negative_prompt() {
         for arm in MAGE_ARMS {
-            let request = mage_request(arm, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
+            let capabilities = mage_capabilities(arm);
+            let request = mage_request(arm, &capabilities, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
             assert_eq!(request.conditioning.len(), usize::from(arm.edit));
             if arm.edit {
                 assert!(matches!(
@@ -12941,8 +13204,14 @@ mod mage_tests {
                 ));
             }
             assert_eq!(request.steps, Some(arm.steps));
-            assert_eq!(request.guidance, Some(arm.guidance));
-            assert_eq!(request.negative_prompt.is_some(), arm.guidance > 1.0);
+            // Both knobs follow the pinned engine's published capability for this member, never the
+            // table's scale (sc-22738) — see
+            // `a_distilled_mage_route_sends_no_guidance_and_no_negative_prompt`.
+            assert_eq!(request.guidance.is_some(), capabilities.supports_guidance);
+            assert_eq!(
+                request.negative_prompt.is_some(),
+                capabilities.supports_negative_prompt
+            );
             assert_eq!(request.seed, Some(MAGE_SEED));
         }
     }
