@@ -823,10 +823,16 @@ fn c2_measured_current_cell_selection() {
     let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live, binding_digest,
-        "criterion 2 requires the shipped SC-18237 Qwen q8 binding and evidence record to match \
-         the live provider closure; binding={binding_digest}, live={live}"
+    // sc-22738: currency is a note, not a precondition — the runtime grades the shipped binding
+    // identically whether or not the provider closure has moved since SC-18237.
+    eprintln!(
+        "[sc18101/c2] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {live} ({})",
+        if live == binding_digest {
+            "current"
+        } else {
+            "moved since capture — a re-capture signal for the tooling only"
+        }
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -919,10 +925,10 @@ fn c3_current_lane_enforces_exact_static_boundary() {
     let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live, binding_digest,
-        "criterion 3 requires the current shipped SC-18237 Qwen lane; \
-         binding={binding_digest}, live={live}"
+    // sc-22738: currency is a note, not a precondition (see c2).
+    eprintln!(
+        "[sc18101/c3] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {live}"
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -974,14 +980,8 @@ fn c3_current_lane_enforces_exact_static_boundary() {
         "current exact evidence must still install the request-scoped MLX process ceiling"
     );
 
-    let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
-        .expect("packaged evidence must parse")
-    {
-        sceneworks_core::memory_calibration::BundleLoad::Ready(bundle) => bundle,
-        sceneworks_core::memory_calibration::BundleLoad::Stale(reason) => {
-            panic!("packaged evidence unexpectedly stale: {reason:?}")
-        }
-    };
+    let bundle = sceneworks_core::memory_calibration::load_packaged_bundle()
+        .expect("packaged evidence must parse");
     let envelope = bundle
         .records
         .iter()
@@ -1116,11 +1116,11 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
     let Some((_, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live_qwen_closure_digest(),
-        binding_digest,
-        "the fitted-curve arm requires the shipped SC-18237 Qwen q8 binding and records to match \
-         the live provider closure"
+    // sc-22738: a moved provider closure no longer disqualifies a basis; noted, not asserted.
+    eprintln!(
+        "[sc18101/c5] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {}",
+        live_qwen_closure_digest()
     );
     assert!(
         matches!(

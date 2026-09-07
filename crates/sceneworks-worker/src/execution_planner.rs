@@ -1337,7 +1337,7 @@ mod tests {
 #[cfg(test)]
 mod corpus_replay_tests {
     use super::*;
-    use sceneworks_core::memory_calibration::{load_packaged_bundle, BundleLoad};
+    use sceneworks_core::memory_calibration::load_packaged_bundle;
     use serde_json::Value;
 
     /// The three execution-domain keys, in the spellings a calibration `parameters` block would use
@@ -1360,12 +1360,10 @@ mod corpus_replay_tests {
     /// [`single_declared_value`] may start honoring a measured grid point.
     #[test]
     fn no_shipped_measurement_names_an_execution_domain_axis() {
-        let BundleLoad::Ready(bundle) = load_packaged_bundle().expect("the packaged bundle parses")
-        else {
-            // A stale bundle is a legitimate shipped state (schema/ABI ahead of the corpus) and every
-            // consumer falls back to the legacy path; there is nothing to replay through the planner.
-            return;
-        };
+        // sc-22738: the packaged bundle no longer has a "stale" load state to step aside for —
+        // currency is a re-capture signal for the probe tooling, not a load-time demotion — so
+        // every shipped record is replayed unconditionally.
+        let bundle = load_packaged_bundle().expect("the packaged bundle parses");
         for record in &bundle.records {
             for key in record.strategy.parameters.keys() {
                 assert!(
