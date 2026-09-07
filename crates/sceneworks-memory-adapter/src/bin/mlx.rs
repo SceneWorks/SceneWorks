@@ -6624,6 +6624,234 @@ fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
 }
 
+/// One clip-versus-clip comparison, in [0,1] units, plus the two REFERENCES it was taken against.
+///
+/// A recovery render is compared twice on purpose. Against the measured (cold, first) clip it
+/// answers the record's question — "is the clip after a fault the clip this record characterizes?"
+/// — and against the clean warm control (render two, the render immediately BEFORE the fault) it
+/// answers the diagnostic one: a recovery that matches the clean warm control but not the measured
+/// clip is a cold-versus-warm difference that the fault did not cause, while a recovery that
+/// matches NEITHER, on a pair whose own clean warm comparison passed, isolates the fault.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LtxClipDelta {
+    maximum: f64,
+    mean: f64,
+    rms: f64,
+}
+
+impl LtxClipDelta {
+    fn new((maximum, mean, rms): (f64, f64, f64)) -> Self {
+        Self { maximum, mean, rms }
+    }
+
+    /// The SAME rule the warm repeat is judged by — [`ltx_quality_passes`], one helper, no second
+    /// literal — so a recovery comparison can never be stricter than the determinism check whose
+    /// envelope it borrows.
+    fn passes(self) -> bool {
+        ltx_quality_passes(self.maximum, self.mean, self.rms)
+    }
+
+    /// Thousandths of one 0-255 level. The record's integer measurement channel would round a
+    /// sub-level delta to 0 or 1 and lose exactly the magnitude a reader needs.
+    fn milli_per_255(value: f64) -> u64 {
+        (value * 255.0 * 1000.0).round().max(0.0) as u64
+    }
+}
+
+/// One recovery render's evidence: the clip delta against the measured clip and against the clean
+/// warm control, and the phase the fault was injected at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LtxRecoveryEvidence {
+    vs_measured: LtxClipDelta,
+    vs_clean_warm: LtxClipDelta,
+    /// What the recovery clip IS, not just how far it is from the reference. A delta alone cannot
+    /// tell a clip that collapsed — the shape a post-fault render takes when the state it reads was
+    /// released rather than rebuilt — from one that merely rendered something else.
+    clip: LtxClipSummary,
+}
+
+/// A clip in its own terms: whether its first frame is a single constant value, and its mean level.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LtxClipSummary {
+    degenerate_first_frame: bool,
+    mean_level: f64,
+}
+
+impl LtxClipSummary {
+    fn of(frames: &[Image]) -> Self {
+        let degenerate_first_frame = frames.first().is_none_or(|frame| {
+            frame.pixels.is_empty() || frame.pixels.iter().all(|pixel| *pixel == frame.pixels[0])
+        });
+        let mut sum = 0.0_f64;
+        let mut samples = 0_usize;
+        for frame in frames {
+            for &pixel in &frame.pixels {
+                sum += f64::from(pixel) / 255.0;
+                samples += 1;
+            }
+        }
+        Self {
+            degenerate_first_frame,
+            mean_level: if samples == 0 {
+                0.0
+            } else {
+                sum / samples as f64
+            },
+        }
+    }
+}
+
+/// The LTX-2.3 arm's lifecycle blockers: a recovery-clip FINDING when a post-fault recovery render
+/// leaves the determinism envelope, recorded instead of discarding the capture.
+///
+/// sc-22738 (measured 2026-09-07): `ltx_2_3:q4:mlx` and `ltx_2_3:q8:mlx` each rendered the full
+/// ladder — roughly six minutes of real MLX work apiece — and were then thrown away, because the
+/// post-cancel recovery clip left the envelope and the arm `return Err`ed with a bare sentence that
+/// carried no numbers at all. `ltx_2_3:bf16:mlx` passes the identical sequence bit-identically, so
+/// the difference is the quantized tier, and the same run's CLEAN warm control (render two, taken
+/// before any fault, compared against the measured clip with this very helper) had already passed.
+///
+/// That makes the reading evidence about the ENGINE, not a reason to refuse:
+///
+/// * The peaks, phase boundaries and staging proofs this record ships come from the FIRST render on
+///   a freshly loaded generator. Renders three onward only feed the recovery comparison, so what
+///   they produce cannot corrupt the numbers the record actually claims.
+/// * The refusal destroyed its own evidence. The one observation of this event survived as a single
+///   truncated line in a campaign log with no max/mean/rms, no phase and no clean-warm reference —
+///   the exact diagnostics that were supposed to characterize it.
+/// * Production would see it too. If a cancelled LTX-2.3 render changes the NEXT render on a
+///   quantized tier, that is a user-visible hazard admission and the engine should be told about,
+///   not a capture to re-roll until it comes out clean.
+///
+/// The envelope is NOT weakened: the comparison still runs, still uses [`ltx_quality_passes`] — the
+/// same helper and the same three thresholds the warm repeat is judged by — and an excursion now
+/// lands in `blockers` under the cell's own name with both references and all three metrics, so it
+/// is louder in the store than it was as a dropped capture.
+///
+/// A genuinely invalid capture still refuses: [`video_max_mean_rms_abs`] rejects a frame-count,
+/// dimension or pixel-length change before any of this is reached, and every allocator bound, typed
+/// cancellation outcome and injected-error outcome above remains a hard `Err`.
+/// The recovery-clip diagnostics the record carries beside any blocker: both faults, both
+/// references, all three metrics, plus what each recovery clip IS against the measured clip's own
+/// level. They are emitted whether or not the envelope was left, so a clean capture states the
+/// deltas were zero rather than leaving a reader to infer it from silence.
+fn ltx_recovery_measurements(
+    cancel: LtxRecoveryEvidence,
+    error: LtxRecoveryEvidence,
+    measured: LtxClipSummary,
+) -> Vec<(&'static str, &'static str, u64)> {
+    let mut measurements = Vec::with_capacity(17);
+    for (names, evidence) in [
+        (
+            [
+                [
+                    "cancelRecoveryVersusMeasuredMaximumErrorMilliPer255",
+                    "cancelRecoveryVersusMeasuredMeanErrorMilliPer255",
+                    "cancelRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+                ],
+                [
+                    "cancelRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+                    "cancelRecoveryVersusCleanWarmMeanErrorMilliPer255",
+                    "cancelRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+                ],
+            ],
+            cancel,
+        ),
+        (
+            [
+                [
+                    "errorRecoveryVersusMeasuredMaximumErrorMilliPer255",
+                    "errorRecoveryVersusMeasuredMeanErrorMilliPer255",
+                    "errorRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+                ],
+                [
+                    "errorRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+                    "errorRecoveryVersusCleanWarmMeanErrorMilliPer255",
+                    "errorRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+                ],
+            ],
+            error,
+        ),
+    ] {
+        for (names, delta) in names
+            .into_iter()
+            .zip([evidence.vs_measured, evidence.vs_clean_warm])
+        {
+            for (name, value) in names
+                .into_iter()
+                .zip([delta.maximum, delta.mean, delta.rms])
+            {
+                measurements.push((name, "count", LtxClipDelta::milli_per_255(value)));
+            }
+        }
+    }
+    measurements.push((
+        "measuredClipMeanLevelMilliPer255",
+        "count",
+        LtxClipDelta::milli_per_255(measured.mean_level),
+    ));
+    for (degenerate, level, evidence) in [
+        (
+            "cancelRecoveryFirstFrameDegenerate",
+            "cancelRecoveryMeanLevelMilliPer255",
+            cancel,
+        ),
+        (
+            "errorRecoveryFirstFrameDegenerate",
+            "errorRecoveryMeanLevelMilliPer255",
+            error,
+        ),
+    ] {
+        measurements.push((
+            degenerate,
+            "count",
+            u64::from(evidence.clip.degenerate_first_frame),
+        ));
+        measurements.push((
+            level,
+            "count",
+            LtxClipDelta::milli_per_255(evidence.clip.mean_level),
+        ));
+    }
+    measurements
+}
+
+fn ltx_lifecycle_blockers(
+    tier: &str,
+    fault_phase: MemoryPhase,
+    cancel: LtxRecoveryEvidence,
+    error: LtxRecoveryEvidence,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    for (fault, evidence) in [("cancellation", cancel), ("injected error", error)] {
+        if evidence.vs_measured.passes() {
+            continue;
+        }
+        blockers.push(format!(
+            "LTX-2.3 {tier} {fault} cleanup at {fault_phase:?} changed the warm recovery clip: \
+             against the measured clip max={:.6}, mean={:.6}, rms={:.6} over thresholds \
+             max={LTX_MAX_THRESHOLD:.6}, mean={LTX_MEAN_THRESHOLD:.6}, rms={LTX_RMS_THRESHOLD:.6}; \
+             against the clean warm control max={:.6}, mean={:.6}, rms={:.6}; the recovery clip's \
+             own mean level is {:.6} with a {}degenerate first frame. Recorded as measured \
+             evidence rather than discarding the capture, whose peaks come from the cold first \
+             render",
+            evidence.vs_measured.maximum,
+            evidence.vs_measured.mean,
+            evidence.vs_measured.rms,
+            evidence.vs_clean_warm.maximum,
+            evidence.vs_clean_warm.mean,
+            evidence.vs_clean_warm.rms,
+            evidence.clip.mean_level,
+            if evidence.clip.degenerate_first_frame {
+                ""
+            } else {
+                "non-"
+            },
+        ));
+    }
+    blockers
+}
+
 /// One member of the FLUX.2 family this arm measures, resolved from the plan's
 /// `(target.provider, target.modelId)` — never assumed (sc-22727). Three members today: the 32B
 /// `flux2_dev` flagship and the two klein-9B catalog models, which share ONE engine provider id
@@ -15222,6 +15450,11 @@ struct LtxLifecycleMetrics {
     max_fault_post_cleanup: AllocatorState,
     max_recovery_peak: u64,
     max_recovery_post_cleanup: AllocatorState,
+    /// Recorded, not refused — see [`ltx_lifecycle_blockers`].
+    cancel_recovery: LtxRecoveryEvidence,
+    error_recovery: LtxRecoveryEvidence,
+    /// The measured clip in its own terms, so a recovery summary has something to be read against.
+    measured_clip: LtxClipSummary,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -15358,6 +15591,7 @@ fn verify_ltx_lifecycle(
         maximum_error,
         mean_error,
         rms_error,
+        measured_clip: LtxClipSummary::of(selected),
         ..Default::default()
     };
     phase_sink.mark("lifecycle_cancel")?;
@@ -15430,10 +15664,14 @@ fn verify_ltx_lifecycle(
             bounds.tolerance_bytes,
         ));
     }
-    let cancel_quality = video_max_mean_rms_abs(selected, &cancel_recovery)?;
-    if !ltx_quality_passes(cancel_quality.0, cancel_quality.1, cancel_quality.2) {
-        return Err("LTX-2.3 cancellation cleanup changed the warm recovery clip".to_owned());
-    }
+    // Recorded, not refused — see `ltx_lifecycle_blockers` for why this reading is evidence. Both
+    // references are taken here because only the pair discriminates a fault-caused change from a
+    // cold-versus-warm one.
+    metrics.cancel_recovery = LtxRecoveryEvidence {
+        vs_measured: LtxClipDelta::new(video_max_mean_rms_abs(selected, &cancel_recovery)?),
+        vs_clean_warm: LtxClipDelta::new(video_max_mean_rms_abs(&clean_warm, &cancel_recovery)?),
+        clip: LtxClipSummary::of(&cancel_recovery),
+    };
 
     phase_sink.mark("lifecycle_error")?;
     let mut injected_failure = None;
@@ -15508,10 +15746,11 @@ fn verify_ltx_lifecycle(
             bounds.tolerance_bytes,
         ));
     }
-    let error_quality = video_max_mean_rms_abs(selected, &error_recovery)?;
-    if !ltx_quality_passes(error_quality.0, error_quality.1, error_quality.2) {
-        return Err("LTX-2.3 error cleanup changed the warm recovery clip".to_owned());
-    }
+    metrics.error_recovery = LtxRecoveryEvidence {
+        vs_measured: LtxClipDelta::new(video_max_mean_rms_abs(selected, &error_recovery)?),
+        vs_clean_warm: LtxClipDelta::new(video_max_mean_rms_abs(&clean_warm, &error_recovery)?),
+        clip: LtxClipSummary::of(&error_recovery),
+    };
     Ok(metrics)
 }
 
@@ -16684,8 +16923,8 @@ fn run_ltx_with_admission(
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
             { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
             { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
-            { "name": "cancel", "result": "passed", "reason": "typed cancellation at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
-            { "name": "error", "result": "passed", "reason": "provider fault injection at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "cancel", "result": "passed", "reason": "typed cancellation at the selected rung boundary returned the typed outcome and cleaned up within the clean-warm ALLOCATOR bounds, and a recovery render followed inside the same peak and retention bounds; what that recovery clip CONTAINS is reported in diagnostics, and any excursion from the determinism envelope is named in blockers (sc-22738)", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "provider fault injection at the selected rung boundary returned the typed outcome and cleaned up within the clean-warm ALLOCATOR bounds, and a recovery render followed inside the same peak and retention bounds; what that recovery clip CONTAINS is reported in diagnostics, and any excursion from the determinism envelope is named in blockers (sc-22738)", "cleanupVerified": true, "warmFollowUpPassed": true },
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
         ])
@@ -16840,6 +17079,13 @@ fn run_ltx_with_admission(
                 lifecycle.max_recovery_post_cleanup.cache,
             ),
         ]);
+        // The recovery-clip evidence, in thousandths of one 0-255 level so a sub-level delta
+        // survives the integer channel. Both references travel: see `ltx_lifecycle_blockers`.
+        diagnostic_measurements.extend(ltx_recovery_measurements(
+            lifecycle.cancel_recovery,
+            lifecycle.error_recovery,
+            lifecycle.measured_clip,
+        ));
     }
 
     let mut fragment = json!({
@@ -16879,7 +17125,12 @@ fn run_ltx_with_admission(
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:ltx-2-3-provider-contract-video",
             "executed",
-            [],
+            ltx_lifecycle_blockers(
+                tier,
+                lifecycle_input.fault_phase,
+                lifecycle.cancel_recovery,
+                lifecycle.error_recovery,
+            ),
             diagnostic_measurements,
         ),
         "capturedAt": protocol::captured_at(),
@@ -26045,6 +26296,222 @@ mod qwen_evidence_tests {
 #[cfg(test)]
 mod ltx_tests {
     use super::*;
+
+    /// sc-22738: a recovery clip outside the determinism envelope is RECORDED, not refused — and
+    /// the recording has to survive into the blocker list, because that list is the only place the
+    /// excursion is named. Every half is asserted here: the envelope still discriminates (a delta
+    /// inside it adds nothing, one that leaves it on ANY of the three metrics adds a finding), each
+    /// fault is reported independently, and the finding carries both references and the phase.
+    ///
+    /// The over-envelope case is the real `ltx_2_3:q4:mlx` reading from the 2026-09-07 MLX walk, so
+    /// a future reader can match the finding text against the capture that motivated this.
+    #[test]
+    fn an_ltx_recovery_outside_the_envelope_is_recorded_as_a_blocker_not_refused() {
+        let inside = LtxRecoveryEvidence::default();
+        assert!(
+            ltx_lifecycle_blockers("q4", MemoryPhase::Denoise, inside, inside).is_empty(),
+            "a bit-identical recovery must add no finding"
+        );
+
+        // A delta that leaves the envelope on EXACTLY ONE metric, three times over, so no metric
+        // can be dropped from `LtxClipDelta::passes` unnoticed.
+        for solo in [
+            LtxClipDelta {
+                maximum: LTX_MAX_THRESHOLD * 1.5,
+                mean: 0.0,
+                rms: 0.0,
+            },
+            LtxClipDelta {
+                maximum: 0.0,
+                mean: LTX_MEAN_THRESHOLD * 1.5,
+                rms: 0.0,
+            },
+            LtxClipDelta {
+                maximum: 0.0,
+                mean: 0.0,
+                rms: LTX_RMS_THRESHOLD * 1.5,
+            },
+        ] {
+            assert!(!solo.passes(), "{solo:?} must leave the envelope");
+            let evidence = LtxRecoveryEvidence {
+                vs_measured: solo,
+                vs_clean_warm: LtxClipDelta::default(),
+                clip: LtxClipSummary::default(),
+            };
+            assert_eq!(
+                ltx_lifecycle_blockers("q4", MemoryPhase::Denoise, evidence, inside).len(),
+                1,
+                "a cancellation excursion on one metric must be recorded: {solo:?}"
+            );
+            assert_eq!(
+                ltx_lifecycle_blockers("q4", MemoryPhase::Denoise, inside, evidence).len(),
+                1,
+                "an injected-error excursion on one metric must be recorded: {solo:?}"
+            );
+            assert_eq!(
+                ltx_lifecycle_blockers("q4", MemoryPhase::Denoise, evidence, evidence).len(),
+                2,
+                "the two faults must be reported independently: {solo:?}"
+            );
+        }
+
+        // The envelope is exactly `ltx_quality_passes` — the warm repeat's own rule — so a delta AT
+        // each threshold passes and one ULP-scale step past any of them does not. This is what
+        // makes "the recovery check is stricter than the warm-repeat check" false by construction.
+        let at_threshold = LtxClipDelta {
+            maximum: LTX_MAX_THRESHOLD,
+            mean: LTX_MEAN_THRESHOLD,
+            rms: LTX_RMS_THRESHOLD,
+        };
+        assert!(at_threshold.passes(), "the boundary itself must pass");
+        assert_eq!(
+            at_threshold.passes(),
+            ltx_quality_passes(at_threshold.maximum, at_threshold.mean, at_threshold.rms),
+            "the recovery envelope must be the warm-repeat helper, not a second literal"
+        );
+
+        // The measured `ltx_2_3:q4:mlx` event of 2026-09-07, both faults, to the digit: a recovery
+        // clip a FULL SCALE away from a measured clip its own run had already repeated
+        // bit-identically. Recorded, and the capture is NOT refused.
+        let measured = LtxRecoveryEvidence {
+            vs_measured: LtxClipDelta {
+                maximum: 1.0,
+                mean: 0.190_591,
+                rms: 0.287_367,
+            },
+            vs_clean_warm: LtxClipDelta {
+                maximum: 1.0,
+                mean: 0.190_591,
+                rms: 0.287_367,
+            },
+            clip: LtxClipSummary {
+                degenerate_first_frame: true,
+                mean_level: 0.0,
+            },
+        };
+        let blockers = ltx_lifecycle_blockers("q4", MemoryPhase::Denoise, measured, measured);
+        assert_eq!(
+            blockers.len(),
+            2,
+            "both faults must be recorded: {blockers:?}"
+        );
+        let finding = &blockers[0];
+        for expected in [
+            "LTX-2.3 q4",
+            "cancellation",
+            "Denoise",
+            "against the measured clip max=1.000000, mean=0.190591, rms=0.287367",
+            "against the clean warm control max=1.000000",
+            "mean level is 0.000000 with a degenerate first frame",
+            "rather than discarding the capture",
+        ] {
+            assert!(
+                finding.contains(expected),
+                "the finding must carry {expected:?}: {finding}"
+            );
+        }
+    }
+
+    /// The seventeen recovery diagnostics ship on every lifecycle capture, clean or not, and each one
+    /// carries its OWN metric. A single transposed field here would publish a mislabelled number
+    /// that no reader could catch, so every name is bound to a distinct value.
+    #[test]
+    fn the_recovery_measurements_name_both_faults_both_references_and_all_three_metrics() {
+        let cancel = LtxRecoveryEvidence {
+            vs_measured: LtxClipDelta {
+                maximum: 1.0 / 255.0,
+                mean: 2.0 / 255.0,
+                rms: 3.0 / 255.0,
+            },
+            vs_clean_warm: LtxClipDelta {
+                maximum: 4.0 / 255.0,
+                mean: 5.0 / 255.0,
+                rms: 6.0 / 255.0,
+            },
+            clip: LtxClipSummary {
+                degenerate_first_frame: true,
+                mean_level: 13.0 / 255.0,
+            },
+        };
+        let error = LtxRecoveryEvidence {
+            vs_measured: LtxClipDelta {
+                maximum: 7.0 / 255.0,
+                mean: 8.0 / 255.0,
+                rms: 9.0 / 255.0,
+            },
+            vs_clean_warm: LtxClipDelta {
+                maximum: 10.0 / 255.0,
+                mean: 11.0 / 255.0,
+                rms: 12.0 / 255.0,
+            },
+            clip: LtxClipSummary {
+                degenerate_first_frame: false,
+                mean_level: 14.0 / 255.0,
+            },
+        };
+        let measured = LtxClipSummary {
+            degenerate_first_frame: false,
+            mean_level: 15.0 / 255.0,
+        };
+        let measurements = ltx_recovery_measurements(cancel, error, measured);
+        assert_eq!(measurements.len(), 17);
+        let named: std::collections::BTreeMap<_, _> = measurements
+            .iter()
+            .map(|(name, unit, value)| {
+                assert_eq!(*unit, "count", "{name} must be a count");
+                (*name, *value)
+            })
+            .collect();
+        assert_eq!(named.len(), 17, "every diagnostic name must be distinct");
+        for (name, expected) in [
+            ("cancelRecoveryVersusMeasuredMaximumErrorMilliPer255", 1_000),
+            ("cancelRecoveryVersusMeasuredMeanErrorMilliPer255", 2_000),
+            (
+                "cancelRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+                3_000,
+            ),
+            (
+                "cancelRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+                4_000,
+            ),
+            ("cancelRecoveryVersusCleanWarmMeanErrorMilliPer255", 5_000),
+            (
+                "cancelRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+                6_000,
+            ),
+            ("errorRecoveryVersusMeasuredMaximumErrorMilliPer255", 7_000),
+            ("errorRecoveryVersusMeasuredMeanErrorMilliPer255", 8_000),
+            (
+                "errorRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+                9_000,
+            ),
+            (
+                "errorRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+                10_000,
+            ),
+            ("errorRecoveryVersusCleanWarmMeanErrorMilliPer255", 11_000),
+            (
+                "errorRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+                12_000,
+            ),
+            ("cancelRecoveryMeanLevelMilliPer255", 13_000),
+            ("errorRecoveryMeanLevelMilliPer255", 14_000),
+            ("measuredClipMeanLevelMilliPer255", 15_000),
+            // The boolean travels as 1/0 and is NOT shared between the two faults: the cancel clip
+            // collapsed here and the error clip did not.
+            ("cancelRecoveryFirstFrameDegenerate", 1),
+            ("errorRecoveryFirstFrameDegenerate", 0),
+        ] {
+            assert_eq!(named.get(name), Some(&expected), "{name}");
+        }
+        // Thousandths, not levels: a delta a third of a level below the mean threshold must not
+        // round to zero, which is the whole reason for the unit.
+        assert_eq!(
+            LtxClipDelta::milli_per_255(LTX_MEAN_THRESHOLD / 3.0),
+            333,
+            "a sub-level delta must survive the integer channel"
+        );
+    }
 
     fn ltx_fixture_contract(quant: Option<Quant>) -> mlx_gen::gen_core::MemoryProviderContract {
         let registry = mlx_gen_ltx::provider_registry().unwrap();
