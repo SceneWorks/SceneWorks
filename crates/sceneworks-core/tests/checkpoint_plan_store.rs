@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_import::{
@@ -20,6 +21,17 @@ use sceneworks_core::checkpoint_plan_store::{
     CheckpointPlanVerificationEventV1, APPROVED_ROOTS_FILE, BINDINGS_DIR, CHECKPOINTS_DIR,
     INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, STORE_LOCK_FILE,
 };
+
+/// Lowercase hex sha256, matching the digest form the plan store persists and reports.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 fn fixture_dir(label: &str) -> TempDir {
     tempfile::Builder::new()
@@ -329,11 +341,19 @@ fn semantic_digest_is_locator_independent_but_source_binding_is_not() {
     );
 }
 
-/// A same-size source replacement after verification hashing but before the binding stamp is
-/// sampled must not persist the replacement's stamp: otherwise the next resolve would skip the
-/// hash and trust bytes that were never compared to this plan's digest.
+/// A same-size source replacement inside the verification window — after the binding stamp is
+/// sampled, before the bytes that stamp will stand for are hashed — must not persist that stamp:
+/// otherwise the next resolve would skip the hash and trust bytes that were never compared to this
+/// plan's digest.
+///
+/// The refusal is proven by the digest, never by a stamp difference, so it does not depend on the
+/// host filesystem's change-key resolution. The fixture asserts only the two properties the store
+/// is required to discriminate on: the replacement is the same length and a different digest. It
+/// deliberately does NOT assert that the two files' stamps differ — a same-size in-place rewrite
+/// inside one Windows system clock tick leaves every Windows stamp field identical, and a store
+/// that needed them to differ would be the defect this test exists to catch.
 #[test]
-fn same_size_replacement_between_verification_hash_and_stamp_refuses_without_persistence() {
+fn same_size_replacement_inside_verification_window_refuses_without_persistence() {
     let fx = fixture("stamp-toctou");
     let file = fx.library_dir.join("kreamania.safetensors");
     write_krea_native_file(&file, 0x5a);
@@ -355,17 +375,33 @@ fn same_size_replacement_between_verification_hash_and_stamp_refuses_without_per
     let mut replacement = original.clone();
     let last = replacement.len() - 1;
     replacement[last] ^= 0xff;
-    assert_eq!(replacement.len(), original.len());
+
+    // Preconditions the store is required to discriminate on, stated before it is exercised: the
+    // replacement occupies exactly as many bytes as the original, and hashes to something else.
+    assert_eq!(
+        replacement.len(),
+        original.len(),
+        "the fixture must be a same-size replacement or it proves nothing about the stamp"
+    );
+    let replacement_sha256 = sha256_hex(&replacement);
+    assert_ne!(
+        replacement_sha256, expected_sha256,
+        "the fixture must change the bytes the plan names"
+    );
+
     let mut hook_ran = false;
     let error = fx
         .store
         .compile_linked_with_hook(&root.root_id, "kreamania.safetensors", |event| {
-            assert_eq!(event, CheckpointPlanVerificationEventV1::LayerHashComplete);
+            assert_eq!(event, CheckpointPlanVerificationEventV1::LayerStampCaptured);
             hook_ran = true;
             fs::write(&file, &replacement).unwrap();
         })
-        .expect_err("replacement after hash must not publish an unchecked stamp");
-    assert!(hook_ran, "fixture must replace the source after hashing");
+        .expect_err("replacement inside the verification window must not publish a stamp");
+    assert!(
+        hook_ran,
+        "fixture must replace the source inside the verification window"
+    );
     assert_eq!(
         fs::metadata(&file).unwrap().len(),
         u64::try_from(original.len()).unwrap()
@@ -380,7 +416,10 @@ fn same_size_replacement_between_verification_hash_and_stamp_refuses_without_per
             assert_eq!(actual_checkpoint_id, checkpoint_id);
             assert_eq!(relative_path, "kreamania.safetensors");
             assert_eq!(actual_expected, expected_sha256);
-            assert_ne!(actual_sha256, expected_sha256);
+            assert_eq!(
+                actual_sha256, replacement_sha256,
+                "the refusal must name the bytes actually read, not a stale observation"
+            );
         }
         other => panic!("TOCTOU replacement must refuse as source drift, got {other:?}"),
     }

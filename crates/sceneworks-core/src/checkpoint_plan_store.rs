@@ -262,12 +262,12 @@ pub struct SourceBindingsV1 {
 /// Deterministic fault-injection boundary for the verification-to-publication seam.
 ///
 /// This is not an execution hook. It exists so the plan-store regression fixture can replace a
-/// same-size source after its bytes have been hashed but before the stamp that could be persisted
-/// is sampled.
+/// same-size source inside the verification window: after the stamp that could be persisted has
+/// been sampled, and before the bytes that stamp will stand for are hashed.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointPlanVerificationEventV1 {
-    LayerHashComplete,
+    LayerStampCaptured,
 }
 
 /// A freshly compiled and persisted checkpoint.
@@ -1051,37 +1051,37 @@ fn layer_relative_path(layer: &ImportLayerV1) -> &str {
 
 /// Hash one source while pinning the stamp that can later skip a hash to those bytes.
 ///
-/// A source replaced after hashing but before the final stamp sample must be rejected: persisting
-/// the replacement's stamp would make a later resolve trust bytes never checked against the plan.
-/// The pre-hash stamp is safe to persist only when the post-hash stamp is identical.
+/// `stamp` must have been sampled from `path` *before* this call, and the bytes are hashed after
+/// it. That ordering is what binds the two: any replacement landing before the hash completes is
+/// read by the hash itself and refused on the digest, so the surviving stamp always describes a
+/// file whose contents were verified no earlier than the stamp.
+///
+/// The stamp is deliberately not re-sampled and compared afterwards. A second stamp only detects a
+/// replacement on filesystems whose change key has finer resolution than the replacement is fast:
+/// on Unix `changed_nanos` carries `ctime`'s nanoseconds and discriminates, while every Windows
+/// field (`size_bytes`, `creation_time`, `last_write_time`, `modified_nanos`) is unchanged by a
+/// same-size in-place rewrite inside one ~15.6 ms system clock tick. Hashing after the stamp needs
+/// no such discrimination and therefore holds identically on every platform.
 fn verify_source_and_capture_stamp(
     checkpoint_id: &str,
     relative_path: &str,
     path: &Path,
     expected_sha256: &str,
-    before: SourceStampV1,
-    after_hash: impl FnOnce(),
+    stamp: SourceStampV1,
+    before_hash: impl FnOnce(),
 ) -> Result<SourceStampV1, CheckpointPlanError> {
+    before_hash();
     let hashed = sha256_file(path).map_err(|error| io_error(path, error))?;
-    after_hash();
-    let after = SourceStampV1::of(path).map_err(|error| io_error(path, error))?;
-    if before == after && hashed == expected_sha256 {
-        return Ok(before);
+    if hashed == expected_sha256 {
+        return Ok(stamp);
     }
 
-    // If the stamp changed after an otherwise matching hash, report the bytes now named by the
-    // path. This second hash is diagnostic only; no observation from a rejected verification is
-    // ever persisted or refreshed.
-    let actual_sha256 = if hashed == expected_sha256 {
-        sha256_file(path).map_err(|error| io_error(path, error))?
-    } else {
-        hashed
-    };
+    // No observation from a rejected verification is ever persisted or refreshed.
     Err(CheckpointPlanError::SourceDrifted {
         checkpoint_id: checkpoint_id.to_owned(),
         relative_path: relative_path.to_owned(),
         expected_sha256: expected_sha256.to_owned(),
-        actual_sha256,
+        actual_sha256: hashed,
     })
 }
 
@@ -1712,7 +1712,7 @@ impl CheckpointPlanStore {
     }
 
     /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
-    /// layer has been hashed and before its persisted source stamp is sampled.
+    /// layer's persisted source stamp has been sampled and before its bytes are hashed.
     #[doc(hidden)]
     pub fn compile_linked_with_hook(
         &self,
@@ -1838,9 +1838,9 @@ impl CheckpointPlanStore {
         record.validate_loaded_plan(&plan)?;
 
         // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
-        // the plan names. Sampling a new stamp after inspection would let a same-size replacement
-        // between those operations bypass the next resolve's hash. Re-hash under a stable
-        // before/after stamp and persist that stable stamp instead.
+        // the plan names. Sampling a stamp and trusting the inspector's earlier hash would let a
+        // same-size replacement between those operations bypass the next resolve's hash. Sample
+        // the stamp first, then re-hash under it, and persist the stamp only if that hash matched.
         let mut stamps = BTreeMap::new();
         for layer in &plan.layers {
             if locator_kind(&layer.source) != expected_kind {
@@ -1851,7 +1851,7 @@ impl CheckpointPlanStore {
                 });
             }
             let path = self.layer_path(&checkpoint_id, root_path, layer)?;
-            let before = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
+            let sampled = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
             let fingerprint = layer_fingerprint(layer);
             let relative_path = layer_relative_path(layer);
             let stamp = verify_source_and_capture_stamp(
@@ -1859,8 +1859,8 @@ impl CheckpointPlanStore {
                 relative_path,
                 &path,
                 fingerprint,
-                before,
-                || hook(CheckpointPlanVerificationEventV1::LayerHashComplete),
+                sampled,
+                || hook(CheckpointPlanVerificationEventV1::LayerStampCaptured),
             )?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
@@ -2116,9 +2116,9 @@ impl CheckpointPlanStore {
             let rehashed = !stamp_matches;
             if rehashed {
                 // Same bytes, new entry (touched, re-copied, relinked): refresh the stamp so the
-                // next resolve is cheap again. The refreshed stamp is retained only if it stayed
-                // stable around the exact-byte verification; otherwise it could bless a source
-                // replacement that happened between the hash and stamp sampling.
+                // next resolve is cheap again. `current` was sampled above, before the hash below
+                // reads the bytes, so the refreshed stamp cannot bless a replacement that landed
+                // between the two — the hash reads the replacement and refuses on the digest.
                 let verified_stamp = verify_source_and_capture_stamp(
                     checkpoint_id,
                     relative_path,
