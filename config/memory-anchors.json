@@ -92,6 +92,186 @@
       "overallAllocatorEnvelopeBytes": 113150645436
     },
     {
+      "id": "flux2_klein_9b:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-rehost-t2i-v1:imc-251ed7ac4061106f1987",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json",
+        "sha256": "cf5ac8666c92736cc83643c566af7fe2d61392fccf4f4084a3d4834cf4100bec",
+        "recordId": "imc-251ed7ac4061106f1987",
+        "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-rehost-t2i-v1",
+        "loaderClosureDigest": "b741e32b867a89a537d3e2dced5b942d62c1be794dd05f1d730cbf20204374e8"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15138041888,
+        "denoise": 27541218520,
+        "decode": 35467495840
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15138043936,
+        "denoise": 33413164196,
+        "decode": 66623825544
+      },
+      "overallAllocatorEnvelopeBytes": 66623825544
+    },
+    {
+      "id": "krea_2_raw:mlx:bf16:base:base:krea-2-raw-bf16-mlx-shared-ladder-v1:imc-9511a33e5d5748de9ae7",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json",
+        "sha256": "ec9df84fbea56bff29d1bff3f82ebfa66a836a580499e4928e224a61150fe01e",
+        "recordId": "imc-9511a33e5d5748de9ae7",
+        "calibrationFingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "469220ca0dc2d0a6b65d685ae3f72efb4034351ff244c39ddc4f5bbaaa7f5463"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 7845917348,
+        "denoise": 37696572188,
+        "decode": 39273229248
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 7845917504,
+        "denoise": 45940401156,
+        "decode": 39273229248
+      },
+      "overallAllocatorEnvelopeBytes": 47517058216
+    },
+    {
+      "id": "krea_2_raw:mlx:q4:base:base:krea-2-raw-q4-mlx-shared-ladder-v1:imc-ff84e613361f988ec9c8",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-q4-mlx-evidence.json",
+        "sha256": "d321d0c65a79cb7c375972ba7b3229cc1ab8d1db6c5be6cdc8a433b6562c0261",
+        "recordId": "imc-ff84e613361f988ec9c8",
+        "calibrationFingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "469220ca0dc2d0a6b65d685ae3f72efb4034351ff244c39ddc4f5bbaaa7f5463"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2769826468,
+        "denoise": 12800428836,
+        "decode": 16231312320
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2769826624,
+        "denoise": 16095110156,
+        "decode": 16231312320
+      },
+      "overallAllocatorEnvelopeBytes": 19525993640
+    },
+    {
+      "id": "krea_2_raw:mlx:q8:base:base:krea-2-raw-q8-mlx-shared-ladder-v1:imc-ec21447a802f7bf1c4cf",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-q8-mlx-evidence.json",
+        "sha256": "9b939092bcffbb764a9576e9cdddfd6cf6bd378ca786e8310a1fa6b05c6e9c41",
+        "recordId": "imc-ec21447a802f7bf1c4cf",
+        "calibrationFingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "469220ca0dc2d0a6b65d685ae3f72efb4034351ff244c39ddc4f5bbaaa7f5463"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536021668,
+        "denoise": 20815874852,
+        "decode": 24246758336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4536021824,
+        "denoise": 24135214100,
+        "decode": 24246758336
+      },
+      "overallAllocatorEnvelopeBytes": 27566097584
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -146,6 +326,236 @@
       "overallAllocatorEnvelopeBytes": 22352494592
     },
     {
+      "id": "krea_2_turbo:mlx:bf16:base:base:krea-2-turbo-bf16-mlx-shared-ladder-v1:imc-21df4ccb39c644c3c819",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-bf16-mlx-evidence.json",
+        "sha256": "9d40116e95a9ab4072cddec518b0e1f0b12a1650ade6bc8df81f0f67b1c6fa17",
+        "recordId": "imc-21df4ccb39c644c3c819",
+        "calibrationFingerprint": "krea-2-turbo-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "858b28715ccc2d45a9446b4caf49e19901f50e16c00fc97aaaf4630bc10387f0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 7845606164,
+        "denoise": 37113809472,
+        "decode": 43042940156
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 7845606368,
+        "denoise": 43271854292,
+        "decode": 43042940156
+      },
+      "overallAllocatorEnvelopeBytes": 49200984976,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json",
+        "sha256": "6c5eda994fd714bb8b5a2f495d6584d032ad7850d39961507a85435c1bc4b46b",
+        "recordId": "imc-8bcf5e9fcda82036aec7",
+        "calibrationFingerprint": "krea-2-turbo-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "858b28715ccc2d45a9446b4caf49e19901f50e16c00fc97aaaf4630bc10387f0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2768597780,
+        "denoise": 12722391448,
+        "decode": 16225150040
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2768597984,
+        "denoise": 15117484244,
+        "decode": 16225150040
+      },
+      "overallAllocatorEnvelopeBytes": 18620242836,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "krea_2_turbo:mlx:q8:base:base:krea-2-turbo-q8-mlx-shared-ladder-v1:imc-387060d1e955a3c4a201",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-q8-mlx-evidence.json",
+        "sha256": "0996e7dea15e2df8dd04eee9d9bee43c3ff652b95572a9b3d0a724d1a22f11f4",
+        "recordId": "imc-387060d1e955a3c4a201",
+        "calibrationFingerprint": "krea-2-turbo-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "858b28715ccc2d45a9446b4caf49e19901f50e16c00fc97aaaf4630bc10387f0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4535710484,
+        "denoise": 21331904924,
+        "decode": 28016600152
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4535710688,
+        "denoise": 24170791128,
+        "decode": 28016600152
+      },
+      "overallAllocatorEnvelopeBytes": 30855486356,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "ltx_2_3:mlx:bf16:base:base:sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2:imc-480f79e0b28dc695828b",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json",
+        "sha256": "1736735547265b0493313f76ff2fc3d410fa30821608c1926753cd023c0be904",
+        "recordId": "imc-480f79e0b28dc695828b",
+        "calibrationFingerprint": "sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2",
+        "loaderClosureDigest": "45ac16983aabfab89e3eae3a060f0b77f73c9d8cf125a369771931782b1da6d3"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 121,
+        "fps": 30
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 42177775068,
+        "denoise": 47246583382,
+        "decode": 21585137844
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 44291143926,
+        "denoise": 47246583382,
+        "decode": 21585137844
+      },
+      "overallAllocatorEnvelopeBytes": 49359952240,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "ltx_2_3:mlx:q4:base:base:sc-20772-ltx-2-3-q4-mlx-memory-ladder-v2:imc-2ef125f6374216a361d6",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-3-q4-mlx-evidence.json",
+        "sha256": "b2486c6918d72653bc9f9e124f48991783d2b30dba701105952cbc7202cc5c89",
+        "recordId": "imc-2ef125f6374216a361d6",
+        "calibrationFingerprint": "sc-20772-ltx-2-3-q4-mlx-memory-ladder-v2",
+        "loaderClosureDigest": "45ac16983aabfab89e3eae3a060f0b77f73c9d8cf125a369771931782b1da6d3"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 121,
+        "fps": 30
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 35309220010,
+        "denoise": 15800122314,
+        "decode": 21585137844
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36157579042,
+        "denoise": 15800122314,
+        "decode": 21585137844
+      },
+      "overallAllocatorEnvelopeBytes": 36157579042,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "ltx_2_3:mlx:q8:base:base:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1:imc-5aff3e74b46b30fb797c",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
@@ -190,6 +600,51 @@
       },
       "overallAllocatorEnvelopeBytes": 159636259044,
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "ltx_2_5:mlx:bf16:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-39340b8e9208d6cca309",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": "dev",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-bf16-mlx-evidence.json",
+        "sha256": "9e0ec4396fe0feb7d2fc6b35c09c5694955b414325a1598730856f0f714e1104",
+        "recordId": "imc-39340b8e9208d6cca309",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "9a3161f49e336d17ce95564987d0f73fac816eb21b41cbef24ca91c9ceb51629"
+      },
+      "geometry": {
+        "width": 512,
+        "height": 768,
+        "frames": 145,
+        "fps": 24
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 52462748314,
+        "denoise": 52463272602,
+        "decode": 25522093382
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 56568415122,
+        "denoise": 52463272602,
+        "decode": 25522093382
+      },
+      "overallAllocatorEnvelopeBytes": 56568939410
     },
     {
       "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
@@ -327,6 +782,51 @@
       "overallAllocatorEnvelopeBytes": 66789535288
     },
     {
+      "id": "ltx_2_5:mlx:q4:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-f78ef9654a39b858821a",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": "dev",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-q4-mlx-evidence.json",
+        "sha256": "a3622cfd7408c2e05c6122774599564a81cac6b5e6443949a42da5247cc1860f",
+        "recordId": "imc-f78ef9654a39b858821a",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "9a3161f49e336d17ce95564987d0f73fac816eb21b41cbef24ca91c9ceb51629"
+      },
+      "geometry": {
+        "width": 512,
+        "height": 768,
+        "frames": 145,
+        "fps": 24
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 25850793380,
+        "denoise": 25851312740,
+        "decode": 25522093382
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 29654690318,
+        "denoise": 25851312740,
+        "decode": 25522093382
+      },
+      "overallAllocatorEnvelopeBytes": 29655209678
+    },
+    {
       "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
       "modelId": "ltx_2_5",
       "modelFamily": "ltx-video",
@@ -460,6 +960,834 @@
         "decode": 64847765684
       },
       "overallAllocatorEnvelopeBytes": 69260977594
+    },
+    {
+      "id": "mage_flow:mlx:bf16:base:base:mage-flow-mage-flow-bf16-mlx-shared-ladder-v1:imc-4355eb2a1c8e81825197",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json",
+        "sha256": "5afe81cdd14844977bcd9a00bbeeb7dad1687e51ae66e742e6d7bdb5e2c7e430",
+        "recordId": "imc-4355eb2a1c8e81825197",
+        "calibrationFingerprint": "mage-flow-mage-flow-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7bd0d7080f267bd12f5d8a69e721b4c87cb95f32d172ee9d64e9a668675bfa8a"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 17480069106,
+        "decode": 18007180228
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 20452144718,
+        "decode": 18007180228
+      },
+      "overallAllocatorEnvelopeBytes": 20979255840,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow:mlx:q4:base:base:mage-flow-mage-flow-q4-mlx-shared-ladder-v1:imc-4cd959b92f7e769bbe59",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json",
+        "sha256": "6de22e937e7af3fa36708391b46f8730c440784543faa7fe2815c8be6e1e5d8c",
+        "recordId": "imc-4cd959b92f7e769bbe59",
+        "calibrationFingerprint": "mage-flow-mage-flow-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7bd0d7080f267bd12f5d8a69e721b4c87cb95f32d172ee9d64e9a668675bfa8a"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 7647461640,
+        "decode": 8058388900
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 9208776008,
+        "decode": 8058388900
+      },
+      "overallAllocatorEnvelopeBytes": 9619703268,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow:mlx:q8:base:base:mage-flow-mage-flow-q8-mlx-shared-ladder-v1:imc-989173afd67a15b8b69e",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json",
+        "sha256": "50749fcbe01e54957b497334315ac146911d9a9f7990af77ab499a222ebb70e5",
+        "recordId": "imc-989173afd67a15b8b69e",
+        "calibrationFingerprint": "mage-flow-mage-flow-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7bd0d7080f267bd12f5d8a69e721b4c87cb95f32d172ee9d64e9a668675bfa8a"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 9889792264,
+        "decode": 10302294436
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 11440653640,
+        "decode": 10302294436
+      },
+      "overallAllocatorEnvelopeBytes": 11853155812,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_base:mlx:bf16:base:base:mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1:imc-5ca11acafd1ccc6ba6b1",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json",
+        "sha256": "585247d3f2e66d5abff71dc0cd658e71d9ec7c45b00063222ccb5a451020bd69",
+        "recordId": "imc-5ca11acafd1ccc6ba6b1",
+        "calibrationFingerprint": "mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3b561e43c2acd4f30da44f75b53eef90be24633d0cb932c801c539d6946c37b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 17480066034,
+        "decode": 18007173572
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 20452141646,
+        "decode": 18007173572
+      },
+      "overallAllocatorEnvelopeBytes": 20979249184,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_base:mlx:q4:base:base:mage-flow-mage-flow-base-q4-mlx-shared-ladder-v1:imc-66d5fd9600585126d129",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json",
+        "sha256": "499adcb2fa759607ff75ecd51d903991ff9e6f6e76b8fbec2edb1aa2af779f5f",
+        "recordId": "imc-66d5fd9600585126d129",
+        "calibrationFingerprint": "mage-flow-mage-flow-base-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3b561e43c2acd4f30da44f75b53eef90be24633d0cb932c801c539d6946c37b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 7647461640,
+        "decode": 8058390948
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 9205237054,
+        "decode": 8058390948
+      },
+      "overallAllocatorEnvelopeBytes": 9616166362,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_base:mlx:q8:base:base:mage-flow-mage-flow-base-q8-mlx-shared-ladder-v1:imc-fcfd3e1551d8f3beb43f",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json",
+        "sha256": "2603a160c99e8903779158c0478992265300974919ba19ed0c68aba107e691db",
+        "recordId": "imc-fcfd3e1551d8f3beb43f",
+        "calibrationFingerprint": "mage-flow-mage-flow-base-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3b561e43c2acd4f30da44f75b53eef90be24633d0cb932c801c539d6946c37b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 191222,
+        "denoise": 9889784072,
+        "decode": 10302286244
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 191530,
+        "denoise": 11424130376,
+        "decode": 10302286244
+      },
+      "overallAllocatorEnvelopeBytes": 11836632548,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit:mlx:bf16:base:base:mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1:imc-8590e420672347a08d21",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json",
+        "sha256": "33a3f10b8bf0b08d4e6a731317ace7d391b99418f53bee8735592f9c51834029",
+        "recordId": "imc-8590e420672347a08d21",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "3491229911a52083e4705720179601dc26c43004f11be7c568cf4cc80bd773a1"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 18909905462,
+        "decode": 18936192408
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 24361299170,
+        "decode": 18936192408
+      },
+      "overallAllocatorEnvelopeBytes": 24387586116,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit:mlx:q4:base:base:mage-flow-mage-flow-edit-q4-mlx-shared-ladder-v1:imc-2ee482a8f91b7cdd7475",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json",
+        "sha256": "331e1a0bafe08c1d974df85499ae1f0554a3fc53278223066c9edd39e76a5298",
+        "recordId": "imc-2ee482a8f91b7cdd7475",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "3491229911a52083e4705720179601dc26c43004f11be7c568cf4cc80bd773a1"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 8509125386,
+        "decode": 8472246652
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 12316729146,
+        "decode": 8472246652
+      },
+      "overallAllocatorEnvelopeBytes": 12316729146,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit:mlx:q8:base:base:mage-flow-mage-flow-edit-q8-mlx-shared-ladder-v1:imc-bc00974cbc3a8695be33",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json",
+        "sha256": "dc0c5483480ec55a73493b55a8da463aee8056039db72fbec1c7b5250b48a703",
+        "recordId": "imc-bc00974cbc3a8695be33",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "3491229911a52083e4705720179601dc26c43004f11be7c568cf4cc80bd773a1"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 10957009674,
+        "decode": 10921703548
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 14608832312,
+        "decode": 10921703548
+      },
+      "overallAllocatorEnvelopeBytes": 14608832312,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_base:mlx:bf16:base:base:mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1:imc-e636cbaf2675e9012486",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-bf16-mlx-evidence.json",
+        "sha256": "828f495f705296d747e0f091d79837b50ef1d74ca1dbf264cd7241c4e3c290e8",
+        "recordId": "imc-e636cbaf2675e9012486",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d0d83dcb8ae55a2f1f49afe9a398625d7ba285680527344639744923fe851521"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 18909902646,
+        "decode": 18936189592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 24376648928,
+        "decode": 18936189592
+      },
+      "overallAllocatorEnvelopeBytes": 24402935874,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_base:mlx:q4:base:base:mage-flow-mage-flow-edit-base-q4-mlx-shared-ladder-v1:imc-99384472d6e397257d36",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json",
+        "sha256": "e2880d3289b0117e308f66eb72bcb58896cd38dc1bbe9c428d2f3e2ad51d0ca0",
+        "recordId": "imc-99384472d6e397257d36",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d0d83dcb8ae55a2f1f49afe9a398625d7ba285680527344639744923fe851521"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 8509125386,
+        "decode": 8472246652
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 12314103610,
+        "decode": 8472246652
+      },
+      "overallAllocatorEnvelopeBytes": 12314103610,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_base:mlx:q8:base:base:mage-flow-mage-flow-edit-base-q8-mlx-shared-ladder-v1:imc-d95adbb3ab8537e5be54",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json",
+        "sha256": "5fa07632d56251493c40afe41ec1841b91515a1a7f69c0167d7c55d91e5c6261",
+        "recordId": "imc-d95adbb3ab8537e5be54",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d0d83dcb8ae55a2f1f49afe9a398625d7ba285680527344639744923fe851521"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4536456,
+        "denoise": 10957013770,
+        "decode": 10921707644
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4545680,
+        "denoise": 14613796664,
+        "decode": 10921707644
+      },
+      "overallAllocatorEnvelopeBytes": 14613796664,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_turbo:mlx:bf16:base:base:mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1:imc-e745d017ddf6fafc0f3d",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-mlx-evidence.json",
+        "sha256": "75fa8da5136d7bc16617b75fb44dc377d98772102d759d2646a4f5402dd1437e",
+        "recordId": "imc-e745d017ddf6fafc0f3d",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "bf91a8fba39064710f09c69f7c5ada4288c0996ffc9bae9b625caa0bbe1ac276"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2321564,
+        "denoise": 18390196934,
+        "decode": 18936200084
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2330800,
+        "denoise": 23338149986,
+        "decode": 18936200084
+      },
+      "overallAllocatorEnvelopeBytes": 23884153136,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_turbo:mlx:q4:base:base:mage-flow-mage-flow-edit-turbo-q4-mlx-shared-ladder-v1:imc-b0d374a3410557eb5266",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json",
+        "sha256": "c128b8379459549224a57853c39629350def6dbbb7a490fd5d38d550f40b49c8",
+        "recordId": "imc-b0d374a3410557eb5266",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "bf91a8fba39064710f09c69f7c5ada4288c0996ffc9bae9b625caa0bbe1ac276"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2321564,
+        "denoise": 8067243216,
+        "decode": 8472167020
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2330800,
+        "denoise": 10646689980,
+        "decode": 8472167020
+      },
+      "overallAllocatorEnvelopeBytes": 11051613784,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_turbo:mlx:q8:base:base:mage-flow-mage-flow-edit-turbo-q8-mlx-shared-ladder-v1:imc-89e76115e3046d52dce9",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json",
+        "sha256": "c4f280e85bbdafba200c75c5c88012875271a3b65c4a8739f22dab13b1aa7fd3",
+        "recordId": "imc-89e76115e3046d52dce9",
+        "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "bf91a8fba39064710f09c69f7c5ada4288c0996ffc9bae9b625caa0bbe1ac276"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2321564,
+        "denoise": 10431118544,
+        "decode": 10921598060
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2330800,
+        "denoise": 12887740604,
+        "decode": 10921598060
+      },
+      "overallAllocatorEnvelopeBytes": 13378220120,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_turbo:mlx:bf16:base:base:mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1:imc-c96ca295ccfb9b0ce96f",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json",
+        "sha256": "058dd501f8abf94a31fca8200ee31a48eafb90144ecc132f5c78fa54460e7cf6",
+        "recordId": "imc-c96ca295ccfb9b0ce96f",
+        "calibrationFingerprint": "mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7b01df965a04ef1764c84f21fa7e5828d258006ef5869fbc5117ba06cadd9459"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 150082,
+        "denoise": 17064130848,
+        "decode": 18005972688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 158618,
+        "denoise": 19325169950,
+        "decode": 18005972688
+      },
+      "overallAllocatorEnvelopeBytes": 20267011790,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_turbo:mlx:q4:base:base:mage-flow-mage-flow-turbo-q4-mlx-shared-ladder-v1:imc-a79fd5c72123739f602f",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json",
+        "sha256": "9cec7797270207b3bec3c5371630d837414d495787eb92e2b84864c66cd113e4",
+        "recordId": "imc-a79fd5c72123739f602f",
+        "calibrationFingerprint": "mage-flow-mage-flow-turbo-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7b01df965a04ef1764c84f21fa7e5828d258006ef5869fbc5117ba06cadd9459"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 150082,
+        "denoise": 7112694048,
+        "decode": 8057139888
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 158618,
+        "denoise": 7925102576,
+        "decode": 8057139888
+      },
+      "overallAllocatorEnvelopeBytes": 8869548416,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_turbo:mlx:q8:base:base:mage-flow-mage-flow-turbo-q8-mlx-shared-ladder-v1:imc-0023b1cfe5c69b15d32f",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json",
+        "sha256": "fb3d8b39220999d3a197c4c161ebc38c842a629f818f3610c8553b75e81f27ed",
+        "recordId": "imc-0023b1cfe5c69b15d32f",
+        "calibrationFingerprint": "mage-flow-mage-flow-turbo-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7b01df965a04ef1764c84f21fa7e5828d258006ef5869fbc5117ba06cadd9459"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 150082,
+        "denoise": 9355041056,
+        "decode": 10301060784
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 158618,
+        "denoise": 10167597040,
+        "decode": 10301060784
+      },
+      "overallAllocatorEnvelopeBytes": 11113616768,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
@@ -644,6 +1972,681 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json",
+        "sha256": "82cb486a526509ba620da8563d25b37100a046a7cc662e64d6b9e3f15405c66b",
+        "recordId": "imc-f542a84955c32cbecc3b",
+        "calibrationFingerprint": "sd3-5-large-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7d40a15bc38c80dc57b162946f721b6cee3c47093a043e4ba6eb1561f19882e0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 38111151440,
+        "decode": 44547860448
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 51621898712,
+        "decode": 44547860448
+      },
+      "overallAllocatorEnvelopeBytes": 58058607720
+    },
+    {
+      "id": "sd3_5_large:mlx:q4:base:base:sd3-5-large-q4-mlx-shared-ladder-v1:imc-1f2bb72093b9a28e7822",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-q4-mlx-evidence.json",
+        "sha256": "1d67ffa9a69dd0e59159b1af287ea10779583853f059058dc120d9a8b6daade2",
+        "recordId": "imc-1f2bb72093b9a28e7822",
+        "calibrationFingerprint": "sd3-5-large-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7d40a15bc38c80dc57b162946f721b6cee3c47093a043e4ba6eb1561f19882e0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 10466129312,
+        "decode": 23683803232
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 17635883560,
+        "decode": 23683803232
+      },
+      "overallAllocatorEnvelopeBytes": 30853557480
+    },
+    {
+      "id": "sd3_5_large:mlx:q8:base:base:sd3-5-large-q8-mlx-shared-ladder-v1:imc-e23377d024486df250b9",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-q8-mlx-evidence.json",
+        "sha256": "9b70e13764aa4d74337a1400b2755145665809432e6817f0e20d0fcdc0fbfc84",
+        "recordId": "imc-e23377d024486df250b9",
+        "calibrationFingerprint": "sd3-5-large-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "7d40a15bc38c80dc57b162946f721b6cee3c47093a043e4ba6eb1561f19882e0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 17229678496,
+        "decode": 30447355488
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 23930535464,
+        "decode": 30447355488
+      },
+      "overallAllocatorEnvelopeBytes": 37148212456
+    },
+    {
+      "id": "sd3_5_large_turbo:mlx:bf16:base:base:sd3-5-large-turbo-bf16-mlx-shared-ladder-v1:imc-9698813bd1b3ac3dff77",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-bf16-mlx-evidence.json",
+        "sha256": "7bb5d3808d4ba0cbf43dd616a08a820d0dbcda88325dbaab12a85380e218a464",
+        "recordId": "imc-9698813bd1b3ac3dff77",
+        "calibrationFingerprint": "sd3-5-large-turbo-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "de55a6e157e1663fdff7e18a66657842d485321bf8150cbc1144777574429200"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 331576,
+        "denoise": 30927442676,
+        "decode": 44543581664
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 332600,
+        "denoise": 36065316872,
+        "decode": 44543581664
+      },
+      "overallAllocatorEnvelopeBytes": 49681455860
+    },
+    {
+      "id": "sd3_5_large_turbo:mlx:q4:base:base:sd3-5-large-turbo-q4-mlx-shared-ladder-v1:imc-12d619299de48f1095da",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json",
+        "sha256": "acc486f88f9517832caf8c932174a0ca34aae62c7ab924ee1a443daeeed540af",
+        "recordId": "imc-12d619299de48f1095da",
+        "calibrationFingerprint": "sd3-5-large-turbo-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "de55a6e157e1663fdff7e18a66657842d485321bf8150cbc1144777574429200"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 331576,
+        "denoise": 10127946160,
+        "decode": 23678548064
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 332600,
+        "denoise": 15477511416,
+        "decode": 23678548064
+      },
+      "overallAllocatorEnvelopeBytes": 29028113320
+    },
+    {
+      "id": "sd3_5_large_turbo:mlx:q8:base:base:sd3-5-large-turbo-q8-mlx-shared-ladder-v1:imc-ab5d1076325e7ef8b0c3",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json",
+        "sha256": "341d0a01d0501accbaaacaddb6b3fac8309dae5a23bfa99732513d6df3103161",
+        "recordId": "imc-ab5d1076325e7ef8b0c3",
+        "calibrationFingerprint": "sd3-5-large-turbo-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "de55a6e157e1663fdff7e18a66657842d485321bf8150cbc1144777574429200"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 331576,
+        "denoise": 16891420080,
+        "decode": 30442112096
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 332600,
+        "denoise": 21952341752,
+        "decode": 30442112096
+      },
+      "overallAllocatorEnvelopeBytes": 35503033768
+    },
+    {
+      "id": "sd3_5_medium:mlx:bf16:base:base:sd3-5-medium-bf16-mlx-shared-ladder-v1:imc-61454a8014ee1b8e5756",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-bf16-mlx-evidence.json",
+        "sha256": "a964084d4a96a18f74b855b15e2ca628cca8200cd461f3032c374699a7550e66",
+        "recordId": "imc-61454a8014ee1b8e5756",
+        "calibrationFingerprint": "sd3-5-medium-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3f2b55c44cf13311705a5a5fa6cf8f9dc22e247bcf10c6bd53d4f222c566599"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 20360418800,
+        "decode": 33193988832
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 27095350892,
+        "decode": 33193988832
+      },
+      "overallAllocatorEnvelopeBytes": 39928920924
+    },
+    {
+      "id": "sd3_5_medium:mlx:q4:base:base:sd3-5-medium-q4-mlx-shared-ladder-v1:imc-666ccf6eceaccacd818b",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-q4-mlx-evidence.json",
+        "sha256": "78bc6393fd73242721dba56c699232a55792b1b53634d6e3cc4d34d582bc003a",
+        "recordId": "imc-666ccf6eceaccacd818b",
+        "calibrationFingerprint": "sd3-5-medium-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3f2b55c44cf13311705a5a5fa6cf8f9dc22e247bcf10c6bd53d4f222c566599"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 7319707404,
+        "decode": 20674144096
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 13738466204,
+        "decode": 20674144096
+      },
+      "overallAllocatorEnvelopeBytes": 27092902896
+    },
+    {
+      "id": "sd3_5_medium:mlx:q8:base:base:sd3-5-medium-q8-mlx-shared-ladder-v1:imc-6be8c9aa799061a0d3e3",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-q8-mlx-evidence.json",
+        "sha256": "41549307ddf3ca3c7ee37be13e91b94252854889e648c821a79fdf882489e1d6",
+        "recordId": "imc-6be8c9aa799061a0d3e3",
+        "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c3f2b55c44cf13311705a5a5fa6cf8f9dc22e247bcf10c6bd53d4f222c566599"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 662112,
+        "denoise": 10937912268,
+        "decode": 24534365536
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 663136,
+        "denoise": 17051641436,
+        "decode": 24534365536
+      },
+      "overallAllocatorEnvelopeBytes": 30648094704
+    },
+    {
+      "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json",
+        "sha256": "d6cb8918631aa9e7a53abe0c973765182938a1de12c077d683fc3fdc7fd3b38e",
+        "recordId": "imc-68608ccc1b400583f721",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "135474622b326b40c853d2077ca2d8979bbfa536dc35e9d660ad588f35d82a1b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 20455965880,
+        "denoise": 22874467240,
+        "decode": 29083410392
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 20455999064,
+        "denoise": 29749722826,
+        "decode": 29083410392
+      },
+      "overallAllocatorEnvelopeBytes": 35958665978
+    },
+    {
+      "id": "z_image:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-800990e244049dbde8bf",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-q4-mlx-evidence.json",
+        "sha256": "93a2a6dc57dda1e0c42e7b5a0e31eaec54aa01f79ab74c8b563d901afb749cb0",
+        "recordId": "imc-800990e244049dbde8bf",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "135474622b326b40c853d2077ca2d8979bbfa536dc35e9d660ad588f35d82a1b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5833051064,
+        "denoise": 7728659728,
+        "decode": 14460495576
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5833084248,
+        "denoise": 13366664536,
+        "decode": 14460495576
+      },
+      "overallAllocatorEnvelopeBytes": 20098500384
+    },
+    {
+      "id": "z_image:mlx:q8:base:base:z-image-mlx-independent-materialization-v4:imc-6781d57075b7948bc4b3",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-q8-mlx-evidence.json",
+        "sha256": "7a0b58e8948f91af3fdd8b62a59c58d1d550529724b1f3869f719537741e18da",
+        "recordId": "imc-6781d57075b7948bc4b3",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "135474622b326b40c853d2077ca2d8979bbfa536dc35e9d660ad588f35d82a1b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10921626552,
+        "denoise": 12503367336,
+        "decode": 19549071064
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10921659736,
+        "denoise": 17428345948,
+        "decode": 19549071064
+      },
+      "overallAllocatorEnvelopeBytes": 24474049676
+    },
+    {
+      "id": "z_image_edit:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-3581ee9d281f4b49a4b2",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-bf16-mlx-evidence.json",
+        "sha256": "fc7be270c4fd4f3d3743b60e91090ec8c796edf8e2d18c8f55cf35da30cfe884",
+        "recordId": "imc-3581ee9d281f4b49a4b2",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "c6410b8db2d2e8b2490f359a2836e77cbd16dbaa737a75e798b56e113b203bd3"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 20531281352,
+        "denoise": 25705481800,
+        "decode": 29151933208
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 20531316552,
+        "denoise": 44022366850,
+        "decode": 29151933208
+      },
+      "overallAllocatorEnvelopeBytes": 47468818258
+    },
+    {
+      "id": "z_image_edit:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-36b7bff7e005fb0be9eb",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-q4-mlx-evidence.json",
+        "sha256": "1034feb738ebeb7c81400cd74c83d89b8e900a6f04700ad7198ddd127dbcfd2b",
+        "recordId": "imc-36b7bff7e005fb0be9eb",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "c6410b8db2d2e8b2490f359a2836e77cbd16dbaa737a75e798b56e113b203bd3"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5908986952,
+        "denoise": 11083187400,
+        "decode": 14529638808
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5909022152,
+        "denoise": 29516988468,
+        "decode": 14529638808
+      },
+      "overallAllocatorEnvelopeBytes": 32963439876
+    },
+    {
+      "id": "z_image_edit:mlx:q8:base:base:z-image-mlx-independent-materialization-v4:imc-0eb1a48bbe76202de0c1",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-q8-mlx-evidence.json",
+        "sha256": "c494f4bcd67d3ed151855057dc922249b72464a17bc21d50dd9d69593ba19cd3",
+        "recordId": "imc-0eb1a48bbe76202de0c1",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "c6410b8db2d2e8b2490f359a2836e77cbd16dbaa737a75e798b56e113b203bd3"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10997906504,
+        "denoise": 16172106952,
+        "decode": 19618558360
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10997941704,
+        "denoise": 34270563400,
+        "decode": 19618558360
+      },
+      "overallAllocatorEnvelopeBytes": 37717014808
+    },
+    {
       "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
@@ -806,6 +2809,51 @@
       "overallAllocatorEnvelopeBytes": 11237588992
     },
     {
+      "id": "z_image_turbo:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-84f617daf75fb2e1ece6",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-turbo-bf16-mlx-evidence.json",
+        "sha256": "586dc80698ec48a9402c3035a0fbdb34cadf355abe160c90cf9a36f550f273d7",
+        "recordId": "imc-84f617daf75fb2e1ece6",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "dca26897a1c16f2ad36924a0aa3366e8c9908db8b815c581d323a62281e17edd"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 20455636856,
+        "denoise": 22295350942,
+        "decode": 29083383256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 20455672056,
+        "denoise": 27165995152,
+        "decode": 29083383256
+      },
+      "overallAllocatorEnvelopeBytes": 33954027466
+    },
+    {
       "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
@@ -858,6 +2906,51 @@
         "decode": 14462448216
       },
       "overallAllocatorEnvelopeBytes": 19383375180
+    },
+    {
+      "id": "z_image_turbo:mlx:q8:base:base:z-image-mlx-independent-materialization-v4:imc-39155e037db1a566f017",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-turbo-q8-mlx-evidence.json",
+        "sha256": "1963b5f96f2482fd9995890951fd1d5827e8d4a6535935bf4a3e78c341a292e5",
+        "recordId": "imc-39155e037db1a566f017",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "dca26897a1c16f2ad36924a0aa3366e8c9908db8b815c581d323a62281e17edd"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10923257848,
+        "denoise": 12503886104,
+        "decode": 19551004248
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10923293048,
+        "denoise": 16979261444,
+        "decode": 19551004248
+      },
+      "overallAllocatorEnvelopeBytes": 24026379588
     }
   ],
   "analyticOnly": [
@@ -1645,17 +3738,6 @@
       "route": "flux2_klein_9b",
       "backend": "mlx",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b:mlx:q8",
-      "modelId": "flux2_klein_9b",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "mlx",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -2487,39 +4569,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:krea_2_raw:mlx:bf16",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_raw:mlx:q4",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_raw:mlx:q8",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:krea_2_turbo:candle:bf16",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2568,50 +4617,6 @@
           "vramGbByTier": "35.2"
         }
       }
-    },
-    {
-      "id": "analytic:krea_2_turbo:mlx:bf16",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_turbo:mlx:q4",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "every retained render for this cell ran under the 'control:1' overlay (the largest is on provider 'krea_2_turbo_control'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-2cd840a85ce33b4f22a9",
-        "envelopeBytes": 39417727840,
-        "values": {
-          "provider": "krea_2_turbo_control",
-          "overlay": "control:1"
-        }
-      }
-    },
-    {
-      "id": "analytic:krea_2_turbo:mlx:q8",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:krea_realtime_14b:mlx:bf16",
@@ -2812,28 +4817,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:ltx_2_3:mlx:bf16",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_3:mlx:q4",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:ltx_2_3_eros:mlx:default",
       "modelId": "ltx_2_3_eros",
       "modelFamily": "ltx-video",
@@ -2911,39 +4894,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow:mlx:bf16",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow:mlx:q4",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow:mlx:q8",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_base:candle:bf16",
       "modelId": "mage_flow_base",
       "modelFamily": "mage-flow",
@@ -2971,39 +4921,6 @@
       "modelFamily": "mage-flow",
       "route": "mage_flow_base",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_base:mlx:bf16",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_base:mlx:q4",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_base:mlx:q8",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
@@ -3043,39 +4960,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit:mlx:bf16",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:mlx:q4",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:mlx:q8",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_edit_base:candle:bf16",
       "modelId": "mage_flow_edit_base",
       "modelFamily": "mage-flow",
@@ -3103,39 +4987,6 @@
       "modelFamily": "mage-flow",
       "route": "mage_flow_edit_base",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_base:mlx:bf16",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_base:mlx:q4",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_base:mlx:q8",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
@@ -3175,39 +5026,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit_turbo:mlx:bf16",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_turbo:mlx:q4",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_turbo:mlx:q8",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_turbo:candle:bf16",
       "modelId": "mage_flow_turbo",
       "modelFamily": "mage-flow",
@@ -3235,39 +5053,6 @@
       "modelFamily": "mage-flow",
       "route": "mage_flow_turbo",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:mlx:bf16",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:mlx:q4",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:mlx:q8",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
@@ -4042,39 +5827,6 @@
       }
     },
     {
-      "id": "analytic:sd3_5_large:mlx:bf16",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large:mlx:q4",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large:mlx:q8",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sd3_5_large_turbo:candle:bf16",
       "modelId": "sd3_5_large_turbo",
       "modelFamily": "sd3",
@@ -4097,39 +5849,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:sd3_5_large_turbo:mlx:bf16",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:mlx:q4",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:mlx:q8",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sd3_5_medium:candle:bf16",
       "modelId": "sd3_5_medium",
       "modelFamily": "sd3",
@@ -4147,39 +5866,6 @@
       "route": "sd3_5_medium",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:mlx:bf16",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:mlx:q4",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:mlx:q8",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "mlx",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -5262,39 +6948,6 @@
       }
     },
     {
-      "id": "analytic:z_image:mlx:bf16",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image:mlx:q4",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image:mlx:q8",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:z_image_edit:candle:bf16",
       "modelId": "z_image_edit",
       "modelFamily": "z-image",
@@ -5322,61 +6975,6 @@
       "modelFamily": "z-image",
       "route": "z_image_turbo",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:mlx:bf16",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:mlx:q4",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:mlx:q8",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_turbo:mlx:bf16",
-      "modelId": "z_image_turbo",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_turbo:mlx:q8",
-      "modelId": "z_image_turbo",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
@@ -5608,6 +7206,102 @@
       }
     },
     {
+      "id": "exceeded:bernini:mlx:q4:base:base:bernini-image-q4-mlx-dual-expert-ladder-v1:exc-3ff33b42be1429719760",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 49,
+        "fps": null
+      },
+      "observedFootprintBytes": 108484649848,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_108484649848",
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json",
+        "sha256": "cd5ba0d462bc16eea424b5d99d1057dc4c1044cb8c5efa0fef81e4cc0e5ed8ec",
+        "recordId": "exc-3ff33b42be1429719760",
+        "calibrationFingerprint": "bernini-image-q4-mlx-dual-expert-ladder-v1",
+        "loaderClosureDigest": "bd65cb057e738526eefe1947868fa2c8c05549c261ef8fea5deafc8508398132"
+      }
+    },
+    {
+      "id": "exceeded:bernini:mlx:q8:base:base:bernini-image-q8-mlx-dual-expert-ladder-v1:exc-086e91ed15c7415c4ffc",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 49,
+        "fps": null
+      },
+      "observedFootprintBytes": 108595791424,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_108595791424",
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json",
+        "sha256": "887e4a92e43afdb77981a583df1cfd670425dc00749deb6b707f626038360931",
+        "recordId": "exc-086e91ed15c7415c4ffc",
+        "calibrationFingerprint": "bernini-image-q8-mlx-dual-expert-ladder-v1",
+        "loaderClosureDigest": "bd65cb057e738526eefe1947868fa2c8c05549c261ef8fea5deafc8508398132"
+      }
+    },
+    {
+      "id": "exceeded:bernini_image:mlx:bf16:base:base:bernini-image-bf16-mlx-dual-expert-ladder-v1:exc-55ce757827be31846a13",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 1,
+        "fps": null
+      },
+      "observedFootprintBytes": 94852699512,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_94852699512",
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-image-bf16-mlx-exceeded-evidence.json",
+        "sha256": "3d4e355351c3cc5c227531de3ded2dfa12ee3343a18b2575e649a4d8751d6be6",
+        "recordId": "exc-55ce757827be31846a13",
+        "calibrationFingerprint": "bernini-image-bf16-mlx-dual-expert-ladder-v1",
+        "loaderClosureDigest": "d8e97cad45e8095aedd81c15af5846aaae7f04ea388c44ddd3fb9f92e595c23c"
+      }
+    },
+    {
       "id": "exceeded:flux2_dev:mlx:bf16:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:exc-2c3953f5b6d3a4680b35",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -5637,6 +7331,134 @@
         "recordId": "exc-2c3953f5b6d3a4680b35",
         "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
         "loaderClosureDigest": "503a1581954b9d064d2a1c3e725cd0101405a9271ee36e0366daa043930cc11f"
+      }
+    },
+    {
+      "id": "exceeded:krea_realtime_14b:mlx:bf16:base:base:krea-realtime-14b-bf16-mlx-resident-ladder-v1:exc-596a1ae39ba4e61551cd",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "provider": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "observedFootprintBytes": 109921567216,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_109921567216",
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-realtime-14b-bf16-mlx-exceeded-evidence.json",
+        "sha256": "b7817fa839ae7f2878d7dc2088fc760a83a81756feb01dd30418294f4a67a4f4",
+        "recordId": "exc-596a1ae39ba4e61551cd",
+        "calibrationFingerprint": "krea-realtime-14b-bf16-mlx-resident-ladder-v1",
+        "loaderClosureDigest": "af81efd3813101f61f90861c065d7749235b5874fcfac975aff2b3ee3578d088"
+      }
+    },
+    {
+      "id": "exceeded:krea_realtime_14b:mlx:q4:base:base:krea-realtime-14b-q4-mlx-resident-ladder-v1:exc-c8c7f41ad2c9c1f42023",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "provider": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "observedFootprintBytes": 110079800312,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_110079800312",
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-realtime-14b-q4-mlx-exceeded-evidence.json",
+        "sha256": "e9fb4e293e05f19212b25977a305bd1e004499cc5f1a609b40bf1bd37cf313c0",
+        "recordId": "exc-c8c7f41ad2c9c1f42023",
+        "calibrationFingerprint": "krea-realtime-14b-q4-mlx-resident-ladder-v1",
+        "loaderClosureDigest": "af81efd3813101f61f90861c065d7749235b5874fcfac975aff2b3ee3578d088"
+      }
+    },
+    {
+      "id": "exceeded:krea_realtime_14b:mlx:q8:base:base:krea-realtime-14b-q8-mlx-resident-ladder-v1:exc-e3635aa610448bc8d98a",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "provider": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "observedFootprintBytes": 110094811152,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_110094811152",
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json",
+        "sha256": "74e42d7f05136bf05767fab2d1ed45477d18c5cc66d4ecb375577506cdf47fe8",
+        "recordId": "exc-e3635aa610448bc8d98a",
+        "calibrationFingerprint": "krea-realtime-14b-q8-mlx-resident-ladder-v1",
+        "loaderClosureDigest": "af81efd3813101f61f90861c065d7749235b5874fcfac975aff2b3ee3578d088"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2_i2v_14b:mlx:bf16:base:base:sc-22736-wan2-2-i2v-a14b-mlx-dense-v1:exc-8071db4312d55971c74b",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "provider": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 106174403704,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_106174403704",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-i2v-14b-bf16-mlx-exceeded-evidence.json",
+        "sha256": "faeee6a3503e3586f1895862f050ea8ac8f92b68f04fa42bb6d76c133e344d97",
+        "recordId": "exc-8071db4312d55971c74b",
+        "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-dense-v1",
+        "loaderClosureDigest": "c344ac5cf322fe884fa0227ffa45e31c48af31118d3a8c41f599ab61b27e8095"
       }
     }
   ]

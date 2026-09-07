@@ -1,0 +1,62 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "96b0998cdd4b6d0f637e6a87aa74fab41cdf702e60669a93d2f250c262f39ae4",
+        "repository": "SceneWorks/bernini-mlx",
+        "resolvedRevision": "533d688f16c8f33dc832890c1e16c11921a2019a",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "bernini-image-q8-mlx-dual-expert-ladder-v1",
+      "capturedAt": "2026-09-07T02:08:45.185Z",
+      "ceilingBytes": 94822600832,
+      "eventFileSha256": "318ecf80182f2673a62ead93649acd9958aefa047d88cb699cc31ef0129987e4",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-086e91ed15c7415c4ffc",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-1dd5c7480d6b8b0dcad3",
+      "observedFootprintBytes": 108595791424,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_108595791424",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "72f9dfc2f351367de90fd1bd36080879808f2badd90222405e7aa222381f7a7c",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:66bb079c52848e9579d2d8e1ce91047e74868f19ee71c5d804e823511ed9f9b2",
+          "revision": "414c70322003884dbd9740a8597d8e48a3c4bb59"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 49,
+          "height": 480,
+          "width": 848
+        },
+        "mode": "text_to_video",
+        "modelId": "bernini",
+        "overlay": "none",
+        "provider": "bernini",
+        "tier": "q8"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}
