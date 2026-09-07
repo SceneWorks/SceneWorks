@@ -19,6 +19,12 @@
 //     [--skip-current]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
 //
+// A cell the store already carries a CURRENT measured lower bound for classifies `exceeded_current`
+// and is never scheduled, with or without `--skip-current` (sc-22738): the host has proved it cannot
+// finish there under this loader closure, and a re-run could only re-establish the same inequality.
+// A bound that has STALED classifies nothing, so the cell is capturable again the moment its
+// evidence stops speaking for production.
+//
 // `--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle in
 // <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
 // anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
@@ -1192,6 +1198,45 @@ export async function readMatrixCurrency(root = ROOT) {
   return current;
 }
 
+/**
+ * The measured lower bounds the store already holds, keyed like an anchor
+ * (`<modelId>:<tier>:<backend>`), each with whether it is CURRENT (sc-22738).
+ *
+ * A bound is evidence about a cell exactly as a record is — the run established that this cell's
+ * peak is at or above the footprint the guard stopped it at — but it is carried in the store's
+ * `exceededBounds` array and its bundle's `records` array is empty, so neither `capturedInCampaign`
+ * (which indexes `records`) nor the matrix's currency map (which publishes only anchors) could see
+ * it. A cell the host has already proved it cannot finish therefore classified `runnable` and the
+ * next `--skip-current` re-run would book the same 76-minute render again.
+ *
+ * Currency is the SAME rule a record's is (`generate-memory-matrix.mjs`, both `current:` sites):
+ * the row's `source.loaderClosureDigest` against the digest `config/anchor-loader-closures.json`
+ * carries for that `(modelId, backend)` at the pinned inference revision. So a bound stops
+ * classifying its cell the moment a pin bump or a closure edit stales it — the same moment it stops
+ * refusing anything in production — and the cell becomes capturable again with no edit here.
+ */
+export async function readExceededBounds(root = ROOT) {
+  const bounds = new Map();
+  let store;
+  let closures;
+  try {
+    store = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
+    closures = JSON.parse(await readFile(path.join(root, ANCHOR_LOADER_CONFIG_PATH), "utf8"));
+  } catch {
+    return bounds;
+  }
+  for (const bound of store.exceededBounds ?? []) {
+    if (!bound.modelId || !bound.tier || !bound.backend) continue;
+    const declared = closures.models?.[`${bound.modelId}:${bound.backend}`]?.digest;
+    bounds.set(`${bound.modelId}:${bound.tier}:${bound.backend}`, {
+      current: declared !== undefined && declared === bound.source?.loaderClosureDigest,
+      source: bound.source?.path ?? ANCHOR_STORE_PATH,
+      observedFootprintBytes: bound.observedFootprintBytes ?? null,
+    });
+  }
+  return bounds;
+}
+
 export async function compiledInferencePin(root = ROOT) {
   const source = await readFile(path.join(root, ADAPTER_LIB_PATH), "utf8");
   const match = /^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/m.exec(source);
@@ -1379,7 +1424,7 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
@@ -1415,6 +1460,22 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     };
   }
   if (captured.has(key)) return { ...row, status: "already_captured", reason: captured.get(key) };
+  // sc-22738: a CURRENT measured lower bound is a captured cell, not an uncaptured one. The run that
+  // produced it established the one fact a re-run could establish — this cell's peak is at or above
+  // a footprint this host had to stop — so booking it again spends another guarded render (76
+  // minutes for the bernini bf16 stop) to learn the same thing, and the only reason it stayed
+  // `runnable` is that a bound's bundle carries no `records` entry for the classifier to see. A
+  // STALE bound classifies nothing: the cell goes back to `runnable`, because the loader closure it
+  // was measured under is no longer the one production loads.
+  const bound = bounds.get(key);
+  if (bound?.current) {
+    return {
+      ...row, status: "exceeded_current", current: true,
+      reason:
+        `exceeded bound recorded at the pinned inference revision (${bound.source}); the host `
+        + "already proved this cell cannot complete under this loader closure",
+    };
+  }
   if (declaredLanes && !declaredLanes.has(`${parts.modelId}:${backend}`)) {
     return {
       ...row, status: "lane_undeclared",
@@ -1739,6 +1800,65 @@ export function appendPackagedSource(source, relativePath) {
   return `${source.slice(0, at)}${entry}\n${source.slice(at)}`;
 }
 
+/**
+ * The two Rust builder stages' evidence-copy blocks, and the line that opens each of them.
+ *
+ * Every `include_str!` `memory_anchor.rs` compiles in must ALSO be copied into both Docker builder
+ * contexts, or `docker build` breaks while `cargo build` on a checkout stays green — the two see
+ * different trees. `scripts/platform-review-contracts.test.mjs` ("Rust Docker builders copy every
+ * production generated embed from sceneworks-core") asserts exactly that, counting the `COPY <path>
+ * ./<dir>/` line twice. `appendPackagedSource` added the embed and left the Dockerfile alone, so
+ * every anchor commit — a completed capture's as much as a hard stop's — landed a red tree that had
+ * to be repaired by hand afterwards (PR #2759 and the bernini q4 seed both did).
+ */
+export const DOCKERFILE_PATH = "docker/rust.Dockerfile";
+export const DOCKERFILE_EMBED_ANCHOR = "COPY docs/generated/memory-calibration-evidence.json ./docs/generated/";
+
+/**
+ * `dockerfile` with `relativePath` copied into BOTH builder stages, idempotently.
+ *
+ * Placement follows the lines already there rather than inventing an order: inside the same
+ * directory group in sorted position (so `docs/calibration/sc-22738/` stays readable as one block),
+ * else after the last line of the same `docs/<kind>/` family, else at the end of the block. The
+ * block is the contiguous run of `COPY` lines around each occurrence of [`DOCKERFILE_EMBED_ANCHOR`],
+ * which is the one embed both stages have carried since the file was written.
+ *
+ * Fails when the two blocks cannot be found: a Dockerfile this cannot read must red the run rather
+ * than silently commit an embed the image will not carry.
+ */
+export function insertEvidenceCopy(dockerfile, relativePath) {
+  const directory = relativePath.slice(0, relativePath.lastIndexOf("/") + 1);
+  const entry = `COPY ${relativePath} ./${directory}`;
+  const lines = dockerfile.split("\n");
+  const anchors = lines.flatMap((line, index) => (line === DOCKERFILE_EMBED_ANCHOR ? [index] : []));
+  if (anchors.length !== 2) {
+    fail(
+      `${DOCKERFILE_PATH} carries ${anchors.length} "${DOCKERFILE_EMBED_ANCHOR}" lines, not the two `
+        + "builder stages this run must copy the new evidence into",
+    );
+  }
+  const family = `COPY ${directory.split("/").slice(0, 2).join("/")}/`;
+  // Last block first: an insertion shifts every LATER index, never an earlier one.
+  for (const anchor of [...anchors].reverse()) {
+    let start = anchor;
+    while (start > 0 && lines[start - 1].startsWith("COPY ")) start -= 1;
+    let end = anchor;
+    while (end + 1 < lines.length && lines[end + 1].startsWith("COPY ")) end += 1;
+    if (lines.slice(start, end + 1).includes(entry)) continue;
+    let at = null;
+    for (let index = start; index <= end; index += 1) {
+      if (!lines[index].startsWith(`COPY ${directory}`)) continue;
+      if (lines[index] > entry) { at = index; break; }
+      at = index + 1;
+    }
+    if (at === null) {
+      for (let index = start; index <= end; index += 1) if (lines[index].startsWith(family)) at = index + 1;
+    }
+    lines.splice(at ?? end + 1, 0, entry);
+  }
+  return lines.join("\n");
+}
+
 /** Anchors already ingested under the campaign directory, keyed by anchor key. */
 export async function capturedInCampaign(root, campaignDir) {
   const captured = new Map();
@@ -2005,7 +2125,9 @@ export async function measureAnchor(row, context) {
   const exceededOutput = path.join(workDir, "captures", `${slug}-exceeded.json`);
   const exceededEvidenceRelative = `${campaignDir}/${slug}-exceeded-evidence.json`;
   const started = Date.now();
-  const touched = [ANCHOR_STORE_PATH, MATRIX_PATH, MATRIX_MD_PATH, PACKAGED_SOURCES_PATH];
+  // sc-22738: the Dockerfile moves with the packaged-source list, on BOTH commit paths — an embed
+  // the image does not copy is a red `platform-review-contracts` suite on a commit already made.
+  const touched = [ANCHOR_STORE_PATH, MATRIX_PATH, MATRIX_MD_PATH, PACKAGED_SOURCES_PATH, DOCKERFILE_PATH];
   const exec = (command, commandArgs, options = {}) => run(command, commandArgs, { cwd: root, ...options });
   const gitAt = (gitArgs) => git(gitArgs, root);
   const created = [];
@@ -2054,6 +2176,10 @@ export async function measureAnchor(row, context) {
       }
       const rust = await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8");
       await writeFile(path.join(root, PACKAGED_SOURCES_PATH), appendPackagedSource(rust, target));
+      // The same corpus, into both Docker builder contexts. Idempotent, so a re-ingest of a bundle
+      // already packaged rewrites nothing.
+      const dockerfile = await readFile(path.join(root, DOCKERFILE_PATH), "utf8");
+      await writeFile(path.join(root, DOCKERFILE_PATH), insertEvidenceCopy(dockerfile, target));
       await extractSeedingNewAnchors(exec, root, log);
       await exec(process.execPath, [
         "scripts/anchor-loader-closure.mjs", "--repo", path.resolve(args.inferenceRepo), "--stamp-anchors",
@@ -2189,6 +2315,10 @@ export async function planRun(args, root = ROOT) {
   const campaign = args.campaign ?? `catalog-${new Date().toISOString().slice(0, 10)}`;
   const campaignDir = `docs/calibration/${campaign}`;
   const captured = await capturedInCampaign(root, campaignDir);
+  // sc-22738: measured lower bounds are campaign-independent — they live in the committed store, not
+  // under one campaign directory — so a bound recorded by an earlier campaign still speaks for the
+  // cell as long as its currency key is the pinned one.
+  const bounds = await readExceededBounds(root);
   const declaredLanes = await readDeclaredLanes(root);
   const declaredProviders = await readDeclaredProviders(root);
   const hubs = hubRoots(args.hfCache);
@@ -2206,7 +2336,7 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, bounds, declaredLanes, declaredProviders, sdxlRoutes });
     if (row.status === "other_backend" && !args.anchors) continue;
     // An unperformed route-revision comparison is reported on the row it did not happen for, so a
     // run without an inference checkout cannot silently look like a run that proved the engine agrees.
