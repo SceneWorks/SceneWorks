@@ -1508,11 +1508,16 @@ fn gated_fragment_body(parts: PlainGatedFragment<'_>) -> Value {
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
-    // The failure line FIRST, informational notes after it. `measure-memory-catalog.mjs` names a
-    // failed capture by the FIRST line the adapter wrote to stderr, so a per-render note printed the
-    // moment the render returned would be the line the runner quotes for a capture that failed after
-    // it — which is how eighteen sc-22738 Mage refusals were reported as a GPU-view coherence
-    // statistic rather than as the lifecycle refusal that actually stopped them.
+    // The failure line FIRST, informational notes after it — which is how eighteen sc-22738 Mage
+    // refusals came to be reported as a GPU-view coherence statistic rather than as the lifecycle
+    // refusal that actually stopped them: a per-render note printed the moment the render returned
+    // sat where the outcome belonged.
+    //
+    // The runner reads the OTHER end (`measure-memory-catalog.mjs#failureReason` quotes the last
+    // non-banner line), so this ordering alone would have put the same tally back in every summary
+    // row. `failureReason` therefore skips the `note:` prefix `flush_deferred_notes` writes below;
+    // that prefix is the contract between the two, and renaming it here without teaching the
+    // runner reinstates the defect (sc-22738).
     eprintln!("memory-strategy provider adapter: {}", message.as_ref());
     flush_deferred_notes();
     std::process::exit(1);
