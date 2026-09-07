@@ -66,6 +66,61 @@ export const MATRIX_MD_PATH = "docs/generated/memory-matrix.md";
 /** A well-formed but meaningless key the extractor accepts for a NEW anchor; `--stamp-anchors`
  *  re-derives every key at its record's own revision right after, before anything is committed. */
 export const SEED_DIGEST = "0".repeat(64);
+/**
+ * sc-22738: the ceiling on any ONE file this runner will stage, and the rule behind it.
+ *
+ * The three `ltx_2_5:*:mlx` anchor commits of the 2026-09-07 rerun each carried the render's
+ * selected/reference A/V pair — six `implan-*-{selected_av,reference_av}-*.avbin` files of 165–176 MB,
+ * ~1 GB in all — because the receipt copy below took EVERYTHING the harness had written under the
+ * campaign prefix. GitHub refused the push. Rendered media never belongs in the evidence tree: the
+ * evidence JSON already carries each output's content digest (also in its filename), byte length,
+ * geometry and frame count, and the quality metrics computed from it, and the harness verifies the
+ * bytes against that receipt at capture and again at ingest (`--source-root`). So the copy keeps the
+ * `<session>.log` + `<session>.request.json` pair alone (`receiptDisposition`), and `assertStageable`
+ * refuses to `git add` any file over this ceiling with a message that names it. Tooling only: nothing
+ * at runtime reads it.
+ */
+export const MAX_STAGED_FILE_BYTES = 50 * 1024 * 1024;
+/** The two receipts a physical MLX session commits, named from its `ims-<20 hex>` session id. */
+export const PHYSICAL_RECEIPT_BASENAME = /^ims-[0-9a-f]{20}\.(log|request\.json)$/;
+
+/**
+ * What the receipt copy does with one entry the harness left under `<rawLogDir>/<campaignDir>`:
+ * `"receipt"` — copied beside the evidence and committed; `"rendered_output"` — left in the work dir,
+ * its digest/length/geometry being the evidence. Default-deny: anything that is not one of the two
+ * named receipts is a provider output, whatever its extension (`.rgb`, `.avbin`, or a format a later
+ * arm invents), so no new media type can slip into a commit by not being listed here.
+ */
+export function receiptDisposition(name) {
+  return PHYSICAL_RECEIPT_BASENAME.test(name) ? "receipt" : "rendered_output";
+}
+
+/**
+ * Refuse to stage any file over `MAX_STAGED_FILE_BYTES`. Walks directories. Throws through `fail`
+ * naming every offender and its size, so a runner that somehow reaches `git add` with a render in
+ * hand stops BEFORE the commit exists rather than at the push.
+ */
+export async function assertStageable(root, relativePaths, ceiling = MAX_STAGED_FILE_BYTES) {
+  const oversized = [];
+  const visit = async (relative) => {
+    const absolute = path.join(root, relative);
+    const info = await stat(absolute);
+    if (info.isDirectory()) {
+      for (const name of await readdir(absolute)) await visit(path.posix.join(relative, name));
+      return;
+    }
+    if (info.size > ceiling) oversized.push(`  ${relative} (${info.size} bytes)`);
+  };
+  for (const relative of relativePaths) await visit(relative);
+  if (oversized.length > 0) {
+    fail(
+      `refusing to stage ${oversized.length} file(s) over the ${ceiling}-byte (50 MB) staging ceiling. `
+      + "Rendered media never enters the evidence tree: the evidence JSON carries its sha256, byte "
+      + "length, geometry/frames and quality metrics instead (sc-22738).\n"
+      + oversized.join("\n"),
+    );
+  }
+}
 export const HARNESS = "scripts/memory-calibration-harness.mjs";
 
 // LTX-2.5 is bound by the harness itself (`--ltx25-snapshot-root`), at the revision it hard-codes.
@@ -721,7 +776,9 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * fails, and a sourceCapture without the raw-log pair fails too. So exactly these arms get
  * `SCENEWORKS_MEMORY_CAPTURE_DIR` + `SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`, the harness's
  * `--raw-log-dir`/`--source-path-prefix`, `ingest --source-root`, and the receipt copy into the
- * campaign directory — and no other arm gets any of them.
+ * campaign directory — and no other arm gets any of them. The copy takes the `<session>.log` and
+ * `<session>.request.json` pair ONLY; the rendered selected/reference outputs the same arms write
+ * beside them stay in the work dir (`receiptDisposition`, sc-22738).
  *
  * sc-22738: this used to be spelled `physical`, which conflated the emission with the CURRENCY rule
  * below and so bound the pair to `qwen_image` alone. `crates/.../bin/mlx_ltx25.rs` has emitted a
@@ -2501,8 +2558,16 @@ export async function measureAnchor(row, context) {
         const receipts = path.join(rawLogDir, campaignDir);
         try {
           for (const name of await readdir(receipts)) {
+            // sc-22738: the session's log + request pair is the committed receipt; the rendered
+            // selected/reference outputs beside them are not — the bundle's `outputs[]` already
+            // names each one's digest, byte length, geometry and frames, verified at ingest above.
+            if (receiptDisposition(name) !== "receipt") {
+              const { size } = await stat(path.join(receipts, name));
+              log.write(`excluded rendered output ${name} (${size} bytes): its digest, length and geometry are the evidence\n`);
+              continue;
+            }
             created.push(`${campaignDir}/${name}`);
-            await cp(path.join(receipts, name), path.join(root, campaignDir, name), { recursive: true, force: false, errorOnExist: true });
+            await cp(path.join(receipts, name), path.join(root, campaignDir, name), { force: false, errorOnExist: true });
           }
         } catch (error) {
           fail(`copy physical receipts from ${receipts}: ${error.message}`);
@@ -2525,6 +2590,8 @@ export async function measureAnchor(row, context) {
       }
       await exec(process.execPath, ["scripts/generate-memory-matrix.mjs"], { log });
 
+      // sc-22738: nothing over the staging ceiling reaches the index, whatever put it there.
+      await assertStageable(root, [...touched, ...created]);
       // `-f`: the harness's `<session>.log` receipt matches the blanket `*.log` ignore rule.
       await gitAt(["add", "-f", "--", ...touched, ...created]);
       const stray = await gitAt(["status", "--porcelain"]);
