@@ -21,9 +21,16 @@ use serde_json::{Map, Value};
 /// adapters emitted them as verbatim copies of `allocatorBytes`, so a v4 record could — and every
 /// committed MLX record did — assert wired residency above the probed wired ceiling as a pure
 /// artifact of that aliasing. A v4 bundle is not upgradeable in place by a reader (it carries no
-/// way to tell a measured field from an aliased one), so it loads as `BundleLoad::Stale`.
+/// way to tell a measured field from an aliased one), and its aliased counters fail `EvidenceBundle`'s
+/// `deny_unknown_fields` parse outright.
 ///
-/// Schema v4 added the required per-record `loadShape` axis; v3 and earlier are likewise stale.
+/// Schema v4 added the required per-record `loadShape` axis.
+///
+/// TOOLING CONSTANTS, NOT A RUNTIME GATE (sc-22738). The packaged bundle is asserted to carry these
+/// versions by `cargo test` (`packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out`)
+/// and the harness stamps them; [`load_bundle`] does NOT compare them. A bundle whose version fields
+/// drifted but whose records still parse and validate serves those records exactly as a current one
+/// would — version drift is a re-capture signal for the probe tooling, never a runtime demotion.
 pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 6;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
@@ -54,12 +61,18 @@ pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
 /// (`mlx-gen-krea`) and on candle (`candle-gen-krea`), which are different code paths that must
 /// never be compared against each other.
 ///
+/// A RE-CAPTURE SIGNAL FOR THE PROBE TOOLING, NEVER A RUNTIME INPUT (sc-22738). The runtime
+/// admission seam — `mlx_fit_gate`, `candle_memory_strategy`, `vram_gate`, `krea_control_fit`,
+/// `video_admission`, `memory_strategy` — does not call this and carries no field to compare it
+/// against: a measured record is admitted exactly as if it were current whether or not its
+/// provider's closure has since moved, because a fix to shared engine code touches nearly every
+/// closure and shipping it must neither wait on hours of re-measurement nor silently move what a
+/// live request gets. The scripts that decide what to re-capture (`measure-memory-catalog.mjs`,
+/// `stale-lane-report.mjs`, `generate-memory-matrix.mjs`) read the same ledger from JavaScript;
+/// this accessor exists for tests that stamp fixtures at the declared digest.
+///
 /// `None` is a real answer: the lane carries no currency term, so nobody derived what code its
-/// measurements were taken against and no measurement on it can ever read as CURRENT. Callers
-/// therefore fall back to the conservative analytic estimate — they must NOT treat `None` as
-/// grounds to refuse admission (sc-22512, epic requirement E8: absence never blocks; a measurement
-/// only ever improves an estimate). Runtime catching, not a build-time gate, is the failure posture
-/// for an estimate that turns out too low.
+/// measurements were taken against (sc-22512, epic requirement E8: absence never blocks).
 pub fn packaged_closure_digest(backend: &str, provider: &str) -> Option<String> {
     serde_json::from_str::<Value>(PACKAGED_INFERENCE_PROVIDER_CLOSURES)
         .ok()?
@@ -748,18 +761,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleBundleReason {
-    SchemaVersion { found: Option<u64> },
-    HarnessVersion { found: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BundleLoad {
-    Ready(EvidenceBundle),
-    Stale(StaleBundleReason),
-}
-
 #[derive(Debug)]
 pub enum BundleLoadError {
     Json(serde_json::Error),
@@ -779,52 +780,20 @@ impl fmt::Display for BundleLoadError {
 
 impl std::error::Error for BundleLoadError {}
 
-pub fn load_bundle(source: &str) -> Result<BundleLoad, BundleLoadError> {
-    let raw: Value = serde_json::from_str(source).map_err(BundleLoadError::Json)?;
-    let schema_version = raw.get("schemaVersion").and_then(Value::as_u64);
-    if schema_version.is_some()
-        && schema_version != Some(u64::from(MEMORY_CALIBRATION_SCHEMA_VERSION))
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::SchemaVersion {
-            found: schema_version,
-        }));
-    }
-    let harness_version = raw
-        .get("harnessVersion")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if harness_version.is_some()
-        && harness_version.as_deref() != Some(MEMORY_CALIBRATION_HARNESS_VERSION)
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-            found: harness_version,
-        }));
-    }
-    if let Some(found) = raw
-        .get("records")
-        .and_then(Value::as_array)
-        .and_then(|records| {
-            records.iter().find_map(|record| {
-                record
-                    .get("harnessVersion")
-                    .and_then(Value::as_str)
-                    .filter(|found| *found != MEMORY_CALIBRATION_HARNESS_VERSION)
-                    .map(|found| Some(found.to_owned()))
-            })
-        })
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-            found,
-        }));
-    }
-
-    let bundle: EvidenceBundle = serde_json::from_value(raw).map_err(BundleLoadError::Json)?;
+/// Parse and validate a bundle. Well-formed records are served regardless of the bundle's or the
+/// records' `schemaVersion` / `harnessVersion` stamps (sc-22738): those stamps tell the probe
+/// tooling what to re-capture and are pinned against the packaged file by tests, but a reader that
+/// demoted every record on a version drift would be a currency gate in the runtime, which this
+/// repository has none of. What still fails here is a bundle that does not PARSE or does not
+/// VALIDATE — a malformed record is not a measurement of anything.
+pub fn load_bundle(source: &str) -> Result<EvidenceBundle, BundleLoadError> {
+    let bundle: EvidenceBundle = serde_json::from_str(source).map_err(BundleLoadError::Json)?;
     validate_bundle(&bundle).map_err(BundleLoadError::Invalid)?;
-    Ok(BundleLoad::Ready(bundle))
+    Ok(bundle)
 }
 
 /// Load the exact bundle compiled into the product.
-pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
+pub fn load_packaged_bundle() -> Result<EvidenceBundle, BundleLoadError> {
     load_bundle(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
 }
 
@@ -832,18 +801,19 @@ pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
 pub struct CalibrationBinding {
     pub abi: u32,
     /// Materialization shape the manifest's opt-in claims its receipts were measured under.
-    /// Compared record-by-record; a mismatch is [`StaleEvidenceReason::LoadShape`].
+    /// Compared record-by-record; a mismatch is [`EvidenceMismatchReason::LoadShape`].
     pub load_shape: LoadShapeKey,
     pub fingerprint: String,
     pub scene_works_revision: String,
     pub matrix_source_revision: String,
-    /// Capture provenance only — NEVER compared (sc-17774). See [`Self::inference_closure_digest`].
+    /// Capture provenance only — NEVER compared (sc-17774).
     pub inference_revision: String,
-    /// The provider compile-closure digest this calibration is in force for (sc-17774).
+    /// The provider compile-closure digest the manifest binding was measured under (sc-17774).
     ///
-    /// One mechanism for every model: a record is current exactly when the closure of the provider
-    /// it measured is unchanged. A change to any other model's code path cannot move this value, so
-    /// it cannot demote this calibration.
+    /// CAPTURE PROVENANCE ONLY since sc-22738: neither [`EvidenceBundle::evidence_for`] nor any
+    /// runtime selector compares it against the record's digest or against the live packaged
+    /// closure. A moved closure is what the probe tooling re-captures on
+    /// (`scripts/stale-lane-report.mjs`); it never changes what a live request is admitted at.
     pub inference_closure_digest: String,
     pub artifact_repository: String,
     pub artifact_resolved_revision: String,
@@ -867,22 +837,20 @@ pub struct EvidenceQuery {
     pub calibration: CalibrationBinding,
 }
 
+/// Why a record that matches the query's cell is nonetheless not the measurement the manifest
+/// binding cites. Every reason is an IDENTITY mismatch — a different ABI, materialization shape,
+/// provider-declared calibration campaign, receipt provenance, or artifact bytes — i.e. the record
+/// measured something other than what would run. None of them is a currency term: the provider's
+/// inference compile closure is deliberately absent (sc-22738), so a record captured under a
+/// closure that has since moved verifies exactly as a fresh capture would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StaleEvidenceReason {
+pub enum EvidenceMismatchReason {
     CalibrationAbi,
     LoadShape,
     CalibrationFingerprint,
-    /// The measured provider's own inference compile closure moved (sc-17774).
-    ///
-    /// Replaces the former `InferenceRevision`, which fired whenever the inference pin moved at all
-    /// — including for a commit to an unrelated model.
-    InferenceClosure,
-    /// A record carried no closure digest, so currency cannot be decided (sc-17774).
-    ///
-    /// Separate from [`Self::InferenceClosure`] on purpose: "we could not tell" must never be
-    /// reported as "the code changed", and neither may silently fall back to revision equality.
-    MissingClosureDigest,
-    /// A current Qwen q4/bf16 record omitted the physical MLX receipt required by SC-18353.
+    /// A Qwen q4/bf16 MLX record omitted the physical MLX receipt required by SC-18353. Before
+    /// sc-22738 this was asked only of closure-current records; it is now asked of every one,
+    /// because it is a statement about how the number was measured, not about when.
     PhysicalMlxProvenance,
     ArtifactRepository,
     ArtifactResolvedRevision,
@@ -893,7 +861,7 @@ pub enum StaleEvidenceReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvidenceVerdict<'a> {
     Verified(&'a EvidenceRecord),
-    Stale(StaleEvidenceReason),
+    Mismatch(EvidenceMismatchReason),
     OutOfEnvelope,
     Unknown,
 }
@@ -928,55 +896,48 @@ impl EvidenceBundle {
             return EvidenceVerdict::Unknown;
         }
         if query.calibration.abi != MEMORY_CALIBRATION_ABI {
-            return EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationAbi);
+            return EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationAbi);
         }
 
-        let mut saw_current_identity = false;
-        let mut stale = None;
+        let mut saw_matching_identity = false;
+        let mut mismatched = None;
         for record in candidates {
+            // sc-22738: `record.repositories.inference.closure_digest` is deliberately not read
+            // here. The closure digest is capture provenance the probe tooling keys re-captures on;
+            // comparing it against the binding (or the live ledger) would make a moved closure
+            // demote this record, which the runtime must never do.
             let mismatch = if record.load_shape != query.calibration.load_shape {
-                Some(StaleEvidenceReason::LoadShape)
+                Some(EvidenceMismatchReason::LoadShape)
             } else if record.calibration_fingerprint != query.calibration.fingerprint {
-                Some(StaleEvidenceReason::CalibrationFingerprint)
-            } else if record.repositories.inference.closure_digest.is_none() {
-                Some(StaleEvidenceReason::MissingClosureDigest)
+                Some(EvidenceMismatchReason::CalibrationFingerprint)
             } else if record.backend == Backend::Mlx
                 && record.target.model_id == "qwen_image"
                 && matches!(record.target.tier.as_str(), "q4" | "bf16")
-                && record.repositories.inference.closure_digest.as_deref()
-                    == Some(query.calibration.inference_closure_digest.as_str())
                 && record.source_provenance != Some(SourceProvenance::PhysicalMlxV1)
             {
-                Some(StaleEvidenceReason::PhysicalMlxProvenance)
-            } else if record.repositories.inference.closure_digest.as_deref()
-                != Some(query.calibration.inference_closure_digest.as_str())
-            {
-                // sc-17774: the provider's own compile closure, not the inference pin. The pin
-                // comparison this replaces demoted every calibrated provider on any inference
-                // commit — 2812 of 2812 non-merge commits over the 90 days to `fbb00d6b`.
-                Some(StaleEvidenceReason::InferenceClosure)
+                Some(EvidenceMismatchReason::PhysicalMlxProvenance)
             } else if record.artifact.repository != query.calibration.artifact_repository {
-                Some(StaleEvidenceReason::ArtifactRepository)
+                Some(EvidenceMismatchReason::ArtifactRepository)
             } else if record.artifact.resolved_revision
                 != query.calibration.artifact_resolved_revision
             {
-                Some(StaleEvidenceReason::ArtifactResolvedRevision)
+                Some(EvidenceMismatchReason::ArtifactResolvedRevision)
             } else if record.artifact.variant != query.calibration.artifact_variant {
-                Some(StaleEvidenceReason::ArtifactVariant)
+                Some(EvidenceMismatchReason::ArtifactVariant)
             } else if !matches!(
                 &record.loadability.resolved_path_fingerprint,
                 RequiredNullable::Value(value)
                     if value == &query.calibration.resolved_path_fingerprint
             ) {
-                Some(StaleEvidenceReason::ResolvedPathFingerprint)
+                Some(EvidenceMismatchReason::ResolvedPathFingerprint)
             } else {
                 None
             };
             if let Some(reason) = mismatch {
-                stale.get_or_insert(reason);
+                mismatched.get_or_insert(reason);
                 continue;
             }
-            saw_current_identity = true;
+            saw_matching_identity = true;
 
             let exact_geometry = record.target.geometry == query.geometry;
             let passed_exact_case = record.sweep.range_verified
@@ -988,10 +949,10 @@ impl EvidenceBundle {
             }
         }
 
-        if saw_current_identity {
+        if saw_matching_identity {
             EvidenceVerdict::OutOfEnvelope
-        } else if let Some(reason) = stale {
-            EvidenceVerdict::Stale(reason)
+        } else if let Some(reason) = mismatched {
+            EvidenceVerdict::Mismatch(reason)
         } else {
             EvidenceVerdict::Unknown
         }
@@ -1880,9 +1841,6 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
             record.id
         ));
     }
-    if record.harness_version != MEMORY_CALIBRATION_HARNESS_VERSION {
-        return Err(format!("{} has a stale harnessVersion", record.id));
-    }
     validate_git_state(&record.repositories.scene_works, true, &record.id)?;
     validate_git_state(&record.repositories.inference, false, &record.id)?;
     validate_hardware(&record.hardware, &record.id)?;
@@ -2727,12 +2685,12 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use super::{
-        load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
-        CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        Ltx25Decoder, Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory,
-        PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind, StaleBundleReason,
-        StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
-        MEMORY_CALIBRATION_SCHEMA_VERSION, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        load_bundle, load_packaged_bundle, Backend, BundleLoadError, CalibrationBinding,
+        EvidenceBundle, EvidenceMismatchReason, EvidenceQuery, EvidenceVerdict, Geometry,
+        LoadShapeKey, Ltx25Decoder, Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory,
+        PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind, StrategyRung,
+        MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
+        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
@@ -2879,10 +2837,7 @@ mod tests {
     }
 
     fn loaded_bundle() -> EvidenceBundle {
-        match load_bundle(&bundle(complete_record())).expect("valid fixture") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        }
+        load_bundle(&bundle(complete_record())).expect("valid fixture")
     }
 
     #[test]
@@ -2970,12 +2925,7 @@ mod tests {
             "sourceSessions": [source_session],
             "records": [record]
         });
-        let loaded = match load_bundle(&document.to_string()).expect("physical MLX bundle parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => {
-                panic!("unexpected stale physical MLX fixture: {reason:?}")
-            }
-        };
+        let loaded = load_bundle(&document.to_string()).expect("physical MLX bundle parses");
         assert_eq!(
             loaded.source_sessions[0].kind,
             SourceSessionKind::PhysicalMlx
@@ -3005,10 +2955,7 @@ mod tests {
             ));
             output["bytes"] = json!(16);
         }
-        assert!(matches!(
-            load_bundle(&av_document.to_string()),
-            Ok(BundleLoad::Ready(_))
-        ));
+        assert!(load_bundle(&av_document.to_string()).is_ok());
         let mut crossed_av = av_document.clone();
         crossed_av["sourceSessions"][0]["outputs"][2]["role"] = json!("reference_rgb");
         assert!(matches!(
@@ -3093,10 +3040,7 @@ mod tests {
             "decoder": "conv",
             "rung": "bounded_decode"
         });
-        assert!(matches!(
-            load_bundle(&ltx_document.to_string()),
-            Ok(BundleLoad::Ready(_))
-        ));
+        assert!(load_bundle(&ltx_document.to_string()).is_ok());
         for (field, value) in [
             ("tier", "q8"),
             ("mode", "image_to_video"),
@@ -3213,12 +3157,8 @@ mod tests {
     #[test]
     fn mlx_admission_envelope_derives_foreign_demand_and_keeps_observed_distinct() {
         let gib = 1024_u64.pow(3);
-        let small = match load_bundle(&bundle(mlx_record(8 * gib, 6 * gib, 7 * gib)))
-            .expect("valid small-host evidence")
-        {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        };
+        let small = load_bundle(&bundle(mlx_record(8 * gib, 6 * gib, 7 * gib)))
+            .expect("valid small-host evidence");
         let small = small.records[0]
             .mlx_admission_envelope()
             .expect("MLX complete record");
@@ -3234,12 +3174,8 @@ mod tests {
             "one byte below the exact host requirement must fail"
         );
 
-        let mid = match load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
-            .expect("valid mid-host evidence")
-        {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        };
+        let mid = load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
+            .expect("valid mid-host evidence");
         let mid = mid.records[0]
             .mlx_admission_envelope()
             .expect("MLX complete record");
@@ -3361,10 +3297,7 @@ mod tests {
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
         // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
         // re-dated onto a pin it never ran against (sc-16482).
-        let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
-        };
+        let bundle = load_packaged_bundle().expect("compiled bundle must parse");
         let preserved_session_ids = BTreeSet::from([
             "ims-4b4ab770efa632199d23",
             "ims-4fbfb599c1fc3e3e9dfb",
@@ -3762,10 +3695,7 @@ mod tests {
             .expect("packaged evidence JSON");
         extended["sourceSessions"][0]["hardware"]["futureProbeMetadata"] =
             json!({ "tool": "next-generation-probe", "version": 2 });
-        let bundle = match load_bundle(&extended.to_string()).expect("hardware extension parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("extended bundle must be current: {reason:?}"),
-        };
+        let bundle = load_bundle(&extended.to_string()).expect("hardware extension parses");
         assert_eq!(
             bundle.source_sessions[0].hardware.extensions["futureProbeMetadata"],
             json!({ "tool": "next-generation-probe", "version": 2 })
@@ -3836,10 +3766,7 @@ mod tests {
         record["predictedPeakBytes"] = json!({ "overall": predicted });
         record["observedMemory"] = json!({ "overall": { "activeBytes": observed } });
 
-        let bundle = match load_bundle(&sparse.to_string()).expect("sparse telemetry parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("sparse bundle must be current: {reason:?}"),
-        };
+        let bundle = load_bundle(&sparse.to_string()).expect("sparse telemetry parses");
         let record = bundle
             .records
             .iter()
@@ -3911,7 +3838,7 @@ mod tests {
         let clean: Value =
             serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
         assert!(
-            matches!(load_bundle(&clean.to_string()), Ok(BundleLoad::Ready(_))),
+            load_bundle(&clean.to_string()).is_ok(),
             "the unmutated packaged bundle must load, or the mutations below prove nothing"
         );
 
@@ -3942,10 +3869,7 @@ mod tests {
     fn allocator_bytes_must_equal_active_plus_reclaimable() {
         let clean: Value =
             serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
-        assert!(matches!(
-            load_bundle(&clean.to_string()),
-            Ok(BundleLoad::Ready(_))
-        ));
+        assert!(load_bundle(&clean.to_string()).is_ok());
 
         for field in ["allocatorBytes", "reclaimableBytes"] {
             let mut drifted = clean.clone();
@@ -3982,7 +3906,7 @@ mod tests {
             .expect("wired limit");
         set_uniform_phases(record, wired_limit, 0);
         assert!(
-            matches!(load_bundle(&at_limit.to_string()), Ok(BundleLoad::Ready(_))),
+            load_bundle(&at_limit.to_string()).is_ok(),
             "resident bytes exactly at the wired ceiling must be admissible"
         );
 
@@ -4023,10 +3947,7 @@ mod tests {
         );
         set_uniform_phases(record, LTX_RESIDENT, LTX_RECLAIMABLE);
         let record_id = record["id"].as_str().expect("record id").to_owned();
-        let bundle = match load_bundle(&sound.to_string()).expect("sound capture parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("bundle must be current: {reason:?}"),
-        };
+        let bundle = load_bundle(&sound.to_string()).expect("sound capture parses");
         let loaded = bundle
             .records
             .iter()
@@ -4058,21 +3979,34 @@ mod tests {
         ));
     }
 
+    /// sc-22738: a version stamp is a re-capture signal for the probe tooling, not a runtime
+    /// input. A bundle (or a record) whose `schemaVersion` / `harnessVersion` drifted still loads
+    /// and still serves its well-formed records; only a bundle that does not parse or validate is
+    /// refused. MUTATION: restoring the pre-22738 version pre-scan in `load_bundle` (or the
+    /// per-record harness check in `validate_record`) turns the first three assertions red.
     #[test]
-    fn schema_and_harness_drift_are_stale_but_bad_json_is_an_error() {
-        assert_eq!(
-            load_bundle(
-                r#"{"schemaVersion":2,"harnessVersion":"sceneworks-memory-v3","records":[]}"#
-            )
-            .expect("version drift is not a parse failure"),
-            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
-        );
-        assert_eq!(
-            load_bundle(r#"{"schemaVersion":6,"harnessVersion":"old","records":[]}"#)
-                .expect("harness drift is not a parse failure"),
-            BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-                found: Some("old".to_owned())
-            })
+    fn version_drift_still_loads_but_bad_json_is_an_error() {
+        let drifted = load_bundle(
+            r#"{"schemaVersion":2,"harnessVersion":"sceneworks-memory-v3","records":[]}"#,
+        )
+        .expect("bundle version drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.schema_version, 2);
+        assert_eq!(drifted.harness_version, "sceneworks-memory-v3");
+        let drifted = load_bundle(r#"{"schemaVersion":6,"harnessVersion":"old","records":[]}"#)
+            .expect("harness drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.harness_version, "old");
+        let mut record_drifted = complete_record();
+        record_drifted["harnessVersion"] = json!("old-record");
+        let drifted = load_bundle(&bundle(record_drifted))
+            .expect("record harness drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.records.len(), 1);
+        assert_eq!(drifted.records[0].harness_version, "old-record");
+        assert!(
+            matches!(
+                drifted.evidence_for(&exact_query()),
+                EvidenceVerdict::Verified(_)
+            ),
+            "a record from an older harness is served exactly as a current one"
         );
         let mut missing_load_shape = complete_record();
         missing_load_shape
@@ -4085,14 +4019,6 @@ mod tests {
                 Err(BundleLoadError::Json(_))
             ),
             "a current record without its measured loadShape must fail to parse, not default"
-        );
-        let mut record_stale = complete_record();
-        record_stale["harnessVersion"] = json!("old-record");
-        assert_eq!(
-            load_bundle(&bundle(record_stale)).expect("record harness drift is stale"),
-            BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-                found: Some("old-record".to_owned())
-            })
         );
         assert!(matches!(
             load_bundle(r#"{"harnessVersion":"sceneworks-memory-v5","records":[]}"#),
@@ -4144,10 +4070,7 @@ mod tests {
         ltx["target"]["transformerVariant"] = json!("distilled");
         ltx["target"]["decoder"] = json!("diffvae");
 
-        let loaded = match load_bundle(&bundle(ltx.clone())).expect("typed LTX-2.5 record parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
-        };
+        let loaded = load_bundle(&bundle(ltx.clone())).expect("typed LTX-2.5 record parses");
         assert_eq!(
             loaded.records[0].target.transformer_variant,
             Some(Ltx25TransformerVariant::Distilled)
@@ -4188,10 +4111,7 @@ mod tests {
         ltx["target"]["provider"] = json!("ltx_2_5");
         ltx["target"]["transformerVariant"] = json!("distilled");
         ltx["target"]["decoder"] = json!("conv");
-        let bundle = match load_bundle(&bundle(ltx)).expect("typed LTX-2.5 record parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
-        };
+        let bundle = load_bundle(&bundle(ltx)).expect("typed LTX-2.5 record parses");
         let mut query = exact_query();
         query.model_id = "ltx_2_5".to_owned();
         query.provider = "ltx_2_5".to_owned();
@@ -4225,10 +4145,7 @@ mod tests {
             "wiredLimitBytes": 80000
         });
         mlx["backend"] = json!("mlx");
-        assert!(matches!(
-            load_bundle(&bundle(mlx)),
-            Ok(BundleLoad::Ready(_))
-        ));
+        assert!(load_bundle(&bundle(mlx)).is_ok());
 
         let mut extra = complete_record();
         extra["target"]["futureField"] = json!(true);
@@ -4282,7 +4199,7 @@ mod tests {
         record["negativeMutation"]["parameters"] = strategy_parameters;
 
         assert!(
-            matches!(load_bundle(&bundle(record)), Ok(BundleLoad::Ready(_))),
+            load_bundle(&bundle(record)).is_ok(),
             "negative_complete requires thresholds, not positive-case measured quality"
         );
     }
@@ -4308,7 +4225,7 @@ mod tests {
         fingerprint.calibration.fingerprint.push_str("-mutated");
         assert_eq!(
             bundle.evidence_for(&fingerprint),
-            EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationFingerprint)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationFingerprint)
         );
 
         let mut scene_works = exact_query();
@@ -4328,13 +4245,16 @@ mod tests {
             EvidenceVerdict::Verified(_)
         ));
 
-        // The provider's own compile closure is the term that decides currency, and it is not blind.
+        // sc-22738: the provider's compile closure is capture provenance too. A binding whose
+        // digest no longer matches the record's verifies exactly as a matching one — currency is
+        // what the probe tooling re-captures on, never what the runtime demotes on. MUTATION:
+        // restoring an `InferenceClosure` arm in `evidence_for` turns this red.
         let mut closure = exact_query();
         closure.calibration.inference_closure_digest = "e".repeat(64);
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&closure),
-            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut matrix = exact_query();
         matrix.calibration.matrix_source_revision = "source-tree:2222222".to_owned();
@@ -4347,40 +4267,43 @@ mod tests {
         artifact_repository.calibration.artifact_repository = "other/repo".to_owned();
         assert_eq!(
             bundle.evidence_for(&artifact_repository),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactRepository)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactRepository)
         );
 
         let mut artifact_revision = exact_query();
         artifact_revision.calibration.artifact_resolved_revision = "d".repeat(40);
         assert_eq!(
             bundle.evidence_for(&artifact_revision),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactResolvedRevision)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactResolvedRevision)
         );
 
         let mut artifact_variant = exact_query();
         artifact_variant.calibration.artifact_variant = "q8".to_owned();
         assert_eq!(
             bundle.evidence_for(&artifact_variant),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactVariant)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactVariant)
         );
 
         let mut path = exact_query();
         path.calibration.resolved_path_fingerprint = "different".to_owned();
         assert_eq!(
             bundle.evidence_for(&path),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ResolvedPathFingerprint)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ResolvedPathFingerprint)
         );
 
         let mut abi = exact_query();
         abi.calibration.abi += 1;
         assert_eq!(
             bundle.evidence_for(&abi),
-            EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationAbi)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationAbi)
         );
     }
 
+    /// SC-18353's physical-receipt requirement is a statement about HOW a Qwen q4/bf16 number was
+    /// measured, so since sc-22738 it is asked of every such record regardless of the closure it
+    /// was captured under — the closure no longer selects which records the rule applies to.
     #[test]
-    fn current_qwen_q4_evidence_without_physical_mlx_provenance_is_stale() {
+    fn qwen_q4_evidence_without_physical_mlx_provenance_is_a_mismatch_under_any_closure() {
         let mut record = mlx_record(
             128 * 1024 * 1024 * 1024,
             120 * 1024 * 1024 * 1024,
@@ -4390,11 +4313,7 @@ mod tests {
         record["target"]["provider"] = json!("qwen_image");
         record["target"]["tier"] = json!("q4");
         record["loadability"]["resolvedPathFingerprint"] = json!("fixture@resolved:q4");
-        let bundle =
-            match load_bundle(&bundle(record)).expect("legacy Qwen receipt remains history") {
-                BundleLoad::Ready(bundle) => bundle,
-                BundleLoad::Stale(reason) => panic!("unexpected stale bundle envelope: {reason:?}"),
-            };
+        let bundle = load_bundle(&bundle(record)).expect("legacy Qwen receipt remains history");
         let mut query = exact_query();
         query.backend = Backend::Mlx;
         query.model_id = "qwen_image".to_owned();
@@ -4402,14 +4321,14 @@ mod tests {
 
         assert_eq!(
             bundle.evidence_for(&query),
-            EvidenceVerdict::Stale(StaleEvidenceReason::PhysicalMlxProvenance)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::PhysicalMlxProvenance)
         );
 
         query.calibration.inference_closure_digest = "e".repeat(64);
         assert_eq!(
             bundle.evidence_for(&query),
-            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure),
-            "pre-provenance records remain ordinary history once their captured closure is stale"
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::PhysicalMlxProvenance),
+            "the closure digest neither selects nor waives the provenance requirement"
         );
     }
 

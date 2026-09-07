@@ -22119,8 +22119,8 @@ fn exceeded_bound_capture_refusal_in(
         Some("diffvae") => Some(sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae),
         _ => None,
     };
-    let Some(bound) = store.binding_exceeded_bound(
-        sceneworks_core::memory_anchor::ExceededBoundQuery {
+    let Some(bound) =
+        store.binding_exceeded_bound(sceneworks_core::memory_anchor::ExceededBoundQuery {
             model_id,
             // See `ExceededBoundQuery`: a capture plan carries no catalog resolution, and both
             // omitted axes are functions of ones graded above.
@@ -22140,9 +22140,8 @@ fn exceeded_bound_capture_refusal_in(
                 .map_err(|_| "planned geometry height overflows".to_owned())?,
             frames: u32::try_from(frames)
                 .map_err(|_| "planned geometry frames overflows".to_owned())?,
-        },
-        sceneworks_core::memory_anchor::packaged_anchor_loader_closures(),
-    ) else {
+        })
+    else {
         return Ok(None);
     };
     let hardware_bytes = request
@@ -32052,12 +32051,9 @@ mod exceeded_bound_tests {
                     sha256: "0".repeat(64),
                     record_id: "exc-0".to_owned(),
                     calibration_fingerprint: "fp".to_owned(),
-                    loader_closure_digest: anchor::packaged_anchor_loader_closures()
-                        .and_then(|closures| {
-                            closures.digest_for("bernini", anchor::AnchorBackend::Mlx)
-                        })
-                        .expect("the packaged closures declare bernini:mlx")
-                        .to_owned(),
+                    // Any well-formed digest: the bound binds regardless of currency (sc-22738),
+                    // and the mirror must match production in that.
+                    loader_closure_digest: "b".repeat(64),
                     currency_attestation: None,
                 },
             }],
