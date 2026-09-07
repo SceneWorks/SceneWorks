@@ -1010,10 +1010,26 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // the root resolves through — stays `ltx_2_3`. Both rows point at the ONE rehost the manifest
   // ships for all three platforms.
   //
-  // The Candle lane additionally binds the DENSE GEMMA text encoder, which is a sibling directory
-  // of the same snapshot rather than a separate repository (`SCENEWORKS_LTX_TEXT_ENCODER_ROOT`,
-  // validated by candle.rs against `<snapshot>/gemma`). That is what `siblingRoots` declares — see
-  // its use in `describeAnchor`. The MLX arm reads no such root, so its row declares none.
+  // BOTH lanes bind the DENSE GEMMA text encoder, which is a sibling directory of the same
+  // snapshot rather than a separate repository (`SCENEWORKS_LTX_TEXT_ENCODER_ROOT`, validated by
+  // BOTH adapters against `<snapshot>/gemma` — `mlx.rs#ltx_load_spec` and the candle twin). That
+  // is what `siblingRoots` declares — see its use in `describeAnchor`.
+  //
+  // sc-22738: the MLX row was declared WITHOUT it, on the belief that only the Candle arm read the
+  // root. `mlx.rs#ltx_load_spec` has required `SCENEWORKS_LTX_TEXT_ENCODER_ROOT` since sc-18808
+  // landed the video arm, so all three booked `ltx_2_3:*:mlx` captures died on
+  // `required environment variable SCENEWORKS_LTX_TEXT_ENCODER_ROOT is not set` — after the tier
+  // root had already been probed and the capture scheduled. `every SCENEWORKS_LTX_* root the
+  // adapters require is bound by the LTX-2.3 rows` (measure-memory-catalog.test.mjs) now derives
+  // the requirement from the adapter sources, so neither row can drift from its arm again.
+  //
+  // The resolution is PRODUCTION's own: `video_jobs/ltx.rs#bundled_ltx_gemma_dir` takes the
+  // selected tier dir's parent snapshot and joins `gemma`, which is exactly
+  // `path.dirname(resolved.root)/gemma` here. Production additionally honors a `$LTX_GEMMA_DIR`
+  // override and, failing that, scans SIBLING snapshot revisions (sc-14377) — neither is mirrored,
+  // and deliberately: both adapters snapshot-validate the text-encoder root against the SAME
+  // repository AND revision as the tier root, so a cross-revision or operator-overridden gemma is
+  // refused by the arm. The mirrored branch is the only one a capture can use.
   //
   // There is no `ltx_2_3:bf16:candle` cell, and its absence is a ROUTING fact rather than an
   // omission: the manifest ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, and the
@@ -1021,7 +1037,10 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // (`video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions`) returns `None` for
   // `CandleLtxTier::Bf16`. `measure-memory-catalog.test.mjs` asserts that exemption against BOTH
   // of those sources, so it cannot outlive either reason.
-  ltx_2_3: { env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["mlx"] },
+  ltx_2_3: {
+    env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["mlx"],
+    siblingRoots: [{ env: "LTX_TEXT_ENCODER", dir: "gemma" }],
+  },
   ltx_2_3_distilled: {
     env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["candle"],
     siblingRoots: [{ env: "LTX_TEXT_ENCODER", dir: "gemma" }],

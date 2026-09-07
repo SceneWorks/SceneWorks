@@ -71,6 +71,7 @@ import {
   requiredFilesFor,
   QWEN_EDIT_LIGHTNING_LORA,
   LTX25_REPOSITORY,
+  LTX_2_3_REPOSITORY,
   LTX25_DEV_REFINEMENT_LORA,
   LTX25_ENHANCER_DIR,
   INSTANTID_IDENTITY_BUNDLE_FILES,
@@ -3198,6 +3199,52 @@ test("every planned bernini, ltx_2_3 and minimax-h3 fingerprint is one its lane'
 // (CI always supplies one — see `skipWithoutRoutes`): the one bare MLX row per family is the tier
 // the engine's `CALIBRATED_TIER` names, so a re-tiered engine reds the plan here as well as in
 // the adapter's own tests.
+// sc-22738. `mlx.rs#krea_realtime_probes_admission` decides whether the Krea Realtime capture asks
+// the provider's admission gate anything, and its answer must be the ENGINE's: production admits
+// only the routes `mlx-gen-krea-realtime`'s registered `safety_check` names, and every other request
+// mode is refused there by name (`crossed resident request mode`) before the shared budget check is
+// ever reached. sc-22735 probed the anchor's own reference-free t2v surface anyway and all three
+// `krea_realtime_14b:*:mlx` cells died on the first probe after a full 14B weight load.
+//
+// The Rust side cannot make this binding: the gate short-circuits on an unresolvable artifact
+// receipt, so a weights-free probe rejects every mode for a reason that says nothing about routing.
+// So both route lists are READ — the engine's out of its `safety_check` match, the arm's out of its
+// `matches!` — and compared. An engine that grows or drops a route reds here rather than leaving the
+// arm quietly skipping a surface production now admits.
+test("the Krea Realtime arm's admitted routes are the pinned engine's own", { skip: skipWithoutRoutes }, async () => {
+  const engine = await readFile(
+    path.join(process.env.INFERENCE_REPO, "crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs"),
+    "utf8",
+  );
+  const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
+  assert.ok(gate, "the pinned crate still declares a registered safety_check");
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(gate[1]);
+  assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
+  const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
+  assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");
+  assert.ok(
+    !engineRoutes.includes("text_to_video"),
+    "the engine now admits the reference-free t2v surface; the arm must PROBE admission again "
+      + "rather than record the three scenarios unexecuted",
+  );
+
+  const arm = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const predicate = /fn krea_realtime_probes_admission\([\s\S]*?\n\}/.exec(arm);
+  assert.ok(predicate, "the arm still declares krea_realtime_probes_admission");
+  const armRoutes = [...predicate[0].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual(
+    armRoutes,
+    engineRoutes,
+    "the arm's admitted-route mirror has drifted from the pinned engine's own safety_check",
+  );
+  assert.match(
+    predicate[0],
+    /reference_count > 0/,
+    "a reference-carrying request must probe on any mode, so a new reference surface cannot "
+      + "inherit the skip silently",
+  );
+});
+
 test("the bare MLX LTX-2.3 and MiniMax-H3 plan rows are the engines' calibrated tiers", { skip: skipWithoutRoutes }, async () => {
   const bare = await videoFamilyBareTiers();
   for (const [family, crate] of [
@@ -3545,6 +3592,101 @@ test("every declared adapter arm is a provider that lane's adapter really dispat
     [],
     "every plan anchor names a provider its lane's adapter dispatch admits",
   );
+});
+
+/** Every `SCENEWORKS_LTX_*` root `relative`'s LTX-2.3 arm refuses to run without. */
+function requiredLtxEnv(source, relative) {
+  const names = [
+    ...new Set(
+      [...source.matchAll(/required_env\(\s*"(SCENEWORKS_LTX_[A-Z0-9_]+)"\s*,?\s*\)/g)].map(
+        (match) => match[1],
+      ),
+    ),
+  ].sort();
+  assert.ok(
+    names.length > 0,
+    `${relative}: the required_env parse found no SCENEWORKS_LTX_* root at all; the LTX arm's ` +
+      "environment family moved and this derivation has stopped asking its question",
+  );
+  return names;
+}
+
+// sc-22738. The campaign lost ALL THREE `ltx_2_3:*:mlx` captures to
+// `required environment variable SCENEWORKS_LTX_TEXT_ENCODER_ROOT is not set`, ~150 s into each
+// booked run: `PROVIDER_FAMILIES.ltx_2_3` declared no `siblingRoots`, on a comment claiming the MLX
+// arm read no text-encoder root. `mlx.rs#ltx_load_spec` has required it since sc-18808, so `--list`
+// called every cell runnable and the adapter refused before a weight was opened.
+//
+// NOTHING here is a literal env name: the requirement is READ out of each lane's adapter binary, so
+// an arm that grows (or drops) a `SCENEWORKS_LTX_*` root moves this case with no edit, and a row
+// that stops binding one reds. The resolution asserted is PRODUCTION's own —
+// `video_jobs/ltx.rs#bundled_ltx_gemma_dir` joins `gemma` to the selected tier dir's parent
+// snapshot — so the value handed to the arm is the value the worker would resolve.
+test("every SCENEWORKS_LTX_* root the adapters require is bound by the LTX-2.3 rows", async () => {
+  const lanes = [
+    ["mlx", "ltx_2_3"],
+    ["candle", "ltx_2_3_distilled"],
+  ];
+  const required = Object.fromEntries(
+    await Promise.all(
+      lanes.map(async ([backend]) => [
+        backend,
+        requiredLtxEnv(
+          await readFile(path.join(ROOT, ADAPTER_BIN_PATHS[backend]), "utf8"),
+          ADAPTER_BIN_PATHS[backend],
+        ),
+      ]),
+    ),
+  );
+  // Both arms open the same LTX-2.3 identity stack, so a root one lane requires and the other does
+  // not is itself a finding — and it would leave one lane's rows short exactly the way the MLX row
+  // was short.
+  assert.deepEqual(required.mlx, required.candle, "the two LTX arms require the same root family");
+
+  const models = [
+    ...fakeModels(),
+    {
+      id: "ltx_2_3",
+      downloads: [
+        { repo: LTX_2_3_REPOSITORY, revision: REVISION, variant: "q4", files: ["q4/*"] },
+      ],
+    },
+  ];
+  const layout = [[LTX_2_3_REPOSITORY, REVISION, "q4"]];
+
+  const staged = await fakeHub([...layout, [LTX_2_3_REPOSITORY, REVISION, "gemma"]]);
+  const snapshot = snapshotPath(staged, LTX_2_3_REPOSITORY, REVISION);
+  for (const [backend, provider] of lanes) {
+    const row = await classifyAnchor(`ltx_2_3:q4:${backend}`, { provider }, {
+      models, backend, hubs: [staged], current: new Map(), captured: new Map(),
+    });
+    assert.equal(row.status, "runnable", `${backend}: ${row.reason}`);
+    for (const name of required[backend]) {
+      assert.ok(
+        Object.hasOwn(row.env, name),
+        `${backend}: ${ADAPTER_BIN_PATHS[backend]} requires ${name}, but the ltx_2_3 row binds ` +
+          `only ${Object.keys(row.env).sort().join(", ")} — the booked capture dies on it`,
+      );
+    }
+    assert.equal(
+      row.env.SCENEWORKS_LTX_TEXT_ENCODER_ROOT,
+      path.join(snapshot, "gemma"),
+      `${backend}: the text-encoder root must be the gemma sibling of the SELECTED tier's own ` +
+        "snapshot, which is what bundled_ltx_gemma_dir resolves and what both arms snapshot-validate",
+    );
+    assert.equal(row.env.SCENEWORKS_LTX_ROOT, path.join(snapshot, "q4"), backend);
+  }
+
+  // And a host WITHOUT the sibling is `weights_missing` by name rather than runnable: the load
+  // cannot open, so booking a capture there only reproduces the failure this case exists for.
+  const holed = await fakeHub(layout);
+  for (const [backend, provider] of lanes) {
+    const row = await classifyAnchor(`ltx_2_3:q4:${backend}`, { provider }, {
+      models, backend, hubs: [holed], current: new Map(), captured: new Map(),
+    });
+    assert.equal(row.status, "weights_missing", `${backend}: ${row.reason}`);
+    assert.match(row.reason, /gemma\//, backend);
+  }
 });
 
 // sc-22738 (feature-end round 1). The lane-default anchor composition has ONE spelling.
