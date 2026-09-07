@@ -1784,6 +1784,51 @@ pub(crate) fn admit_video_generation(
     )
 }
 
+/// Why the loaded provider refuses this advisory run context, or `None` when it accepts it
+/// (sc-22738).
+///
+/// # The hazard this closes
+///
+/// A `Resident` context modifies nothing about the render: it carries the selected contract and
+/// evidence receipt so provider safety and telemetry can name what was admitted. But
+/// [`crate::memory_strategy::generate_with_scope`] turns any
+/// [`gen_core::MemorySafetyDecision::Reject`] into a hard `Error::Unsupported` before the engine
+/// generates anything, so attaching a context a provider refuses converts a shipped, working render
+/// into a job failure. Several pinned MLX video providers refuse whole request shapes by name —
+/// Krea Realtime admits only `image_to_video`/`video_to_video` at one reference under its sealed
+/// `provider-resident-video-request-v3` receipt, Bernini only its five provider video routes,
+/// SCAIL-2 only `animation`/`replacement` at one reference — and until this epic packaged no video
+/// evidence for them, so admission never built a context and the refusal was unreachable. Landing
+/// anchors and bounds makes it reachable on `text_to_video`.
+///
+/// # Why the provider's own declaration is the source
+///
+/// [`gen_core::Generator::memory_strategy_safety_check`] is the exact declaration
+/// `generate_with_scope` already consults, resolved through each provider's registered strategy, so
+/// asking it here can never disagree with the gate that would refuse the render. There is no
+/// hard-coded model list, and a provider that widens its accepted shapes at a future pin widens
+/// this guard with it.
+///
+/// # Why the rung knobs go with it
+///
+/// The caller drops `memory` together with the context, so a refused shape reaches the engine with
+/// the input it received before the video gate existed. Keeping an optimized `GenerationMemory`
+/// block without its request scope is the exact state `generate_with_scope` already refuses, and a
+/// provider that will not accept a shape's context has not promised that shape an optimized rung
+/// either — so declining the rung is the conservative reading of its own declaration, not a
+/// weakening of it. The residual risk is a request that only fit at the optimized rung now running
+/// resident; the pre-load fit gate still governs that load, and a runtime refusal is strictly
+/// better than the unconditional `Unsupported` this path returns today.
+fn engine_declines_advisory_context(
+    generator: &dyn gen_core::Generator,
+    context: &MemoryRunContext,
+) -> Option<String> {
+    match generator.memory_strategy_safety_check(context) {
+        gen_core::MemorySafetyDecision::Accept => None,
+        gen_core::MemorySafetyDecision::Reject { reason } => Some(reason),
+    }
+}
+
 /// Whether a request has sealed packaged evidence before the worker pays for a live-memory probe.
 /// This is deliberately independent of the post-load budget: an unsupported mode/shape/rate must
 /// preserve direct generation even when that platform's budget probe would itself fail.
@@ -2229,6 +2274,22 @@ fn admit_video_generation_with_curves_and_profiles(
                 binding_frames = selected.binding_geometry.estimate_frames(),
                 request_frames = request.frames,
             );
+            if let Some(reason) = engine_declines_advisory_context(generator, &context) {
+                tracing::info!(
+                    event = "video_memory_context_declined_by_provider",
+                    route = request.route,
+                    mode = request.mode,
+                    reference_count = request.reference_count,
+                    reason,
+                    "the loaded provider's declared strategy does not accept this request shape; \
+                     handing the engine its own load-time defaults instead of a context it refuses"
+                );
+                return VideoAdmissionOutcome {
+                    memory: None,
+                    context: None,
+                    refusal: None,
+                };
+            }
             VideoAdmissionOutcome {
                 memory: contract.generation_memory(&selected.selection),
                 context: Some(context),
