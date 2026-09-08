@@ -9049,6 +9049,38 @@
       }
     },
     {
+      "id": "exceeded:scail2_14b:mlx:q4:base:base:scail2-14b-q4-mlx-resident-eager-v1:exc-48fbd21b5f3a0b3a8121",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 95299408488,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_95299408488",
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json",
+        "sha256": "55ca81ed9c41f7d8785173f2ce59d7d5b122ddeb5a2e061d518ac0686f0cbfe3",
+        "recordId": "exc-48fbd21b5f3a0b3a8121",
+        "calibrationFingerprint": "scail2-14b-q4-mlx-resident-eager-v1",
+        "loaderClosureDigest": "973a84206d5fc49295161f9c6cfc8ae19d90ad9294bb8e65476649251bc8f1cb"
+      }
+    },
+    {
       "id": "exceeded:wan_2_2_i2v_14b:mlx:bf16:base:base:sc-22736-wan2-2-i2v-a14b-mlx-dense-v1:exc-8071db4312d55971c74b",
       "modelId": "wan_2_2_i2v_14b",
       "modelFamily": "wan-video",
