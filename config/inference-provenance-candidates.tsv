@@ -617,7 +617,7 @@ crates/media/mlx-gen/mlx-gen-sensenova/src/config.rs	f5e0409be621afdfa2c2fc8fb93
 crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs	cebeaa016375258976f350573b5a0f4a766abbde	68b44c699610132072fa2b27be75575f5e065c1748ca40410cde6f428a3a29ee	architecture:crates/media/mlx-gen/mlx-gen-sensenova
 crates/media/mlx-gen/mlx-gen-sensenova/src/qwen3.rs	0880bba5b5b1fb7489c0ece56afac9ee86d2d480	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-sensenova
 crates/media/mlx-gen/mlx-gen-sensenova/src/runtime.rs	72ca212c624e5f46a883ab844e49babd021d516a	34685acc925d60791c8d6707c4027321ed9dc62c68dc213590994c517d1533f9	architecture:crates/media/mlx-gen/mlx-gen-sensenova
-crates/media/mlx-gen/mlx-gen-sensenova/src/t2i.rs	731a3f710a812e1a08db4bfc2ec4d50d52da3f7c	4270cf2d90a7236fce8dae849ae560aa13178f14cf654806db77910a01371069	architecture:crates/media/mlx-gen/mlx-gen-sensenova
+crates/media/mlx-gen/mlx-gen-sensenova/src/t2i.rs	6069810a587e8203394b19795725b11b15b2b53a	4270cf2d90a7236fce8dae849ae560aa13178f14cf654806db77910a01371069	architecture:crates/media/mlx-gen/mlx-gen-sensenova
 crates/media/mlx-gen/mlx-gen-sensenova/src/text.rs	dc486c4d8621546aa6c6a1e04a5b207da65e07d8	c7c792d228e59d633dc56287d23aca1c77c1355b357e36cbbef4f37663a987b4	architecture:crates/media/mlx-gen/mlx-gen-sensenova
 crates/media/mlx-gen/mlx-gen-sensenova/src/vision.rs	d655f4a0f86a629b98bdbeba3fcd87d6d0685778	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-sensenova
 crates/media/mlx-gen/mlx-gen-svd/src/config.rs	b859096a6c74faa520ab9a57c0baf1632ff4ee0a	2e01018e65f8f1e279bc16e89359022da0def06ad8320585036a0e3180e26aa5	architecture:crates/media/mlx-gen/mlx-gen-svd

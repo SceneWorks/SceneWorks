@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+  "inferenceRevision": "e34d7b46a301376676bd8a60419190c7be9aa4f0",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -1704,7 +1704,7 @@
     },
     "mlx:sensenova_u1_8b": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "f63c28e5b8b5348bdc578119aab954b292858a5143211085d0798998c83dc621",
+      "digest": "2e58d97a5d1f498588bea7a9c59d98b497908fb29b42a29055829c1aab7611db",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1723,7 +1723,7 @@
     },
     "mlx:sensenova_u1_8b_fast": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "3affbad3e7a3e8d60da6f0546ed1dc0c5829c18a75fa7bfdc437bcc9c5e7e4b1",
+      "digest": "b16c32c9e1f7e6b89ee6cd5deb24aaf92f7ee1425d451e75fa87e5b45b78cb8e",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
