@@ -37,6 +37,7 @@ use crate::checkpoint_inspector::{
     discover_library_root, inspect_checkpoint, CheckpointCandidateV1, CheckpointDiagnosticCodeV1,
     CheckpointDiagnosticSeverityV1, CheckpointDiagnosticV1, CheckpointInspectionRequestV1,
 };
+use crate::file_lock::FileLock;
 
 /// Directory under the application data dir that holds every file this store owns.
 pub const CHECKPOINTS_DIR: &str = "checkpoints";
@@ -1309,14 +1310,16 @@ impl CheckpointPlanStore {
 
     /// Take the store's exclusive cross-process lock for one read-modify-write.
     ///
-    /// The returned handle IS the lock: dropping the file releases it.
+    /// The returned handle IS the lock: dropping it releases the lock with `LOCK_UN` (see
+    /// [`FileLock`] — a close-only release stays visibly held while any forked child still
+    /// references the same open file description).
     ///
     /// The lock is NOT reentrant — `fs2` locks an open file description, so a second acquisition on
     /// a fresh descriptor blocks even inside one process. Every mutator therefore takes it exactly
     /// once and never calls another locking mutator underneath it: `remove_root` does its own
     /// inventory rewrite rather than calling `invalidate` in a loop, which is also what collapses
     /// its N document writes into one.
-    fn lock_store(&self) -> Result<fs::File, CheckpointPlanError> {
+    fn lock_store(&self) -> Result<FileLock, CheckpointPlanError> {
         fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
         let path = self.store_lock_path();
         // A lock file that is a symlink would let a planted link move the lock (and the writes it
@@ -1336,8 +1339,7 @@ impl CheckpointPlanStore {
             .truncate(false)
             .open(&path)
             .map_err(|error| io_error(&path, error))?;
-        fs2::FileExt::lock_exclusive(&file).map_err(|error| io_error(&path, error))?;
-        Ok(file)
+        FileLock::exclusive(file).map_err(|error| io_error(&path, error))
     }
 
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
@@ -2313,5 +2315,38 @@ impl CheckpointPlanStore {
             plan,
             layers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A released store lock must be free IMMEDIATELY, even while a descriptor this process handed
+    /// to a child still references the same open file description. `flock(2)` locks live on the
+    /// open file description, so a close-only release only takes effect once every such reference
+    /// is gone; `inherited_descriptor` reproduces that sharing without a child process, so the
+    /// interleaving is injected rather than waited for. Before sc-22738 the next mutator blocked
+    /// behind an already-released lock for as long as an unrelated `Command` sat between `fork`
+    /// and `exec`.
+    #[test]
+    fn a_released_store_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let store = CheckpointPlanStore::open(temporary.path());
+
+        let guard = store.lock_store().expect("store lock acquires");
+        let inherited = guard.inherited_descriptor().expect("descriptor duplicates");
+        drop(guard);
+
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.store_lock_path())
+            .expect("store lock file opens");
+        assert!(
+            FileLock::try_exclusive(lock_file).is_ok(),
+            "a store lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
     }
 }

@@ -19,13 +19,13 @@ pub use retention::{
     RetentionHold, RetentionReport, SourceLifecycleSelector,
 };
 
+use crate::file_lock::FileLock;
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
     ArtifactLocation, ArtifactProvenance, ClosureFileStat, ModelArtifactResolver,
     PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -583,7 +583,7 @@ struct StoreInner {
     session_id: String,
     /// `None` only for the read-only inspection handle created by
     /// [`ResolvedCacheStore::enumerate_existing`]; every runtime session holds its lock.
-    _session_lock: Option<File>,
+    _session_lock: Option<FileLock>,
 }
 
 impl std::fmt::Debug for ResolvedCacheStore {
@@ -613,10 +613,10 @@ impl ResolvedCacheStore {
         })?;
         let session_id = random_id()?;
         let session_lock_path = root.join("sessions").join(format!("{session_id}.lock"));
-        let session_lock = open_lock_file(&session_lock_path)?;
-        FileExt::try_lock_exclusive(&session_lock).map_err(|error| {
-            ResolvedCacheError::new(format!("lock cache session {session_id}: {error}"))
-        })?;
+        let session_lock =
+            FileLock::try_exclusive(open_lock_file(&session_lock_path)?).map_err(|error| {
+                ResolvedCacheError::new(format!("lock cache session {session_id}: {error}"))
+            })?;
         std::fs::create_dir(root.join("sessions").join(&session_id)).map_err(|error| {
             ResolvedCacheError::new(format!("create cache session records: {error}"))
         })?;
@@ -1017,14 +1017,14 @@ impl ResolvedCacheStore {
             return Err(ResolvedCacheError::new("source root is not a directory"));
         }
         let digest = cache_key_digest(cache_key)?;
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-        match FileExt::try_lock_exclusive(&artifact_lock) {
-            Ok(()) => {}
-            Err(error) if is_lock_contended(&error) => {
-                return Ok(ReservationOutcome::Contended);
-            }
-            Err(error) => return Err(error.into()),
-        }
+        let artifact_lock =
+            match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
+                Ok(lock) => lock,
+                Err(error) if is_lock_contended(&error) => {
+                    return Ok(ReservationOutcome::Contended);
+                }
+                Err(error) => return Err(error.into()),
+            };
         let entry = self.entry_path(cache_key)?;
         ensure_managed_entry_dir(&entry)?;
         let _metadata_lock = self.lock_metadata(&digest)?;
@@ -1309,8 +1309,7 @@ impl ResolvedCacheStore {
     ) -> Result<Option<ResolvedCacheLease>, ResolvedCacheError> {
         let logical_model_owner = validate_model_owner(logical_model_owner)?.to_owned();
         let digest = cache_key_digest(cache_key)?;
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-        FileExt::lock_shared(&artifact_lock)?;
+        let artifact_lock = FileLock::shared(open_lock_file(&self.artifact_lock_path(&digest))?)?;
         let metadata_lock = self.lock_metadata(&digest)?;
         let mut metadata = match self.read_metadata_unlocked(&digest)? {
             JournalRead::Valid { metadata, .. }
@@ -1367,12 +1366,12 @@ impl ResolvedCacheStore {
         let summaries = self.enumerate()?;
         for summary in &summaries {
             let digest = cache_key_digest(&summary.cache_key)?;
-            let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-            match FileExt::try_lock_exclusive(&artifact_lock) {
-                Ok(()) => {}
-                Err(error) if is_lock_contended(&error) => continue,
-                Err(error) => return Err(error.into()),
-            }
+            let _artifact_lock =
+                match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
+                    Ok(lock) => lock,
+                    Err(error) if is_lock_contended(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
             let _metadata_lock = self.lock_metadata(&digest)?;
             match self.read_metadata_unlocked(&digest) {
                 Ok(JournalRead::Valid {
@@ -1510,12 +1509,12 @@ impl ResolvedCacheStore {
             if !metadata.is_dir() || metadata.is_symlink() {
                 continue;
             }
-            let artifact_lock = open_lock_file(&self.artifact_lock_path(digest))?;
-            match FileExt::try_lock_exclusive(&artifact_lock) {
-                Ok(()) => {}
-                Err(error) if is_lock_contended(&error) => continue,
-                Err(error) => return Err(error.into()),
-            }
+            let _artifact_lock =
+                match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(digest))?) {
+                    Ok(lock) => lock,
+                    Err(error) if is_lock_contended(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
             let _metadata_lock = self.lock_metadata(digest)?;
             let live = match self.read_metadata_unlocked(digest) {
                 Ok(JournalRead::Valid { metadata, .. })
@@ -1566,10 +1565,13 @@ impl ResolvedCacheStore {
             .join(format!("{digest}.metadata.lock"))
     }
 
-    fn lock_metadata(&self, digest: &str) -> Result<File, ResolvedCacheError> {
-        let file = open_lock_file(&self.metadata_lock_path(digest))?;
-        FileExt::lock_exclusive(&file)?;
-        Ok(file)
+    /// The returned guard IS the lock: dropping it releases with `LOCK_UN` rather than by
+    /// `close(2)` alone, which would keep reading as held while any forked child still references
+    /// the same open file description (see [`FileLock`]).
+    fn lock_metadata(&self, digest: &str) -> Result<FileLock, ResolvedCacheError> {
+        Ok(FileLock::exclusive(open_lock_file(
+            &self.metadata_lock_path(digest),
+        )?)?)
     }
 
     fn read_metadata_locked(
@@ -1929,9 +1931,8 @@ impl ResolvedCacheStore {
             .root
             .join("sessions")
             .join(format!("{session}.lock"));
-        let file = open_lock_file(&path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(true),
+        match FileLock::try_exclusive(open_lock_file(&path)?) {
+            Ok(_probe) => Ok(true),
             Err(error) if is_lock_contended(&error) => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -1948,14 +1949,15 @@ impl ResolvedCacheStore {
             if !is_valid_session_id(session) || session == self.inner.session_id {
                 continue;
             }
-            let file = open_lock_file(&item.path())?;
-            match FileExt::try_lock_exclusive(&file) {
-                Ok(()) => {
+            match FileLock::try_exclusive(open_lock_file(&item.path())?) {
+                Ok(lock) => {
                     let records = sessions.join(session);
                     if records.is_dir() {
                         std::fs::remove_dir_all(records)?;
                     }
-                    drop(file);
+                    // Windows will not remove a file with an open handle, and the lock must be
+                    // released before the lock FILE itself is unlinked.
+                    drop(lock);
                     let _ = std::fs::remove_file(item.path());
                 }
                 Err(error) if is_lock_contended(&error) => {}
@@ -1975,7 +1977,7 @@ pub struct ResolvedCacheReservation {
     session_id: String,
     staging_path: PathBuf,
     record_path: PathBuf,
-    artifact_lock: Option<File>,
+    artifact_lock: Option<FileLock>,
     finished: bool,
 }
 
@@ -2244,7 +2246,7 @@ impl ResolvedCacheReservation {
 pub struct ResolvedCacheLease {
     runtime_lease: Option<ActiveArtifactLease>,
     #[allow(dead_code)]
-    artifact_lock: File,
+    artifact_lock: FileLock,
     record_path: PathBuf,
 }
 
