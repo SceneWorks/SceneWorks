@@ -1587,6 +1587,11 @@ export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs)
     const root = await firstExistingDirectory(
       hubs.map((hub) => snapshotPath(hub, artifact.repo, revision, ...suffix)),
     );
+    // sc-22738: present-but-empty is `weights_missing`, not a runnable root — see
+    // `EMPTY_SNAPSHOT_PREFIX`.
+    if (root && !(await directoryHasFiles(root))) {
+      return { root: null, revision, expected: root, reason: `${EMPTY_SNAPSHOT_PREFIX}${root}` };
+    }
     return {
       root,
       revision,
@@ -1594,11 +1599,20 @@ export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs)
       reason: `no ${artifact.repo}@${revision.slice(0, 8)}${label} on this host`,
     };
   }
+  // An unpinned repository is probed by whatever revision is staged here, so an empty tree is
+  // SKIPPED rather than reported: a second staged revision of the same repository may well hold the
+  // weights. Only when no candidate holds a file does the empty one become the answer.
+  let empty = null;
   for (const hub of hubs) {
     for (const candidate of await hostSnapshotRevisions(hub, artifact.repo)) {
       const root = snapshotPath(hub, artifact.repo, candidate, ...suffix);
-      if (await firstExistingDirectory([root])) return { root, revision: candidate, expected: root, reason: null };
+      if (!(await firstExistingDirectory([root]))) continue;
+      if (await directoryHasFiles(root)) return { root, revision: candidate, expected: root, reason: null };
+      empty ??= root;
     }
+  }
+  if (empty) {
+    return { root: null, revision: null, expected: empty, reason: `${EMPTY_SNAPSHOT_PREFIX}${empty}` };
   }
   return {
     root: null,
@@ -1657,6 +1671,53 @@ async function firstExistingDirectory(candidates) {
     } catch { /* absent */ }
   }
   return null;
+}
+
+/**
+ * sc-22738 (CUDA run 34272596969). The ONE spelling of "the directory is there and holds nothing".
+ *
+ * The Windows box's `E:\huggingface\hub` carried
+ * `models--SceneWorks--Mage-Flow-Base\snapshots\d642341926…\q4` as an EMPTY directory — a hub fetch
+ * that was interrupted after the snapshot tree was created and before a blob landed. Every probe in
+ * this file asked only "is it a directory", so the cell planned `runnable`, the walk booked it, and
+ * `hashArtifactInventory` then threw `artifact inventory is empty: …` out of `measureAnchor` and
+ * killed the remaining 71 cells of a multi-hour walk.
+ *
+ * An empty (or otherwise unusable) staged root is a HOST CONDITION about one cell, exactly like an
+ * absent one, so it classifies `weights_missing` with this prefix and — because the hub CLI resumes
+ * an interrupted download — is eligible for `--download-missing` on the same pass.
+ */
+export const EMPTY_SNAPSHOT_PREFIX = "snapshot present but empty: ";
+
+/**
+ * Why `tierRoot` cannot be inventoried, as the per-cell `weights_missing` reason.
+ *
+ * `hashArtifactInventory`'s own "is empty" message is rewritten into this file's one spelling so an
+ * operator reads the same phrase whether the classifier or the capture found the empty tree.
+ */
+export function inventoryUnusableReason(tierRoot, error) {
+  const message = String(error?.message ?? error ?? "unknown failure");
+  if (message.startsWith("artifact inventory is empty:")) return `${EMPTY_SNAPSHOT_PREFIX}${tierRoot}`;
+  return `artifact inventory unusable at ${tierRoot}: ${message}`.slice(0, FAILURE_REASON_LIMIT);
+}
+
+/** Whether `directory` holds at least one file at any depth. A dangling symlink counts as a file
+ *  here on purpose: it is a staging defect the inventory hash reports precisely, not an empty tree. */
+export async function directoryHasFiles(directory) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (await directoryHasFiles(path.join(directory, entry.name))) return true;
+    } else {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -2047,6 +2108,37 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
 /** The Hugging Face CLI, newest spelling first. `hf` superseded `huggingface-cli`; both take the
  *  same `download <repo> --revision … --include … --cache-dir …` form the runbook documents. */
 export const HF_CLI_CANDIDATES = Object.freeze(["hf", "huggingface-cli"]);
+
+/**
+ * Which of [`HF_CLI_CANDIDATES`] this host can run, or `null` when it can run none (sc-22738).
+ *
+ * WHY IT IS PROBED ONCE, UP FRONT. Without this, a box with no Hugging Face CLI answered
+ * `--download-missing` with N identical per-cell `download failed: … ENOENT` lines buried in a
+ * multi-hour walk log, and the operator's only summary was a wall of `weights_missing` rows that
+ * look exactly like the ones a box legitimately does not hold. The condition is not per-cell — it
+ * is one fact about the runner — so it is stated once, loudly, and then quoted on every cell it
+ * silences.
+ *
+ * A CLI that exists but exits non-zero on `--version` still counts as present: that is a broken
+ * install, and the real download's own error is a better description of it than anything guessed
+ * here. Only ENOENT — nothing of that name on PATH — moves on to the next spelling.
+ */
+export async function firstAvailableHfCli({ clis = HF_CLI_CANDIDATES, runCommand = run, env = process.env } = {}) {
+  for (const cli of clis) {
+    try {
+      await runCommand(cli, ["--version"], { env });
+      return cli;
+    } catch (error) {
+      if (error?.code !== "ENOENT") return cli;
+    }
+  }
+  return null;
+}
+
+/** The one reason a cell carries when the runner cannot fetch at all. */
+export const DOWNLOAD_UNAVAILABLE_REASON =
+  `no Hugging Face CLI on PATH (tried ${HF_CLI_CANDIDATES.join(", ")}), so --download-missing `
+  + "fetched nothing on this runner";
 
 /** This host in the manifest's own platform vocabulary. */
 export function manifestPlatform(platform = process.platform) {
@@ -2902,6 +2994,92 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
 /** Longest failure reason a summary row carries. The ONLY bound: never a delimiter, see below. */
 export const FAILURE_REASON_LIMIT = 300;
 
+// ---------------------------------------------------------------------------------------------
+// A CONTAMINATED GPU IS A HOST CONDITION, NOT A CATALOG OF PER-CELL FAILURES (sc-22738)
+// ---------------------------------------------------------------------------------------------
+//
+// CUDA run 34272596969: pid 6308 — an orphaned `memory-candle-adapter.exe` left behind when the
+// PREVIOUS dispatch (34271044903) was cancelled; the runner's own "Cleaning up orphan processes"
+// does not reach a detached grandchild — was resident on GPU 1 from the very first cell. The
+// engine's stable-idle guard did its job and refused every peak as contaminated, so the walk spent
+// FIFTY-ONE guarded renders, roughly an hour of GPU time, producing fifty-one copies of one fact
+// about the host.
+//
+// Two separate fixes, in two places, because these are two different problems:
+//
+//   * `.github/workflows/memory-catalog-campaign.yml` → `scripts/ci/memory-catalog/gpu-preflight.sh`
+//     stops the walk from STARTING on a dirty GPU, and reaps our own orphans first.
+//   * this file stops a walk that has ALREADY started once the host proves it is contaminated.
+//
+// The guard itself is untouched: it is measurement validity — a peak sampled beside a foreign
+// process is not this model's peak — not a gate on anything shipping.
+//
+// This abort is deliberately NOT the shape of the empty-snapshot fix above. A host condition that
+// invalidates EVERY remaining cell is worth stopping for; a per-cell condition never is.
+
+/** How many consecutive contaminated captures naming the SAME process prove a contaminated HOST. */
+export const CONTAMINATION_ABORT_STREAK = 5;
+
+const CONTAMINATION_PIDS_RE = /pure compute processes \[([\d,\s]*)\]/;
+
+/** The pids an "untrustworthy stable idle baseline" reason names, or `null` for any other reason. */
+export function contaminationPids(reason) {
+  const match = CONTAMINATION_PIDS_RE.exec(String(reason ?? ""));
+  if (!match) return null;
+  const pids = match[1].split(",").map((pid) => pid.trim()).filter(Boolean).map(Number);
+  return pids.length > 0 && pids.every(Number.isInteger) ? pids : null;
+}
+
+/**
+ * The compute processes `nvidia-smi` reports on the profiled GPU, as `pid → "<name> (<memory>)"`.
+ *
+ * Queried by the RUNNER rather than named by the engine on purpose: the guard's message is
+ * `candle-gen`'s, at the pinned inference revision, and a bare pid there is useless to whoever has
+ * to go and kill it. An unavailable or unparsable `nvidia-smi` yields an empty map — the reason
+ * then reads exactly as it does today, with the pid alone.
+ */
+export async function gpuComputeProcesses({ runCommand = run, env = process.env } = {}) {
+  const byPid = new Map();
+  const device = env.CUDA_VISIBLE_DEVICES;
+  const argv = ["--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"];
+  if (device) argv.unshift("-i", device);
+  let stdout;
+  try {
+    ({ stdout } = await runCommand("nvidia-smi", argv, { env }));
+  } catch {
+    return byPid;
+  }
+  for (const line of String(stdout).split("\n")) {
+    const [pid, name, memory] = line.split(",").map((field) => field.trim());
+    if (!/^\d+$/.test(pid ?? "")) continue;
+    byPid.set(Number(pid), memory ? `${name} (${memory})` : name);
+  }
+  return byPid;
+}
+
+/** `reason` with every pid it names annotated with that process's name, where one is known. */
+export function nameContaminatingProcesses(reason, pids, byPid) {
+  const named = pids.filter((pid) => byPid.has(pid));
+  if (named.length === 0) return reason;
+  const describe = named.map((pid) => `${pid} = ${byPid.get(pid)}`).join("; ");
+  return `${reason} [${describe}]`;
+}
+
+/** The walk-level halt a contaminated host earns once the streak is proven. */
+export function contaminatedHostHalt(pids, byPid, streak = CONTAMINATION_ABORT_STREAK) {
+  const described = pids
+    .map((pid) => (byPid.has(pid) ? `${pid} (${byPid.get(pid)})` : String(pid)))
+    .join(", ");
+  return (
+    `${streak} consecutive captures were refused for the SAME foreign compute process on the `
+    + `profiled GPU: ${described}. That is a contaminated HOST, not ${streak} model failures — `
+    + "every remaining anchor would be refused the same way and burn a guarded render doing it. "
+    + "Kill the process (a leftover memory-*-adapter from a cancelled run is the usual cause; the "
+    + "runner's orphan cleanup does not reach a detached grandchild), then re-run the walk. No "
+    + "measurement was recorded for any of the refused cells."
+  );
+}
+
 /**
  * A line the adapter wrote as INFORMATION rather than as its outcome.
  *
@@ -2989,7 +3167,18 @@ export async function measureAnchor(row, context) {
 
   const env = { ...process.env, ...row.env };
   if (row.tierRoot) {
-    const inventory = await hashArtifactInventory(row.tierRoot);
+    // sc-22738 (CUDA run 34272596969). EVERY way the inventory can refuse this root is a per-cell
+    // status. The classifier now rejects an empty tree before booking the cell, so reaching this
+    // arm means the tree changed under the walk or the inventory found something else it cannot
+    // hash (a symlink escaping the hub, an entry that resolves to a non-file). Whatever the cause,
+    // it says one thing about ONE cell — it must never be allowed to abort the walk and throw away
+    // every anchor the run has not reached yet, which is exactly what it did at cell 61 of 132.
+    let inventory;
+    try {
+      inventory = await hashArtifactInventory(row.tierRoot);
+    } catch (error) {
+      return finish("weights_missing", inventoryUnusableReason(row.tierRoot, error));
+    }
     env.SCENEWORKS_MEMORY_MODEL_BYTES = String(inventory.bytes);
     env.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = inventory.sha256;
     // The same digest a hard stop's artifact binding cites, so a bound names the exact weight files
@@ -3308,8 +3497,20 @@ export async function planRun(args, root = ROOT) {
     // HF env convention and the same place the CLI would write on its own.
     const cacheRoot = hubs[0];
     process.stdout.write(`download-missing: destination hub root ${cacheRoot}\n`);
+    // sc-22738: one probe, one warning, before any cell is silenced by it. `--dry-run` prints what
+    // it WOULD fetch without running the CLI, so it is not gated on one being installed.
+    const cli = args.dryRun ? null : await firstAvailableHfCli();
+    if (!args.dryRun && !cli) {
+      process.stdout.write(
+        `::warning title=Hugging Face CLI missing::${DOWNLOAD_UNAVAILABLE_REASON}\n`,
+      );
+    }
     for (const [index, row] of rows.entries()) {
       if (row.status !== "weights_missing") continue;
+      if (!args.dryRun && !cli) {
+        row.reason = `${row.reason} (download unavailable: ${DOWNLOAD_UNAVAILABLE_REASON})`;
+        continue;
+      }
       const missingReason = row.reason;
       const outcome = await fetchAnchorSnapshots(row, models, { cacheRoot, dryRun: args.dryRun });
       if (outcome.failed) {
@@ -3396,6 +3597,8 @@ export async function main(argv = process.argv.slice(2)) {
   process.on("SIGTERM", onInterrupt);
 
   const results = [];
+  // sc-22738: the consecutive-contamination discriminator, over ATTEMPTS rather than over the run.
+  const contamination = { streak: 0, signature: null, processes: null };
   const summaryPath = path.join(args.workDir, `summary-${stamp()}.json`);
   const writeSummary = () => writeFile(summaryPath, JSON.stringify({ campaign, backend: args.backend, inferencePin, results, commits: state.commits, rows }, null, 2));
   for (const row of runnable) {
@@ -3403,6 +3606,24 @@ export async function main(argv = process.argv.slice(2)) {
     if (state.stopRequested) { results.push({ key: row.key, status: "not_started", reason: "interrupted" }); continue; }
     process.stdout.write(`\n=== ${row.key} (${results.length + 1}/${runnable.length}) ${new Date().toISOString()}\n`);
     const result = await measureAnchor(row, { args, inferencePin, campaignDir, campaignPrefix, workDir: args.workDir, state });
+    // sc-22738: name the foreign process, and stop once the host has proved itself contaminated.
+    const contaminating = contaminationPids(result.reason);
+    if (contaminating) {
+      // Queried once per contaminated STREAK, not once per cell: the process set does not change
+      // between two refusals four seconds apart, and this runs while the GPU is otherwise idle.
+      contamination.processes ??= await gpuComputeProcesses();
+      result.reason = nameContaminatingProcesses(result.reason, contaminating, contamination.processes);
+      const signature = contaminating.join(",");
+      contamination.streak = signature === contamination.signature ? contamination.streak + 1 : 1;
+      contamination.signature = signature;
+      if (contamination.streak >= CONTAMINATION_ABORT_STREAK) {
+        state.halt = contaminatedHostHalt(contaminating, contamination.processes);
+      }
+    } else {
+      contamination.streak = 0;
+      contamination.signature = null;
+      contamination.processes = null;
+    }
     results.push(result);
     process.stdout.write(`--- ${row.key}: ${result.status}${result.reason ? ` (${result.reason})` : ""} in ${result.seconds}s\n`);
     await writeSummary();

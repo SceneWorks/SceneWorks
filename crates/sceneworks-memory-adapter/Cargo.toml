@@ -45,6 +45,11 @@ candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "e34d7b46a
 # own `request_evidence_revision`, rather than restating either in the adapter.
 candle-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "e34d7b46a301376676bd8a60419190c7be9aa4f0", features = ["cuda"], optional = true }
 candle-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "e34d7b46a301376676bd8a60419190c7be9aa4f0", features = ["cuda"], optional = true }
+# sc-22738: the SDXL family's route revisions are READ from the engine's own `SDXL_ROUTES` rather
+# than transcribed into the adapter. The transcription is what broke CUDA run 34272596969 -- the
+# sc-22729 repair moved both Illustrious routes and the copies here did not follow, so six cells
+# were refused for a drift that did not exist at the pin. Same reasoning as the two crates above.
+candle-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "e34d7b46a301376676bd8a60419190c7be9aa4f0", features = ["cuda"], optional = true }
 runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "e34d7b46a301376676bd8a60419190c7be9aa4f0", optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
@@ -53,7 +58,7 @@ sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference",
 [features]
 default = []
 mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
-candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-wan", "dep:runtime-cuda"]
+candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-sdxl", "dep:candle-gen-wan", "dep:runtime-cuda"]
 
 [[bin]]
 name = "memory-mlx-adapter"
