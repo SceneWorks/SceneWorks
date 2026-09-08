@@ -4652,6 +4652,52 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_infographic_v2:mlx:bf16:base:base:sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1:imc-f3714df49f7065bc00ce",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json",
+        "sha256": "e5aec783d3b82ff6cd8d4fb9338741be598a32e3d6ec8d5f52c0439e18d4682b",
+        "recordId": "imc-f3714df49f7065bc00ce",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 35621742556,
+        "decode": 33518690088
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 39506783660,
+        "decode": 37623932176
+      },
+      "overallAllocatorEnvelopeBytes": 39726984644,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -7954,17 +8000,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:q4",
