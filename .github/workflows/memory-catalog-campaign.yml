@@ -17,6 +17,17 @@
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
 # back into the dispatched `ref` when the branch has commits. Nothing is merged automatically.
 #
+# FETCHING THE WEIGHTS IT NEEDS (`download_missing`, default false, sc-22738). Neither box holds the
+# whole catalog, and an anchor whose pinned snapshot is under none of the hub roots plans as
+# `weights_missing` and is skipped. Downloading the missing snapshots on the Windows box is faster
+# than copying them off the Mac's SSD, so the dispatch can turn on `--download-missing`: for the
+# `weights_missing` anchors AND ONLY THOSE, the walk resolves each repository/pinned-revision/file
+# globs out of the manifest rows the plan already reads, fetches them one at a time through the
+# Hugging Face CLI into the FIRST hub root, and classifies the anchor again. `$HF_TOKEN` (a runner
+# secret) is exported for the CLI and is only needed for a gated repository; a failed fetch leaves
+# that one anchor `weights_missing (download failed: …)` and never stops the walk. The flag reaches
+# the dry run (which fetches nothing) and the walk, never the `--list` pass.
+#
 # THE SCARCE RESOURCE IS THE GPU, NOT THE RUNNER. Each job takes a job-level `concurrency` group
 # keyed on (backend, runner) with `cancel-in-progress: false`, so two campaigns can never share one
 # box's GPU: the second dispatch queues behind the first rather than fighting it for unified memory
@@ -63,6 +74,15 @@ on:
         required: false
         type: string
         default: ""
+      download_missing:
+        description: >-
+          Fetch the pinned snapshots of anchors that would otherwise plan as weights_missing
+          (--download-missing). They land in the FIRST hub root above through the Hugging Face CLI
+          at the manifest's pinned revision, one at a time; a gated repo needs $HF_TOKEN on the
+          runner. Off by default: leave it off when the box already holds its weights.
+        required: false
+        type: boolean
+        default: false
       ref:
         description: "Branch to walk from. The campaign branch is cut from this ref and the PR targets it."
         required: true
@@ -86,8 +106,9 @@ on:
         type: string
         default: "1"
 
-# `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. No other secret is
-# needed or read by this workflow.
+# `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. The only other secret
+# this workflow reads is `HF_TOKEN`, and only the Hugging Face CLI sees it, only under
+# `download_missing` against a gated repository.
 permissions:
   contents: write
   pull-requests: write
@@ -104,6 +125,11 @@ env:
   MODELS_INPUT: ${{ inputs.models }}
   SKIP_CURRENT: ${{ inputs.skip_current }}
   HF_CACHE_INPUT: ${{ inputs.hf_cache_roots }}
+  DOWNLOAD_MISSING: ${{ inputs.download_missing }}
+  # Read by the Hugging Face CLI itself when --download-missing fetches a gated repository. Absent
+  # is not an error: every SceneWorks rehost and every upstream this campaign fetches is public, so
+  # an unset token only matters for a gated one. `hf_transfer` is opt-in on the runner, not here.
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   mlx:

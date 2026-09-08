@@ -18,6 +18,16 @@
 //     --work-dir /abs/OUTSIDE/the/repo/calib --campaign sc-NNNN [--model sdxl ...] [--anchors a,b]
 //     [--skip-current] [--probe-budget-minutes N]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
+//     [--download-missing]
+//
+// `--download-missing` (default OFF, sc-22738) fetches the pinned snapshots of every anchor the
+// plan would otherwise classify `weights_missing` — and only those — into the FIRST `--hf-cache`
+// root, through the Hugging Face CLI (`hf download <repo> --revision <pinned> --include <globs>
+// --cache-dir <root>`, falling back to `huggingface-cli`), then classifies the anchor again. One
+// download at a time, resumable, `$HF_TOKEN` honoured by the CLI itself; a failed fetch leaves the
+// anchor `weights_missing (download failed: …)` and never aborts the walk. `--dry-run
+// --download-missing` prints what it would fetch, with the manifest's own byte estimate, and
+// fetches nothing.
 //
 // Every guarded probe also carries a WALL-CLOCK budget (`--probe-budget-minutes`, defaulted per
 // lane by `PROBE_BUDGET_MINUTES`), passed to the guard as `--max-runtime-seconds`. A probe that
@@ -1334,7 +1344,7 @@ export function parseArgs(argv) {
   const args = {
     backend: null, adapter: null, inferenceRepo: null, workDir: null, campaign: null,
     anchors: null, models: [], skipCurrent: false, dryRun: false, commit: true, hfCache: [], list: false,
-    probeBudgetMinutes: null,
+    probeBudgetMinutes: null, downloadMissing: false,
   };
   const value = (flag, index) => {
     const selected = argv[index + 1];
@@ -1362,6 +1372,9 @@ export function parseArgs(argv) {
         index += 1;
         break;
       }
+      // sc-22738. Off by default: a campaign that has its weights must never start a multi-GB
+      // transfer, and the flag is the operator's statement that this box is allowed to fetch.
+      case "--download-missing": args.downloadMissing = true; break;
       case "--dry-run": args.dryRun = true; break;
       case "--no-commit": args.commit = false; break;
       case "--list": args.list = true; break;
@@ -2013,6 +2026,240 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     variant: parts.tier,
   };
   return row;
+}
+
+// ---------------------------------------------------------------------------------------------
+// `--download-missing`: fetch the pinned snapshots a `weights_missing` anchor needs (sc-22738)
+// ---------------------------------------------------------------------------------------------
+//
+// The campaign runs on boxes that do not hold the whole catalog: the Windows CUDA runner's
+// `E:\huggingface\hub` carries a fraction of what the plan declares, and every anchor whose pinned
+// snapshot is under none of the `--hf-cache` roots classifies `weights_missing` and is skipped.
+// Copying the missing snapshots off the Mac's SSD is slower than fetching them from the hub on that
+// box's own link (2026-09-08), so the walk can fetch them itself.
+//
+// Everything below is DERIVED from what the plan already knows — the family row that says which
+// repositories one anchor binds, and the manifest download rows that pin each repository's revision
+// and its file globs. Nothing here decides what an anchor needs; `classifyAnchor` does, and it
+// decides again after the fetch. The flag is opt-in and touches ONLY rows the plan classified
+// `weights_missing`: a runnable anchor is never re-fetched, and no other status is reconsidered.
+
+/** The Hugging Face CLI, newest spelling first. `hf` superseded `huggingface-cli`; both take the
+ *  same `download <repo> --revision … --include … --cache-dir …` form the runbook documents. */
+export const HF_CLI_CANDIDATES = Object.freeze(["hf", "huggingface-cli"]);
+
+/** This host in the manifest's own platform vocabulary. */
+export function manifestPlatform(platform = process.platform) {
+  if (platform === "darwin") return "macos";
+  if (platform === "win32") return "windows";
+  return "linux";
+}
+
+/**
+ * The manifest download rows that ship `tier` of `repo` for `modelId` — the tier's own rows plus
+ * every tier-independent co-requisite of the same repository.
+ *
+ * Narrowed to THIS host's platform, because several families ship a different file set per platform
+ * (MiniMax-H3's dense upstream ships `transformer/*` on windows/linux and only the text encoder on
+ * macOS) and fetching the union would pull tens of GB no lane loads. The narrowing is fail-safe: a
+ * repository whose rows are all scoped to other platforms falls back to the unfiltered set rather
+ * than resolving to "no globs", which downstream would read as "fetch the whole repository".
+ */
+export function tierDownloadRows(models, modelId, repo, tier, platform = manifestPlatform()) {
+  const model = models.find((entry) => entry.id === modelId);
+  if (!model) return [];
+  const rows = (model.downloads ?? []).filter(
+    (download) => download.repo === repo && (download.variant === undefined || download.variant === tier),
+  );
+  const scoped = rows.filter((download) => !download.platforms || download.platforms.includes(platform));
+  return scoped.length > 0 ? scoped : rows;
+}
+
+/**
+ * Every pinned snapshot ONE anchor binds, as `{ label, repo, revision, include, estimatedBytes }`,
+ * plus the roots that cannot be fetched at all and why.
+ *
+ * The repositories are exactly the ones `classifyAnchor` probes for this cell — the LTX-2.5
+ * snapshot the harness binds through `--ltx25-snapshot-root`, or else the per-(lane, tier) artifact
+ * `familyArtifact` resolves; the `upstream` root; the caller-staged `components` in both their array
+ * (SDXL) and object (Mage-Flow) shapes; and the member's `sideArtifact`. `siblingRoots` need no
+ * entry: a sibling lives INSIDE the artifact's own snapshot at the same revision, so the tier root's
+ * co-requisite rows already carry its globs.
+ *
+ * Two things are deliberately NOT fetchable, and are reported rather than guessed at:
+ *
+ *   - a repository the manifest ships with NO pinned revision (the upstream Wan 2.2 / SVD Diffusers
+ *     checkpoints). `--revision` is ALWAYS the pinned revision here; falling back to `main` would
+ *     fetch whatever the branch points at today, which is not the artifact the anchor prices — and
+ *     pinning a manifest download REMOVES `refs/main` from the mirror in the first place;
+ *   - a `bundle` / `stagedEnv` root (PuLID's identity bundle, the InstantID stack), which is a
+ *     pre-staged directory named by an operator env var and not a hub repository at all.
+ */
+export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIES, platform = manifestPlatform() } = {}) {
+  const targets = [];
+  const unfetchable = [];
+  const family = familyFor(row.modelId, row.provider, families);
+  if (!family) return { targets, unfetchable: [`no artifact family declares ${row.modelId} on provider ${row.provider}`] };
+
+  const repositories = [];
+  if (family.ltx25) repositories.push({ label: "ltx25 snapshot", repo: family.repo });
+  else repositories.push({ label: "tier root", repo: familyArtifact(family, row.backend, row.tier).repo });
+  if (family.upstream) repositories.push({ label: "upstream root", repo: family.upstream.repo });
+  for (const component of Array.isArray(family.components) ? family.components : []) {
+    repositories.push({ label: `component ${component.env}`, repo: component.repo });
+  }
+  if (family.components && !Array.isArray(family.components)) {
+    repositories.push({ label: "components snapshot", repo: family.components.repo });
+  }
+
+  const seen = new Set();
+  for (const { label, repo } of repositories) {
+    const rows = tierDownloadRows(models, row.modelId, repo, row.tier, platform);
+    if (rows.length === 0) {
+      unfetchable.push(`the manifest declares no ${repo} download for ${row.modelId}:${row.tier}`);
+      continue;
+    }
+    // One target per (repo, revision): a family whose co-requisites sit at a different revision
+    // from its tier weights is two fetches, never one fetch at whichever revision sorted first.
+    const byRevision = new Map();
+    for (const download of rows) {
+      if (!/^[0-9a-f]{40}$/.test(download.revision ?? "")) continue;
+      const entry = byRevision.get(download.revision) ?? { include: [], estimatedBytes: 0, whole: false };
+      if ((download.files ?? []).length === 0) entry.whole = true;
+      for (const glob of download.files ?? []) if (!entry.include.includes(glob)) entry.include.push(glob);
+      entry.estimatedBytes += Number(download.estimatedSizeBytes ?? 0);
+      byRevision.set(download.revision, entry);
+    }
+    if (byRevision.size === 0) {
+      unfetchable.push(
+        `${repo} is shipped without a pinned revision, and this fetch passes --revision with the `
+        + "pinned revision or does not run at all",
+      );
+      continue;
+    }
+    for (const [revision, entry] of byRevision) {
+      if (seen.has(`${repo}@${revision}`)) continue;
+      seen.add(`${repo}@${revision}`);
+      // `whole` means at least one row of this repository ships no `files` predicate, so the
+      // download IS the snapshot; passing the other rows' globs would fetch strictly less.
+      targets.push({ label, repo, revision, include: entry.whole ? [] : entry.include, estimatedBytes: entry.estimatedBytes });
+    }
+  }
+
+  // Not a manifest download: the member's own pinned side artifact (the Qwen edit Lightning distill
+  // LoRA), whose repository, revision and file the family row pins because the worker fetches it
+  // lazily rather than declaring it.
+  const side = family.sideArtifact?.[row.modelId];
+  if (side && !seen.has(`${side.repo}@${side.revision}`)) {
+    seen.add(`${side.repo}@${side.revision}`);
+    targets.push({
+      label: "side artifact", repo: side.repo, revision: side.revision,
+      include: side.file ? [side.file] : [], estimatedBytes: 0,
+    });
+  }
+  if (family.bundle) {
+    unfetchable.push(`$${family.bundle.env} is a pre-staged loose-file bundle, not a Hugging Face repository`);
+  }
+  for (const staging of family.stagedEnv ?? []) {
+    unfetchable.push(`$${staging.env} names a hand-staged directory, not a Hugging Face repository`);
+  }
+  return { targets, unfetchable };
+}
+
+/**
+ * The CLI arguments for one target. `--revision` is ALWAYS the pinned revision: the whole point of
+ * the flag is to land the snapshot the anchor prices, and a fetch that resolved a branch would
+ * quietly measure some other artifact.
+ */
+export function hfDownloadArgv(target, cacheRoot) {
+  const argv = ["download", target.repo, "--revision", target.revision];
+  for (const glob of target.include) argv.push("--include", glob);
+  argv.push("--cache-dir", cacheRoot);
+  return argv;
+}
+
+/** Files and bytes under one staged snapshot, for the per-anchor log line. */
+async function snapshotFileStats(root) {
+  let files = 0;
+  let bytes = 0;
+  const visit = async (dir) => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await visit(child); continue; }
+      try {
+        const info = await stat(child);
+        if (info.isFile()) { files += 1; bytes += info.size; }
+      } catch { /* a dangling blob symlink counts as neither */ }
+    }
+  };
+  await visit(root);
+  return { files, bytes };
+}
+
+/**
+ * Fetch every snapshot one `weights_missing` anchor needs into `cacheRoot`, one at a time.
+ *
+ * Serial on purpose: these are multi-GB transfers on a runner whose link is the bottleneck (the
+ * Windows box died at ~150 KB/s inside a single parallel git fetch), and the CLI RESUMES a partial
+ * download, so a killed campaign re-runs the same command and pays only for what is missing.
+ *
+ * A failure NEVER aborts the walk — it comes back as a reason the caller appends to the anchor's
+ * `weights_missing` row, exactly as an absent snapshot does today.
+ */
+export async function fetchAnchorSnapshots(row, models, {
+  cacheRoot,
+  dryRun = false,
+  log = (line) => process.stdout.write(`${line}\n`),
+  families = PROVIDER_FAMILIES,
+  platform = manifestPlatform(),
+  env = process.env,
+  runCommand = run,
+  clis = HF_CLI_CANDIDATES,
+} = {}) {
+  const { targets, unfetchable } = anchorDownloadTargets(row, models, { families, platform });
+  if (targets.length === 0) {
+    return { fetched: [], failed: unfetchable.length > 0 ? unfetchable.join("; ") : "nothing to fetch", unfetchable };
+  }
+  const fetched = [];
+  for (const target of targets) {
+    if (dryRun) {
+      log(
+        `download: ${row.key} ${target.repo}@${target.revision.slice(0, 8)} would fetch `
+        + `${target.include.length > 0 ? `${target.include.length} glob(s): ${target.include.join(" ")}` : "the whole snapshot"}`
+        + `${target.estimatedBytes > 0 ? ` (~${target.estimatedBytes} bytes)` : ""}`,
+      );
+      fetched.push({ ...target, dryRun: true });
+      continue;
+    }
+    let lastError = null;
+    let ran = false;
+    for (const cli of clis) {
+      try {
+        await runCommand(cli, hfDownloadArgv(target, cacheRoot), { env });
+        ran = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        // Only a MISSING cli falls through to the next spelling; a real download failure is the
+        // answer, not a reason to run a second tool.
+        if (error?.code !== "ENOENT") break;
+      }
+    }
+    if (!ran) {
+      return {
+        fetched,
+        failed: `${target.repo}@${target.revision.slice(0, 8)}: ${failureReason(lastError ?? new Error("no Hugging Face CLI on PATH"))}`,
+        unfetchable,
+      };
+    }
+    const staged = snapshotPath(cacheRoot, target.repo, target.revision);
+    const stats = await snapshotFileStats(staged);
+    log(`download: ${row.key} ${target.repo}@${target.revision.slice(0, 8)} ${stats.files} files, ${stats.bytes} bytes`);
+    fetched.push({ ...target, ...stats });
+  }
+  return { fetched, failed: null, unfetchable };
 }
 
 /** Append one evidence corpus to the Rust loader's compiled-in list, idempotently. */
@@ -2997,12 +3244,10 @@ export async function planRun(args, root = ROOT) {
   for (const model of args.models ?? []) {
     if (!keys.some((key) => anchorParts(key).modelId === model)) fail(`--model ${model} matches no plan anchor`);
   }
-  const rows = [];
-  for (const key of keys) {
-    if (args.anchors && !args.anchors.includes(key)) continue;
-    if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, bounds, declaredLanes, declaredProviders, sdxlRoutes, wanMlxSealed });
-    if (row.status === "other_backend" && !args.anchors) continue;
+  const context = { models, backend: args.backend, hubs, current, captured, bounds, declaredLanes, declaredProviders, sdxlRoutes, wanMlxSealed };
+  // Everything the classifier states about one row AFTER `classifyAnchor` returns it, so a
+  // re-classification following a fetch reaches exactly the same status a first pass would have.
+  const settle = (row) => {
     // An unperformed route-revision comparison is reported on the row it did not happen for, so a
     // run without an inference checkout cannot silently look like a run that proved the engine agrees.
     if (row.routeCheck && ["runnable", "weights_missing"].includes(row.status)) {
@@ -3012,7 +3257,44 @@ export async function planRun(args, root = ROOT) {
       row.status = "current";
       row.reason = "anchor is current at the pinned inference revision (--skip-current)";
     }
-    rows.push(row);
+    return row;
+  };
+  const rows = [];
+  for (const key of keys) {
+    if (args.anchors && !args.anchors.includes(key)) continue;
+    if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
+    const row = await classifyAnchor(key, plan.anchors[key], context);
+    if (row.status === "other_backend" && !args.anchors) continue;
+    rows.push(settle(row));
+  }
+  // sc-22738. `--download-missing` fetches the pinned snapshots the ALREADY-CLASSIFIED
+  // `weights_missing` rows need, then asks the classifier again. Nothing else is touched: a
+  // `runnable` row is never re-fetched, and a row refused for any other reason (no adapter arm, an
+  // undeclared lane, an exceeded bound) is not a weights problem and gets no download.
+  if (args.downloadMissing) {
+    // The FIRST --hf-cache root is the destination, because that is the root the operator named
+    // for this box; with no --hf-cache at all it is whatever `hubRoots()` puts first, which is the
+    // HF env convention and the same place the CLI would write on its own.
+    const cacheRoot = hubs[0];
+    process.stdout.write(`download-missing: destination hub root ${cacheRoot}\n`);
+    for (const [index, row] of rows.entries()) {
+      if (row.status !== "weights_missing") continue;
+      const missingReason = row.reason;
+      const outcome = await fetchAnchorSnapshots(row, models, { cacheRoot, dryRun: args.dryRun });
+      if (outcome.failed) {
+        row.reason = `${missingReason} (download failed: ${outcome.failed})`;
+        continue;
+      }
+      for (const note of outcome.unfetchable) process.stdout.write(`download: ${row.key} not fetchable: ${note}\n`);
+      // A dry run states what it WOULD fetch and changes no classification: nothing landed, so
+      // re-classifying could only report the same missing root a second time.
+      if (args.dryRun) continue;
+      const reclassified = settle(await classifyAnchor(row.key, plan.anchors[row.key], context));
+      if (reclassified.status === "weights_missing") {
+        reclassified.reason = `${reclassified.reason} (after --download-missing fetched ${outcome.fetched.length} snapshot(s))`;
+      }
+      rows[index] = reclassified;
+    }
   }
   return { plan, rows, campaign, campaignDir, campaignPrefix: campaignDir, hubs };
 }
