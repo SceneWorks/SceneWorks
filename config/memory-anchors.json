@@ -9782,6 +9782,38 @@
           "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree)."
         }
       }
+    },
+    {
+      "id": "exceeded:wan_2_2_i2v_14b:mlx:q4:base:base:sc-22736-wan2-2-i2v-a14b-mlx-q4-v1:exc-a4760f3cf30e39b2cf16",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "provider": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 105509080336,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_105509080336",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json",
+        "sha256": "65cdb5aaa2d42ce62050377561417a1ab37cbaf929ebadc506d688d6c2d2cccf",
+        "recordId": "exc-a4760f3cf30e39b2cf16",
+        "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q4-v1",
+        "loaderClosureDigest": "be4ac7bd5a2f220f549ce09e5eac983e0354ed87a1e045f194035901d91867f0"
+      }
     }
   ]
 }
