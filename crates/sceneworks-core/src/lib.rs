@@ -17,6 +17,7 @@ pub mod credentials;
 pub mod dataset_quality;
 pub mod decoder_support;
 pub mod external_roots;
+pub mod file_lock;
 pub mod hf_home;
 pub mod hf_repo_renames;
 pub mod ideogram_caption;
