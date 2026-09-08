@@ -2,8 +2,8 @@
 //!
 //! FOUR engine providers, ONE arm, because the four differ only in coordinates a table can hold:
 //! the artifact family, the public request carrier, the rate menu and the production identity. The
-//! measured path is identical — resolve the artifact, seal the receipt the way the worker's
-//! memory-aware load does, load through `runtime_macos::catalog().media()` (the seam
+//! measured path is identical — resolve the artifact, seal a receipt only where the engine publishes
+//! the identity from one, load through `runtime_macos::catalog().media()` (the seam
 //! `crates/sceneworks-worker/src/inference_runtime.rs` wraps), read the LOADED generator's own
 //! contract, drive the four admission probes through the provider's own registered check, and
 //! measure three synchronized phase peaks off the boundaries `generate` already emits.
@@ -468,6 +468,46 @@ fn numeric_quant(arm: Arm, tier: &str) -> Result<Option<Quant>, String> {
     Ok(if arm.route.is_some() { quant } else { None })
 }
 
+/// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
+/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// or by the provider's own `memory_strategy` module, which the loader publishes only for an
+/// unprepared spec, so sealing one would HIDE it (sc-22738).
+///
+/// Asked of the engine rather than spelled per route: `production_calibration_fingerprint`
+/// (`gen-core/src/wan_i2v_memory.rs`) is the receipt authority's own answer, and it returns `None`
+/// for `wan2_2_ti2v_5b` by design — that route's `sc-19236-…` identity belongs to
+/// `mlx-gen-wan/src/memory_strategy.rs`, and `Wan::memory_strategy_contract` (`model.rs`) returns
+/// the receipt's contract, calibration and all, ahead of that one whenever the spec was prepared.
+/// The receipt-published identity must be the plan's: a receipt naming any other string is a drift
+/// between this table and the engine, refused by name before a byte is opened.
+fn receipt_publishes_the_identity(
+    arm: Arm,
+    tier: &str,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    let Some(route) = arm.route else {
+        return Ok(false);
+    };
+    let numeric_tier = MemoryNumericTier {
+        precision: Precision::Bf16,
+        quant: numeric_quant(arm, tier)?,
+        component_precision_floors: &[],
+    };
+    match mlx_gen::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+        route,
+        mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+        numeric_tier,
+    ) {
+        None => Ok(false),
+        Some(published) if published == expected_fingerprint => Ok(true),
+        Some(published) => Err(format!(
+            "the pinned receipt authority mints {published} for the {} {tier} cell, not this \
+             arm's {expected_fingerprint}; the table and the engine have drifted",
+            arm.provider
+        )),
+    }
+}
+
 /// A deterministic, non-degenerate RGB8 plane. Every carrier byte a capture presents is generated
 /// here rather than staged, so the record's request identity is reproducible from this source
 /// alone — the same choice the PuLID and LTX arms make for their synthetic carriers.
@@ -765,12 +805,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
 
     let mut artifact = load_spec(arm, tier, load_shape)?;
-    // A Wan route's loader prepares a memory receipt only for a spec whose file pins are already
-    // prepared (`model.rs`: `spec.prepared_file_pins().is_prepared()`), so the capture must do what
-    // the worker's memory-aware load does — otherwise the generator loads with no calibration
-    // identity at all. SCAIL-2 seals its own shared-tier pins inside `PreparedMemory::prepare` and
-    // needs no pre-pass.
-    if arm.route.is_some() {
+    // The A14B loaders publish a memory contract ONLY from a sealed receipt (`model.rs`: the
+    // `i2v_memory` prepared for a spec whose file pins are already prepared), so on those routes
+    // the capture seals one before the load — otherwise the generator loads with no contract at
+    // all. TI2V-5B is the opposite (sc-22738): its production identity is its own
+    // `memory_strategy` module's, which `load` publishes only for an UNPREPARED spec — a prepared
+    // one takes the receipt path instead, and the receipt authority mints no identity for that
+    // route. Production (`video_jobs/wan.rs::video_load_spec`) prepares nothing, so neither does
+    // this cell. SCAIL-2 seals its own shared-tier pins inside `PreparedMemory::prepare`.
+    if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {
         mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec, arm.provider)
             .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
     }
@@ -1071,6 +1114,64 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the A14B routes seal a receipt before the load (sc-22738).
+    ///
+    /// `wan_2_2:{bf16,q4,q8}:mlx` were refused at e34d7b46a with "published no calibration
+    /// identity": the arm sealed a receipt for every Wan route, and for TI2V-5B the loader then
+    /// published the receipt's identity-less contract ahead of its own `sc-19236-…` one. The
+    /// discriminator is the engine's receipt authority, asked directly, so the A14B cells keep
+    /// their pre-pass and the two unprepared arms match production's own load.
+    ///
+    /// Mutations that fail this: guarding the pre-pass on `arm.route.is_some()` again (the
+    /// TI2V-5B rows flip), or dropping the drift refusal (the last assertion).
+    #[test]
+    fn only_the_a14b_routes_seal_a_receipt_before_the_load() {
+        for arm in ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let expected = production_fingerprint(arm, tier).unwrap();
+                let seals = receipt_publishes_the_identity(arm, tier, &expected).unwrap();
+                let a14b = matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b));
+                assert_eq!(seals, a14b, "{} {tier}", arm.provider);
+            }
+        }
+        // Not vacuous: the table really carries both kinds of route.
+        assert!(matches!(TI2V_5B.route, Some(WanI2vRoute::Ti2v5b)));
+        assert!(SCAIL2.route.is_none());
+        for tier in ["bf16", "q4", "q8"] {
+            let expected = production_fingerprint(TI2V_5B, tier).unwrap();
+            assert!(expected.starts_with("sc-19236-wan2-2-ti2v-5b-mlx-"));
+            assert_eq!(
+                receipt_publishes_the_identity(TI2V_5B, tier, &expected),
+                Ok(false),
+                "{tier}"
+            );
+        }
+        let drift =
+            receipt_publishes_the_identity(T2V_A14B, "q4", "not-the-engines-string").unwrap_err();
+        assert!(
+            drift.contains("sc-22736-wan2-2-t2v-a14b-mlx-q4-v1") && drift.contains("drifted"),
+            "{drift}"
+        );
+    }
+
+    /// The pre-pass in the arm's body is guarded by the engine-asked discriminator and by nothing
+    /// looser; read as source because the load itself needs real weights (sc-22738).
+    #[test]
+    fn the_receipt_prepass_is_guarded_by_the_receipt_authority() {
+        let body = arm_source_body();
+        let guard = body
+            .find("if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {")
+            .expect("the pre-pass is guarded by the receipt authority");
+        let prepass = body
+            .find("mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec")
+            .expect("the pre-pass still exists");
+        assert!(guard < prepass, "the guard precedes the pre-pass");
+        assert!(
+            !body.contains("if arm.route.is_some() {\n        mlx_gen_wan::i2v_memory_strategy"),
+            "the pre-pass must not run for every Wan route"
+        );
+    }
 
     /// `LoadSpec::quantize` follows each route's OWN MLX convention, and the two differ.
     ///
