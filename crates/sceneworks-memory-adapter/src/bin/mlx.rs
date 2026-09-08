@@ -1272,31 +1272,8 @@ mod tests {
         for record in evidence.records.iter().filter(|record| {
             record.backend == Backend::Mlx && record.target.mode == "text_to_image"
         }) {
-            // A record whose ENGINE bounds none of the three declared phase edges publishes the
-            // overall-only shape and says so in its diagnostics (sc-22738 — the SenseNova family
-            // at e16c6a55e, `SENSENOVA_ENGINE_BOUNDARIES`). There is no decomposition to run the
-            // counterfactual over, and inventing one is exactly what that arm refuses to do, so
-            // such a record is skipped — but only on its own declaration. An overall-only record
-            // that does NOT declare an unattributed phase is a decomposition that went missing,
-            // and still fails here.
             let observed = match &record.observed_memory {
-                RequiredNullable::Value(observed) => match observed.full() {
-                    Some(observed) => observed,
-                    None => {
-                        assert!(
-                            record.diagnostics.as_ref().is_some_and(|diagnostics| {
-                                diagnostics.measurements.iter().any(|measurement| {
-                                    measurement.name == "conditioningPhaseUnattributed"
-                                        && measurement.value == 1
-                                })
-                            }),
-                            "{} carries overall-only image telemetry without declaring an \
-                             unattributed phase",
-                            record.id
-                        );
-                        continue;
-                    }
-                },
+                RequiredNullable::Value(observed) => observed.full().expect("full image telemetry"),
                 RequiredNullable::Null => panic!("{} has null image telemetry", record.id),
             };
             image_records += 1;
@@ -3336,19 +3313,6 @@ impl PredictedPhasePeaks {
             "decode": self.decode,
             "overall": self.overall,
         })
-    }
-
-    /// The receipt an arm files when its engine does not bound every declared phase (sc-22738).
-    ///
-    /// `memory_calibration::PredictedPeakBytes` accepts exactly two shapes — the full four-key
-    /// decomposition or an overall-only object — and a partial decomposition deserializes as
-    /// NEITHER (both variants are `deny_unknown_fields`). An arm that measured only some of the
-    /// phases therefore publishes the ceiling and omits the decomposition, rather than filling an
-    /// unmeasured phase with a zero that reads as "this phase cost nothing". The ceiling itself is
-    /// identical: it is taken over the windows that WERE bounded, and those windows cover the
-    /// unbounded phases.
-    fn overall_only_json(self) -> Value {
-        json!({ "overall": self.overall })
     }
 }
 
@@ -20176,88 +20140,8 @@ fn sensenova_context(
     }
 }
 
-/// WHICH LIFECYCLE BOUNDARIES THE PINNED SENSENOVA ENGINE ACTUALLY EMITS (sc-22738).
-///
-/// `mlx-gen-sensenova` at inference e16c6a55e constructs a `Progress` value in exactly two places
-/// and hands `on_progress` to nothing else:
-///
-/// * `src/t2i.rs:105` — `StepReporter::step`: `Progress::Step { current, total }` for one
-///   COMPLETED denoise step (1-based), called from the two denoise loops at `src/t2i.rs:739`
-///   (text-to-image) and `:1835` (it2i);
-/// * `src/t2i.rs:130` — `fill_interleave_bar`: a terminal `Progress::Step` on the interleave path
-///   only, which no still capture runs.
-///
-/// It emits no `Progress::Loading(_)` and no `Progress::Decoding` anywhere in the crate.
-/// `Generator::generate` (`src/model.rs:580-665`) builds one `StepReporter` per image and threads
-/// the sink nowhere else. The contract declares the phase envelope `[Conditioning, Denoise]` and no
-/// decode phase at all (`src/memory_strategy.rs:968`), and the pipeline has none: the pixel path is
-/// `fm_head` → `unpatchify` INSIDE every denoise step (`src/t2i.rs:16-20`, `:723`); there is no
-/// VAE.
-///
-/// So the engine bounds exactly ONE kind of edge inside `generate`: the completion of a denoise
-/// step. The first `Progress::Step` fires only after a full denoise step — the prompt prefill, any
-/// think rollout and the first backbone pass over the image block are all inside it — so it is not
-/// the conditioning peak, and `Progress::Decoding` never fires, so a denoise phase closed on it is
-/// never closed at all. That is the zero every SenseNova cell of the e16c6a55e campaign that got
-/// past the identity gate refused on (`sensenova-u1-8b-*-mlx.log`; the watchdog streams carry
-/// `providerPhase: null` in every sample because the adapter published no phase).
-///
-/// This arm therefore attributes the two windows the engine DOES bound — through the first
-/// completed denoise step, and from there to the returned image — declares all three lifecycle
-/// phases UNATTRIBUTED, and files the ceiling alone. The two windows partition the whole render,
-/// so the overall ceiling this record prices is exactly what it always was. Closing the gap is an
-/// inference-side change ([`SENSENOVA_BOUNDARY_INFERENCE_CHANGE`]) and therefore a pin bump; the
-/// moment the engine emits either missing boundary, [`sensenova_window_peaks`] refuses the
-/// single-window attribution by name so the strict three-phase cut is restored rather than the
-/// stale model quietly filing under it.
-const SENSENOVA_ENGINE_BOUNDARIES: &str = concat!(
-    "the pinned mlx-gen-sensenova pipeline emits only `Progress::Step`, one per completed denoise ",
-    "step (t2i.rs:105 via StepReporter::step, called at t2i.rs:739 and :1835) — it never emits ",
-    "`Progress::Loading(_)` or `Progress::Decoding`, its contract declares no decode phase ",
-    "(memory_strategy.rs:968) and the pipeline has no VAE (unpatchify runs inside every step, ",
-    "t2i.rs:723). No boundary exists at the conditioning/denoise edge and no decode phase exists to ",
-    "bound, so this record attributes the two windows the engine does bound (through the first ",
-    "completed denoise step, and from there to the returned image), reports all three lifecycle ",
-    "phases as UNATTRIBUTED rather than as zero peaks, and files the overall ceiling alone. The two ",
-    "windows partition the render, so the ceiling is unaffected and remains conservative."
-);
-
-/// The inference change that lets this arm cut every declared phase on an engine boundary, the way
-/// inference #963 (`mlx-progress-boundaries`) did for Mage-Flow and Bernini at this same pin.
-const SENSENOVA_BOUNDARY_INFERENCE_CHANGE: &str = concat!(
-    "in `crates/media/mlx-gen/mlx-gen-sensenova/src/t2i.rs` at e16c6a55e, give `StepReporter` ",
-    "(t2i.rs:49-110) a boundary emitter and (1) emit `Progress::Loading(LoadPhase::Renderer)` ",
-    "immediately before the denoise loop opens — before `for i in 0..steps` at t2i.rs:672 ",
-    "(`denoise`) and t2i.rs:1713 (`it2i_denoise`), i.e. after the prompt prefill / think rollout and ",
-    "before the first backbone pass over the image block — and (2) emit `Progress::Decoding` once the ",
-    "loop returns its final latent, before `decoded_to_image` (model.rs:664) copies it out; the ",
-    "resident engine's decode window is that copy and reads the resident weights, never zero. With ",
-    "both in place this arm returns to the strict three-phase cut its siblings use."
-);
-
-/// The inference change that lets the three DENSE quality rehosts publish a calibration identity.
-///
-/// `SceneWorks/sensenova-u1-8b-mlx`, `-infographic-v2-mlx` and `-infographic-v3-mlx` ship their
-/// `bf16/` tier as an 8-shard Hugging Face layout (`model-00001-of-00008.safetensors` …
-/// `model.safetensors.index.json`); the three `_fast` bf16 turnkeys and every packed tier are a
-/// single `model.safetensors`. At e16c6a55e the engine pins only the latter, so the three sharded
-/// cells load (the loader falls back to `load_raw`, `src/model.rs:446-450`) and then publish no
-/// identity — the failure the `sensenova-u1-8b-bf16-mlx.log` capture died on after a 128 s load.
-const SENSENOVA_SHARDED_IDENTITY_INFERENCE_CHANGE: &str = concat!(
-    "in `crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs` at e16c6a55e, let ",
-    "`verified_artifact` (:479-498) pin an HF-sharded snapshot as well as the single ",
-    "`model.safetensors` it pins today — every `model-NNNNN-of-MMMMM.safetensors` shard named by ",
-    "`model.safetensors.index.json`'s `weight_map`, each pinned by the same entry+canonical identity ",
-    "`pinned_artifact` (:414) applies, digested in index order — and let `resolved_artifact_tier` ",
-    "(:561-623) fold `safetensors_path_tensor_headers` over those shards instead of reading ",
-    "`root.join(\"model.safetensors\")` (:569). `can_stream_gen_with_artifact` (:809) may keep rung 4 ",
-    "single-file. `production_calibration_identity` (:710-741) then publishes ",
-    "`sensenova-u1-<route>-bf16-mlx-shared-ladder-v1` for the three sharded dense rehosts, the ",
-    "strings `production_calibration_fingerprint` (:680-688) already tables for them."
-);
-
-/// The safetensors inventory of a tier root, in the terms the pinned engine's `verified_artifact`
-/// decides on (`mlx-gen-sensenova/src/memory_strategy.rs:479-498`): every non-hidden
+/// The safetensors inventory of a tier root, in the terms the pinned engine's `checkpoint_files`
+/// decides on (`mlx-gen-sensenova/src/memory_strategy.rs:630-645`): every non-hidden
 /// `*.safetensors` entry, sorted, plus whether an HF shard index sits beside them.
 fn sensenova_safetensors_inventory(root: &Path) -> (Vec<String>, bool) {
     let mut entries: Vec<String> = std::fs::read_dir(root)
@@ -20276,15 +20160,18 @@ fn sensenova_safetensors_inventory(root: &Path) -> (Vec<String>, bool) {
 /// Before the load, with the engine's OWN predicates (sc-22738): will the pinned engine publish a
 /// calibration identity for this tier root at all?
 ///
-/// `production_calibration_identity` (`mlx-gen-sensenova/src/memory_strategy.rs:710-741`)
-/// publishes only for an artifact `verified_artifact` pinned AND whose on-disk tier equals the
-/// requested one. Both predicates are `pub` on the engine (`verified_artifact_identity`, :500;
-/// `resolved_artifact_tier`, :561; `requested_tier`, :653), so this asks them directly rather than
-/// re-spelling their rules — a pin that widens them widens this preflight with it — and refuses in
-/// seconds, naming the layout, the engine site and the inference change, instead of after a
-/// two-minute load. The digest `verified_artifact_identity` computes for a single-file root is the
-/// one the loader reuses (`pinned_artifact`'s process-wide digest cache), so a passing preflight
-/// costs the load nothing.
+/// `production_calibration_identity` (`mlx-gen-sensenova/src/memory_strategy.rs:900-931`)
+/// publishes only for an artifact `verified_artifact` (:656-669) pinned AND whose on-disk tier
+/// equals the requested one. Since inference #966 (e34d7b46a) `verified_artifact` pins two
+/// inventories — exactly one `model.safetensors`, or exactly the shards that
+/// `model.safetensors.index.json`'s `weight_map` names (`checkpoint_files`, :630-645) — so the
+/// three dense quality rehosts' 8-shard `bf16/` roots pin like the single-file `_fast` turnkeys
+/// and the packed tiers do. All three predicates are `pub` on the engine
+/// (`verified_artifact_identity`, :671; `resolved_artifact_tier`, :733; `requested_tier`, :842),
+/// so this asks them directly rather than re-spelling their rules — a pin that widens them widens
+/// this preflight with it — and refuses in seconds, naming the layout and the engine site, instead
+/// of after a two-minute load. The digests `verified_artifact_identity` computes are the ones the
+/// loader reuses (the process-wide digest cache), so a passing preflight costs the load nothing.
 fn sensenova_identity_preflight(
     arm: SenseNovaArm,
     tier: &str,
@@ -20300,25 +20187,43 @@ fn sensenova_identity_preflight(
     };
     if engine::verified_artifact_identity(spec).is_none() {
         let (entries, index) = sensenova_safetensors_inventory(root);
-        let layout = match (entries.len(), index) {
-            (0, _) => "no safetensors entry at all".to_owned(),
-            (1, _) => format!("one safetensors entry [{}], which is not `model.safetensors`", entries.join(", ")),
-            (count, true) => format!(
-                "{count} safetensors entries [{}] beside `model.safetensors.index.json` — a Hugging Face sharded layout",
+        let layout = match (entries.as_slice(), index) {
+            ([], _) => "no safetensors entry at all".to_owned(),
+            ([only], false) if only == "model.safetensors" => {
+                "a single `model.safetensors` the engine could not pin (unreadable, or changed \
+                 while it was being hashed)"
+                    .to_owned()
+            }
+            ([only], false) => {
+                format!("one safetensors entry [{only}], which is not `model.safetensors`")
+            }
+            (entries, true) => format!(
+                "{} safetensors entries [{}] beside `model.safetensors.index.json` — a Hugging \
+                 Face sharded layout the index does not account for exactly (its `weight_map` is \
+                 unreadable, names a shard outside this directory, or names a set other than \
+                 these entries), or a shard the engine could not pin",
+                entries.len(),
                 entries.join(", ")
             ),
-            (count, false) => format!("{count} safetensors entries [{}]", entries.join(", ")),
+            (entries, false) => format!(
+                "{} safetensors entries [{}] with no `model.safetensors.index.json` — an \
+                 unindexed multi-file layout",
+                entries.len(),
+                entries.join(", ")
+            ),
         };
         return Err(format!(
             "the pinned {} provider at inference {} publishes no calibration identity for the {} \
              {tier} tier root, so this cell cannot capture at this pin and is refused before the \
-             load: `verified_artifact` (mlx-gen-sensenova/src/memory_strategy.rs:479-498) pins \
-             exactly one `model.safetensors` and returns None for any other inventory, and {} \
-             carries {layout}; `production_calibration_identity` (:727, `artifact?`) therefore \
-             publishes nothing for the production identity {expected_fingerprint}, even though \
-             the loader (src/model.rs:446-450) loads such a root through `load_raw`. Inference \
-             change needed: {SENSENOVA_SHARDED_IDENTITY_INFERENCE_CHANGE} The plan row stays \
-             runnable and captures at the first pin that carries it.",
+             load: `verified_artifact` (mlx-gen-sensenova/src/memory_strategy.rs:656-669, through \
+             `checkpoint_files` :630-645) pins exactly one `model.safetensors`, or exactly the \
+             shards `model.safetensors.index.json`'s `weight_map` names, and returns None for any \
+             other inventory, and {} carries {layout}; `production_calibration_identity` (:917, \
+             `artifact?`) therefore publishes nothing for the production identity \
+             {expected_fingerprint}, even though the loader (src/model.rs:446-451) loads such a \
+             root through `load_raw`. Repair the snapshot (a complete, index-matching shard set or \
+             a single `model.safetensors`); the plan row stays runnable and captures once the root \
+             pins.",
             arm.provider,
             protocol::INFERENCE_PIN,
             arm.model_id,
@@ -20330,14 +20235,14 @@ fn sensenova_identity_preflight(
         Err(error) => Err(format!(
             "the pinned {} provider cannot prove the {} {tier} artifact's tier, so it publishes no \
              calibration identity (`resolved_artifact_tier`, \
-             mlx-gen-sensenova/src/memory_strategy.rs:561-623, fails closed): {error}",
+             mlx-gen-sensenova/src/memory_strategy.rs:733-808, fails closed): {error}",
             arm.provider, arm.model_id
         )),
         Ok(resolved) if resolved != requested => Err(format!(
             "the {} {tier} tier root carries a {resolved:?} artifact while the plan asks the \
              loader for {requested:?}; the pinned engine keys the identity on the ARTIFACT-proven \
              tier (`production_calibration_identity`, \
-             mlx-gen-sensenova/src/memory_strategy.rs:736) and publishes none for the pair, so \
+             mlx-gen-sensenova/src/memory_strategy.rs:926) and publishes none for the pair, so \
              this root cannot serve this cell",
             arm.model_id
         )),
@@ -20345,78 +20250,120 @@ fn sensenova_identity_preflight(
     }
 }
 
-/// The progress-stream fold behind the SenseNova attribution — pure, so a synthetic stream drives
-/// it in tests (sc-22738). See [`SENSENOVA_ENGINE_BOUNDARIES`] for why there are two windows.
+/// The progress-stream fold behind the SenseNova attribution — pure, so a synthetic stream per
+/// route drives it in tests (sc-22738).
+///
+/// WHICH LIFECYCLE BOUNDARIES THE PINNED SENSENOVA ENGINE EMITS. `mlx-gen-sensenova/src/t2i.rs`
+/// at inference e34d7b46a (#966) gives `StepReporter` the two phase boundaries beside its per-step
+/// ticks: `open_denoise_phase` emits `Progress::Loading(LoadPhase::Renderer)` after every prefill
+/// — the conditioning work — and before the first denoise step, in both denoise loops
+/// (`T2iModel::denoise`, `T2iModel::it2i_denoise`); `open_decode_phase` emits `Progress::Decoding`
+/// after the last step, before `unpatchify` + the host copy turn the RGB patches into an image.
+/// `SenseNova::generate` (`src/model.rs`) hands each per-image reporter
+/// `request_phase_bounds(i, count)`, so a request opens each boundary exactly ONCE whatever its
+/// count — the first image's loop opens denoise, the last image's loop opens decode — and the
+/// interleave route opens denoise on its first image and closes the run with a single `Decoding`
+/// after the folded bar is filled (`finish_interleave_progress`). The contract declares all three
+/// phases (`memory_strategy.rs` `build_memory_strategy_contract`, `[Conditioning, Denoise,
+/// Decode]`).
+///
+/// So this fold cuts conditioning on `Loading(Renderer)`, denoise on `Decoding`, and the arm
+/// closes decode at the returned image — the same three-phase cut the Mage-Flow and Bernini arms
+/// use since inference #963. The first `Progress::Step` is deliberately NOT cut on: it fires only
+/// after a full denoise step, with the whole backbone resident, and is not the conditioning peak.
+/// The pin before this one (e16c6a55e) emitted only `Step`; this arm then filed an overall-only
+/// ceiling with every phase declared unattributed. That relaxation is gone: a stream that is not
+/// the one above is refused by name in [`sensenova_phase_peaks`], never filed under a stale model.
 #[derive(Debug, Default)]
-struct SenseNovaWindows {
-    /// The read taken at the first `Progress::Step` — the peak THROUGH the first completed denoise
-    /// step, since the pre-generate reset. The same closure resets the peak, so the next window
-    /// opens on that boundary.
-    through_first_step: Option<PhaseMemory>,
-    /// Boundaries this attribution does NOT cut on. Either arriving means the engine changed and
-    /// the single-window model is stale, so the arm refuses rather than files under it.
-    loading_boundaries: u32,
+struct SenseNovaPhases {
+    /// The conditioning peak, read at `Loading(Renderer)` — the peak since the pre-generate
+    /// reset. The same closure resets the peak, so the denoise phase opens on that boundary.
+    conditioning: Option<PhaseMemory>,
+    /// The denoise peak, read at the `Decoding` that follows it; the reset there opens decode.
+    denoise: Option<PhaseMemory>,
+    /// How many times each boundary arrived. The engine opens each exactly once per request, so
+    /// any other count means the stream is not the one this cut was written against.
+    renderer_boundaries: u32,
     decoding_boundaries: u32,
+    /// `Loading(_)` boundaries other than `Renderer`. The engine emits none; one arriving means
+    /// the engine changed and the conditioning edge may no longer be where this cut takes it.
+    other_loading_boundaries: u32,
 }
 
-impl SenseNovaWindows {
-    /// Fold one event. `close_window` reads the counters and resets the peak; it runs exactly once,
-    /// at the first `Progress::Step { current: 1 }`.
-    fn observe(&mut self, progress: &Progress, close_window: impl FnOnce() -> PhaseMemory) {
+impl SenseNovaPhases {
+    /// Fold one event. `close_phase` reads the counters and resets the peak; it runs at most
+    /// twice — at the first `Loading(Renderer)` and at the first `Decoding` after it.
+    fn observe(&mut self, progress: &Progress, close_phase: impl FnOnce() -> PhaseMemory) {
         match progress {
-            Progress::Step { current: 1, .. } if self.through_first_step.is_none() => {
-                self.through_first_step = Some(close_window());
+            Progress::Loading(LoadPhase::Renderer) => {
+                self.renderer_boundaries += 1;
+                if self.conditioning.is_none() && self.denoise.is_none() {
+                    self.conditioning = Some(close_phase());
+                }
             }
+            Progress::Decoding => {
+                self.decoding_boundaries += 1;
+                if self.conditioning.is_some() && self.denoise.is_none() {
+                    self.denoise = Some(close_phase());
+                }
+            }
+            Progress::Loading(_) => self.other_loading_boundaries += 1,
             Progress::Step { .. } => {}
-            Progress::Loading(_) => self.loading_boundaries += 1,
-            Progress::Decoding => self.decoding_boundaries += 1,
         }
     }
 }
 
-/// The two windows the pinned engine bounds, each with a non-zero active peak.
+/// The three declared phases the pinned engine bounds, each with a non-zero active peak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SenseNovaWindowPeaks {
-    through_first_step: PhaseMemory,
-    post_first_step: PhaseMemory,
+struct SenseNovaPhasePeaks {
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
 }
 
-/// The attribution this arm files, or the refusal by name. `post_first_step` is the read taken
-/// after `generate` returns — the peak since the reset at the first denoise step.
-fn sensenova_window_peaks(
+/// The attribution this arm files, or the refusal by name. `decode` is the read taken after
+/// `generate` returns — the peak since the reset at `Decoding`.
+fn sensenova_phase_peaks(
     arm: SenseNovaArm,
-    windows: &SenseNovaWindows,
-    post_first_step: PhaseMemory,
-) -> Result<SenseNovaWindowPeaks, String> {
-    if windows.loading_boundaries > 0 || windows.decoding_boundaries > 0 {
+    phases: &SenseNovaPhases,
+    decode: PhaseMemory,
+) -> Result<SenseNovaPhasePeaks, String> {
+    if phases.renderer_boundaries != 1
+        || phases.decoding_boundaries != 1
+        || phases.other_loading_boundaries != 0
+    {
         return Err(format!(
-            "the pinned {} engine emitted {} `Progress::Loading(_)` and {} `Progress::Decoding` \
-             boundaries that this arm's two-window attribution does not cut on; the engine now \
-             bounds a phase edge it did not at e16c6a55e, so restore the strict three-phase cut \
-             (conditioning at `Loading(Renderer)`, denoise at `Decoding`) instead of filing under \
-             the stale single-window model",
-            arm.model_id, windows.loading_boundaries, windows.decoding_boundaries
+            "the pinned {} engine emitted {} `Progress::Loading(LoadPhase::Renderer)`, {} \
+             `Progress::Decoding` and {} other `Progress::Loading(_)` boundaries where this arm's \
+             three-phase cut expects exactly one, one and none per request (`StepReporter` opens \
+             each phase once, t2i.rs `request_phase_bounds` / `finish_interleave_progress`); the \
+             stream is not the one the cut was written against, so nothing is filed",
+            arm.model_id,
+            phases.renderer_boundaries,
+            phases.decoding_boundaries,
+            phases.other_loading_boundaries
         ));
     }
-    let Some(through_first_step) = windows.through_first_step else {
+    let (Some(conditioning), Some(denoise)) = (phases.conditioning, phases.denoise) else {
         return Err(format!(
-            "the pinned {} engine never reported its first completed denoise step \
-             (`Progress::Step {{ current: 1, .. }}`), the one lifecycle boundary this arm cuts on; \
-             nothing bounds a window, so nothing is filed",
+            "the pinned {} engine reported `Progress::Decoding` before \
+             `Progress::Loading(LoadPhase::Renderer)`, so the conditioning/denoise edge was never \
+             cut and no denoise phase closed; nothing is filed",
             arm.model_id
         ));
     };
-    if through_first_step.active == 0 || post_first_step.active == 0 {
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
         return Err(format!(
-            "a synchronized {} lifecycle window reported a zero active peak (through the first \
-             denoise step: {} bytes, after it: {} bytes); with the resident backbone live neither \
-             window can be empty, so the capture is invalid rather than cheap",
-            arm.model_id, through_first_step.active, post_first_step.active
+            "a synchronized {} lifecycle phase reported a zero active peak (conditioning: {} \
+             bytes, denoise: {} bytes, decode: {} bytes); with the resident backbone live no phase \
+             can be empty, so the capture is invalid rather than cheap",
+            arm.model_id, conditioning.active, denoise.active, decode.active
         ));
     }
-    Ok(SenseNovaWindowPeaks {
-        through_first_step,
-        post_first_step,
+    Ok(SenseNovaPhasePeaks {
+        conditioning,
+        denoise,
+        decode,
     })
 }
 
@@ -20513,8 +20460,8 @@ fn run_sensenova(request: &Value) -> Result<Value, String> {
              `verified_artifact_identity` and `resolved_artifact_tier`) passed; the production \
              identity for this cell is {expected_fingerprint} (the engines publish one per \
              (route, artifact-proven tier), `production_calibration_identity` at \
-             mlx-gen-sensenova/src/memory_strategy.rs:710-741), so one of that gate's composition \
-             clauses (:715-726) or the `_fast` pre-merged marker clause (:728-735) refused this \
+             mlx-gen-sensenova/src/memory_strategy.rs:900-931), so one of that gate's composition \
+             clauses (:905-916) or the `_fast` pre-merged marker clause (:918-925) refused this \
              load and this cell captures only at a pin that carries it",
             arm.provider,
             protocol::INFERENCE_PIN,
@@ -20580,13 +20527,14 @@ fn run_sensenova(request: &Value) -> Result<Value, String> {
         ));
     }
 
-    // Two windows cut on the ONE boundary the pinned engine emits (sc-22738,
-    // `SENSENOVA_ENGINE_BOUNDARIES`): the pre-generate reset opens the first, the first
-    // `Progress::Step` closes it and opens the second, the returned image closes that. Neither is
-    // a lifecycle phase — the first `Step` fires after a full denoise step and `Decoding` never
-    // fires — so no phase is cut here and none is filed; the windows partition the render and
-    // the ceiling over them is the overall this record prices.
-    let mut windows = SenseNovaWindows::default();
+    // Three phase peaks cut on the lifecycle boundaries the pinned engine emits on EVERY route
+    // (sc-22738, inference #966 at e34d7b46a; see `SenseNovaPhases`): `Loading(Renderer)` after
+    // the prefills is the conditioning/denoise edge, `Decoding` after the last step closes
+    // denoise, and the returned image closes decode. The first `Step` is deliberately NOT cut on:
+    // it fires only after a full denoise step, with the whole backbone resident, and is not the
+    // conditioning peak. The stream reaches the cut only through the fold, which refuses by name
+    // any stream that is not the one the engine emits.
+    let mut phases = SenseNovaPhases::default();
     clear_cache();
     reset_peak_memory();
     let pre_rung_active = get_active_memory() as u64;
@@ -20594,25 +20542,22 @@ fn run_sensenova(request: &Value) -> Result<Value, String> {
     let selected = one_image(
         generator
             .generate(&sensenova_request(width, height), &mut |progress| {
-                windows.observe(&progress, || {
-                    let window = PhaseMemory::capture();
+                phases.observe(&progress, || {
+                    let phase = PhaseMemory::capture();
                     reset_peak_memory();
-                    window
+                    phase
                 });
             })
             .map_err(|error| format!("generate measured {} render: {error}", arm.model_id))?,
     )?;
-    let post_first_step = PhaseMemory::capture();
-    let SenseNovaWindowPeaks {
-        through_first_step,
-        post_first_step,
-    } = sensenova_window_peaks(arm, &windows, post_first_step)?;
-    let overall = PhaseMemory::overall(&[through_first_step, post_first_step]);
-    // The lane's image ceiling policy over the two bounded windows. The engine has no decode phase
-    // (`SENSENOVA_ENGINE_BOUNDARIES`), so the third slot repeats the post-first-step window; only
-    // `.overall` — the componentwise high-water mark over the two windows — is ever published.
-    let predicted_peaks =
-        image_predicted_peak_bytes(through_first_step, post_first_step, post_first_step);
+    let decode = PhaseMemory::capture();
+    let SenseNovaPhasePeaks {
+        conditioning,
+        denoise,
+        decode,
+    } = sensenova_phase_peaks(arm, &phases, decode)?;
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
     if !matches!(
         safety(&calibration.fingerprint, predicted, predicted),
@@ -20709,13 +20654,13 @@ fn run_sensenova(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        // The OVERALL-ONLY receipt shape (sc-22738): a four-key decomposition is a claim that all
-        // three declared phases were measured, and on this engine none was
-        // (`SENSENOVA_ENGINE_BOUNDARIES`). `RuntimeObservedMemory` carries the ACTIVE peak and
-        // nothing else — the allocator envelope stays in the diagnostics, where
-        // `overallAllocatorEnvelope` publishes it.
-        "predictedPeakBytes": predicted_peaks.overall_only_json(),
-        "observedMemory": { "overall": { "activeBytes": overall.active } },
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
         "quality": {
             "contract": "identical artifact, prompt, guidance, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
             "identicalInputs": true,
@@ -20735,29 +20680,13 @@ fn run_sensenova(request: &Value) -> Result<Value, String> {
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:sensenova-u1-{}-shared-ladder", arm.slug),
             "executed",
-            [
-                lifecycle_blocker.to_owned(),
-                // sc-22738: the phases this record does NOT attribute are named in the record
-                // itself, with the inference change that closes the gap, rather than left to be
-                // inferred from measurements that are simply absent.
-                SENSENOVA_ENGINE_BOUNDARIES.to_owned(),
-                format!("inference change that restores the three-phase cut: {SENSENOVA_BOUNDARY_INFERENCE_CHANGE}"),
-            ],
+            [lifecycle_blocker.to_owned()],
             [
                 ("preRungActiveAfterClear", "bytes", pre_rung_active),
                 ("preRungCacheAfterClear", "bytes", pre_rung_cache),
-                // The per-phase peaks are the keys `extract-memory-anchors.mjs`
-                // (`PHASE_MEASUREMENTS`) and `memory_anchor::validate_anchor` mint an anchor from,
-                // so they are withheld: the engine bounded no phase, and an anchor keyed on a
-                // window that is not a phase would price a decomposition nothing measured. What
-                // the two windows DID measure is published under names that say what they are.
-                ("conditioningPhaseUnattributed", "count", 1),
-                ("denoisePhaseUnattributed", "count", 1),
-                ("decodePhaseUnattributed", "count", 1),
-                ("throughFirstDenoiseStepWindowActivePeak", "bytes", through_first_step.active),
-                ("throughFirstDenoiseStepWindowCache", "bytes", through_first_step.cache),
-                ("postFirstDenoiseStepWindowActivePeak", "bytes", post_first_step.active),
-                ("postFirstDenoiseStepWindowCache", "bytes", post_first_step.cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
                 ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
@@ -31675,272 +31604,284 @@ mod sensenova_tests {
         }
     }
 
-    // ---- sc-22738: the phases the pinned engine actually bounds -------------------------------
+    // ---- sc-22738: the three phases the pinned engine bounds on every route -------------------
 
-    /// The pinned engine's progress stream for the two-step fixture, from the engine's own source
-    /// (`SENSENOVA_ENGINE_BOUNDARIES`): exactly one `Progress::Step` per completed denoise step
-    /// (`t2i.rs:105`, called at `:739`), nothing before the first and nothing after the last. The
-    /// e16c6a55e campaign's watchdog streams for these cells
-    /// (`calib-mlx-rerun/logs/sensenova-u1-8b-*-mlx-watchdog.jsonl`) carry `providerPhase: null`
-    /// in every sample — the same fact seen from outside the process: the adapter published no
-    /// phase because the engine handed it no boundary to publish one on.
-    fn pinned_engine_stream() -> [Progress; 2] {
-        [
-            Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            Progress::Step {
-                current: 2,
-                total: 2,
-            },
-        ]
-    }
-
-    const THROUGH_FIRST_STEP: PhaseMemory = PhaseMemory {
+    const CONDITIONING: PhaseMemory = PhaseMemory {
         active: 17_000_000_000,
         cache: 512,
     };
-    const POST_FIRST_STEP: PhaseMemory = PhaseMemory {
+    const DENOISE: PhaseMemory = PhaseMemory {
         active: 18_000_000_000,
         cache: 1_024,
     };
+    const DECODE: PhaseMemory = PhaseMemory {
+        active: 16_500_000_000,
+        cache: 256,
+    };
 
-    fn fold(stream: &[Progress]) -> SenseNovaWindows {
-        let mut windows = SenseNovaWindows::default();
-        for progress in stream {
-            windows.observe(progress, || THROUGH_FIRST_STEP);
-        }
-        windows
+    fn step(current: u32, total: u32) -> Progress {
+        Progress::Step { current, total }
     }
 
-    /// sc-22738 — the cut this arm shipped with collapses on the pinned stream, and the attribution
-    /// it files now does not.
-    ///
-    /// Every SenseNova cell of the e16c6a55e campaign that got past the identity gate (quality
-    /// q4/q8, all three `_fast` tiers, the infographic siblings) was refused with "a synchronized
-    /// … lifecycle phase reported a zero active peak" after a complete render. The arm cut
-    /// conditioning on the first `Progress::Step` and denoise on `Progress::Decoding`; the engine
-    /// never emits the latter, so `denoise` was structurally zero on every capture. That old cut
-    /// is reproduced inline here against the engine's stream so the collapse is demonstrated, not
-    /// asserted; reverting the arm to it reds
-    /// [`the_sensenova_receipt_withholds_the_keys_an_anchor_would_be_minted_from`].
-    #[test]
-    fn the_engine_bounds_one_edge_and_the_arm_files_the_two_windows_it_bounds() {
-        let stream = pinned_engine_stream();
-        let (mut conditioning, mut denoise) = (0_u64, 0_u64);
-        for progress in &stream {
-            match progress {
-                Progress::Step { current: 1, .. } => conditioning = THROUGH_FIRST_STEP.active,
-                Progress::Decoding => denoise = POST_FIRST_STEP.active,
-                _ => {}
-            }
-        }
-        let decode = POST_FIRST_STEP.active;
-        assert!(
-            [conditioning, denoise, decode].contains(&0),
-            "the three-phase cut refuses the pinned stream: `Decoding` never fires, so the denoise \
-             phase it closes on stays zero"
-        );
-
-        let windows = fold(&stream);
-        let peaks = sensenova_window_peaks(SENSENOVA_FAST_ARM, &windows, POST_FIRST_STEP)
-            .expect("the two windows the engine bounds file");
-        assert_eq!(peaks.through_first_step, THROUGH_FIRST_STEP);
-        assert_eq!(peaks.post_first_step, POST_FIRST_STEP);
-        // The ceiling this record prices is the componentwise high-water mark over the two
-        // windows, through the same image policy wrapper every other still arm uses.
-        let overall = PhaseMemory::overall(&[peaks.through_first_step, peaks.post_first_step]);
-        assert_eq!(overall.active, POST_FIRST_STEP.active);
-        assert_eq!(overall.cache, POST_FIRST_STEP.cache);
-        assert_eq!(
-            image_predicted_peak_bytes(
-                peaks.through_first_step,
-                peaks.post_first_step,
-                peaks.post_first_step
-            )
-            .overall,
-            predicted_phase_ceiling(overall, IMAGE_PREDICTED_PEAK_BASIS)
-        );
+    /// One request's stream on a single-loop route: `Loading(Renderer)` after the prefills,
+    /// one `Step` per completed denoise step, `Decoding` after the last.
+    fn single_loop_stream(steps: u32) -> Vec<Progress> {
+        let mut stream = vec![Progress::Loading(LoadPhase::Renderer)];
+        stream.extend((1..=steps).map(|current| step(current, steps)));
+        stream.push(Progress::Decoding);
+        stream
     }
 
-    /// The first window closes exactly once, on the first `Step { current: 1 }`; a later `Step`
-    /// neither reopens nor re-closes it.
-    #[test]
-    fn the_first_window_closes_exactly_once_at_the_first_denoise_step() {
+    /// The pinned engine's progress stream per route, from the engine's own source at e34d7b46a
+    /// (`mlx-gen-sensenova/src/t2i.rs`: `StepReporter::open_denoise_phase` /
+    /// `open_decode_phase`, `request_phase_bounds`, `finish_interleave_progress`; pinned there by
+    /// `step_reporter_opens_each_phase_once_per_request` and
+    /// `interleave_run_opens_denoise_once_and_closes_with_one_decode_boundary`). Every route
+    /// opens each boundary exactly once per request; the interleave route folds the bar and
+    /// closes with one `Decoding` after the fill; a multi-image request opens denoise from its
+    /// first loop and decode from its last.
+    fn pinned_engine_streams() -> Vec<(&'static str, Vec<Progress>)> {
+        vec![
+            (
+                "text_to_image (sensenova_u1_8b quality, `T2iModel::denoise`)",
+                single_loop_stream(2),
+            ),
+            (
+                "edit / it2i (`T2iModel::it2i_denoise`)",
+                single_loop_stream(2),
+            ),
+            (
+                "fast turnkey (sensenova_u1_8b_fast, distilled steps)",
+                single_loop_stream(8),
+            ),
+            (
+                "infographic v2 / v3 (same denoise loop under the infographic rehost)",
+                single_loop_stream(3),
+            ),
+            (
+                "interleave (model-driven, 2 of 3 images realized, folded bar + fill)",
+                vec![
+                    Progress::Loading(LoadPhase::Renderer),
+                    step(1, 6),
+                    step(2, 6),
+                    step(3, 6),
+                    step(4, 6),
+                    step(6, 6),
+                    Progress::Decoding,
+                ],
+            ),
+            (
+                "multi-image request (count 2: the first loop opens denoise, the last opens decode)",
+                vec![
+                    Progress::Loading(LoadPhase::Renderer),
+                    step(1, 2),
+                    step(2, 2),
+                    step(1, 2),
+                    step(2, 2),
+                    Progress::Decoding,
+                ],
+            ),
+        ]
+    }
+
+    /// Fold a stream the way the arm does: the first close reads the conditioning peak, the
+    /// second the denoise peak. Returns the fold and how many times a phase closed.
+    fn fold(stream: &[Progress]) -> (SenseNovaPhases, u32) {
+        let mut phases = SenseNovaPhases::default();
         let mut closes = 0_u32;
-        let mut windows = SenseNovaWindows::default();
-        for progress in [
-            Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            Progress::Step {
-                current: 2,
-                total: 2,
-            },
-        ] {
-            windows.observe(&progress, || {
+        for progress in stream {
+            phases.observe(progress, || {
                 closes += 1;
-                THROUGH_FIRST_STEP
+                if closes == 1 {
+                    CONDITIONING
+                } else {
+                    DENOISE
+                }
             });
         }
-        assert_eq!(closes, 1);
-        assert_eq!(windows.through_first_step, Some(THROUGH_FIRST_STEP));
-        assert_eq!(
-            (windows.loading_boundaries, windows.decoding_boundaries),
-            (0, 0)
-        );
+        (phases, closes)
     }
 
-    /// A pin whose engine starts emitting a boundary this arm does not cut on is refused BY NAME,
-    /// so the strict three-phase cut is restored rather than the stale two-window model quietly
-    /// filing under it — the state inference #963 put Mage-Flow and Bernini back into.
+    /// sc-22738 — every route's stream at e34d7b46a cuts all three declared phases on an engine
+    /// boundary, each phase closes exactly once, and the receipt is the full decomposition the
+    /// sibling still arms file.
     #[test]
-    fn a_pin_that_emits_a_boundary_this_arm_does_not_cut_on_is_refused_by_name() {
-        let loading = [
-            Progress::Loading(LoadPhase::Renderer),
-            Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            Progress::Step {
-                current: 2,
-                total: 2,
-            },
-        ];
-        let decoding = [
-            Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            Progress::Step {
-                current: 2,
-                total: 2,
-            },
-            Progress::Decoding,
-        ];
-        for (stream, counts) in [
-            (&loading[..], "1 `Progress::Loading(_)` and 0"),
-            (&decoding[..], "0 `Progress::Loading(_)` and 1"),
-        ] {
-            let windows = fold(stream);
-            let error = sensenova_window_peaks(SENSENOVA_BASE_ARM, &windows, POST_FIRST_STEP)
-                .expect_err("a boundary the model does not cut on is a stale model");
-            assert!(error.contains(counts), "{error}");
+    fn every_route_stream_cuts_all_three_declared_phases_on_an_engine_boundary() {
+        use sceneworks_core::memory_calibration::PredictedPeakBytes;
+
+        for (route, stream) in pinned_engine_streams() {
+            let (phases, closes) = fold(&stream);
+            assert_eq!(
+                closes, 2,
+                "{route}: conditioning and denoise each close once"
+            );
+            let peaks = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+                .unwrap_or_else(|error| panic!("{route}: {error}"));
+            assert_eq!(
+                peaks,
+                SenseNovaPhasePeaks {
+                    conditioning: CONDITIONING,
+                    denoise: DENOISE,
+                    decode: DECODE,
+                },
+                "{route}"
+            );
+            let overall = PhaseMemory::overall(&[peaks.conditioning, peaks.denoise, peaks.decode]);
+            let predicted =
+                image_predicted_peak_bytes(peaks.conditioning, peaks.denoise, peaks.decode);
+            assert_eq!(
+                predicted.overall,
+                predicted_phase_ceiling(overall, IMAGE_PREDICTED_PEAK_BASIS),
+                "{route}"
+            );
+            let receipt: PredictedPeakBytes =
+                serde_json::from_value(predicted.json()).expect("a four-key decomposition");
             assert!(
-                error.contains("restore the strict three-phase cut"),
-                "{error}"
+                receipt.full().is_some(),
+                "{route}: the receipt is the full decomposition, not an overall-only ceiling"
             );
         }
     }
 
-    /// A zero in either bounded window, or an engine that never reports its first denoise step, is
-    /// a refusal — never a filed number.
+    /// sc-22738 (mutation) — drop, duplicate, misplace or add a boundary and the stream is refused
+    /// BY NAME; nothing is filed under a model the engine no longer emits. The e16c6a55e stream
+    /// (steps only) is one of the refused shapes.
     #[test]
-    fn a_zero_window_or_a_missing_first_step_is_refused_not_filed() {
-        let windows = fold(&pinned_engine_stream());
-        let error = sensenova_window_peaks(
+    fn a_stream_missing_or_repeating_a_boundary_is_refused_not_filed() {
+        for (route, stream) in pinned_engine_streams() {
+            let without_loading: Vec<Progress> = stream
+                .iter()
+                .filter(|progress| !matches!(progress, Progress::Loading(_)))
+                .cloned()
+                .collect();
+            let (phases, _) = fold(&without_loading);
+            let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+                .expect_err("no conditioning/denoise edge");
+            assert!(
+                error.contains(
+                    "emitted 0 `Progress::Loading(LoadPhase::Renderer)`, 1 `Progress::Decoding`"
+                ),
+                "{route}: {error}"
+            );
+            assert!(error.contains("nothing is filed"), "{route}: {error}");
+
+            let without_decoding: Vec<Progress> = stream
+                .iter()
+                .filter(|progress| !matches!(progress, Progress::Decoding))
+                .cloned()
+                .collect();
+            let (phases, _) = fold(&without_decoding);
+            let error = sensenova_phase_peaks(SENSENOVA_FAST_ARM, &phases, DECODE)
+                .expect_err("denoise never closes");
+            assert!(
+                error.contains(
+                    "emitted 1 `Progress::Loading(LoadPhase::Renderer)`, 0 `Progress::Decoding`"
+                ),
+                "{route}: {error}"
+            );
+        }
+
+        // The e16c6a55e engine: steps only.
+        let (phases, closes) = fold(&[step(1, 2), step(2, 2)]);
+        assert_eq!(closes, 0, "a step is not a boundary");
+        let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+            .expect_err("the previous pin's stream bounds no phase");
+        assert!(
+            error.contains(
+                "emitted 0 `Progress::Loading(LoadPhase::Renderer)`, 0 `Progress::Decoding`"
+            ),
+            "{error}"
+        );
+
+        // A duplicated boundary (a per-image reporter opening a phase again).
+        let mut duplicated = single_loop_stream(2);
+        duplicated.insert(2, Progress::Loading(LoadPhase::Renderer));
+        let (phases, closes) = fold(&duplicated);
+        assert_eq!(closes, 2, "the second `Loading(Renderer)` closes nothing");
+        let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+            .expect_err("two conditioning edges");
+        assert!(
+            error.contains(
+                "emitted 2 `Progress::Loading(LoadPhase::Renderer)`, 1 `Progress::Decoding`"
+            ),
+            "{error}"
+        );
+        let mut duplicated = single_loop_stream(2);
+        duplicated.push(Progress::Decoding);
+        let (phases, _) = fold(&duplicated);
+        let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+            .expect_err("two decode edges");
+        assert!(
+            error.contains("1 `Progress::Loading(LoadPhase::Renderer)`, 2 `Progress::Decoding`"),
+            "{error}"
+        );
+
+        // A boundary the engine does not emit: the model may no longer cut the conditioning edge.
+        let mut foreign = single_loop_stream(2);
+        foreign.insert(0, Progress::Loading(LoadPhase::TextEncoder));
+        let (phases, _) = fold(&foreign);
+        let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+            .expect_err("an unexpected loading boundary");
+        assert!(
+            error.contains("and 1 other `Progress::Loading(_)` boundaries"),
+            "{error}"
+        );
+
+        // The boundaries in the wrong order: counts are right, the edge was never cut.
+        let (phases, closes) = fold(&[
+            Progress::Decoding,
+            step(1, 1),
+            Progress::Loading(LoadPhase::Renderer),
+        ]);
+        assert_eq!(closes, 1);
+        let error = sensenova_phase_peaks(SENSENOVA_BASE_ARM, &phases, DECODE)
+            .expect_err("decode before the conditioning edge");
+        assert!(error.contains("`Progress::Decoding` before"), "{error}");
+    }
+
+    /// A zero in any bounded phase is a refusal — never a filed number.
+    #[test]
+    fn a_zero_phase_is_refused_not_filed() {
+        let (phases, _) = fold(&single_loop_stream(2));
+        let error = sensenova_phase_peaks(
             SENSENOVA_BASE_ARM,
-            &windows,
+            &phases,
             PhaseMemory {
                 active: 0,
                 cache: 0,
             },
         )
-        .expect_err("an empty post-first-step window");
+        .expect_err("an empty decode phase");
         assert!(error.contains("zero active peak"), "{error}");
-        assert!(error.contains("after it: 0 bytes"), "{error}");
+        assert!(error.contains("decode: 0 bytes"), "{error}");
 
-        let mut windows = SenseNovaWindows::default();
-        windows.observe(
-            &Progress::Step {
-                current: 1,
-                total: 2,
-            },
-            || PhaseMemory {
+        let mut phases = SenseNovaPhases::default();
+        for progress in single_loop_stream(2) {
+            phases.observe(&progress, || PhaseMemory {
                 active: 0,
                 cache: 0,
-            },
-        );
-        let error = sensenova_window_peaks(SENSENOVA_BASE_ARM, &windows, POST_FIRST_STEP)
-            .expect_err("an empty through-first-step window");
+            });
+        }
+        let error = sensenova_phase_peaks(SENSENOVA_FAST_ARM, &phases, DECODE)
+            .expect_err("empty conditioning and denoise phases");
         assert!(
-            error.contains("through the first denoise step: 0 bytes"),
-            "{error}"
-        );
-
-        let mut windows = SenseNovaWindows::default();
-        windows.observe(
-            &Progress::Step {
-                current: 2,
-                total: 2,
-            },
-            || panic!("no window closes without a first step"),
-        );
-        let error = sensenova_window_peaks(SENSENOVA_BASE_ARM, &windows, POST_FIRST_STEP)
-            .expect_err("no first step, no window");
-        assert!(
-            error.contains("never reported its first completed denoise step"),
+            error.contains("conditioning: 0 bytes, denoise: 0 bytes"),
             "{error}"
         );
     }
 
-    /// WHY the receipt is published overall-only rather than with the unmeasured keys dropped.
+    /// sc-22738 — the arm ACTS on the three-phase cut: the stream reaches it only through
+    /// `SenseNovaPhases::observe`, the receipt is the full four-key decomposition, the per-phase
+    /// peaks that mint an anchor are published, the identity preflight runs before the load, and
+    /// the e16c6a55e relaxation (an overall-only ceiling, phases declared unattributed, a cut on
+    /// the first `Step`) is gone. Read the way the sibling guards in this file read an arm — the
+    /// measured render needs real weights.
     ///
-    /// `memory_calibration` accepts exactly two receipt shapes and both `deny_unknown_fields`, so
-    /// a partial decomposition is not a record at all. The choice is therefore between the ceiling
-    /// alone and fabricated phase numbers, and this pins the first.
+    /// Mutations that fail this: cutting on `Progress::Step { current: 1, .. }` again; filing
+    /// `overall_only_json`; withholding `conditioningActivePeak` / `denoiseActivePeak` /
+    /// `decodeActivePeak`; declaring a `PhaseUnattributed` marker; dropping the preflight.
     #[test]
-    fn an_unattributed_sensenova_phase_is_published_as_a_ceiling_not_as_a_zero() {
-        use sceneworks_core::memory_calibration::{ObservedMemory, PredictedPeakBytes};
-
-        let peaks = PredictedPhasePeaks {
-            conditioning: 1,
-            denoise: 2,
-            decode: 3,
-            overall: 4,
-        };
-        let overall_only: PredictedPeakBytes =
-            serde_json::from_value(peaks.overall_only_json()).expect("overall-only prediction");
-        assert_eq!(overall_only.overall(), 4);
-        assert!(
-            overall_only.full().is_none(),
-            "an overall-only receipt must not read as a decomposition"
-        );
-        assert!(
-            serde_json::from_value::<PredictedPeakBytes>(
-                json!({ "denoise": 2, "decode": 3, "overall": 4 })
-            )
-            .is_err(),
-            "a partial decomposition is not a receipt shape; dropping the unmeasured keys is not \
-             an option"
-        );
-        let observed: ObservedMemory =
-            serde_json::from_value(json!({ "overall": { "activeBytes": POST_FIRST_STEP.active } }))
-                .expect("overall-only");
-        assert!(observed.full().is_none());
-        assert_eq!(
-            observed.overall_non_reclaimable_bytes(),
-            POST_FIRST_STEP.active
-        );
-    }
-
-    /// The arm ACTS on the attribution rather than merely computing it: the receipt is the
-    /// ceiling, the anchor-minting phase measurements are withheld, both measured windows are
-    /// published under names that say what they are, the gap and the inference change are stated
-    /// in the record's own blockers, and the identity preflight runs before the load. Read the way
-    /// the sibling guards in this file read an arm — the measured render needs real weights.
-    ///
-    /// Mutations that fail this: restoring the `Progress::Decoding` cut or the three-phase
-    /// `.contains(&0)` refusal; filing `predicted_peaks.json()`; publishing `conditioningActivePeak`
-    /// / `denoiseActivePeak` / `decodeActivePeak`; dropping the preflight.
-    #[test]
-    fn the_sensenova_receipt_withholds_the_keys_an_anchor_would_be_minted_from() {
+    fn the_sensenova_arm_cuts_every_declared_phase_on_an_engine_boundary() {
         let source = include_str!("mlx.rs");
         let start = source
             .find("\nfn run_sensenova(")
@@ -31950,40 +31891,43 @@ mod sensenova_tests {
                 + source[start..]
                     .find("\n}\n")
                     .expect("the arm's body closes")];
-        for declaration in [
+        for cut in [
             "sensenova_identity_preflight(arm, tier, &spec, &expected_fingerprint)?;",
-            "sensenova_window_peaks(arm, &windows, post_first_step)?;",
-            "predicted_peaks.overall_only_json()",
-            "\"observedMemory\": { \"overall\": { \"activeBytes\": overall.active } }",
-            "(\"conditioningPhaseUnattributed\", \"count\", 1)",
-            "(\"denoisePhaseUnattributed\", \"count\", 1)",
-            "(\"decodePhaseUnattributed\", \"count\", 1)",
-            "\"throughFirstDenoiseStepWindowActivePeak\"",
-            "\"postFirstDenoiseStepWindowActivePeak\"",
-            "SENSENOVA_ENGINE_BOUNDARIES.to_owned()",
-            "{SENSENOVA_BOUNDARY_INFERENCE_CHANGE}",
+            "phases.observe(&progress, || {",
+            "let decode = PhaseMemory::capture();",
+            "} = sensenova_phase_peaks(arm, &phases, decode)?;",
+            "let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);",
+            "\"predictedPeakBytes\": predicted_peaks.json(),",
+            "\"conditioning\": conditioning.json(),",
+            "\"denoise\": denoise.json(),",
+            "\"decode\": decode.json(),",
+            "(\"conditioningActivePeak\", \"bytes\", conditioning.active)",
+            "(\"denoiseActivePeak\", \"bytes\", denoise.active)",
+            "(\"decodeActivePeak\", \"bytes\", decode.active)",
         ] {
             assert!(
-                body.contains(declaration),
-                "the two-window attribution lost {declaration}"
+                body.contains(cut),
+                "the strict three-phase capture lost {cut}"
             );
         }
-        // Any direct read of the stream inside the arm — a match arm, an `if let`, a reset
-        // keyed on an event — is a cut this attribution does not make; the only consumer of the
-        // stream is `SenseNovaWindows::observe`.
-        for fabrication in [
-            "Progress::Decoding",
-            "Progress::Step {",
+        // Any direct read of the stream inside the arm — a match arm, an `if let`, a reset keyed
+        // on an event — is a cut the fold does not make; the only consumer of the stream is
+        // `SenseNovaPhases::observe`.
+        for relaxation in [
+            "Progress::Step",
             "Progress::Loading",
-            ".contains(&0)",
-            "predicted_peaks.json()",
-            "\"conditioningActivePeak\"",
-            "\"denoiseActivePeak\"",
-            "\"decodeActivePeak\"",
+            "Progress::Decoding",
+            "PhaseUnattributed",
+            "overall_only_json",
+            "throughFirstDenoiseStep",
+            "postFirstDenoiseStep",
+            "SENSENOVA_ENGINE_BOUNDARIES",
+            "SENSENOVA_BOUNDARY_INFERENCE_CHANGE",
+            "\"observedMemory\": { \"overall\"",
         ] {
             assert!(
-                !body.contains(fabrication),
-                "the SenseNova arm must not file a phase the engine does not bound ({fabrication})"
+                !body.contains(relaxation),
+                "the SenseNova arm must not grade on {relaxation} again"
             );
         }
     }
@@ -32009,61 +31953,132 @@ mod sensenova_tests {
         (root, arm.expected_repository, REVISION)
     }
 
-    /// A minimal dense checkpoint in the shape the engine's tier proof reads
-    /// (`resolved_artifact_tier`, memory_strategy.rs:561-623): one backbone decoder Linear
+    /// A minimal dense checkpoint (or shard) in the shape the engine's tier proof reads
+    /// (`resolved_artifact_tier`, memory_strategy.rs:733-808): one backbone decoder Linear
     /// (`convert::is_backbone_linear`) with no `.scales` companion — a bf16 artifact.
-    fn dense_backbone_safetensors() -> Vec<u8> {
-        let header = br#"{"language_model.model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[2,2],"data_offsets":[0,8]}}"#;
+    fn dense_backbone_safetensors(tensor: &str) -> Vec<u8> {
+        let header =
+            format!(r#"{{"{tensor}":{{"dtype":"BF16","shape":[2,2],"data_offsets":[0,8]}}}}"#);
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
-        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(header.as_bytes());
         bytes.extend_from_slice(&[0_u8; 8]);
         bytes
     }
 
-    /// sc-22738 — a tier root the pinned engine cannot pin is refused BEFORE the load, with the
-    /// engine's own predicates, naming the layout, the engine site and the inference change.
-    ///
-    /// `sensenova_u1_8b:bf16:mlx` (and the two infographic quality siblings) loaded for 128 s and
-    /// then died on "published no calibration identity": their `bf16/` rehost is an 8-shard
-    /// Hugging Face layout and `verified_artifact` (memory_strategy.rs:479-498) pins only a single
-    /// `model.safetensors`. The `_fast` bf16 turnkeys and every packed tier are single-file and
-    /// publish. This drives the preflight over both layouts and over the artifact-tier proof it
-    /// also asks the engine for.
-    #[test]
-    fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_inference_change()
-    {
-        // The layout the three dense quality rehosts ship: shards plus the index.
-        let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
-        for name in [
+    const SHARD_TENSORS: [(&str, &str); 2] = [
+        (
             "model-00001-of-00002.safetensors",
+            "language_model.model.layers.0.self_attn.q_proj.weight",
+        ),
+        (
             "model-00002-of-00002.safetensors",
-            "model.safetensors.index.json",
-        ] {
-            std::fs::write(root.join(name), b"").unwrap();
+            "language_model.model.layers.1.self_attn.k_proj.weight",
+        ),
+    ];
+
+    /// The layout the three dense quality rehosts ship, at two shards: every shard a readable
+    /// dense checkpoint, and `model.safetensors.index.json` whose `weight_map` names exactly them.
+    fn write_sharded_dense_root(root: &Path, indexed: &[(&str, &str)]) {
+        for (shard, tensor) in SHARD_TENSORS {
+            std::fs::write(root.join(shard), dense_backbone_safetensors(tensor)).unwrap();
         }
+        let weight_map: Vec<String> = indexed
+            .iter()
+            .map(|(shard, tensor)| format!("\"{tensor}\":\"{shard}\""))
+            .collect();
+        std::fs::write(
+            root.join("model.safetensors.index.json"),
+            format!(
+                "{{\"metadata\":{{}},\"weight_map\":{{{}}}}}",
+                weight_map.join(",")
+            ),
+        )
+        .unwrap();
+    }
+
+    /// sc-22738 — at e34d7b46a (inference #966) an indexed shard set PINS: the preflight admits
+    /// the sharded dense root with the engine's own predicates, proves it dense, and the engine's
+    /// table names the identity the plan carries for it. At e16c6a55e the same root was refused
+    /// before the load (`verified_artifact` pinned only a single `model.safetensors`), which is
+    /// why the three quality bf16 cells never captured.
+    #[test]
+    fn an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity() {
+        use runtime_macos::providers::sensenova::memory_strategy as engine;
+        let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+        write_sharded_dense_root(&root, &SHARD_TENSORS);
+        let spec =
+            sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "bf16").unwrap();
+        let expected = sensenova_calibration_fingerprint(SENSENOVA_BASE_ARM, "bf16");
+        assert_eq!(
+            sensenova_identity_preflight(SENSENOVA_BASE_ARM, "bf16", &spec, &expected),
+            Ok(())
+        );
+        let identity =
+            engine::verified_artifact_identity(&spec).expect("an indexed shard set pins");
+        assert_eq!(identity.len(), 64, "{identity}");
+        assert_eq!(engine::resolved_artifact_tier(&spec).unwrap(), None);
+        assert_eq!(
+            engine::production_calibration_fingerprint(SENSENOVA_BASE_ARM.provider, &spec)
+                .as_deref(),
+            Some(expected.as_str())
+        );
+
+        // The same shards under a q4 plan: the artifact-proven tier disagrees with the knob.
+        let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "q4");
+        write_sharded_dense_root(&root, &SHARD_TENSORS);
+        let spec =
+            sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "q4").unwrap();
+        let expected = sensenova_calibration_fingerprint(SENSENOVA_BASE_ARM, "q4");
+        let error = sensenova_identity_preflight(SENSENOVA_BASE_ARM, "q4", &spec, &expected)
+            .expect_err("a dense shard set cannot serve a q4 cell");
+        assert!(error.contains("ARTIFACT-proven tier"), "{error}");
+        assert!(error.contains("None") && error.contains("Q4"), "{error}");
+    }
+
+    /// sc-22738 — a tier root the pinned engine cannot pin is still refused BEFORE the load, with
+    /// the engine's own predicates, naming the layout and the engine site: an index that does not
+    /// account for the shards beside it, an unindexed multi-file layout, a single dense file under
+    /// a packed plan, an unreadable single file.
+    #[test]
+    fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_layout() {
+        // Two shards, an index naming only one of them.
+        let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+        write_sharded_dense_root(&root, &SHARD_TENSORS[..1]);
         let spec =
             sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "bf16").unwrap();
         let expected = sensenova_calibration_fingerprint(SENSENOVA_BASE_ARM, "bf16");
         let error = sensenova_identity_preflight(SENSENOVA_BASE_ARM, "bf16", &spec, &expected)
-            .expect_err("a sharded root publishes no identity at this pin");
+            .expect_err("an index that does not account for the shards does not pin");
         for needle in [
             "refused before the load",
-            "`verified_artifact` (mlx-gen-sensenova/src/memory_strategy.rs:479-498)",
+            "`verified_artifact` (mlx-gen-sensenova/src/memory_strategy.rs:656-669",
             "2 safetensors entries [model-00001-of-00002.safetensors, model-00002-of-00002.safetensors]",
-            "Hugging Face sharded layout",
+            "the index does not account for exactly",
             expected.as_str(),
-            "Inference change needed:",
-            "`weight_map`",
             "stays runnable",
         ] {
             assert!(error.contains(needle), "missing {needle:?} in {error}");
         }
         assert!(!error.contains("SCENEWORKS_"), "{error}");
 
+        // Two shards and no index at all.
+        let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+        write_sharded_dense_root(&root, &SHARD_TENSORS);
+        std::fs::remove_file(root.join("model.safetensors.index.json")).unwrap();
+        let spec =
+            sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "bf16").unwrap();
+        let error = sensenova_identity_preflight(SENSENOVA_BASE_ARM, "bf16", &spec, &expected)
+            .expect_err("an unindexed multi-file root does not pin");
+        assert!(error.contains("an unindexed multi-file layout"), "{error}");
+
         // The single dense `model.safetensors` the fast turnkeys ship: pinned, proven dense, and
         // the engine's own table names the identity the plan carries for it.
         let (root, repository, revision) = preflight_root(SENSENOVA_FAST_ARM, "bf16");
-        std::fs::write(root.join("model.safetensors"), dense_backbone_safetensors()).unwrap();
+        std::fs::write(
+            root.join("model.safetensors"),
+            dense_backbone_safetensors(SHARD_TENSORS[0].1),
+        )
+        .unwrap();
         let spec =
             sensenova_load_spec_at(SENSENOVA_FAST_ARM, repository, revision, root, "bf16").unwrap();
         let expected = sensenova_calibration_fingerprint(SENSENOVA_FAST_ARM, "bf16");
@@ -32083,7 +32098,11 @@ mod sensenova_tests {
         // The same dense file under a q4 plan: the artifact-proven tier disagrees with the knob,
         // and the engine keys the identity on the artifact.
         let (root, repository, revision) = preflight_root(SENSENOVA_FAST_ARM, "q4");
-        std::fs::write(root.join("model.safetensors"), dense_backbone_safetensors()).unwrap();
+        std::fs::write(
+            root.join("model.safetensors"),
+            dense_backbone_safetensors(SHARD_TENSORS[0].1),
+        )
+        .unwrap();
         let spec =
             sensenova_load_spec_at(SENSENOVA_FAST_ARM, repository, revision, root, "q4").unwrap();
         let expected = sensenova_calibration_fingerprint(SENSENOVA_FAST_ARM, "q4");
@@ -32105,9 +32124,9 @@ mod sensenova_tests {
 
     /// sc-22738 — the identity NAME set the pinned engine tables for all eighteen cells is the set
     /// the plan and this arm carry: no naming drift between PR #2734's SceneWorks side and the
-    /// engine's `production_calibration_fingerprint` (memory_strategy.rs:680-688) at e16c6a55e.
-    /// The table is the (route, tier) key; what the sharded dense roots lack is the artifact PIN
-    /// in front of it, not a name.
+    /// engine's `production_calibration_fingerprint` (memory_strategy.rs:869-898) at e34d7b46a.
+    /// The table is the (route, tier) key; since inference #966 the sharded dense roots pin in
+    /// front of it too (`an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity`).
     #[test]
     fn every_sensenova_cell_names_the_identity_the_pinned_engine_tables() {
         use runtime_macos::providers::sensenova::memory_strategy as engine;
