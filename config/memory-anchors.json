@@ -4422,6 +4422,52 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b:mlx:q4:base:base:sensenova-u1-quality-q4-mlx-shared-ladder-v1:imc-623341bc53f0139b199a",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json",
+        "sha256": "c0c750616b50b17627025a387db1e1dbd03bc7e2aadd2e94c984dd3007758cbf",
+        "recordId": "imc-623341bc53f0139b199a",
+        "calibrationFingerprint": "sensenova-u1-quality-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 12139424880,
+        "decode": 10491175720
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 14910913600,
+        "decode": 13482898192
+      },
+      "overallAllocatorEnvelopeBytes": 15131147352,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -7598,17 +7644,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:mlx:q4",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:sensenova_u1_8b:mlx:q8",
