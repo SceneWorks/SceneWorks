@@ -2302,40 +2302,58 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  * line (sc-22738, measured 2026-09-06).
  */
 /**
- * The per-probe WALL-CLOCK budget, in minutes, by lane (sc-22738, 2026-09-07).
+ * The per-probe WALL-CLOCK budget, in minutes, by lane (sc-22738, 2026-09-07; re-based 2026-09-08).
  *
  * WHY A BUDGET AT ALL. The guard's ceilings bound a probe that CLIMBS. They say nothing about one
- * that stops climbing: `scail2_14b:bf16:mlx` sat at a flat 93.5 GB against the 94.82 GB kill line
- * for 90 minutes, the host swapping and the adapter's main thread parked in `mlx::core::eval` →
- * `waitUntilSignaledValue`, and would have sat there until an operator noticed. The watchdog has
+ * that stops climbing, and a stopped-climbing probe is indistinguishable from a wedged one from
+ * the outside: `scail2_14b:bf16:mlx` sat at a flat 93.5 GB against the 94.82 GB kill line, the
+ * adapter's main thread parked in `mlx::core::eval` → `waitUntilSignaledValue`. The watchdog has
  * supported `--max-runtime-seconds` since it was written; nothing passed it, so every probe ran
  * unbounded in time.
  *
- * THE BASIS, AND WHAT IT IS NOT. The evidence corpus states no wall clock: `durationSeconds` and
- * every other duration/elapsed field are ABSENT from `docs/calibration/sc-22738/*.json` (a capture
- * bundle carries `capturedAt` and nothing about how long the render took). So these are derived
- * from the two figures the corpus and this tree DO state:
+ * WHAT THAT FLAT LINE ACTUALLY WAS (sc-22738, diagnosed 2026-09-08). Not a wedge. A video arm
+ * renders its clip THREE times per capture — the measured render, a clean warm control and a warm
+ * repeat (`crates/sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs`, the determinism envelope
+ * every video arm carries) — and a SCAIL-2 render is a 14B DiT at 832x480x77 under CFG (two DiT
+ * forwards per step) whose main thread waits on the GPU at the per-step `eval` by design
+ * (`mlx-gen-scail2/src/generate.rs`). The ONE unbudgeted `scail2_14b:bf16:mlx` capture on record
+ * COMPLETED, rendering all 80 decoded frames, in 8,709 s (2026-09-06, `calib-mlx/campaign.log`).
+ * A 90-minute budget then stopped the same cell at every tier with the GPU at 99–100% device
+ * utilization, the footprint oscillating ±90 MB on a 4–6 s cadence and no GPU fault in the system
+ * log: the budget, not the render, was what ended those probes. The `providerPhase` field of the
+ * watchdog stream is `null` for EVERY anchor because the runner passes no
+ * `--provider-phase-profile`; it is not a progress signal and its absence proves nothing.
  *
- *   * consecutive `capturedAt` deltas inside one uninterrupted walk, each an UPPER bound on that
- *     anchor's whole capture→commit cycle. Longest for a completed IMAGE anchor: 847 s
- *     (`bernini_image:q8:mlx`, 07:13:26 after q4's 06:59:19 on 2026-09-07). Longest bounding a
- *     completed VIDEO anchor: 4,161 s (`ltx_2_3:q4:mlx`), with the clean back-to-back `ltx_2_5`
- *     pair at 1,132 s and 1,097 s.
- *   * the longest run this tree WITNESSES a guarded probe making real progress in: the 85-minute
- *     `bernini:q8:mlx` render (a VIDEO entry — `bernini` is the video row, `bernini_image` the
- *     still one) that was steady at 52 GB when a census false positive SIGKILLed it, named in
- *     `scripts/memory-calibration-watchdog.py`'s header.
+ * THE BASIS. The evidence corpus states no wall clock (`durationSeconds` and every other
+ * duration/elapsed field are ABSENT from `docs/calibration/sc-22738/*.json`), so the budgets rest
+ * on the longest COMPLETED capture each lane has witnessed, `WITNESSED_CAPTURE_SECONDS`:
  *
- * So: 150 minutes for video is 1.8x that witnessed 85-minute render and ~2.2x the longest video
- * capture cycle on file; 60 minutes for image is 4.2x the longest image capture cycle on file. Both
- * are backstops against a wedge, not schedule targets — a budget tight enough to argue about would
- * be converting slow renders into re-runs.
+ *   * video: 8,709 s — the completed `scail2_14b:bf16:mlx` capture above, the one direct witness
+ *     of a whole three-render video capture cycle. (The earlier basis, 4,161 s for `ltx_2_3:q4:mlx`
+ *     from consecutive `capturedAt` deltas, was a cycle bound for a lighter model; it under-read
+ *     SCAIL-2 by 2.1x and the 150-minute budget it produced cleared the witness by 3%.)
+ *   * image: 847 s — the `bernini_image:q8:mlx` capture→commit cycle (07:13:26 after q4's
+ *     06:59:19 on 2026-09-07), read the same way.
+ *
+ * So: 270 minutes for video is 1.86x the witnessed 8,709 s cycle, which is the same margin policy
+ * the earlier figure claimed (1.8x) applied to the right witness; 60 minutes for image is 4.2x the
+ * longest image cycle on file. Both are backstops against a wedge, not schedule targets — a budget
+ * tight enough to argue about is converting slow renders into re-runs, which is exactly what the
+ * 90-minute campaign did three times over.
  *
  * The cost of being wrong is bounded BY DESIGN and asymmetric on purpose: a runtime stop records no
  * bound and leaves the cell `runnable`, so too tight a budget costs a re-run, while too loose a one
- * costs only operator time. `--probe-budget-minutes` overrides both entries for a run.
+ * costs only operator time. `--probe-budget-minutes` overrides both entries for a run and is
+ * honored as given; a run launched below its lane's default is told so in the stop reason
+ * (`runtimeBudgetExceededReason`), because a stop under such a budget is not evidence of a stall.
  */
-export const PROBE_BUDGET_MINUTES = { video: 150, image: 60 };
+export const WITNESSED_CAPTURE_SECONDS = { video: 8_709, image: 847 };
+export const PROBE_BUDGET_MINUTES = { video: 270, image: 60 };
+
+/** The lane a plan row is budgeted under: a video anchor renders more than one frame. */
+export function probeLane(row) {
+  return row.videoLane ? "video" : "image";
+}
 
 /** This row's wall-clock budget in minutes: the runner's `--probe-budget-minutes`, else its lane's. */
 export function probeBudgetMinutes(row, override = null) {
@@ -2343,7 +2361,36 @@ export function probeBudgetMinutes(row, override = null) {
     if (!Number.isFinite(override) || override <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
     return override;
   }
-  return PROBE_BUDGET_MINUTES[row.videoLane ? "video" : "image"];
+  return PROBE_BUDGET_MINUTES[probeLane(row)];
+}
+
+/**
+ * The `runtime_budget_exceeded` reason a wall-clock stop reports (sc-22738).
+ *
+ * Names the budget, the peak sampled (so a probe wedged at the ceiling reads differently from one
+ * wedged at 3 GB), and the longest COMPLETED capture this lane has on record — and, when the run
+ * was launched with `--probe-budget-minutes` below its lane's default, says in as many words that
+ * the stop is a budget shortfall rather than evidence of a stall. The three `scail2_14b` cells of
+ * the 90-minute campaign of 2026-09-07 were read as a hung engine for want of this sentence.
+ *
+ * Pure: `peak` is `watchdogPeakFootprint`'s reading or `null`, `ceiling` the guard's kill line as
+ * a phrase, and nothing here touches the store.
+ */
+export function runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling }) {
+  const lane = probeLane(row);
+  const laneDefault = PROBE_BUDGET_MINUTES[lane];
+  const witnessed = WITNESSED_CAPTURE_SECONDS[lane];
+  let reason =
+    `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
+    + `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} `
+    + `against the ${ceiling}. Nothing was measured, so no bound was recorded and this cell stays runnable. `
+    + `The longest completed ${lane} capture on record ran ${witnessed}s`;
+  if (budgetMinutes < laneDefault) {
+    reason += `, and this run was launched with --probe-budget-minutes ${budgetMinutes}, below the ${lane} `
+      + `lane's ${laneDefault}-minute default: this stop is a budget shortfall, not evidence of a stall. `
+      + `Re-run it at the default budget or larger before reading anything into the flat footprint`;
+  }
+  return `${reason}.`;
 }
 
 export function watchdogCeilings({ memoryBytes }) {
@@ -2793,7 +2840,8 @@ export async function measureAnchor(row, context) {
     // The guard killed this group on exactly the path a footprint stop takes — same escalation,
     // same post-stop census — but for a different reason: the probe ran out of time, wherever its
     // footprint happened to be. `scail2_14b:bf16:mlx` sat flat at 93.5 GB under a 94.82 GB ceiling
-    // for 90 minutes; the footprint it was sitting at is not a line it was witnessed to CROSS, and
+    // for 90 minutes (a render in progress, it turned out — see `PROBE_BUDGET_MINUTES`); the
+    // footprint it was sitting at is not a line it was witnessed to CROSS, and
     // recording it as `exceededBounds` would state a lower bound the run never established and make
     // production refuse hosts on it. So this arm returns BEFORE the two bound-recording arms below,
     // records nothing, commits nothing, and leaves the cell `runnable` for the next `--list`: no
@@ -2808,9 +2856,7 @@ export async function measureAnchor(row, context) {
         : "the guard's ceiling";
       return finish(
         "capture_failed",
-        `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
-          + `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} `
-          + `against the ${ceiling}. Nothing was measured, so no bound was recorded and this cell stays runnable.`,
+        runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling }),
       );
     }
     // sc-22738 (measured 2026-09-06): the SECOND way a run ends having measured a bound. Metal
