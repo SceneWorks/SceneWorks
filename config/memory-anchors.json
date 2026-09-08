@@ -9814,6 +9814,38 @@
         "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q4-v1",
         "loaderClosureDigest": "be4ac7bd5a2f220f549ce09e5eac983e0354ed87a1e045f194035901d91867f0"
       }
+    },
+    {
+      "id": "exceeded:wan_2_2_i2v_14b:mlx:q8:base:base:sc-22736-wan2-2-i2v-a14b-mlx-q8-v1:exc-1d3d441eb7342aefa724",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "provider": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 104798013776,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_104798013776",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json",
+        "sha256": "fa579b59b7b60d5770c638c65474cebfd4aa2a463c10a0635b21f622b01eab7f",
+        "recordId": "exc-1d3d441eb7342aefa724",
+        "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q8-v1",
+        "loaderClosureDigest": "be4ac7bd5a2f220f549ce09e5eac983e0354ed87a1e045f194035901d91867f0"
+      }
     }
   ]
 }
