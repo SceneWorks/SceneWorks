@@ -267,3 +267,19 @@ classify `exceeded_current` in the catalog walk. The 49 walk-1 anchors measured 
 **not** attested: `563c44e1..e16c6a55` is 25 inference files, a different and larger diff, and
 nobody has read it per closure. They keep their own measurement-revision keys and read stale in
 the probe tooling; the runtime treats them as measured either way.
+
+## Extension to inference `e34d7b46` (sc-22738, fifth terminal pin, 2026-09-07)
+
+The sc-22738 pin moved again (`e16c6a55` → `e34d7b46a301376676bd8a60419190c7be9aa4f0`, inference
+`main` = PR #966 `fix/sc-22738-sensenova-measurable`, first-parent over `e16c6a55`) so the SenseNova
+MLX generator emits `Progress::Loading(LoadPhase::Renderer)` before its denoise loop and
+`Progress::Decoding` after it on every route, and pins the 8-shard bf16 rehosts through
+`model.safetensors.index.json`. The `e16c6a55..e34d7b46` range changes five inference files, all
+under `crates/media/mlx-gen/mlx-gen-sensenova`: `src/memory_strategy.rs`, `src/model.rs`,
+`src/t2i.rs` and the two parity tests. None of the fourteen attested closures (five anchors, nine
+measured lower bounds) reaches `mlx-gen-sensenova`, so every `closureFiles ∩ e16c6a55..e34d7b46` is
+**empty** — the byte-identical case the doctrine names as the trivial extension. All fourteen
+entries were extended (`attestedRevision` → `e34d7b46`, the reading appended to `why`); no file is
+added to any `filesChangedSinceMeasurement`; no re-measure was taken. The six SenseNova model
+closures and the two SenseNova provider closures are the only closures that moved at this pin, and
+no packaged anchor or bound is keyed to them. Matrix after `--stamp-anchors`: unchanged set.

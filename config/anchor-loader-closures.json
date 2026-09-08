@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529",
+  "inferenceRevision": "e34d7b46a301376676bd8a60419190c7be9aa4f0",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -13542,7 +13542,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "4f166c9f5356c380fa5005447e612ad4a75516ee0223eeebedc270f123183cab",
+      "digest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -13721,7 +13721,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "ed252cbeb82044e4311743ba9f90ecca1707ef6f07f8f59575d0b9dd59c5eacc",
+      "digest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -13902,7 +13902,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "c167afab50de07b3a9ff5bce9f24e3efcfda26b9be7200dd4715f8bd429303dc",
+      "digest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -14083,7 +14083,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "9e244391628bee0e49cb48bad8d68da8860bf304c52f77506a2ad3491c7ae67f",
+      "digest": "73408aaecda389b53a2eff11f15b327f33775e73b0158d36d3e10f42d99209fc",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -14264,7 +14264,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "07ccec18651ec569dcc4b74d7a5a8636122927a2310be81635c083541f322b95",
+      "digest": "0f0a069086eba2b4595404e4d7ff12edf4524ec668d2cc308673ee386ac1c82a",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -14445,7 +14445,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "e6ece27dd3be678cc52a5061e86dbc7fbf084ea89ac97cef58a1abe775913dc7",
+      "digest": "e402fa43ca305ee749293b2b0cb161a2616d7c5d2b8c5cc45c70c841a485e2ea",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
