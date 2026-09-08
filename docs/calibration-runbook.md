@@ -1521,9 +1521,10 @@ measurement runs at epic end or on explicit request, never per code change.
 
 **Inputs.** `backend` (`mlx` | `candle`), `campaign` (one path segment, e.g. `sc-22738`), `anchors`
 (comma-separated keys), `models` (space-separated ids), `skip_current` (default true),
-`hf_cache_roots`, `ref` (the branch to walk from and the PR base), `runner_label` (mlx only),
-`push_every`. `anchors`, `models`, `skip_current` and `hf_cache_roots` map one-for-one onto the
-script's `--anchors` / `--model` / `--skip-current` / `--hf-cache` flags.
+`hf_cache_roots`, `download_missing` (default false), `ref` (the branch to walk from and the PR
+base), `runner_label` (mlx only), `push_every`. `anchors`, `models`, `skip_current`,
+`hf_cache_roots` and `download_missing` map one-for-one onto the script's `--anchors` / `--model` /
+`--skip-current` / `--hf-cache` / `--download-missing` flags.
 
 **Where each lane runs.**
 
@@ -1608,6 +1609,51 @@ candle), not a measured budget.
 on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a warning, not an
 error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
 snapshot is under none of them plans as `weights_missing` rather than failing the run.
+
+**Fetching the missing snapshots — `download_missing` / `--download-missing` (sc-22738).** Neither
+box holds the whole catalog. Copying the missing snapshots off the Mac's SSD is slower than fetching
+them from the hub on the Windows box's own link (measured 2026-09-08), so the campaign can fetch
+what it needs:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=candle -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f download_missing=true
+```
+
+- **Only `weights_missing` anchors.** A `runnable` cell is never re-fetched, and a cell refused for
+  any other reason (`no_adapter_arm`, `lane_undeclared`, `exceeded_current`, `harness_unsupported`)
+  is not a weights problem and gets no download. After the fetch the cell is classified **again**,
+  by the same `classifyAnchor` that refused it.
+- **Nothing is invented.** Each anchor's repositories are the ones the classifier probes (the
+  LTX-2.5 snapshot, the per-(lane, tier) artifact, `upstream`, the SDXL and Mage-Flow components,
+  the member's side artifact), and each repository's revision and file globs come from the manifest
+  download rows for that model, tier and platform. `--revision` is **always** the pinned revision —
+  never `main`, which pinning a manifest download removes from the mirror anyway — so a repository
+  the manifest ships unpinned (the upstream Wan 2.2 / SVD Diffusers checkpoints) is reported as not
+  fetchable instead of being resolved off a branch. So are the hand-staged roots (PuLID's identity
+  bundle, the InstantID stack): they are operator env vars, not hub repositories.
+- **Destination: the FIRST `--hf-cache` root**, i.e. the first line of `hf_cache_roots` above —
+  `E:\huggingface\hub` on the CUDA box, `/Volumes/Models/huggingface/hub` on a Mac. Standard hub
+  layout (`models--<org>--<name>/snapshots/<rev>/…`, with `refs/` exactly as the CLI writes them),
+  because it is the CLI that writes it: `hf download <repo> --revision <rev> --include <glob> …
+  --cache-dir <root>` (falling back to `huggingface-cli` when `hf` is not installed).
+- **One at a time, resumable.** These are multi-GB transfers on a link that has already killed a
+  parallel fetch; the CLI resumes a partial download, so a re-dispatch pays only for what is
+  missing. Each landed snapshot logs `download: <key> <repo>@<rev> <n> files, <bytes> bytes`.
+- **A failed fetch never stops the walk.** That one anchor stays `weights_missing (download failed:
+  <reason>)` and the campaign moves on, exactly as an absent snapshot does today.
+- **`$HF_TOKEN`** is exported into the job from the repository/org secret of that name and is read
+  by the CLI, not by this script. Every artifact the campaign fetches today is public, so an unset
+  token only matters for a gated repository; set the secret (or export `HF_TOKEN` /
+  `HUGGING_FACE_HUB_TOKEN` on the runner) before dispatching one. `HF_HUB_ENABLE_HF_TRANSFER` is
+  runner-level opt-in and is not set here.
+- **`--dry-run --download-missing`** prints one line per snapshot it would fetch, with the
+  manifest's own `estimatedSizeBytes` where the rows declare it, and fetches nothing. That is what
+  the workflow's *Plan the walk* step runs; the `--list` table in the same step deliberately does
+  **not** carry the flag, so reading the plan can never start a download.
 
 ### 6b. Through the guarded dispatch
 
