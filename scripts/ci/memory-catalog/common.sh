@@ -114,3 +114,20 @@ build_catalog_args() {
     CATALOG_ARGS+=(--hf-cache "$root")
   done < <(hf_cache_roots)
 }
+
+# `--download-missing`, when the dispatch asked for it (sc-22738).
+#
+# DELIBERATELY NOT part of build_catalog_args: that array is shared with plan.sh's `--list` pass,
+# which is meant to be a millisecond-cheap table, and `--list --download-missing` would start the
+# multi-GB transfers there instead of in the walk. Only the two passes that are allowed to fetch --
+# the dry run (which prints what it would fetch and fetches nothing) and the walk itself -- append
+# it, and each does so explicitly.
+#
+# The destination is the FIRST --hf-cache root, i.e. the first line hf_cache_roots() prints. A gated
+# repository additionally needs $HF_TOKEN in the job env; every artifact this campaign fetches today
+# is public.
+download_missing_args() {
+  if [[ "${DOWNLOAD_MISSING:-false}" == "true" ]]; then
+    printf '%s\n' "--download-missing"
+  fi
+}

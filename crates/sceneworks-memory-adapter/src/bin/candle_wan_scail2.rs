@@ -464,6 +464,35 @@ fn load_spec(arm: Arm, tier: &str, load_shape: LoadShape) -> Result<Artifact, St
     })
 }
 
+/// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
+/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// or by the provider's own `memory_strategy` module, which the loader publishes only for an
+/// unprepared spec, so sealing one would HIDE it (sc-22738). The MLX arm's helper on this lane's
+/// backend token; `production_calibration_fingerprint` returns `None` for `wan2_2_ti2v_5b` by
+/// design, and a receipt naming any string but the plan's is a table/engine drift refused by name.
+fn receipt_publishes_the_identity(
+    arm: Arm,
+    tier: &str,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    let Some(route) = arm.route else {
+        return Ok(false);
+    };
+    match runtime_cuda::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+        route,
+        runtime_cuda::gen_core::wan_i2v_memory::WanI2vBackend::Candle,
+        numeric_tier(tier)?,
+    ) {
+        None => Ok(false),
+        Some(published) if published == expected_fingerprint => Ok(true),
+        Some(published) => Err(format!(
+            "the pinned receipt authority mints {published} for the {} {tier} cell, not this \
+             arm's {expected_fingerprint}; the table and the engine have drifted",
+            arm.provider
+        )),
+    }
+}
+
 /// A deterministic, non-degenerate RGB8 plane — the same generator the MLX arm uses, so the two
 /// lanes present byte-identical carriers for the same cell.
 fn plane(width: u32, height: u32, salt: u32) -> Image {
@@ -658,7 +687,12 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
 
     let mut resolved = load_spec(arm, tier, load_shape)?;
-    if arm.route.is_some() {
+    // Same split as the MLX arm (sc-22738): the A14B loaders publish a contract only from a sealed
+    // receipt, while TI2V-5B's `sc-19223-…` identity is its own `memory_strategy` module's and
+    // `WanGenerator::memory_strategy_contract` (`candle-gen-wan/src/lib.rs`) returns the receipt's
+    // identity-less contract ahead of it whenever the spec was prepared. Production
+    // (`video_jobs/wan.rs::video_load_spec`) prepares nothing.
+    if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {
         candle_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut resolved.spec, arm.provider)
             .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
     }
@@ -969,6 +1003,33 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the A14B routes seal a receipt before the load; TI2V-5B and SCAIL-2 load unprepared,
+    /// exactly as production loads them (sc-22738). Mutation that fails this: guarding the
+    /// pre-pass on `arm.route.is_some()` again.
+    #[test]
+    fn only_the_a14b_routes_seal_a_receipt_before_the_load() {
+        for arm in ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let expected = production_fingerprint(arm, tier).unwrap();
+                let seals = receipt_publishes_the_identity(arm, tier, &expected).unwrap();
+                let a14b = matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b));
+                assert_eq!(seals, a14b, "{} {tier}", arm.provider);
+            }
+        }
+        let ti2v = receipt_publishes_the_identity(
+            TI2V_5B,
+            "q4",
+            "sc-19223-wan2-2-ti2v-5b-candle-q4-sequential-load-v1",
+        );
+        assert_eq!(ti2v, Ok(false));
+        let drift =
+            receipt_publishes_the_identity(T2V_A14B, "q4", "not-the-engines-string").unwrap_err();
+        assert!(
+            drift.contains("sc-22736-wan2-2-t2v-a14b-candle-q4-v1") && drift.contains("drifted"),
+            "{drift}"
+        );
+    }
 
     #[test]
     fn every_arm_plans_a_geometry_its_own_engine_admits() {

@@ -16,6 +16,10 @@ source "$(dirname "$0")/common.sh"
 
 build_catalog_args
 CATALOG_ARGS+=(--adapter "$ADAPTER")
+while IFS= read -r flag; do
+  [[ -z "$flag" ]] && continue
+  CATALOG_ARGS+=("$flag")
+done < <(download_missing_args)
 
 LOG="${WORK_DIR}/campaign.log"
 : > "$LOG"

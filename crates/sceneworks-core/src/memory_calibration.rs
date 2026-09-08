@@ -648,6 +648,12 @@ pub struct Quality {
     pub contract: Option<String>,
     pub identical_inputs: Option<bool>,
     pub identical_latents: Option<bool>,
+    /// How many warm passes the capture ran after its measured render (sc-22738). `Some(0)` is a
+    /// video-lane receipt whose determinism comparison was NOT run: `result` is `not_run` and the
+    /// comparison figures are absent, and the runtime-complete validator accepts exactly that
+    /// shape rather than refusing the record or reading a synthetic zero. Absent on every record
+    /// captured before the declaration existed, which keeps the previous requirements.
+    pub warm_passes: Option<u32>,
     pub result: Option<QualityResult>,
     pub maximum_error: Option<f64>,
     pub mean_error: Option<f64>,
@@ -1430,15 +1436,27 @@ fn validate_physical_mlx_outputs_against_record(
     record: &EvidenceRecord,
     session: &SourceSession,
 ) -> Result<(), String> {
-    let has_av = session.outputs.iter().any(|output| {
-        matches!(
-            output.role,
-            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
-        )
-    });
-    if has_av != record.quality.audio.is_some() {
+    // A typed audio comparison is selected-versus-REFERENCE PCM, so it is coupled to the
+    // `reference_av` receipt, not to the A/V kind as such: a single-render video session
+    // (sc-22738) carries a `selected_av` receipt and no audio comparison, and a session may not
+    // carry a reference without a selected render to compare it against.
+    let has_selected_av = session
+        .outputs
+        .iter()
+        .any(|output| output.role == Some(SourceOutputRole::SelectedAv));
+    let has_reference_av = session
+        .outputs
+        .iter()
+        .any(|output| output.role == Some(SourceOutputRole::ReferenceAv));
+    if has_reference_av && !has_selected_av {
         return Err(format!(
-            "{} physical MLX A/V receipts and typed audio quality must be present together",
+            "{} physical MLX reference_av receipt has no selected_av render to compare against",
+            record.id
+        ));
+    }
+    if has_reference_av != record.quality.audio.is_some() {
+        return Err(format!(
+            "{} physical MLX reference A/V receipt and typed audio quality must be present together",
             record.id
         ));
     }
@@ -2118,6 +2136,30 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
         ));
     }
     let quality = &record.quality;
+    // sc-22738: a receipt declaring `warmPasses: 0` ran no comparison render, so its quality is
+    // `not_run` by construction and carries no figure to check — the thresholds it WOULD have been
+    // judged by still travel. Degrades to "not measured"; never a refusal, never a synthetic 0.
+    if quality.warm_passes == Some(0) {
+        if quality.result != Some(QualityResult::NotRun) {
+            return Err(format!(
+                "{} declares quality.warmPasses 0, so its quality must be not_run",
+                record.id
+            ));
+        }
+        if quality.maximum_error.is_some()
+            || quality.mean_error.is_some()
+            || quality.root_mean_square_error.is_some()
+            || quality.audio.is_some()
+        {
+            return Err(format!(
+                "{} declares quality.warmPasses 0 but carries a comparison figure it cannot have \
+                 measured",
+                record.id
+            ));
+        }
+        require_quality_thresholds(quality, &record.id)?;
+        return require_runtime_complete_loadability(record);
+    }
     if quality.identical_inputs != Some(true) || quality.result != Some(QualityResult::Passed) {
         return Err(format!(
             "{} runtime-complete quality evidence did not pass",
@@ -2141,6 +2183,10 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     if rmse > rmse_threshold {
         return Err(format!("{} RMSE threshold was exceeded", record.id));
     }
+    require_runtime_complete_loadability(record)
+}
+
+fn require_runtime_complete_loadability(record: &EvidenceRecord) -> Result<(), String> {
     if record.loadability.result != LoadabilityResult::Passed
         || !matches!(
             &record.loadability.resolved_path_fingerprint,
@@ -2685,10 +2731,11 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use super::{
-        load_bundle, load_packaged_bundle, Backend, BundleLoadError, CalibrationBinding,
-        EvidenceBundle, EvidenceMismatchReason, EvidenceQuery, EvidenceVerdict, Geometry,
-        LoadShapeKey, Ltx25Decoder, Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory,
-        PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind, StrategyRung,
+        load_bundle, load_packaged_bundle, validate_physical_mlx_outputs_against_record, Backend,
+        BundleLoadError, CalibrationBinding, EvidenceBundle, EvidenceMismatchReason, EvidenceQuery,
+        EvidenceRecord, EvidenceVerdict, Geometry, LoadShapeKey, Ltx25Decoder,
+        Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes,
+        RecordStatus, RequiredNullable, SourceSession, SourceSessionKind, StrategyRung,
         MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
         PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
@@ -4360,5 +4407,131 @@ mod tests {
             bundle.evidence_for(&unexecuted),
             EvidenceVerdict::OutOfEnvelope
         );
+    }
+
+    /// sc-22738: a runtime-complete record declaring `quality.warmPasses: 0` — a single-render
+    /// video capture — is accepted with `result: not_run` and no comparison figure, and refused
+    /// the moment it carries a figure it could not have measured or claims a pass it did not run.
+    /// Records without the declaration keep every previous requirement.
+    #[test]
+    fn runtime_complete_accepts_a_declared_zero_warm_pass_quality_as_not_measured() {
+        fn runtime_record(raw: &mut Value) -> &mut Value {
+            raw["records"]
+                .as_array_mut()
+                .expect("records array")
+                .iter_mut()
+                .find(|record| record["status"] == "runtime_complete")
+                .expect("packaged runtime-complete record")
+        }
+        let mut single: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let thresholds = runtime_record(&mut single)["quality"].clone();
+        runtime_record(&mut single)["quality"] = json!({
+            "contract": "one measured render; NOT MEASURED: no warm pass",
+            "result": "not_run",
+            "warmPasses": 0,
+            "maximumErrorThreshold": thresholds["maximumErrorThreshold"],
+            "meanErrorThreshold": thresholds["meanErrorThreshold"],
+            "rootMeanSquareErrorThreshold": thresholds["rootMeanSquareErrorThreshold"],
+        });
+        load_bundle(&single.to_string()).expect("a declared unrun comparison is not a refusal");
+
+        type Doctoring = (fn(&mut Value), &'static str);
+        let doctorings: [Doctoring; 4] = [
+            (
+                |quality| quality["result"] = json!("passed"),
+                "must be not_run",
+            ),
+            (
+                |quality| quality["maximumError"] = json!(0.0),
+                "cannot have measured",
+            ),
+            (
+                |quality| {
+                    quality
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("maximumErrorThreshold");
+                },
+                "threshold evidence is incomplete",
+            ),
+            // Without the declaration the previous requirement stands: not_run is refused.
+            (
+                |quality| {
+                    quality.as_object_mut().unwrap().remove("warmPasses");
+                },
+                "did not pass",
+            ),
+        ];
+        for (mutate, expected) in doctorings {
+            let mut doctored = single.clone();
+            mutate(&mut runtime_record(&mut doctored)["quality"]);
+            assert!(
+                matches!(
+                    load_bundle(&doctored.to_string()),
+                    Err(BundleLoadError::Invalid(message)) if message.contains(expected)
+                ),
+                "{expected}"
+            );
+        }
+    }
+
+    /// sc-22738: a physical A/V session of ONE render carries `selected_av` alone, and the typed
+    /// audio comparison is coupled to the `reference_av` receipt rather than to the A/V kind.
+    #[test]
+    fn a_single_render_av_session_needs_no_audio_comparison_and_a_reference_needs_one() {
+        let mut raw: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let repositories = raw["records"][0]["repositories"].clone();
+        let record: EvidenceRecord =
+            serde_json::from_value(raw["records"][0].take()).expect("packaged record parses");
+        let session = |roles: &[&str]| -> SourceSession {
+            serde_json::from_value(json!({
+                "id": "ims-0123456789abcdefabcd",
+                "kind": "physical_mlx",
+                "command": "[]",
+                "sourcePath": "docs/calibration/x/ims-0123456789abcdefabcd.log",
+                "capturedAt": record.captured_at,
+                "repositories": repositories,
+                "hardware": { "probe": "p", "memoryBytes": 1 },
+                "stdoutSha256": "a".repeat(64),
+                "inputs": [],
+                "outputs": roles.iter().map(|role| json!({
+                    "role": role,
+                    "path": format!(
+                        "docs/calibration/x/{}-{role}-{}x{}-f{}-{}.avbin",
+                        record.logical_case_id,
+                        record.target.geometry.width,
+                        record.target.geometry.height,
+                        record.target.geometry.frames,
+                        "b".repeat(64)
+                    ),
+                    "sha256": "b".repeat(64),
+                    "bytes": 1,
+                })).collect::<Vec<_>>(),
+                "claims": ["memory"],
+                "result": "passed",
+            }))
+            .expect("session parses")
+        };
+        assert!(
+            record.quality.audio.is_none(),
+            "the packaged record carries no audio"
+        );
+        validate_physical_mlx_outputs_against_record(&record, &session(&["selected_av"]))
+            .expect("one selected render, no comparison, no audio block");
+        let error = validate_physical_mlx_outputs_against_record(
+            &record,
+            &session(&["selected_av", "reference_av"]),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("reference A/V receipt and typed audio quality"),
+            "{error}"
+        );
+        let error =
+            validate_physical_mlx_outputs_against_record(&record, &session(&["reference_av"]))
+                .unwrap_err();
+        assert!(error.contains("no selected_av render"), "{error}");
     }
 }

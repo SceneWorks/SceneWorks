@@ -2,8 +2,8 @@
 //!
 //! FOUR engine providers, ONE arm, because the four differ only in coordinates a table can hold:
 //! the artifact family, the public request carrier, the rate menu and the production identity. The
-//! measured path is identical — resolve the artifact, seal the receipt the way the worker's
-//! memory-aware load does, load through `runtime_macos::catalog().media()` (the seam
+//! measured path is identical — resolve the artifact, seal a receipt only where the engine publishes
+//! the identity from one, load through `runtime_macos::catalog().media()` (the seam
 //! `crates/sceneworks-worker/src/inference_runtime.rs` wraps), read the LOADED generator's own
 //! contract, drive the four admission probes through the provider's own registered check, and
 //! measure three synchronized phase peaks off the boundaries `generate` already emits.
@@ -26,11 +26,14 @@ use mlx_gen::gen_core::ReplacementMode;
 const SEED: u64 = 22_736;
 const LABEL: &str = "MLX Wan2.2/SCAIL-2";
 
-/// Determinism envelope for a warm repeat of one of these clips.
+/// Determinism envelope these clips are judged by.
 ///
 /// The same claim the other video arms make — repeat determinism on ONE loaded provider with an
 /// identical request — so the same published FLUX.2 envelope applies rather than a looser bound
 /// invented here. The mandatory `+64` negative mutation is more than eight times the maximum.
+/// Since sc-22738 (2026-09-08) a video capture is ONE measured render, so no warm repeat is
+/// compared against it here: the thresholds travel in the receipt (`quality.warmPasses: 0`,
+/// `result: not_run`) and bound only the falsifiability mutation.
 const MAX_THRESHOLD: f64 = FLUX2_MAX_THRESHOLD;
 const MEAN_THRESHOLD: f64 = FLUX2_MEAN_THRESHOLD;
 const RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
@@ -468,6 +471,46 @@ fn numeric_quant(arm: Arm, tier: &str) -> Result<Option<Quant>, String> {
     Ok(if arm.route.is_some() { quant } else { None })
 }
 
+/// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
+/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// or by the provider's own `memory_strategy` module, which the loader publishes only for an
+/// unprepared spec, so sealing one would HIDE it (sc-22738).
+///
+/// Asked of the engine rather than spelled per route: `production_calibration_fingerprint`
+/// (`gen-core/src/wan_i2v_memory.rs`) is the receipt authority's own answer, and it returns `None`
+/// for `wan2_2_ti2v_5b` by design — that route's `sc-19236-…` identity belongs to
+/// `mlx-gen-wan/src/memory_strategy.rs`, and `Wan::memory_strategy_contract` (`model.rs`) returns
+/// the receipt's contract, calibration and all, ahead of that one whenever the spec was prepared.
+/// The receipt-published identity must be the plan's: a receipt naming any other string is a drift
+/// between this table and the engine, refused by name before a byte is opened.
+fn receipt_publishes_the_identity(
+    arm: Arm,
+    tier: &str,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    let Some(route) = arm.route else {
+        return Ok(false);
+    };
+    let numeric_tier = MemoryNumericTier {
+        precision: Precision::Bf16,
+        quant: numeric_quant(arm, tier)?,
+        component_precision_floors: &[],
+    };
+    match mlx_gen::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+        route,
+        mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+        numeric_tier,
+    ) {
+        None => Ok(false),
+        Some(published) if published == expected_fingerprint => Ok(true),
+        Some(published) => Err(format!(
+            "the pinned receipt authority mints {published} for the {} {tier} cell, not this \
+             arm's {expected_fingerprint}; the table and the engine have drifted",
+            arm.provider
+        )),
+    }
+}
+
 /// A deterministic, non-degenerate RGB8 plane. Every carrier byte a capture presents is generated
 /// here rather than staged, so the record's request identity is reproducible from this source
 /// alone — the same choice the PuLID and LTX arms make for their synthetic carriers.
@@ -694,13 +737,13 @@ fn complete_sweep(request: &Value) -> Result<Value, String> {
 /// `wan_lightning_on`, sc-10047): the record names that exclusion so it cannot be read as the
 /// default composition's evidence.
 fn lifecycle_blocker(arm: Arm) -> String {
-    let mut blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. This record claims nothing about them"
-    )
-    .to_owned();
+    let mut blocker = format!(
+        "this arm executes ONE measured render on the loaded provider and no warm pass ({}); it \
+         opens no memory-strategy request scope and injects no calibration fault, so the scoped \
+         cancellation and authorized-error scenarios and their recovery renders are unexecuted. \
+         This record claims nothing about them",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
+    );
     if matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b)) {
         blocker.push_str(&format!(
             ". The A14B render is measured with NO adapters at the native multi-step recipe \
@@ -720,6 +763,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // multi-gigabyte load: the member, the mode, the geometry against the ENGINE's own menus, the
     // fixture, the tier, and the plan's identity against this arm's table.
     let arm = arm(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(arm.provider)?;
     protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     validate_mode(request, arm)?;
     let geometry = target_geometry(request, arm)?;
@@ -765,12 +810,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
 
     let mut artifact = load_spec(arm, tier, load_shape)?;
-    // A Wan route's loader prepares a memory receipt only for a spec whose file pins are already
-    // prepared (`model.rs`: `spec.prepared_file_pins().is_prepared()`), so the capture must do what
-    // the worker's memory-aware load does — otherwise the generator loads with no calibration
-    // identity at all. SCAIL-2 seals its own shared-tier pins inside `PreparedMemory::prepare` and
-    // needs no pre-pass.
-    if arm.route.is_some() {
+    // The A14B loaders publish a memory contract ONLY from a sealed receipt (`model.rs`: the
+    // `i2v_memory` prepared for a spec whose file pins are already prepared), so on those routes
+    // the capture seals one before the load — otherwise the generator loads with no contract at
+    // all. TI2V-5B is the opposite (sc-22738): its production identity is its own
+    // `memory_strategy` module's, which `load` publishes only for an UNPREPARED spec — a prepared
+    // one takes the receipt path instead, and the receipt authority mints no identity for that
+    // route. Production (`video_jobs/wan.rs::video_load_spec`) prepares nothing, so neither does
+    // this cell. SCAIL-2 seals its own shared-tier pins inside `PreparedMemory::prepare`.
+    if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {
         mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec, arm.provider)
             .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
     }
@@ -912,67 +960,19 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // identity SceneWorks mints, so an answer here would characterize a decision production never
     // takes. See [`ADMISSION_BLOCKER`].
 
-    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
-    clear_cache();
-    reset_peak_memory();
-    let (baseline, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&planned_render, &mut |_| {})
-            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
-        LABEL,
-    )?;
-    let clean_warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let clean_post_cleanup = AllocatorState::capture_current();
-    let cleanup_bounds =
-        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
-    if !quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}",
-            arm.provider
-        ));
-    }
-    reset_peak_memory();
-    let (warm, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&planned_render, &mut |_| {})
-            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
-        LABEL,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    if !cleanup_bounds.allows_warm_peak(warm_peak) {
-        return Err(format!(
-            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%",
-            arm.provider
-        ));
-    }
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
-             cleanup {clean_post_cleanup:?} plus {} bytes",
-            arm.provider, cleanup_bounds.tolerance_bytes,
-        ));
-    }
-    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
-    if !quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err(format!(
-            "{} second warm repeat changed the deterministic output",
-            arm.provider
-        ));
-    }
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above), so
+    // there is no clean warm control to judge determinism against and no warm repeat to bound;
+    // the receipt says so (`warm_repeat` not_run, `quality.warmPasses: 0`) instead of writing
+    // zeros where `lifecycleClean*` / `lifecycleWarmRepeat*` used to be.
 
     // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
     // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    // Against the measured clip itself: the mutation must breach the envelope the arm declares.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
     if quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err(format!(
             "{} output mutation did not breach the determinism envelope",
@@ -1000,7 +1000,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "not_run", "reason": ADMISSION_BLOCKER },
             { "name": "unknown_budget", "result": "not_run", "reason": ADMISSION_BLOCKER },
             { "name": "stale_evidence", "result": "not_run", "reason": ADMISSION_BLOCKER },
-            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
@@ -1013,17 +1013,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, carrier, tier and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": MAX_THRESHOLD,
-            "meanErrorThreshold": MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": RMS_THRESHOLD,
-        },
+        "quality": capture.not_run_quality(
+            "identical artifact, prompt, seed, geometry, frames, fps, steps, carrier, tier and loaded provider contract; the cold measured clip versus a warm repeat, compared over every frame",
+            (MAX_THRESHOLD, MEAN_THRESHOLD, RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -1042,13 +1035,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("predictedOverallCeiling", "bytes", predicted),
                 ("stagedArtifactBytes", "bytes", staged_bytes),
-                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
-                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
-                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
-                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                // sc-22738: no `lifecycleClean*` / `lifecycleWarmRepeat*` figure — the warm
+                // passes were not run (`quality.warmPasses`), and an unmeasured figure is omitted,
+                // never written as 0.
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -1071,6 +1061,64 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the A14B routes seal a receipt before the load (sc-22738).
+    ///
+    /// `wan_2_2:{bf16,q4,q8}:mlx` were refused at e34d7b46a with "published no calibration
+    /// identity": the arm sealed a receipt for every Wan route, and for TI2V-5B the loader then
+    /// published the receipt's identity-less contract ahead of its own `sc-19236-…` one. The
+    /// discriminator is the engine's receipt authority, asked directly, so the A14B cells keep
+    /// their pre-pass and the two unprepared arms match production's own load.
+    ///
+    /// Mutations that fail this: guarding the pre-pass on `arm.route.is_some()` again (the
+    /// TI2V-5B rows flip), or dropping the drift refusal (the last assertion).
+    #[test]
+    fn only_the_a14b_routes_seal_a_receipt_before_the_load() {
+        for arm in ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let expected = production_fingerprint(arm, tier).unwrap();
+                let seals = receipt_publishes_the_identity(arm, tier, &expected).unwrap();
+                let a14b = matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b));
+                assert_eq!(seals, a14b, "{} {tier}", arm.provider);
+            }
+        }
+        // Not vacuous: the table really carries both kinds of route.
+        assert!(matches!(TI2V_5B.route, Some(WanI2vRoute::Ti2v5b)));
+        assert!(SCAIL2.route.is_none());
+        for tier in ["bf16", "q4", "q8"] {
+            let expected = production_fingerprint(TI2V_5B, tier).unwrap();
+            assert!(expected.starts_with("sc-19236-wan2-2-ti2v-5b-mlx-"));
+            assert_eq!(
+                receipt_publishes_the_identity(TI2V_5B, tier, &expected),
+                Ok(false),
+                "{tier}"
+            );
+        }
+        let drift =
+            receipt_publishes_the_identity(T2V_A14B, "q4", "not-the-engines-string").unwrap_err();
+        assert!(
+            drift.contains("sc-22736-wan2-2-t2v-a14b-mlx-q4-v1") && drift.contains("drifted"),
+            "{drift}"
+        );
+    }
+
+    /// The pre-pass in the arm's body is guarded by the engine-asked discriminator and by nothing
+    /// looser; read as source because the load itself needs real weights (sc-22738).
+    #[test]
+    fn the_receipt_prepass_is_guarded_by_the_receipt_authority() {
+        let body = arm_source_body();
+        let guard = body
+            .find("if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {")
+            .expect("the pre-pass is guarded by the receipt authority");
+        let prepass = body
+            .find("mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec")
+            .expect("the pre-pass still exists");
+        assert!(guard < prepass, "the guard precedes the pre-pass");
+        assert!(
+            !body.contains("if arm.route.is_some() {\n        mlx_gen_wan::i2v_memory_strategy"),
+            "the pre-pass must not run for every Wan route"
+        );
+    }
 
     /// `LoadSpec::quantize` follows each route's OWN MLX convention, and the two differ.
     ///

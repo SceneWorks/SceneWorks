@@ -73,7 +73,10 @@ import {
   watchdogPeakFootprint,
   runtimeBudgetStopSeconds,
   RUNTIME_BUDGET_STOP_PATTERN,
+  PROBE_BUDGET_MARGIN,
   PROBE_BUDGET_MINUTES,
+  VIDEO_RENDER_LOWER_BOUND_SECONDS,
+  VIDEO_RENDER_WITNESSES_SECONDS,
   WITNESSED_CAPTURE_SECONDS,
   probeBudgetMinutes,
   probeLane,
@@ -101,6 +104,12 @@ import {
   assertStageable,
   MAX_STAGED_FILE_BYTES,
   readExceededBounds,
+  anchorDownloadTargets,
+  hfDownloadArgv,
+  fetchAnchorSnapshots,
+  tierDownloadRows,
+  manifestPlatform,
+  HF_CLI_CANDIDATES,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -4967,16 +4976,33 @@ test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the
 
 test("every probe carries a wall-clock budget: per lane by default, derived from the plan, overridable", async () => {
   // The table, and the flag that overrides it.
-  assert.deepEqual(PROBE_BUDGET_MINUTES, { video: 270, image: 60 });
-  assert.equal(probeBudgetMinutes({ videoLane: true }), 270);
+  assert.deepEqual(PROBE_BUDGET_MINUTES, { video: 165, image: 60 });
+  assert.equal(probeBudgetMinutes({ videoLane: true }), 165);
   assert.equal(probeBudgetMinutes({ videoLane: false }), 60);
   // sc-22738 (2026-09-08): each lane's budget rests on the longest COMPLETED capture it has
-  // witnessed, with the margin the table's own doc comment states. The video witness is the
-  // 8,709 s `scail2_14b:bf16:mlx` capture that a 150-minute budget cleared by 3% and a 90-minute
-  // campaign then stopped three times over; a budget that no longer clears its witness by that
+  // witnessed, with the margin the table's own doc comment states. The video witness is read PER
+  // RENDER since a video capture became one measured render: the three three-render witnesses on
+  // file are the completed 8,709 s `scail2_14b:bf16:mlx` (2,903 s per render), the completed
+  // 13,411 s `wan_2_2_t2v_14b:bf16:mlx` (4,470 s per render — the witness) and the UNFINISHED
+  // `wan_2_2_t2v_14b:q4:mlx` that exceeded 16,200 s (>5,400 s per render, a lower bound the
+  // budget must clear by the same margin). A budget that no longer clears its witness by that
   // margin is the defect this pins, whichever entry drifts.
-  assert.deepEqual(WITNESSED_CAPTURE_SECONDS, { video: 8_709, image: 847 });
-  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= WITNESSED_CAPTURE_SECONDS.video * 1.8, "video budget clears its witness by 1.8x");
+  assert.deepEqual(WITNESSED_CAPTURE_SECONDS, { video: 4_470, image: 847 });
+  assert.equal(PROBE_BUDGET_MARGIN, 1.8);
+  assert.deepEqual(
+    VIDEO_RENDER_WITNESSES_SECONDS.map(({ cell, perRenderSeconds, completed }) => [cell, perRenderSeconds, completed]),
+    [["scail2_14b:bf16:mlx", 2_903, true], ["wan_2_2_t2v_14b:bf16:mlx", 4_470, true], ["wan_2_2_t2v_14b:q4:mlx", 5_400, false]],
+  );
+  for (const witness of VIDEO_RENDER_WITNESSES_SECONDS) {
+    assert.equal(witness.renders, 3, `${witness.cell} was a three-render capture`);
+    assert.equal(witness.perRenderSeconds, Math.round(witness.captureSeconds / witness.renders), `${witness.cell} per-render figure is the capture over its renders`);
+  }
+  const longestCompleted = Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => w.completed).map((w) => w.perRenderSeconds));
+  assert.equal(WITNESSED_CAPTURE_SECONDS.video, longestCompleted, "the video witness is the longest COMPLETED per-render figure");
+  assert.equal(VIDEO_RENDER_LOWER_BOUND_SECONDS, Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => !w.completed).map((w) => w.perRenderSeconds)));
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= WITNESSED_CAPTURE_SECONDS.video * PROBE_BUDGET_MARGIN, "video budget clears its witness by 1.8x");
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= VIDEO_RENDER_LOWER_BOUND_SECONDS * PROBE_BUDGET_MARGIN, "video budget clears the unfinished packed-tier render's lower bound by 1.8x");
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 < WITNESSED_CAPTURE_SECONDS.video * 3, "the video budget is a per-render figure, not a three-render cycle");
   assert.ok(PROBE_BUDGET_MINUTES.image * 60 >= WITNESSED_CAPTURE_SECONDS.image * 4, "image budget clears its witness by 4x");
   assert.equal(probeLane({ videoLane: true }), "video");
   assert.equal(probeLane({ videoLane: false }), "image");
@@ -4998,7 +5024,7 @@ test("every probe carries a wall-clock budget: per lane by default, derived from
   for (const row of rows) {
     const frames = plan.anchors[row.key].geometry?.frames ?? 1;
     assert.equal(row.videoLane, frames > 1, `${row.key} renders ${frames} frame(s)`);
-    assert.equal(probeBudgetMinutes(row), frames > 1 ? 270 : 60, row.key);
+    assert.equal(probeBudgetMinutes(row), frames > 1 ? 165 : 60, row.key);
     if (frames > 1) video += 1;
   }
   assert.ok(video > 0 && video < rows.length, `${video} of ${rows.length} mlx rows are video anchors`);
@@ -5037,7 +5063,7 @@ test("a runtime stop is recognised by its spelling and reports the guard's sampl
   assert.equal(await watchdogPeakFootprint(path.join(dir, "absent.jsonl")), null);
 });
 
-test("a runtime stop's reason names the lane's longest completed capture, and a budget below the lane default as a shortfall rather than a stall", () => {
+test("a runtime stop's reason names the lane's longest completed render (video) or capture (image), and a budget below the lane default as a shortfall rather than a stall", () => {
   const peak = { peakBytes: 68_564_154_584, samples: 2354 };
   const ceiling = "94822600832-byte ceiling";
   // The campaign of 2026-09-07: `scail2_14b:q4:mlx` under `--probe-budget-minutes 90`, flat at
@@ -5047,16 +5073,16 @@ test("a runtime stop's reason names the lane's longest completed capture, and a 
     shortfall,
     "runtime_budget_exceeded: the 90-minute probe budget (5400s) elapsed; peak physical footprint 68564154584 bytes "
       + "over 2354 sample(s) against the 94822600832-byte ceiling. Nothing was measured, so no bound was recorded and "
-      + "this cell stays runnable. The longest completed video capture on record ran 8709s, and this run was launched "
-      + "with --probe-budget-minutes 90, below the video lane's 270-minute default: this stop is a budget shortfall, "
+      + "this cell stays runnable. The longest completed video render on record ran 4470s, and this run was launched "
+      + "with --probe-budget-minutes 90, below the video lane's 165-minute default: this stop is a budget shortfall, "
       + "not evidence of a stall. Re-run it at the default budget or larger before reading anything into the flat footprint.",
   );
   // At the lane default (or above it) the stop stands on its own: the witness is still named, the
   // shortfall sentence is not.
-  for (const budgetMinutes of [270, 300]) {
+  for (const budgetMinutes of [165, 300]) {
     const reason = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes, budgetSeconds: budgetMinutes * 60, peak, ceiling });
     assert.match(reason, new RegExp(`^runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget \\(${budgetMinutes * 60}s\\) elapsed; `), reason);
-    assert.match(reason, /stays runnable\. The longest completed video capture on record ran 8709s\.$/, reason);
+    assert.match(reason, /stays runnable\. The longest completed video render on record ran 4470s\.$/, reason);
     assert.doesNotMatch(reason, /shortfall|not evidence of a stall/, reason);
   }
   // The image lane reads its own witness and its own default, and an unsampled peak is said so.
@@ -5326,4 +5352,267 @@ test("a refusal on a no-commit run surfaces as `exceeded` naming the Metal refus
   } finally {
     delete process.env.STUB_CAPTURE_METAL_REFUSAL;
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: `--download-missing` fetches the pinned snapshots a weights_missing anchor needs
+// ---------------------------------------------------------------------------------------------
+//
+// The campaign runs on boxes that do not hold the whole catalog, and downloading a missing snapshot
+// on the Windows box beats copying it off the Mac's SSD. These tests drive the fetch through a STUB
+// `hf` on PATH that writes the hub layout the real CLI writes, so they prove the wiring — which
+// anchors are fetched, where they land, what argv the CLI is handed, and what a failure does — with
+// no network and no weights.
+
+// The stub is a shebang script, which the runner resolves off PATH only where a shebang is honoured;
+// spawn() on Windows does no PATHEXT resolution, so the three PATH-driven tests below are macOS/Linux.
+// Nothing lane-specific is being tested in them — the wiring is the same on either box — and the
+// pure functions (`anchorDownloadTargets`, `hfDownloadArgv`, `tierDownloadRows`) run everywhere.
+const skipWithoutShebang = process.platform === "win32" && "the stub CLI is a shebang script on PATH";
+
+/** A stub `hf` on PATH: appends its argv to $STUB_HF_LOG and creates the snapshot it was asked for. */
+async function stubHuggingFaceCli({ fail = false } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "catalog-hf-cli-"));
+  const log = path.join(dir, "invocations.txt");
+  const body = fail
+    ? 'process.stderr.write("stub refusal: 401 Client Error\\n");\nprocess.exit(1);'
+    : [
+      'const repo = argv[1];',
+      'const revision = argv[argv.indexOf("--revision") + 1];',
+      'const cacheDir = argv[argv.indexOf("--cache-dir") + 1];',
+      'const includes = argv.flatMap((a, i) => (a === "--include" ? [argv[i + 1]] : []));',
+      'const snapshot = path.join(cacheDir, "models--" + repo.split("/").join("--"), "snapshots", revision);',
+      // The real CLI materialises whatever the globs select; the stub materialises each glob's own
+      // directory prefix, which is what `classifyAnchor` probes for.
+      'for (const glob of includes.length > 0 ? includes : ["."]) {',
+      '  const directory = glob.includes("/") ? glob.slice(0, glob.lastIndexOf("/")) : ".";',
+      '  fs.mkdirSync(path.join(snapshot, directory), { recursive: true });',
+      '}',
+      'fs.writeFileSync(path.join(snapshot, "config.json"), "{}");',
+      // `refs/` is written exactly as the hub CLI writes it: not at all for a 40-hex revision.
+      'fs.mkdirSync(path.join(cacheDir, "models--" + repo.split("/").join("--"), "blobs"), { recursive: true });',
+    ].join("\n");
+  const script = [
+    "#!/usr/bin/env node",
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    "const argv = process.argv.slice(2);",
+    'fs.appendFileSync(process.env.STUB_HF_LOG, JSON.stringify(argv) + "\\n");',
+    body,
+    "",
+  ].join("\n");
+  const binary = path.join(dir, HF_CLI_CANDIDATES[0]);
+  await writeFile(binary, script, { mode: 0o755 });
+  return {
+    dir,
+    log,
+    invocations: async () => (await readFile(log, "utf8").catch(() => ""))
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line)),
+  };
+}
+
+/** Run `body` with the stub CLI first on PATH and $STUB_HF_LOG pointed at its log. */
+async function withStubCli(stub, body) {
+  const originalPath = process.env.PATH;
+  const originalLog = process.env.STUB_HF_LOG;
+  process.env.PATH = `${stub.dir}${path.delimiter}${originalPath}`;
+  process.env.STUB_HF_LOG = stub.log;
+  try {
+    return await body();
+  } finally {
+    process.env.PATH = originalPath;
+    if (originalLog === undefined) delete process.env.STUB_HF_LOG;
+    else process.env.STUB_HF_LOG = originalLog;
+  }
+}
+
+/**
+ * A checkout-shaped directory `planRun` can read: one plan anchor per key, a manifest carrying the
+ * families' own repositories, and the two closure declarations the classifier consults.
+ */
+async function fakePlanRoot(anchors, models) {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-root-"));
+  await mkdir(path.join(root, "config", "manifests"), { recursive: true });
+  await writeFile(path.join(root, "config", "memory-calibration-plan.json"), JSON.stringify({ anchors }));
+  await writeFile(path.join(root, "config", "manifests", "builtin.models.jsonc"), JSON.stringify({ models }));
+  const lanes = Object.keys(anchors).map((key) => {
+    const parts = anchorParts(key);
+    return `${parts.modelId}:${parts.backend}`;
+  });
+  const providers = Object.entries(anchors).map(([key, planned]) => `${anchorParts(key).backend}:${planned.provider}`);
+  await writeFile(
+    path.join(root, "config", "anchor-loader-closures.json"),
+    JSON.stringify({ models: Object.fromEntries(lanes.map((lane) => [lane, { digest: "d".repeat(64) }])) }),
+  );
+  await writeFile(
+    path.join(root, "config", "inference-provider-closures.json"),
+    JSON.stringify({ providers: Object.fromEntries(providers.map((provider) => [provider, {}])) }),
+  );
+  return root;
+}
+
+const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
+
+function downloadFixture() {
+  return {
+    anchors: {
+      "qwen_image:q4:mlx": { provider: "qwen_image" },
+      "z_image_turbo:q4:mlx": { provider: "z_image_turbo" },
+    },
+    models: [
+      {
+        id: "qwen_image",
+        downloads: [{
+          repo: PROVIDER_FAMILIES.qwen_image.repo, revision: DOWNLOAD_REVISION, variant: "q4",
+          files: ["q4/*"], estimatedSizeBytes: 4321,
+        }],
+      },
+      {
+        id: "z_image_turbo",
+        downloads: [{
+          repo: PROVIDER_FAMILIES.z_image_turbo.repo, revision: DOWNLOAD_REVISION, variant: "q4",
+          files: ["q4/*"],
+        }],
+      },
+    ],
+  };
+}
+
+test("a download target names the family's repository, the PINNED revision and the manifest's globs", () => {
+  const { models } = downloadFixture();
+  const row = { key: "qwen_image:q4:mlx", modelId: "qwen_image", tier: "q4", backend: "mlx", provider: "qwen_image" };
+  const { targets, unfetchable } = anchorDownloadTargets(row, models, { platform: "macos" });
+  assert.deepEqual(unfetchable, []);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].repo, PROVIDER_FAMILIES.qwen_image.repo);
+  assert.equal(targets[0].revision, DOWNLOAD_REVISION);
+  assert.deepEqual(targets[0].include, ["q4/*"]);
+  assert.equal(targets[0].estimatedBytes, 4321);
+
+  // THE MUTATION TARGET. `--revision` is the pinned revision, always: a fetch that resolved `main`
+  // would land whatever the branch points at rather than the artifact the anchor prices — and
+  // pinning a manifest download removes `refs/main` from the mirror in the first place.
+  const argv = hfDownloadArgv(targets[0], "/hub");
+  assert.deepEqual(argv, [
+    "download", PROVIDER_FAMILIES.qwen_image.repo, "--revision", DOWNLOAD_REVISION,
+    "--include", "q4/*", "--cache-dir", "/hub",
+  ]);
+  assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION, "the pinned revision is passed, never main");
+  assert.ok(!argv.includes("main"));
+});
+
+test("no anchor can be fetched off a branch: every target the shipped plan produces carries a 40-hex revision", async () => {
+  const models = await readManifestModels();
+  const plan = await readPlan();
+  let unpinned = 0;
+  for (const [key, planned] of Object.entries(plan.anchors)) {
+    const parts = anchorParts(key);
+    const { targets, unfetchable } = anchorDownloadTargets({ key, ...parts, provider: planned.provider }, models);
+    for (const target of targets) {
+      assert.match(target.revision, /^[0-9a-f]{40}$/, `${key} would fetch ${target.repo}@${target.revision}`);
+    }
+    if (unfetchable.some((note) => /shipped without a pinned revision/.test(note))) unpinned += 1;
+  }
+  // The upstream Wan 2.2 / SVD Diffusers checkpoints are the shipped unpinned case; they are
+  // REPORTED rather than resolved off a branch, which is the whole reason the refusal exists.
+  assert.ok(unpinned > 0, "the unpinned-revision refusal is reachable on the shipped plan");
+});
+
+test("--download-missing fetches ONLY the weights_missing anchors, into the first hub root, and re-classifies them", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  const first = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const second = await mkdtemp(path.join(tmpdir(), "catalog-hub-second-"));
+  const stub = await stubHuggingFaceCli();
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-test", hfCache: [first, second],
+  };
+
+  const before = await planRun({ ...args, downloadMissing: false }, root);
+  assert.equal(before.rows.find((row) => row.key === "qwen_image:q4:mlx").status, "weights_missing");
+  assert.equal(before.rows.find((row) => row.key === "z_image_turbo:q4:mlx").status, "runnable");
+
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(fetched.status, "runnable", fetched.reason);
+  // It landed in the FIRST --hf-cache root, in hub layout, and the tier root is what the row binds.
+  assert.equal(fetched.tierRoot, snapshotPath(first, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4"));
+  assert.ok((await stat(snapshotPath(first, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4"))).isDirectory());
+  assert.deepEqual(await readdir(second), [], "nothing is written into a later --hf-cache root");
+
+  // The anchor that was ALREADY present was never fetched: exactly one invocation, for the other repo.
+  const invocations = await stub.invocations();
+  assert.equal(invocations.length, 1, JSON.stringify(invocations));
+  assert.equal(invocations[0][1], PROVIDER_FAMILIES.qwen_image.repo);
+  assert.equal(invocations[0][invocations[0].indexOf("--revision") + 1], DOWNLOAD_REVISION);
+  assert.equal(invocations[0][invocations[0].indexOf("--cache-dir") + 1], first);
+  assert.equal(rows.find((row) => row.key === "z_image_turbo:q4:mlx").status, "runnable");
+});
+
+test("a failed fetch leaves the anchor weights_missing naming the reason, and never stops the walk", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const stub = await stubHuggingFaceCli({ fail: true });
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-test", hfCache: [hub],
+  };
+
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const refused = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(refused.status, "weights_missing");
+  assert.match(refused.reason, /download failed:/);
+  assert.match(refused.reason, new RegExp(`${PROVIDER_FAMILIES.qwen_image.repo}@${DOWNLOAD_REVISION.slice(0, 8)}`));
+  // The walk keeps going: the other anchor is classified exactly as it was.
+  assert.equal(rows.find((row) => row.key === "z_image_turbo:q4:mlx").status, "runnable");
+});
+
+test("--dry-run --download-missing prints what it would fetch and fetches nothing", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-dry-"));
+  const stub = await stubHuggingFaceCli();
+  const lines = [];
+  const row = { key: "qwen_image:q4:mlx", modelId: "qwen_image", tier: "q4", backend: "mlx", provider: "qwen_image" };
+  const outcome = await withStubCli(stub, () => fetchAnchorSnapshots(row, models, {
+    cacheRoot: hub, dryRun: true, platform: "macos", log: (line) => lines.push(line),
+  }));
+  assert.equal(outcome.failed, null);
+  assert.equal(outcome.fetched.length, 1);
+  assert.match(lines.join("\n"), /would fetch 1 glob\(s\): q4\/\*.*~4321 bytes/);
+  assert.deepEqual(await stub.invocations(), [], "a dry run runs no CLI at all");
+  assert.deepEqual(await readdir(hub), [], "a dry run writes nothing into the hub root");
+
+  // And through planRun: the dry run leaves the classification alone.
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    dryRun: true, campaign: "sc-dl-test", hfCache: [hub],
+  };
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  assert.equal(rows.find((entry) => entry.key === "qwen_image:q4:mlx").status, "weights_missing");
+  assert.deepEqual(await stub.invocations(), []);
+});
+
+test("download rows are narrowed to this host's platform, and fall back rather than resolving to no globs", async () => {
+  assert.equal(manifestPlatform("darwin"), "macos");
+  assert.equal(manifestPlatform("win32"), "windows");
+  assert.equal(manifestPlatform("linux"), "linux");
+  const models = await readManifestModels();
+  // MiniMax-H3's dense upstream ships the whole DiT on windows/linux and only the text encoder and
+  // the VAEs on macOS; the narrowing is what keeps an MLX box from fetching the windows leg.
+  const macos = tierDownloadRows(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "bf16", "macos");
+  const windows = tierDownloadRows(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "bf16", "windows");
+  assert.ok(macos.length > 0 && windows.length > 0);
+  assert.ok(macos.every((download) => !download.platforms || download.platforms.includes("macos")));
+  assert.ok(windows.some((download) => (download.files ?? []).some((glob) => glob === "transformer/*")));
+  assert.ok(!macos.some((download) => (download.files ?? []).some((glob) => glob === "transformer/*")));
+  // A repository whose rows are all scoped elsewhere falls back to the UNFILTERED set rather than
+  // to "no globs", which downstream would read as "fetch the whole repository".
+  const unfiltered = (models.find((entry) => entry.id === "minimax_h3").downloads ?? []).filter(
+    (download) => download.repo === "MiniMaxAI/MiniMax-H3" && (download.variant === undefined || download.variant === "bf16"),
+  );
+  assert.deepEqual(tierDownloadRows(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "bf16", "plan9"), unfiltered);
+  assert.ok(unfiltered.length > macos.length, "the fallback is wider than one platform's rows");
 });

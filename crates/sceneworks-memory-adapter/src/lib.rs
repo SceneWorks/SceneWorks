@@ -664,7 +664,15 @@ pub fn validate_quality_metrics(response: &Value) -> Result<(), String> {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let required = required_quality_metrics(status);
+    // sc-22738: a receipt declaring `warmPasses: 0` ran no comparison render, so it carries no
+    // comparison figure to require — the harness, the schema and `sceneworks-core` read the same
+    // declaration and accept `result: not_run` in its place. Any figure it DOES carry is still
+    // held to finiteness below.
+    let required = if quality.get("warmPasses").and_then(Value::as_u64) == Some(0) {
+        &[][..]
+    } else {
+        required_quality_metrics(status)
+    };
     for metric in QUALITY_METRICS {
         let Some(value) = quality.get(metric) else {
             if required.contains(&metric) {
@@ -926,6 +934,170 @@ pub fn validate_still_geometry(request: &Value, calibration_label: &str) -> Resu
         }
     }
     Ok(())
+}
+
+// ==== capture lane: how many renders one capture runs (sc-22738, 2026-09-08) ====================
+
+/// The lane a plan row is captured under — the SAME derivation `scripts/measure-memory-catalog.mjs`
+/// budgets a probe by (`videoLane`, #2784): a video anchor renders more than one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureLane {
+    Image,
+    Video,
+}
+
+/// Warm passes an IMAGE capture runs after its measured render: a clean warm control and a warm
+/// repeat, which feed the determinism envelope (`quality`), the clean-warm allocator bounds
+/// (`lifecycleClean*` / `lifecycleWarmRepeat*`) and the `warm_repeat` scenario. Unchanged.
+pub const IMAGE_WARM_PASSES: u32 = 2;
+
+/// Warm passes a VIDEO capture runs after its measured render: NONE (sc-22738, decided 2026-09-08).
+///
+/// The anchor's peaks come from the FIRST render — `extract-memory-anchors.mjs` and
+/// `sceneworks-core::memory_anchor` read only the three phase peaks, the overall allocator
+/// envelope and `outputFps` off a record — while the two warm passes existed for the
+/// residency-retention and allocator-envelope checks and cost 2x the render on video. Witnessed:
+/// `scail2_14b:bf16:mlx` ~8,500 s per three-render capture (8,709 s, 2026-09-06);
+/// `wan_2_2_t2v_14b:bf16:mlx` 13,411 s; `wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget without
+/// finishing (the packed tier dequantizes per step, so it is SLOWER than dense). A video capture is
+/// therefore one measured render, and its receipt says so instead of writing zeros: the
+/// `warm_repeat` scenario is `not_run`, `quality` carries `warmPasses: 0` with `result: not_run` and
+/// no comparison figures, and no `lifecycleClean*` / `lifecycleWarmRepeat*` measurement is emitted.
+pub const VIDEO_WARM_PASSES: u32 = 0;
+
+/// Why a single-render video receipt runs no warm pass — the `warm_repeat` scenario's reason and
+/// the head of every video arm's lifecycle blocker, so the record states it once in its own words.
+pub const VIDEO_WARM_PASSES_NOT_RUN: &str = "sc-22738 (2026-09-08): a video capture is ONE \
+    measured render; the clean warm control and warm repeat are not run on the video lane. The \
+    anchor's phase peaks come from the first render, and the two warm passes cost 2x the render on \
+    video (witnessed: scail2_14b:bf16:mlx 8,709 s per three-render capture, wan_2_2_t2v_14b:bf16:mlx \
+    13,411 s, wan_2_2_t2v_14b:q4:mlx unfinished at 16,200 s). Output determinism, the warm-peak \
+    bound and post-cleanup retention are therefore NOT MEASURED for this record; nothing here is a \
+    zero";
+
+/// One capture's render plan, derived from the plan row's lane and nothing else: a lane property,
+/// never a per-model choice. Every arm asks this before it renders, and a receipt's `warmPasses`
+/// declaration is read back from it rather than restated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturePolicy {
+    pub lane: CaptureLane,
+    /// Warm passes after the measured render: [`IMAGE_WARM_PASSES`] or [`VIDEO_WARM_PASSES`].
+    pub warm_passes: u32,
+}
+
+impl CapturePolicy {
+    pub const fn for_lane(lane: CaptureLane) -> Self {
+        Self {
+            lane,
+            warm_passes: match lane {
+                CaptureLane::Image => IMAGE_WARM_PASSES,
+                CaptureLane::Video => VIDEO_WARM_PASSES,
+            },
+        }
+    }
+
+    /// Total `generate` calls one capture makes: the measured render plus the lane's warm passes.
+    pub const fn renders(self) -> u32 {
+        1 + self.warm_passes
+    }
+
+    /// A video arm's declaration that its plan row IS on the video lane and that this capture runs
+    /// the video lane's warm passes — the one place a video arm's single render is decided.
+    pub fn require_video(self, arm_label: &str) -> Result<Self, String> {
+        if self.lane != CaptureLane::Video {
+            return Err(format!(
+                "{arm_label} is a video arm; the plan declares a single-frame geometry, which is \
+                 the image lane"
+            ));
+        }
+        Ok(self)
+    }
+
+    /// The `quality` block of a receipt whose warm passes were NOT run: the contract and the
+    /// thresholds the comparison WOULD be judged by travel so the record is self-describing, the
+    /// result is `not_run`, and no comparison figure is written (`warmPasses: 0` is the schema's
+    /// permission for a `runtime_complete` record to carry exactly this shape).
+    pub fn not_run_quality(
+        self,
+        contract: &str,
+        thresholds: (f64, f64, f64),
+    ) -> Result<Value, String> {
+        if self.warm_passes != 0 {
+            return Err(format!(
+                "a {:?} capture runs {} warm passes and measures its quality; only a zero-warm-pass \
+                 capture may file quality as not_run",
+                self.lane, self.warm_passes
+            ));
+        }
+        let (maximum, mean, rms) = thresholds;
+        Ok(json!({
+            "contract": format!("{contract}; NOT MEASURED: {VIDEO_WARM_PASSES_NOT_RUN}"),
+            "result": "not_run",
+            "warmPasses": self.warm_passes,
+            "maximumErrorThreshold": maximum,
+            "meanErrorThreshold": mean,
+            "rootMeanSquareErrorThreshold": rms,
+        }))
+    }
+
+    /// The `warm_repeat` scenario of a receipt whose warm passes were NOT run.
+    pub fn not_run_warm_repeat_scenario(self) -> Result<Value, String> {
+        if self.warm_passes != 0 {
+            return Err(format!(
+                "a {:?} capture runs {} warm passes; its warm_repeat scenario is measured, not \
+                 not_run",
+                self.lane, self.warm_passes
+            ));
+        }
+        Ok(
+            json!({ "name": "warm_repeat", "result": "not_run", "reason": VIDEO_WARM_PASSES_NOT_RUN }),
+        )
+    }
+}
+
+/// The lane of a plan row (`planned.target.geometry.frames > 1` is video), as
+/// `measure-memory-catalog.mjs` derives the budget lane.
+pub fn capture_lane(request: &Value) -> Result<CaptureLane, String> {
+    let frames = planned(request)?
+        .pointer("/target/geometry/frames")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "planned.target.geometry.frames must be an integer".to_owned())?;
+    if frames == 0 {
+        return Err("planned.target.geometry.frames must be positive".to_owned());
+    }
+    Ok(if frames > 1 {
+        CaptureLane::Video
+    } else {
+        CaptureLane::Image
+    })
+}
+
+/// The capture policy of a plan row: see [`CapturePolicy`].
+pub fn capture_policy(request: &Value) -> Result<CapturePolicy, String> {
+    Ok(CapturePolicy::for_lane(capture_lane(request)?))
+}
+
+/// Which render of a capture a `generate` call is: the measured one, or the n-th warm pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderRole {
+    Measured,
+    /// Warm pass `n` (1-based), only ever issued when the lane's `warm_passes >= n`.
+    Warm(u32),
+}
+
+/// Drive the renders one capture makes under `policy`: the measured render, then exactly
+/// `policy.warm_passes` warm passes, in order. Returns the measured output and the warm outputs.
+/// A video policy calls `render` ONCE; an image policy calls it three times.
+pub fn drive_renders<T, E>(
+    policy: CapturePolicy,
+    mut render: impl FnMut(RenderRole) -> Result<T, E>,
+) -> Result<(T, Vec<T>), E> {
+    let measured = render(RenderRole::Measured)?;
+    let mut warm = Vec::with_capacity(policy.warm_passes as usize);
+    for pass in 1..=policy.warm_passes {
+        warm.push(render(RenderRole::Warm(pass))?);
+    }
+    Ok((measured, warm))
 }
 
 /// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
@@ -2857,5 +3029,150 @@ mod tests {
             3,
             "a degenerate geometry still yields one pixel"
         );
+    }
+
+    // ==== capture lane (sc-22738) ==============================================================
+
+    fn plan_with_frames(frames: u64) -> Value {
+        json!({
+            "planned": {
+                "target": { "geometry": { "width": 832, "height": 480, "batch": 1, "frames": frames } }
+            }
+        })
+    }
+
+    /// The lane is the plan's, derived exactly as `measure-memory-catalog.mjs` derives the budget
+    /// lane: more than one frame is video. Mutation that fails this: deriving the lane from the
+    /// provider id, or reading `frames >= 1` as video.
+    #[test]
+    fn the_capture_lane_is_the_plans_frame_count_and_nothing_else() {
+        assert_eq!(
+            capture_lane(&plan_with_frames(1)).unwrap(),
+            CaptureLane::Image
+        );
+        assert_eq!(
+            capture_lane(&plan_with_frames(2)).unwrap(),
+            CaptureLane::Video
+        );
+        assert_eq!(
+            capture_lane(&plan_with_frames(77)).unwrap(),
+            CaptureLane::Video
+        );
+        assert!(capture_lane(&plan_with_frames(0)).is_err());
+        assert!(capture_lane(&json!({ "planned": { "target": {} } })).is_err());
+    }
+
+    /// The decision itself: a video capture is ONE render, an image capture is three. Restoring the
+    /// warm passes on the video lane (`VIDEO_WARM_PASSES = 2`) turns this red; so does touching
+    /// the image lane's two.
+    #[test]
+    fn a_video_capture_is_one_render_and_an_image_capture_is_three() {
+        assert_eq!(VIDEO_WARM_PASSES, 0);
+        assert_eq!(IMAGE_WARM_PASSES, 2);
+        let video = capture_policy(&plan_with_frames(49)).unwrap();
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        assert_eq!(video.renders(), 1);
+        assert_eq!(image.renders(), 3);
+        assert_eq!(video.require_video("MLX Wan2.2/SCAIL-2").unwrap(), video);
+        assert!(image
+            .require_video("MLX Wan2.2/SCAIL-2")
+            .unwrap_err()
+            .contains("video arm"));
+    }
+
+    /// The driver issues exactly the lane's `generate` calls, in order: measured first, then the
+    /// warm passes. A stub render counts them, so the number and order are asserted rather than
+    /// inferred — one call for a video plan, three for an image plan.
+    #[test]
+    fn the_render_driver_issues_one_generate_for_video_and_three_for_image() {
+        for (frames, expected) in [
+            (49, vec![RenderRole::Measured]),
+            (
+                1,
+                vec![
+                    RenderRole::Measured,
+                    RenderRole::Warm(1),
+                    RenderRole::Warm(2),
+                ],
+            ),
+        ] {
+            let policy = capture_policy(&plan_with_frames(frames)).unwrap();
+            let mut calls = Vec::new();
+            let (measured, warm) = drive_renders::<_, String>(policy, |role| {
+                calls.push(role);
+                Ok(calls.len())
+            })
+            .unwrap();
+            assert_eq!(calls, expected, "{frames} frame(s)");
+            assert_eq!(measured, 1);
+            assert_eq!(warm.len(), policy.warm_passes as usize);
+            assert_eq!(calls.len() as u32, policy.renders());
+        }
+        // A failing measured render stops the capture before any warm pass is attempted.
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        let mut calls = 0;
+        let error = drive_renders::<(), _>(image, |_| {
+            calls += 1;
+            Err("render failed".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!((calls, error.as_str()), (1, "render failed"));
+    }
+
+    /// The receipt of a zero-warm-pass capture states what was not measured and writes no zero:
+    /// `warm_repeat` is `not_run` with the lane's reason, `quality` is `not_run` with `warmPasses: 0`
+    /// and the thresholds, and NO comparison figure or `identicalInputs` claim is present. An image
+    /// policy may not file its quality this way — it measured one.
+    #[test]
+    fn a_single_render_receipt_declares_its_unrun_warm_passes_instead_of_writing_zeros() {
+        let video = capture_policy(&plan_with_frames(25)).unwrap();
+        let scenario = video.not_run_warm_repeat_scenario().unwrap();
+        assert_eq!(scenario["name"], "warm_repeat");
+        assert_eq!(scenario["result"], "not_run");
+        assert_eq!(scenario["reason"], VIDEO_WARM_PASSES_NOT_RUN);
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("8,709 s"));
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("13,411 s"));
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("16,200 s"));
+
+        let quality = video
+            .not_run_quality("identical inputs; cold versus warm", (0.05, 0.01, 0.02))
+            .unwrap();
+        assert_eq!(quality["result"], "not_run");
+        assert_eq!(quality["warmPasses"], 0);
+        assert_eq!(quality["maximumErrorThreshold"], 0.05);
+        assert_eq!(quality["meanErrorThreshold"], 0.01);
+        assert_eq!(quality["rootMeanSquareErrorThreshold"], 0.02);
+        assert!(quality["contract"]
+            .as_str()
+            .unwrap()
+            .starts_with("identical inputs; cold versus warm; NOT MEASURED:"));
+        for absent in [
+            "maximumError",
+            "meanError",
+            "rootMeanSquareError",
+            "identicalInputs",
+            "audio",
+        ] {
+            assert!(
+                quality.get(absent).is_none(),
+                "{absent} must not be written"
+            );
+        }
+        // Files through the same response validator every adapter binary writes through.
+        validate_quality_metrics(&json!({ "status": "runtime_complete", "quality": quality }))
+            .unwrap();
+        // A measured-quality runtime_complete record still needs every figure.
+        assert!(validate_quality_metrics(&json!({
+            "status": "runtime_complete",
+            "quality": { "result": "passed", "maximumErrorThreshold": 0.05 }
+        }))
+        .is_err());
+
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        assert!(image
+            .not_run_quality("identical inputs", (0.05, 0.01, 0.02))
+            .unwrap_err()
+            .contains("runs 2 warm passes"));
+        assert!(image.not_run_warm_repeat_scenario().is_err());
     }
 }

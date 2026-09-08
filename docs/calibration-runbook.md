@@ -1296,22 +1296,52 @@ finish is the failure the bound exists to prevent.
 guard's ceilings bound a probe that CLIMBS; they say nothing about one that stops climbing, and
 `scail2_14b:bf16:mlx` sat flat at 93.5 GB under the 94.82 GB kill line for 90 minutes with the
 adapter parked in `mlx::core::eval`. So `measure-memory-catalog.mjs` passes the guard a
-`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **270
+`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **165
 minutes for a video anchor, 60 for an image one** (the lane is derived from the plan: a video anchor
 renders more than one frame), overridable for a run with `--probe-budget-minutes N`, which
-`--dry-run` prints per row. Each default rests on the longest COMPLETED capture its lane has
-witnessed (`WITNESSED_CAPTURE_SECONDS`): 8,709 s for video — the one unbudgeted
-`scail2_14b:bf16:mlx` capture on record, which rendered all 80 decoded frames — and 847 s for
-image. That flat 93.5 GB line was a render in progress, not a wedge: a video arm renders its clip
-THREE times per capture (measured, clean warm control, warm repeat), a SCAIL-2 render is a 14B DiT
-under CFG whose main thread waits on the GPU at every step by design, and the same cell stopped at
-every tier under a 90-minute budget with the GPU at 99–100% utilization and no GPU fault in the
-system log. (The watchdog stream's `providerPhase` is `null` for every anchor — the runner passes
-no `--provider-phase-profile` — so its absence is not a progress signal.) A probe that reaches its
+`--dry-run` prints per row. Each default rests on the longest COMPLETED figure its lane has
+witnessed (`WITNESSED_CAPTURE_SECONDS`), cleared by the 1.8× margin policy: 4,470 s PER RENDER
+for video and 847 s per capture cycle for image. That flat 93.5 GB line was a render in progress,
+not a wedge: a video arm USED TO render its clip THREE times per capture (measured, clean warm
+control, warm repeat), a SCAIL-2 render is a 14B DiT under CFG whose main thread waits on the GPU
+at every step by design, and the same cell stopped at every tier under a 90-minute budget with the
+GPU at 99–100% utilization and no GPU fault in the system log. (The watchdog stream's
+`providerPhase` is `null` for every anchor — the runner passes no `--provider-phase-profile` — so
+its absence is not a progress signal.)
+
+**A video capture is ONE measured render (sc-22738, decided 2026-09-08).** The three-render
+contract — measured render, clean warm control, warm repeat — stays on the IMAGE lane, where it is
+cheap; on the video lane it cost 2× the render for checks the anchor never reads. The anchor's phase
+peaks come from the FIRST render (`extract-memory-anchors.mjs` and `memory_anchor.rs` read only the
+three phase peaks, the overall allocator envelope and `outputFps`), while the warm passes fed the
+determinism envelope (`quality`), the clean-warm allocator bounds (`lifecycleClean*` /
+`lifecycleWarmRepeat*`) and the `warm_repeat` scenario. Witnessed under the three-render contract:
+`scail2_14b:bf16:mlx` 8,709 s per capture (~2,903 s per render); `wan_2_2_t2v_14b:bf16:mlx`
+13,411 s (4,470 s per render, the longest completed dense render on file);
+`wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget WITHOUT finishing (>5,400 s per render — the
+packed tier dequantizes per step and is slower than dense). The lane is a property of the plan row
+(`sceneworks_memory_adapter::capture_policy`: `geometry.frames > 1` is video, the same derivation
+the runner budgets by), never a per-model choice: every MLX video arm — LTX-2.3 (ordinary capture;
+the SC-20318 campaign entries keep their lifecycle proofs), LTX-2.5, MiniMax-H3, Bernini's video
+member, Krea Realtime, Wan 2.2 / SCAIL-2 — reads it before it renders, and the still `bernini_image`
+member served by the same arm keeps its three renders. The candle video arms already captured one
+render. The receipt states what was NOT measured instead of writing zeros: `warm_repeat` is
+`not_run` with the reason, `quality` carries `warmPasses: 0` with `result: not_run` and the
+thresholds only (no comparison figure, no `identicalInputs`, no typed `audio` block — an LTX-2.5
+session files `selected_av` alone), and no `lifecycleClean*` / `lifecycleWarmRepeat*` measurement
+is emitted. Every consumer degrades to "not measured" for such a record — the JSON schema, the
+harness's `validateRuntimeComplete`, `sceneworks-core::memory_calibration` and the adapter's own
+response validator accept the declared shape — and nothing invalidates the video cells captured
+WITH warm passes (`docs/calibration/sc-22738/*`, `sc-18791/*`): a record without the declaration
+keeps every previous requirement. So the video budget is now per render: 165 minutes = 9,900 s is
+2.2× the 4,470 s witness and 1.83× the 5,400 s packed-tier lower bound.
+
+A probe that reaches its
 budget is stopped on the guard's ONE stop path — the same SIGTERM→SIGKILL escalation and post-stop
 census a footprint stop takes — and is reported as `capture_failed` with reason
 `runtime_budget_exceeded`, naming the budget, the peak footprint sampled (so you can tell a probe
-wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed capture; a run
+wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed render (video) or
+capture (image); a run
 launched with `--probe-budget-minutes` below its lane's default is told, in the reason, that the
 stop is a budget shortfall and not evidence of a stall. **It is not an exceedance:** the run never
 crossed a line, so no bound is written (the harness's `record-exceeded` refuses a wall-clock stop
@@ -1521,9 +1551,10 @@ measurement runs at epic end or on explicit request, never per code change.
 
 **Inputs.** `backend` (`mlx` | `candle`), `campaign` (one path segment, e.g. `sc-22738`), `anchors`
 (comma-separated keys), `models` (space-separated ids), `skip_current` (default true),
-`hf_cache_roots`, `ref` (the branch to walk from and the PR base), `runner_label` (mlx only),
-`push_every`. `anchors`, `models`, `skip_current` and `hf_cache_roots` map one-for-one onto the
-script's `--anchors` / `--model` / `--skip-current` / `--hf-cache` flags.
+`hf_cache_roots`, `download_missing` (default false), `ref` (the branch to walk from and the PR
+base), `runner_label` (mlx only), `push_every`. `anchors`, `models`, `skip_current`,
+`hf_cache_roots` and `download_missing` map one-for-one onto the script's `--anchors` / `--model` /
+`--skip-current` / `--hf-cache` / `--download-missing` flags.
 
 **Where each lane runs.**
 
@@ -1608,6 +1639,51 @@ candle), not a measured budget.
 on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a warning, not an
 error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
 snapshot is under none of them plans as `weights_missing` rather than failing the run.
+
+**Fetching the missing snapshots — `download_missing` / `--download-missing` (sc-22738).** Neither
+box holds the whole catalog. Copying the missing snapshots off the Mac's SSD is slower than fetching
+them from the hub on the Windows box's own link (measured 2026-09-08), so the campaign can fetch
+what it needs:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=candle -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f download_missing=true
+```
+
+- **Only `weights_missing` anchors.** A `runnable` cell is never re-fetched, and a cell refused for
+  any other reason (`no_adapter_arm`, `lane_undeclared`, `exceeded_current`, `harness_unsupported`)
+  is not a weights problem and gets no download. After the fetch the cell is classified **again**,
+  by the same `classifyAnchor` that refused it.
+- **Nothing is invented.** Each anchor's repositories are the ones the classifier probes (the
+  LTX-2.5 snapshot, the per-(lane, tier) artifact, `upstream`, the SDXL and Mage-Flow components,
+  the member's side artifact), and each repository's revision and file globs come from the manifest
+  download rows for that model, tier and platform. `--revision` is **always** the pinned revision —
+  never `main`, which pinning a manifest download removes from the mirror anyway — so a repository
+  the manifest ships unpinned (the upstream Wan 2.2 / SVD Diffusers checkpoints) is reported as not
+  fetchable instead of being resolved off a branch. So are the hand-staged roots (PuLID's identity
+  bundle, the InstantID stack): they are operator env vars, not hub repositories.
+- **Destination: the FIRST `--hf-cache` root**, i.e. the first line of `hf_cache_roots` above —
+  `E:\huggingface\hub` on the CUDA box, `/Volumes/Models/huggingface/hub` on a Mac. Standard hub
+  layout (`models--<org>--<name>/snapshots/<rev>/…`, with `refs/` exactly as the CLI writes them),
+  because it is the CLI that writes it: `hf download <repo> --revision <rev> --include <glob> …
+  --cache-dir <root>` (falling back to `huggingface-cli` when `hf` is not installed).
+- **One at a time, resumable.** These are multi-GB transfers on a link that has already killed a
+  parallel fetch; the CLI resumes a partial download, so a re-dispatch pays only for what is
+  missing. Each landed snapshot logs `download: <key> <repo>@<rev> <n> files, <bytes> bytes`.
+- **A failed fetch never stops the walk.** That one anchor stays `weights_missing (download failed:
+  <reason>)` and the campaign moves on, exactly as an absent snapshot does today.
+- **`$HF_TOKEN`** is exported into the job from the repository/org secret of that name and is read
+  by the CLI, not by this script. Every artifact the campaign fetches today is public, so an unset
+  token only matters for a gated repository; set the secret (or export `HF_TOKEN` /
+  `HUGGING_FACE_HUB_TOKEN` on the runner) before dispatching one. `HF_HUB_ENABLE_HF_TRANSFER` is
+  runner-level opt-in and is not set here.
+- **`--dry-run --download-missing`** prints one line per snapshot it would fetch, with the
+  manifest's own `estimatedSizeBytes` where the rows declare it, and fetches nothing. That is what
+  the workflow's *Plan the walk* step runs; the `--list` table in the same step deliberately does
+  **not** carry the flag, so reading the plan can never start a download.
 
 ### 6b. Through the guarded dispatch
 

@@ -680,6 +680,10 @@
             "contract": { "type": "string", "minLength": 1 },
             "identicalInputs": { "type": "boolean" },
             "identicalLatents": { "type": "boolean" },
+            "warmPasses": {
+              "$comment": "sc-22738: how many warm passes the capture ran after its measured render. 0 is a video-lane receipt (one measured render, no clean warm control, no warm repeat): its determinism comparison was NOT run, so `result` is `not_run` and no comparison figure is carried — the thresholds it would have been judged by still travel. A runtime_complete record with warmPasses 0 is accepted in exactly that shape (see the status branch below). Absent on every record captured before the declaration existed, which keeps the previous requirements for those records.",
+              "type": "integer", "minimum": 0
+            },
             "result": { "enum": ["passed", "failed", "not_run"] },
             "maximumError": { "type": "number", "minimum": 0 },
             "meanError": { "type": "number", "minimum": 0 },
@@ -940,14 +944,31 @@
                 ]
               },
               "quality": {
-                "required": [
-                  "contract", "result", "maximumError", "meanError",
-                  "rootMeanSquareError", "maximumErrorThreshold", "meanErrorThreshold",
-                  "rootMeanSquareErrorThreshold", "identicalInputs"
-                ],
-                "properties": {
-                  "identicalInputs": { "const": true },
-                  "result": { "const": "passed" }
+                "if": { "properties": { "warmPasses": { "const": 0 } }, "required": ["warmPasses"] },
+                "then": {
+                  "$comment": "sc-22738: a single-render video receipt. The comparison was not run; nothing here is a zero.",
+                  "required": [
+                    "contract", "result", "warmPasses",
+                    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold"
+                  ],
+                  "not": { "anyOf": [
+                    { "required": ["maximumError"] }, { "required": ["meanError"] },
+                    { "required": ["rootMeanSquareError"] }, { "required": ["audio"] }
+                  ] },
+                  "properties": {
+                    "result": { "const": "not_run" }
+                  }
+                },
+                "else": {
+                  "required": [
+                    "contract", "result", "maximumError", "meanError",
+                    "rootMeanSquareError", "maximumErrorThreshold", "meanErrorThreshold",
+                    "rootMeanSquareErrorThreshold", "identicalInputs"
+                  ],
+                  "properties": {
+                    "identicalInputs": { "const": true },
+                    "result": { "const": "passed" }
+                  }
                 }
               },
               "negativeMutation": { "type": "null" },

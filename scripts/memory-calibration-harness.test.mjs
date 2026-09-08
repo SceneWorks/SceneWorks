@@ -3121,3 +3121,127 @@ test("a bound's reason is one of the two enumerated causes, never free text", as
   hardStopReason.exceededBounds[0].id = "exc-0000000000000000dead";
   assert.throws(() => validateBundle(hardStopReason), /id is not the digest of its own identity/);
 });
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a VIDEO capture is one measured render — the receipt declares its unrun warm passes.
+// ---------------------------------------------------------------------------------------------
+
+/** A single-render video receipt: `warmPasses: 0`, `result: not_run`, thresholds only. */
+function singleRenderVideoRuntimeComplete() {
+  const record = runtimeComplete();
+  record.backend = "mlx";
+  record.evidenceScope = "authoritative";
+  record.hardware = {
+    probe: "fixture Apple hardware probe",
+    memoryBytes: 128 * 1024 ** 3,
+    model: "Mac16,5",
+    chip: "Apple M4 Max",
+    osVersion: "15.7",
+    metalDevice: "Apple M4 Max",
+    mlxMemoryLimitBytes: 96 * 1024 ** 3,
+    wiredLimitBytes: 80 * 1024 ** 3,
+  };
+  record.target = {
+    modelId: "minimax_h3", provider: "minimax_h3", tier: "q4", mode: "text_to_video", overlay: "none",
+    geometry: { width: 1024, height: 576, batch: 1, frames: 124 },
+  };
+  record.scenarios.find((entry) => entry.name === "warm_repeat").reason =
+    "sc-22738: a video capture is ONE measured render; no warm pass was run";
+  record.quality = {
+    contract: "identical inputs; the cold measured clip versus a warm repeat; NOT MEASURED: no warm pass",
+    result: "not_run",
+    warmPasses: 0,
+    maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+  };
+  record.diagnostics = {
+    adapter: "memory-mlx-adapter:minimax-h3-joint-av", execution: "executed", blockers: [],
+    measurements: [
+      { name: "conditioningActivePeak", unit: "bytes", value: 100 },
+      { name: "denoiseActivePeak", unit: "bytes", value: 200 },
+      { name: "decodeActivePeak", unit: "bytes", value: 150 },
+      { name: "overallAllocatorEnvelope", unit: "bytes", value: 200 },
+      { name: "warmPasses", unit: "count", value: 0 },
+      { name: "outputFps", unit: "count", value: 24 },
+    ],
+  };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  return record;
+}
+
+test("a single-render video receipt with warmPasses 0 degrades quality to not measured — never a refusal, never a synthetic figure (sc-22738)", () => {
+  const record = singleRenderVideoRuntimeComplete();
+  assert.equal(validateRecord(record), record);
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [record] });
+  assert.equal(evidenceSemantics(record, {
+    sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+    inference: record.repositories.inference.revision,
+    inferenceClosureDigests: { "mlx:minimax_h3": record.repositories.inference.closureDigest },
+  }), "current", "the measurement stays valid evidence");
+
+  // What the declaration does NOT permit: a pass it did not run, a figure it could not have
+  // measured, a typed audio comparison with no reference render, or missing thresholds.
+  for (const [mutate, message] of [
+    [(quality) => { quality.result = "passed"; }, /must be not_run/],
+    [(quality) => { quality.maximumError = 0; }, /cannot carry quality\.maximumError/],
+    [(quality) => { quality.rootMeanSquareError = 0; }, /cannot carry quality\.rootMeanSquareError/],
+    [(quality) => { quality.audio = audioQuality(); }, /cannot carry typed audio quality/],
+    [(quality) => { delete quality.meanErrorThreshold; }, /quality\.meanErrorThreshold must be a nonnegative finite number/],
+  ]) {
+    const doctored = structuredClone(record);
+    mutate(doctored.quality);
+    doctored.id = recordId(doctored);
+    assert.throws(() => validateRecord(doctored), message);
+    assert.throws(() => validateBundle({
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [doctored],
+    }), /schema validation failed|must be not_run|cannot carry|nonnegative finite/);
+  }
+  // Without the declaration the previous contract stands: a runtime-complete record measures its
+  // quality, and `not_run` is refused.
+  const undeclared = structuredClone(record);
+  delete undeclared.quality.warmPasses;
+  undeclared.id = recordId(undeclared);
+  assert.throws(() => validateRecord(undeclared), /must pass with identical inputs/);
+  // And an image-lane record that DID run its warm passes is untouched by the declaration.
+  const measured = runtimeComplete();
+  measured.quality.warmPasses = 2;
+  measured.id = recordId(measured);
+  assert.equal(validateRecord(measured), measured);
+});
+
+test("a single-render physical A/V session carries selected_av alone; the audio comparison is coupled to reference_av (sc-22738)", () => {
+  const { bytes } = canonicalAvFixture();
+  const content = parsePhysicalMlxAvContent(bytes);
+  const record = {
+    id: "imc-single-render-av",
+    target: { geometry: { width: 2, height: 1, frames: 1 } },
+    diagnostics: { measurements: [
+      { name: "outputFps", value: 24 },
+      { name: "audioSampleRate", value: 24000 },
+      { name: "audioChannels", value: 2 },
+      { name: "audioSamples", value: 4 },
+    ] },
+    quality: { result: "not_run", warmPasses: 0 },
+  };
+  const selectedOnly = new Map([["selected_av", content]]);
+  validatePhysicalMlxAvContentsAgainstRecord(record, selectedOnly, record.id);
+  // The measured track's identity is still bound — to the record's own audio measurements.
+  const wrongRate = structuredClone(record);
+  wrongRate.diagnostics.measurements.find((entry) => entry.name === "audioSampleRate").value = 48000;
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(wrongRate, selectedOnly, record.id),
+    /A\/V header differs from measured video\/audio identity/,
+  );
+  // A typed audio comparison needs the reference render this session did not make.
+  const claimsAudio = structuredClone(record);
+  claimsAudio.quality.audio = audioQuality({ sampleCount: 4, selectedPcmSha256: content.pcmSha256, referencePcmSha256: content.pcmSha256 });
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(claimsAudio, selectedOnly, record.id),
+    /needs a reference_av render this session did not make/,
+  );
+  // A reference without a selected render is not a session of anything.
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(record, new Map([["reference_av", content]]), record.id),
+    /must carry the selected_av render/,
+  );
+});
