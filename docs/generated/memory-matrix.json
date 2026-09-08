@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fa138b80d81369e708ec6dfd944a342a929b473b859f72fa9c3f789f191610d1",
+    "sceneWorksRevision": "source-tree:52cbe5691d950becc25a009581e73e9520378a29761ad423ea55e70cc7ef14dd",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "04b8384a41edff590fd87c041ac1281a477b0093e362b1135f3da3a4757e9fcc"
+        "sha256": "0027c2876a673ef2866789f48c3f0a56baf33221a5e4888565ca6dd6b1b9bfd1"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "85e4097a2ccb849aa84350f79a210263f117800143752da061a2127867789ffe"
+        "sha256": "d06dac9fbe3267a5e344d9c7d8a4f9fb971e13a2e71f75ff83b368bce47d7e48"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1781,
-    "elidedCells": 7484,
+    "publishedCells": 1787,
+    "elidedCells": 7478,
     "elidedByState": {
-      "Implemented": 3110,
+      "Implemented": 3104,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 106,
-    "analyticOnlyCells": 231,
-    "anchoredCells": 1354,
+    "anchors": 107,
+    "analyticOnlyCells": 230,
+    "anchoredCells": 1372,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -6310,6 +6310,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 4
+    },
+    {
+      "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+      "modelId": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 18
     },
     {
       "id": "sensenova_u1_8b:mlx:bf16:base:base:sensenova-u1-quality-bf16-mlx-shared-ladder-v1:imc-989847820f3a5dcbe171",
@@ -15017,11 +15035,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 18,
       "states": {
-        "Implemented": 18
+        "Anchored": 6,
+        "Implemented": 12
       }
     },
     {
@@ -86520,7 +86539,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86537,7 +86563,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:identity:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86564,7 +86644,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86581,7 +86668,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86608,7 +86699,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86625,7 +86723,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:none:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86652,7 +86804,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86669,7 +86828,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86696,7 +86859,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86713,7 +86883,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:identity:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86740,7 +86964,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86757,7 +86988,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86784,7 +87019,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86801,7 +87043,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:none:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86828,7 +87124,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86845,7 +87148,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86872,7 +87179,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86889,7 +87203,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:identity:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86916,7 +87284,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86933,7 +87308,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -86960,7 +87339,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -86977,7 +87363,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:none:resident",
+      "modelId": "sensenova_u1_8b_fast",
+      "resolvedRoute": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15513,
+      "owningModelStory": 15467,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -87004,7 +87444,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15513,
@@ -87021,7 +87468,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c"
+          }
+        ]
       }
     },
     {
@@ -119110,16 +119561,22 @@
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:candle:q8:text_to_image:none:bounded_decode",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:candle:q8:text_to_image:none:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:identity:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:identity:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:identity:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:none:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:none:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:character_image:none:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:identity:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:identity:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:identity:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:none:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:none:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:edit_image:none:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:identity:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:identity:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:identity:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:none:bounded_decode",
+      "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:none:resident",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:bf16:text_to_image:none:staged_residency",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:q4:character_image:identity:bounded_decode",
       "sensenova_u1_8b_fast:sensenova_u1_8b_fast:mlx:q4:character_image:identity:staged_residency",

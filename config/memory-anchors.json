@@ -4514,6 +4514,52 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json",
+        "sha256": "ddbf40d1e3d10957e4d7364cc2e187d2147e597efeacbb1dbb69287f1203acae",
+        "recordId": "imc-6104367f39ad6d83794c",
+        "calibrationFingerprint": "sensenova-u1-fast-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 35488173004,
+        "decode": 33518683944
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 38689068392,
+        "decode": 36984918228
+      },
+      "overallAllocatorEnvelopeBytes": 38954407288,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -7753,17 +7799,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:mlx:bf16",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:sensenova_u1_8b_fast:mlx:q4",
