@@ -581,6 +581,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json"),
     ),
