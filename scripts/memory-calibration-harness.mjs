@@ -63,14 +63,22 @@ const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
 const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_av", "reference_av",
 ]);
+// sc-22738: a video capture is ONE measured render, so a single-render A/V session carries the
+// `selected_av` receipt alone — there is no warm repeat to file as `reference_av`. Sessions that
+// carry both roles were captured under the previous two-render arm and stay valid as they are.
+const PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES = Object.freeze(["request", "selected_av"]);
+const PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES = Object.freeze(["selected_av"]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
 const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
 
 function physicalMlxExpectedRoles(outputs, includeRequest) {
   const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
-  return hasAv
-    ? (includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES)
-    : (includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES);
+  if (!hasAv) return includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES;
+  const hasReferenceAv = outputs.some((output) => output?.role === "reference_av");
+  if (!hasReferenceAv) {
+    return includeRequest ? PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES;
+  }
+  return includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES;
 }
 
 function stable(value) {
@@ -213,11 +221,14 @@ function validatePhysicalMlxOutputsAgainstRecord(record, session) {
       fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
   }
-  const hasAv = session.outputs.some((output) => output.role === "selected_av");
-  if (hasAv !== (record.quality.audio !== undefined)) {
-    fail(`${record.id}: physical MLX A/V receipts and typed audio quality must be present together`);
+  // A typed audio comparison is selected-versus-REFERENCE PCM, so it is coupled to the
+  // `reference_av` receipt, not to the A/V kind as such: a single-render video session (sc-22738)
+  // carries `selected_av` and no audio comparison.
+  const hasReferenceAv = session.outputs.some((output) => output.role === "reference_av");
+  if (hasReferenceAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX reference A/V receipt and typed audio quality must be present together`);
   }
-  if (hasAv) validateAudioQuality(record);
+  if (hasReferenceAv) validateAudioQuality(record);
 }
 
 function validateAudioQuality(record) {
@@ -248,13 +259,32 @@ function validateAudioQuality(record) {
 
 export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
   if (avContents.size === 0) return;
-  validateAudioQuality(record);
   const selected = avContents.get("selected_av");
   const reference = avContents.get("reference_av");
-  const audio = record.quality.audio;
   const outputFps = record.diagnostics?.measurements?.find(
     (measurement) => measurement.name === "outputFps",
   )?.value;
+  const measurement = (name) => record.diagnostics?.measurements?.find((entry) => entry.name === name)?.value;
+  if (!selected) fail(`${label}: an A/V session must carry the selected_av render`);
+  if (!reference) {
+    // sc-22738: one measured render, no reference. The track's identity is bound to the record's
+    // own `audio*` measurements instead of a selected-versus-reference `quality.audio` block.
+    if (record.quality.audio !== undefined) {
+      fail(`${label}: typed audio quality needs a reference_av render this session did not make`);
+    }
+    if (selected.width !== record.target.geometry.width
+        || selected.height !== record.target.geometry.height
+        || selected.frames !== record.target.geometry.frames
+        || selected.fps !== outputFps
+        || selected.sampleRateHz !== measurement("audioSampleRate")
+        || selected.channels !== measurement("audioChannels")
+        || selected.sampleCount !== measurement("audioSamples")) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+    return;
+  }
+  validateAudioQuality(record);
+  const audio = record.quality.audio;
   for (const content of [selected, reference]) {
     if (!content
         || content.width !== record.target.geometry.width
@@ -855,22 +885,40 @@ function validateRuntimeComplete(record) {
   if (overlay?.result !== "not_applicable") fail(`${record.id}: runtime-complete evidence must be base-only`);
   text(overlay.reason, `${record.id}.overlay.reason`);
   if (record.negativeMutation !== null) fail(`${record.id}: unexecuted negative mutation must remain null`);
-  if (
-    record.quality.result !== "passed" ||
-    record.quality.identicalInputs !== true
-  ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
   text(record.quality.contract, `${record.id}.quality.contract`);
-  for (const metric of [
-    "maximumError", "meanError", "rootMeanSquareError",
-    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
-  ]) {
-    number(record.quality[metric], `${record.id}.quality.${metric}`);
+  if (record.quality.warmPasses === 0) {
+    // sc-22738: a single-render video receipt. The determinism comparison was NOT run, so the
+    // record says `not_run` and carries no figure; it degrades to "not measured", never to a
+    // refusal and never to a synthetic number. The thresholds it would be judged by still travel.
+    if (record.quality.result !== "not_run") {
+      fail(`${record.id}: quality.warmPasses 0 declares an unrun comparison, so quality.result must be not_run`);
+    }
+    for (const metric of ["maximumError", "meanError", "rootMeanSquareError"]) {
+      if (record.quality[metric] !== undefined) {
+        fail(`${record.id}: quality.warmPasses 0 cannot carry quality.${metric}`);
+      }
+    }
+    if (record.quality.audio !== undefined) fail(`${record.id}: quality.warmPasses 0 cannot carry typed audio quality`);
+    for (const metric of ["maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold"]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+  } else {
+    if (
+      record.quality.result !== "passed" ||
+      record.quality.identicalInputs !== true
+    ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
+    for (const metric of [
+      "maximumError", "meanError", "rootMeanSquareError",
+      "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
+    ]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+    if (
+      record.quality.maximumError > record.quality.maximumErrorThreshold ||
+      record.quality.meanError > record.quality.meanErrorThreshold ||
+      record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
+    ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   }
-  if (
-    record.quality.maximumError > record.quality.maximumErrorThreshold ||
-    record.quality.meanError > record.quality.meanErrorThreshold ||
-    record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
-  ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
   // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three

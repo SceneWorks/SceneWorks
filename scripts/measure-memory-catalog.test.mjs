@@ -73,7 +73,10 @@ import {
   watchdogPeakFootprint,
   runtimeBudgetStopSeconds,
   RUNTIME_BUDGET_STOP_PATTERN,
+  PROBE_BUDGET_MARGIN,
   PROBE_BUDGET_MINUTES,
+  VIDEO_RENDER_LOWER_BOUND_SECONDS,
+  VIDEO_RENDER_WITNESSES_SECONDS,
   WITNESSED_CAPTURE_SECONDS,
   probeBudgetMinutes,
   probeLane,
@@ -4973,16 +4976,33 @@ test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the
 
 test("every probe carries a wall-clock budget: per lane by default, derived from the plan, overridable", async () => {
   // The table, and the flag that overrides it.
-  assert.deepEqual(PROBE_BUDGET_MINUTES, { video: 270, image: 60 });
-  assert.equal(probeBudgetMinutes({ videoLane: true }), 270);
+  assert.deepEqual(PROBE_BUDGET_MINUTES, { video: 165, image: 60 });
+  assert.equal(probeBudgetMinutes({ videoLane: true }), 165);
   assert.equal(probeBudgetMinutes({ videoLane: false }), 60);
   // sc-22738 (2026-09-08): each lane's budget rests on the longest COMPLETED capture it has
-  // witnessed, with the margin the table's own doc comment states. The video witness is the
-  // 8,709 s `scail2_14b:bf16:mlx` capture that a 150-minute budget cleared by 3% and a 90-minute
-  // campaign then stopped three times over; a budget that no longer clears its witness by that
+  // witnessed, with the margin the table's own doc comment states. The video witness is read PER
+  // RENDER since a video capture became one measured render: the three three-render witnesses on
+  // file are the completed 8,709 s `scail2_14b:bf16:mlx` (2,903 s per render), the completed
+  // 13,411 s `wan_2_2_t2v_14b:bf16:mlx` (4,470 s per render — the witness) and the UNFINISHED
+  // `wan_2_2_t2v_14b:q4:mlx` that exceeded 16,200 s (>5,400 s per render, a lower bound the
+  // budget must clear by the same margin). A budget that no longer clears its witness by that
   // margin is the defect this pins, whichever entry drifts.
-  assert.deepEqual(WITNESSED_CAPTURE_SECONDS, { video: 8_709, image: 847 });
-  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= WITNESSED_CAPTURE_SECONDS.video * 1.8, "video budget clears its witness by 1.8x");
+  assert.deepEqual(WITNESSED_CAPTURE_SECONDS, { video: 4_470, image: 847 });
+  assert.equal(PROBE_BUDGET_MARGIN, 1.8);
+  assert.deepEqual(
+    VIDEO_RENDER_WITNESSES_SECONDS.map(({ cell, perRenderSeconds, completed }) => [cell, perRenderSeconds, completed]),
+    [["scail2_14b:bf16:mlx", 2_903, true], ["wan_2_2_t2v_14b:bf16:mlx", 4_470, true], ["wan_2_2_t2v_14b:q4:mlx", 5_400, false]],
+  );
+  for (const witness of VIDEO_RENDER_WITNESSES_SECONDS) {
+    assert.equal(witness.renders, 3, `${witness.cell} was a three-render capture`);
+    assert.equal(witness.perRenderSeconds, Math.round(witness.captureSeconds / witness.renders), `${witness.cell} per-render figure is the capture over its renders`);
+  }
+  const longestCompleted = Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => w.completed).map((w) => w.perRenderSeconds));
+  assert.equal(WITNESSED_CAPTURE_SECONDS.video, longestCompleted, "the video witness is the longest COMPLETED per-render figure");
+  assert.equal(VIDEO_RENDER_LOWER_BOUND_SECONDS, Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => !w.completed).map((w) => w.perRenderSeconds)));
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= WITNESSED_CAPTURE_SECONDS.video * PROBE_BUDGET_MARGIN, "video budget clears its witness by 1.8x");
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= VIDEO_RENDER_LOWER_BOUND_SECONDS * PROBE_BUDGET_MARGIN, "video budget clears the unfinished packed-tier render's lower bound by 1.8x");
+  assert.ok(PROBE_BUDGET_MINUTES.video * 60 < WITNESSED_CAPTURE_SECONDS.video * 3, "the video budget is a per-render figure, not a three-render cycle");
   assert.ok(PROBE_BUDGET_MINUTES.image * 60 >= WITNESSED_CAPTURE_SECONDS.image * 4, "image budget clears its witness by 4x");
   assert.equal(probeLane({ videoLane: true }), "video");
   assert.equal(probeLane({ videoLane: false }), "image");
@@ -5004,7 +5024,7 @@ test("every probe carries a wall-clock budget: per lane by default, derived from
   for (const row of rows) {
     const frames = plan.anchors[row.key].geometry?.frames ?? 1;
     assert.equal(row.videoLane, frames > 1, `${row.key} renders ${frames} frame(s)`);
-    assert.equal(probeBudgetMinutes(row), frames > 1 ? 270 : 60, row.key);
+    assert.equal(probeBudgetMinutes(row), frames > 1 ? 165 : 60, row.key);
     if (frames > 1) video += 1;
   }
   assert.ok(video > 0 && video < rows.length, `${video} of ${rows.length} mlx rows are video anchors`);
@@ -5043,7 +5063,7 @@ test("a runtime stop is recognised by its spelling and reports the guard's sampl
   assert.equal(await watchdogPeakFootprint(path.join(dir, "absent.jsonl")), null);
 });
 
-test("a runtime stop's reason names the lane's longest completed capture, and a budget below the lane default as a shortfall rather than a stall", () => {
+test("a runtime stop's reason names the lane's longest completed render (video) or capture (image), and a budget below the lane default as a shortfall rather than a stall", () => {
   const peak = { peakBytes: 68_564_154_584, samples: 2354 };
   const ceiling = "94822600832-byte ceiling";
   // The campaign of 2026-09-07: `scail2_14b:q4:mlx` under `--probe-budget-minutes 90`, flat at
@@ -5053,16 +5073,16 @@ test("a runtime stop's reason names the lane's longest completed capture, and a 
     shortfall,
     "runtime_budget_exceeded: the 90-minute probe budget (5400s) elapsed; peak physical footprint 68564154584 bytes "
       + "over 2354 sample(s) against the 94822600832-byte ceiling. Nothing was measured, so no bound was recorded and "
-      + "this cell stays runnable. The longest completed video capture on record ran 8709s, and this run was launched "
-      + "with --probe-budget-minutes 90, below the video lane's 270-minute default: this stop is a budget shortfall, "
+      + "this cell stays runnable. The longest completed video render on record ran 4470s, and this run was launched "
+      + "with --probe-budget-minutes 90, below the video lane's 165-minute default: this stop is a budget shortfall, "
       + "not evidence of a stall. Re-run it at the default budget or larger before reading anything into the flat footprint.",
   );
   // At the lane default (or above it) the stop stands on its own: the witness is still named, the
   // shortfall sentence is not.
-  for (const budgetMinutes of [270, 300]) {
+  for (const budgetMinutes of [165, 300]) {
     const reason = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes, budgetSeconds: budgetMinutes * 60, peak, ceiling });
     assert.match(reason, new RegExp(`^runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget \\(${budgetMinutes * 60}s\\) elapsed; `), reason);
-    assert.match(reason, /stays runnable\. The longest completed video capture on record ran 8709s\.$/, reason);
+    assert.match(reason, /stays runnable\. The longest completed video render on record ran 4470s\.$/, reason);
     assert.doesNotMatch(reason, /shortfall|not evidence of a stall/, reason);
   }
   // The image lane reads its own witness and its own default, and an unsampled peak is said so.

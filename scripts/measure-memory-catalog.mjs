@@ -2559,12 +2559,14 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  * unbounded in time.
  *
  * WHAT THAT FLAT LINE ACTUALLY WAS (sc-22738, diagnosed 2026-09-08). Not a wedge. A video arm
- * renders its clip THREE times per capture — the measured render, a clean warm control and a warm
- * repeat (`crates/sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs`, the determinism envelope
- * every video arm carries) — and a SCAIL-2 render is a 14B DiT at 832x480x77 under CFG (two DiT
- * forwards per step) whose main thread waits on the GPU at the per-step `eval` by design
- * (`mlx-gen-scail2/src/generate.rs`). The ONE unbudgeted `scail2_14b:bf16:mlx` capture on record
- * COMPLETED, rendering all 80 decoded frames, in 8,709 s (2026-09-06, `calib-mlx/campaign.log`).
+ * USED TO render its clip THREE times per capture — the measured render, a clean warm control and
+ * a warm repeat (the determinism envelope every video arm carried) — and a SCAIL-2 render is a 14B
+ * DiT at 832x480x77 under CFG (two DiT forwards per step) whose main thread waits on the GPU at
+ * the per-step `eval` by design (`mlx-gen-scail2/src/generate.rs`). The ONE unbudgeted
+ * `scail2_14b:bf16:mlx` capture on record COMPLETED, rendering all 80 decoded frames, in 8,709 s
+ * (2026-09-06, `calib-mlx/campaign.log`). Since 2026-09-08 a video capture is ONE measured render
+ * (`crates/sceneworks-memory-adapter/src/lib.rs`, `VIDEO_WARM_PASSES`): the anchor's peaks come
+ * from the first render, and the warm passes cost 2x the render on video.
  * A 90-minute budget then stopped the same cell at every tier with the GPU at 99–100% device
  * utilization, the footprint oscillating ±90 MB on a 4–6 s cadence and no GPU fault in the system
  * log: the budget, not the render, was what ended those probes. The `providerPhase` field of the
@@ -2575,18 +2577,31 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  * duration/elapsed field are ABSENT from `docs/calibration/sc-22738/*.json`), so the budgets rest
  * on the longest COMPLETED capture each lane has witnessed, `WITNESSED_CAPTURE_SECONDS`:
  *
- *   * video: 8,709 s — the completed `scail2_14b:bf16:mlx` capture above, the one direct witness
- *     of a whole three-render video capture cycle. (The earlier basis, 4,161 s for `ltx_2_3:q4:mlx`
- *     from consecutive `capturedAt` deltas, was a cycle bound for a lighter model; it under-read
- *     SCAIL-2 by 2.1x and the 150-minute budget it produced cleared the witness by 3%.)
+ *   * video: 4,470 s PER RENDER (sc-22738, re-based 2026-09-08). A video capture is now ONE
+ *     measured render (`sceneworks_memory_adapter::VIDEO_WARM_PASSES`): the three-render cycle
+ *     that produced the earlier 8,709 s witness — measured render, clean warm control, warm repeat
+ *     — no longer runs on the video lane, so the witnesses are read per render. Three witnesses,
+ *     all three-render captures, recorded in `VIDEO_RENDER_WITNESSES_SECONDS`:
+ *       - `scail2_14b:bf16:mlx` completed in 8,709 s → 2,903 s per render (2026-09-06);
+ *       - `wan_2_2_t2v_14b:bf16:mlx` completed in 13,411 s → 4,470 s per render, the longest
+ *         COMPLETED dense render on file and this lane's witness;
+ *       - `wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget WITHOUT finishing → more than
+ *         5,400 s per render, a lower bound, not a completion: the packed tier dequantizes per
+ *         step and is slower than dense (`VIDEO_RENDER_LOWER_BOUND_SECONDS`).
+ *     (The earlier basis, 4,161 s for `ltx_2_3:q4:mlx` from consecutive `capturedAt` deltas, was a
+ *     cycle bound for a lighter model; it under-read SCAIL-2 by 2.1x and the 150-minute budget it
+ *     produced cleared the witness by 3%.)
  *   * image: 847 s — the `bernini_image:q8:mlx` capture→commit cycle (07:13:26 after q4's
- *     06:59:19 on 2026-09-07), read the same way.
+ *     06:59:19 on 2026-09-07), read the same way. Unchanged: the image lane still runs its two
+ *     warm passes.
  *
- * So: 270 minutes for video is 1.86x the witnessed 8,709 s cycle, which is the same margin policy
- * the earlier figure claimed (1.8x) applied to the right witness; 60 minutes for image is 4.2x the
- * longest image cycle on file. Both are backstops against a wedge, not schedule targets — a budget
- * tight enough to argue about is converting slow renders into re-runs, which is exactly what the
- * 90-minute campaign did three times over.
+ * So: 165 minutes (9,900 s) for video is 2.2x the witnessed 4,470 s dense render and 1.83x the
+ * 5,400 s packed-tier lower bound — the same 1.8x margin policy as before, applied to the longest
+ * per-render figure on file rather than to a completed one alone, because the one render that did
+ * NOT complete is the one the budget exists for; 60 minutes for image is 4.2x the longest image
+ * cycle on file. Both are backstops against a wedge, not schedule targets — a budget tight enough
+ * to argue about is converting slow renders into re-runs, which is exactly what the 90-minute
+ * campaign did three times over.
  *
  * The cost of being wrong is bounded BY DESIGN and asymmetric on purpose: a runtime stop records no
  * bound and leaves the cell `runnable`, so too tight a budget costs a re-run, while too loose a one
@@ -2594,8 +2609,22 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  * honored as given; a run launched below its lane's default is told so in the stop reason
  * (`runtimeBudgetExceededReason`), because a stop under such a budget is not evidence of a stall.
  */
-export const WITNESSED_CAPTURE_SECONDS = { video: 8_709, image: 847 };
-export const PROBE_BUDGET_MINUTES = { video: 270, image: 60 };
+export const WITNESSED_CAPTURE_SECONDS = { video: 4_470, image: 847 };
+/**
+ * The per-render witnesses the video figure above is read from (sc-22738, 2026-09-08). Every one
+ * was a THREE-render capture; `perRenderSeconds` is the capture's wall clock over three.
+ * `completed: false` marks a lower bound — the capture hit its budget with the render unfinished.
+ */
+export const VIDEO_RENDER_WITNESSES_SECONDS = Object.freeze([
+  { cell: "scail2_14b:bf16:mlx", captureSeconds: 8_709, renders: 3, perRenderSeconds: 2_903, completed: true },
+  { cell: "wan_2_2_t2v_14b:bf16:mlx", captureSeconds: 13_411, renders: 3, perRenderSeconds: 4_470, completed: true },
+  { cell: "wan_2_2_t2v_14b:q4:mlx", captureSeconds: 16_200, renders: 3, perRenderSeconds: 5_400, completed: false },
+]);
+/** The packed-tier per-render LOWER BOUND the video budget must clear by the margin policy too. */
+export const VIDEO_RENDER_LOWER_BOUND_SECONDS = 5_400;
+/** The margin every lane default clears its witness by (see the basis above). */
+export const PROBE_BUDGET_MARGIN = 1.8;
+export const PROBE_BUDGET_MINUTES = { video: 165, image: 60 };
 
 /** The lane a plan row is budgeted under: a video anchor renders more than one frame. */
 export function probeLane(row) {
@@ -2631,7 +2660,9 @@ export function runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds,
     `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
     + `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} `
     + `against the ${ceiling}. Nothing was measured, so no bound was recorded and this cell stays runnable. `
-    + `The longest completed ${lane} capture on record ran ${witnessed}s`;
+    // sc-22738: the video figure is PER RENDER (a video capture is one render); the image figure
+    // is a whole capture cycle.
+    + `The longest completed ${lane} ${lane === "video" ? "render" : "capture"} on record ran ${witnessed}s`;
   if (budgetMinutes < laneDefault) {
     reason += `, and this run was launched with --probe-budget-minutes ${budgetMinutes}, below the ${lane} `
       + `lane's ${laneDefault}-minute default: this stop is a budget shortfall, not evidence of a stall. `

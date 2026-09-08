@@ -1730,3 +1730,65 @@ test("the LTX-2.5 component deltas are priced from the committed weights invento
   const packagedStore = JSON.parse(await readFile(path.join(ROOT, STORE_PATH), "utf8"));
   assert.deepEqual(packagedStore.componentDeltas, rows);
 });
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a single-render VIDEO record carries no warm-pass figure, and anchors all the same.
+// ---------------------------------------------------------------------------------------------
+
+test("a video record with quality not_run, warmPasses 0 and no lifecycleWarm*/lifecycleClean* measurement anchors exactly like one that ran its warm passes", () => {
+  const video = (overrides = {}) => record({
+    id: "imc-single-render-video",
+    target: {
+      modelId: "minimax_h3", tier: "q4", mode: "text_to_video", provider: "minimax_h3",
+      geometry: { width: 1024, height: 576, frames: 124 },
+    },
+    status: "runtime_complete",
+    quality: {
+      contract: "identical inputs; NOT MEASURED: no warm pass",
+      result: "not_run", warmPasses: 0,
+      maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+    },
+    scenarios: [{ name: "warm_repeat", result: "not_run", reason: "sc-22738: one measured render" }],
+    diagnostics: {
+      measurements: [
+        { name: "conditioningActivePeak", value: 1 },
+        { name: "denoiseActivePeak", value: 2 },
+        { name: "decodeActivePeak", value: 3 },
+        { name: "overallAllocatorEnvelope", value: 10 },
+        { name: "warmPasses", value: 0 },
+        { name: "outputFps", value: 24 },
+      ],
+    },
+    ...overrides,
+  });
+  const single = anchorCandidate(video(), corpus);
+  assert.ok(single !== null, "one measured render is an anchor");
+  assert.deepEqual(single.phaseActivePeakBytes, { conditioning: 1, denoise: 2, decode: 3 });
+  assert.equal(single.overallAllocatorEnvelopeBytes, 10);
+  // The same cell captured under the previous three-render contract prices identically: the
+  // warm-pass figures were never an input to the anchor.
+  const threeRender = anchorCandidate(video({
+    quality: {
+      contract: "identical inputs", identicalInputs: true, result: "passed",
+      maximumError: 0, meanError: 0, rootMeanSquareError: 0,
+      maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+    },
+    scenarios: [{ name: "warm_repeat", result: "passed", reason: "two warm repeats reproduced the clip" }],
+    diagnostics: {
+      measurements: [
+        { name: "conditioningActivePeak", value: 1 },
+        { name: "denoiseActivePeak", value: 2 },
+        { name: "decodeActivePeak", value: 3 },
+        { name: "overallAllocatorEnvelope", value: 10 },
+        { name: "lifecycleCleanWarmPeak", value: 9 },
+        { name: "lifecycleWarmRepeatPeak", value: 9 },
+        { name: "lifecycleWarmRepeatPostCleanupActive", value: 1 },
+        { name: "outputFps", value: 24 },
+      ],
+    },
+  }), corpus);
+  assert.ok(threeRender !== null);
+  const priced = ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes }) =>
+    ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes });
+  assert.deepEqual(priced(single), priced(threeRender), "the extractor reads no warm-pass figure");
+});

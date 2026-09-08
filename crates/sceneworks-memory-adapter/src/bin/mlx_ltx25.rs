@@ -870,6 +870,9 @@ fn mutate_audio_pcm(audio: &AudioTrack) -> AudioTrack {
     mutated
 }
 
+/// The PCM digest a typed `quality.audio` comparison keys on. Only the tests' selected-versus-
+/// reference fixtures still compare two tracks: the capture renders one (sc-22738).
+#[cfg(test)]
 fn pcm_sha256(audio: &AudioTrack) -> String {
     let mut hasher = Sha256::new();
     for samples in audio.samples.chunks(16_384) {
@@ -1020,12 +1023,15 @@ fn persist_canonical_av(
     }))
 }
 
+/// The physical source-session receipt of ONE measured render (sc-22738): the `selected_av`
+/// output only. The `reference_av` role belongs to a warm repeat, which the video lane does not
+/// run; the retained `sc-18791` / `sc-22738` LTX-2.5 sessions that carry both roles were captured
+/// under the previous two-render arm and remain valid as they are.
 fn source_capture(
     plan: &SourceCapturePlan,
     artifact: &Artifact,
     tier: &str,
     selected: &RenderedClip,
-    reference: &RenderedClip,
 ) -> Result<Value, String> {
     let mut inputs = vec![
         json!({
@@ -1063,7 +1069,6 @@ fn source_capture(
         "inputs": inputs,
         "outputs": [
             persist_canonical_av(plan, "selected_av", selected)?,
-            persist_canonical_av(plan, "reference_av", reference)?,
         ],
         "claims": [
             "memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"
@@ -1089,6 +1094,8 @@ fn complete_sweep(request: &Value) -> Result<Value, String> {
 
 pub(super) fn run(request: &Value) -> Result<Value, String> {
     let target = validate_target(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(LABEL)?;
     let tier = planned_qwen_tier(request)?;
     let selection = planned_selection(request)?;
     validate_selection_shape(&selection, target)?;
@@ -1245,37 +1252,21 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         );
     }
 
-    let mut warm_context = probe_context.clone();
-    warm_context.cache_state = MemoryCacheState::Warm;
-    let repeat = render(generator.as_ref(), target, &warm_context, false)?;
-    if selected.fps != repeat.fps {
-        return Err("LTX-2.5 identical-input repeat changed A/V identity".to_owned());
-    }
-    let (maximum_error, mean_error, rms_error) =
-        video_max_mean_rms_abs(&selected.frames, &repeat.frames)?;
-    if !quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "LTX-2.5 warm repeat exceeded determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
-    }
-    let (audio_maximum_error, audio_mean_error, audio_rms_error) =
-        audio_max_mean_rms_abs(&selected.audio, &repeat.audio)?;
-    if !audio_quality_passes(audio_maximum_error, audio_mean_error, audio_rms_error) {
-        return Err(format!(
-            "LTX-2.5 warm repeat exceeded PCM determinism envelope: max={audio_maximum_error:.6}, mean={audio_mean_error:.6}, rms={audio_rms_error:.6}"
-        ));
-    }
-    let selected_pcm_sha256 = pcm_sha256(&selected.audio);
-    let reference_pcm_sha256 = pcm_sha256(&repeat.audio);
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above). There
+    // is no identical-input repeat to judge the video and PCM determinism envelopes against, so
+    // the receipt carries `quality.warmPasses: 0` with `result: not_run` and NO typed `audio`
+    // block (a typed audio comparison needs a `reference_av` render this capture did not make),
+    // instead of writing zeros. The falsifiability mutations below are judged against the
+    // measured render itself.
     let mutated = qwen_negative_mutation(&selected.frames[0]);
     let (mutated_maximum, mutated_mean, mutated_rms) =
-        image_max_mean_rms_abs(&mutated, &repeat.frames[0])?;
+        image_max_mean_rms_abs(&mutated, &selected.frames[0])?;
     if quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("LTX-2.5 output mutation did not breach determinism envelope".to_owned());
     }
     let mutated_audio = mutate_audio_pcm(&selected.audio);
     let (mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) =
-        audio_max_mean_rms_abs(&mutated_audio, &repeat.audio)?;
+        audio_max_mean_rms_abs(&mutated_audio, &selected.audio)?;
     if audio_quality_passes(mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) {
         return Err(
             "LTX-2.5 same-shape PCM mutation did not breach determinism envelope".to_owned(),
@@ -1289,12 +1280,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
     let sample_count = u64::try_from(selected.audio.samples.len())
         .map_err(|_| "LTX-2.5 PCM sample count must fit u64".to_owned())?;
-    let source_capture = source_capture(&capture_plan, &artifact, tier, &selected, &repeat)?;
+    let source_capture = source_capture(&capture_plan, &artifact, tier, &selected)?;
 
-    let lifecycle_reason = concat!(
-        "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity ",
-        "render per fresh process; cancellation and injected-error lifecycle cases remain explicitly ",
-        "unexecuted here and are not used as calibration currency"
+    let lifecycle_reason = format!(
+        "SC-18783 executes ONE measured full-pipeline render per fresh process and no warm pass \
+         ({}); cancellation and injected-error lifecycle cases remain explicitly unexecuted here \
+         and are not used as calibration currency",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
     );
     let fragment = json!({
         "status": "runtime_complete",
@@ -1310,7 +1302,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider rejected a zero/unknown budget" },
             { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider rejected a mutated calibration fingerprint" },
-            { "name": "warm_repeat", "result": "passed", "reason": "an identical-input full-pipeline request completed on the same loaded provider" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_reason },
             { "name": "error", "result": "not_run", "reason": lifecycle_reason },
             { "name": "loadability", "result": "passed" },
@@ -1323,31 +1315,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus warm full-pipeline repeat",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
-            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
-            "audio": {
-                "result": "passed",
-                "sampleRateHz": selected.audio.sample_rate,
-                "channels": selected.audio.channels,
-                "sampleCount": sample_count,
-                "selectedPcmSha256": selected_pcm_sha256,
-                "referencePcmSha256": reference_pcm_sha256,
-                "maximumAbsoluteError": audio_maximum_error,
-                "meanAbsoluteError": audio_mean_error,
-                "rootMeanSquareError": audio_rms_error,
-                "maximumAbsoluteErrorThreshold": AUDIO_MAX_THRESHOLD,
-                "meanAbsoluteErrorThreshold": AUDIO_MEAN_THRESHOLD,
-                "rootMeanSquareErrorThreshold": AUDIO_RMS_THRESHOLD,
-            },
-        },
+        // No typed `audio` block: it is a selected-versus-reference PCM comparison, and there is no
+        // reference render. The measured track's identity travels as measurements below and in the
+        // content-addressed `selected_av` receipt.
+        "quality": capture.not_run_quality(
+            "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus a warm full-pipeline repeat",
+            (LTX_MAX_THRESHOLD, LTX_MEAN_THRESHOLD, LTX_RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -1367,6 +1341,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 output_fps_diagnostic(target),
                 ("devVariant", "count", u64::from(target.variant == TransformerVariant::Dev)),
                 ("diffusionDecoder", "count", u64::from(target.decoder == Decoder::DiffVae)),
+                // sc-22738: the measured track's identity, where the typed `quality.audio`
+                // comparison block used to carry it; no warm pass ran (`quality.warmPasses`).
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
+                ("audioTrackDecoded", "count", 1),
+                ("audioSamples", "count", sample_count),
+                ("audioSampleRate", "count", u64::from(selected.audio.sample_rate)),
+                ("audioChannels", "count", u64::from(selected.audio.channels)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -1986,7 +1967,18 @@ mod tests {
             }),
         };
         let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
-        let receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        let receipt = source_capture(&plan, &artifact, "q4", &clip).unwrap();
+        // sc-22738: ONE measured render files ONE rendered receipt. A `reference_av` here would
+        // claim a warm repeat this capture did not make.
+        assert_eq!(
+            receipt["outputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|output| output["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["selected_av"]
+        );
         let inputs = receipt["inputs"].as_array().unwrap();
         assert_eq!(
             inputs
@@ -2006,7 +1998,7 @@ mod tests {
         );
         assert_eq!(inputs[2]["sha256"], "c".repeat(64));
         plan.dev_adapter_inventory = None;
-        let distilled_receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        let distilled_receipt = source_capture(&plan, &artifact, "q4", &clip).unwrap();
         assert_eq!(
             distilled_receipt["inputs"]
                 .as_array()
