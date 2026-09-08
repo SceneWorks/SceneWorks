@@ -1296,22 +1296,52 @@ finish is the failure the bound exists to prevent.
 guard's ceilings bound a probe that CLIMBS; they say nothing about one that stops climbing, and
 `scail2_14b:bf16:mlx` sat flat at 93.5 GB under the 94.82 GB kill line for 90 minutes with the
 adapter parked in `mlx::core::eval`. So `measure-memory-catalog.mjs` passes the guard a
-`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **270
+`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **165
 minutes for a video anchor, 60 for an image one** (the lane is derived from the plan: a video anchor
 renders more than one frame), overridable for a run with `--probe-budget-minutes N`, which
-`--dry-run` prints per row. Each default rests on the longest COMPLETED capture its lane has
-witnessed (`WITNESSED_CAPTURE_SECONDS`): 8,709 s for video — the one unbudgeted
-`scail2_14b:bf16:mlx` capture on record, which rendered all 80 decoded frames — and 847 s for
-image. That flat 93.5 GB line was a render in progress, not a wedge: a video arm renders its clip
-THREE times per capture (measured, clean warm control, warm repeat), a SCAIL-2 render is a 14B DiT
-under CFG whose main thread waits on the GPU at every step by design, and the same cell stopped at
-every tier under a 90-minute budget with the GPU at 99–100% utilization and no GPU fault in the
-system log. (The watchdog stream's `providerPhase` is `null` for every anchor — the runner passes
-no `--provider-phase-profile` — so its absence is not a progress signal.) A probe that reaches its
+`--dry-run` prints per row. Each default rests on the longest COMPLETED figure its lane has
+witnessed (`WITNESSED_CAPTURE_SECONDS`), cleared by the 1.8× margin policy: 4,470 s PER RENDER
+for video and 847 s per capture cycle for image. That flat 93.5 GB line was a render in progress,
+not a wedge: a video arm USED TO render its clip THREE times per capture (measured, clean warm
+control, warm repeat), a SCAIL-2 render is a 14B DiT under CFG whose main thread waits on the GPU
+at every step by design, and the same cell stopped at every tier under a 90-minute budget with the
+GPU at 99–100% utilization and no GPU fault in the system log. (The watchdog stream's
+`providerPhase` is `null` for every anchor — the runner passes no `--provider-phase-profile` — so
+its absence is not a progress signal.)
+
+**A video capture is ONE measured render (sc-22738, decided 2026-09-08).** The three-render
+contract — measured render, clean warm control, warm repeat — stays on the IMAGE lane, where it is
+cheap; on the video lane it cost 2× the render for checks the anchor never reads. The anchor's phase
+peaks come from the FIRST render (`extract-memory-anchors.mjs` and `memory_anchor.rs` read only the
+three phase peaks, the overall allocator envelope and `outputFps`), while the warm passes fed the
+determinism envelope (`quality`), the clean-warm allocator bounds (`lifecycleClean*` /
+`lifecycleWarmRepeat*`) and the `warm_repeat` scenario. Witnessed under the three-render contract:
+`scail2_14b:bf16:mlx` 8,709 s per capture (~2,903 s per render); `wan_2_2_t2v_14b:bf16:mlx`
+13,411 s (4,470 s per render, the longest completed dense render on file);
+`wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget WITHOUT finishing (>5,400 s per render — the
+packed tier dequantizes per step and is slower than dense). The lane is a property of the plan row
+(`sceneworks_memory_adapter::capture_policy`: `geometry.frames > 1` is video, the same derivation
+the runner budgets by), never a per-model choice: every MLX video arm — LTX-2.3 (ordinary capture;
+the SC-20318 campaign entries keep their lifecycle proofs), LTX-2.5, MiniMax-H3, Bernini's video
+member, Krea Realtime, Wan 2.2 / SCAIL-2 — reads it before it renders, and the still `bernini_image`
+member served by the same arm keeps its three renders. The candle video arms already captured one
+render. The receipt states what was NOT measured instead of writing zeros: `warm_repeat` is
+`not_run` with the reason, `quality` carries `warmPasses: 0` with `result: not_run` and the
+thresholds only (no comparison figure, no `identicalInputs`, no typed `audio` block — an LTX-2.5
+session files `selected_av` alone), and no `lifecycleClean*` / `lifecycleWarmRepeat*` measurement
+is emitted. Every consumer degrades to "not measured" for such a record — the JSON schema, the
+harness's `validateRuntimeComplete`, `sceneworks-core::memory_calibration` and the adapter's own
+response validator accept the declared shape — and nothing invalidates the video cells captured
+WITH warm passes (`docs/calibration/sc-22738/*`, `sc-18791/*`): a record without the declaration
+keeps every previous requirement. So the video budget is now per render: 165 minutes = 9,900 s is
+2.2× the 4,470 s witness and 1.83× the 5,400 s packed-tier lower bound.
+
+A probe that reaches its
 budget is stopped on the guard's ONE stop path — the same SIGTERM→SIGKILL escalation and post-stop
 census a footprint stop takes — and is reported as `capture_failed` with reason
 `runtime_budget_exceeded`, naming the budget, the peak footprint sampled (so you can tell a probe
-wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed capture; a run
+wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed render (video) or
+capture (image); a run
 launched with `--probe-budget-minutes` below its lane's default is told, in the reason, that the
 stop is a budget shortfall and not evidence of a stall. **It is not an exceedance:** the run never
 crossed a line, so no bound is written (the harness's `record-exceeded` refuses a wall-clock stop

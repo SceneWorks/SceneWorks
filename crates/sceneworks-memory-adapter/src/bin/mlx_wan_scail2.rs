@@ -26,11 +26,14 @@ use mlx_gen::gen_core::ReplacementMode;
 const SEED: u64 = 22_736;
 const LABEL: &str = "MLX Wan2.2/SCAIL-2";
 
-/// Determinism envelope for a warm repeat of one of these clips.
+/// Determinism envelope these clips are judged by.
 ///
 /// The same claim the other video arms make — repeat determinism on ONE loaded provider with an
 /// identical request — so the same published FLUX.2 envelope applies rather than a looser bound
 /// invented here. The mandatory `+64` negative mutation is more than eight times the maximum.
+/// Since sc-22738 (2026-09-08) a video capture is ONE measured render, so no warm repeat is
+/// compared against it here: the thresholds travel in the receipt (`quality.warmPasses: 0`,
+/// `result: not_run`) and bound only the falsifiability mutation.
 const MAX_THRESHOLD: f64 = FLUX2_MAX_THRESHOLD;
 const MEAN_THRESHOLD: f64 = FLUX2_MEAN_THRESHOLD;
 const RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
@@ -734,13 +737,13 @@ fn complete_sweep(request: &Value) -> Result<Value, String> {
 /// `wan_lightning_on`, sc-10047): the record names that exclusion so it cannot be read as the
 /// default composition's evidence.
 fn lifecycle_blocker(arm: Arm) -> String {
-    let mut blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. This record claims nothing about them"
-    )
-    .to_owned();
+    let mut blocker = format!(
+        "this arm executes ONE measured render on the loaded provider and no warm pass ({}); it \
+         opens no memory-strategy request scope and injects no calibration fault, so the scoped \
+         cancellation and authorized-error scenarios and their recovery renders are unexecuted. \
+         This record claims nothing about them",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
+    );
     if matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b)) {
         blocker.push_str(&format!(
             ". The A14B render is measured with NO adapters at the native multi-step recipe \
@@ -760,6 +763,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // multi-gigabyte load: the member, the mode, the geometry against the ENGINE's own menus, the
     // fixture, the tier, and the plan's identity against this arm's table.
     let arm = arm(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(arm.provider)?;
     protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     validate_mode(request, arm)?;
     let geometry = target_geometry(request, arm)?;
@@ -955,67 +960,19 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // identity SceneWorks mints, so an answer here would characterize a decision production never
     // takes. See [`ADMISSION_BLOCKER`].
 
-    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
-    clear_cache();
-    reset_peak_memory();
-    let (baseline, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&planned_render, &mut |_| {})
-            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
-        LABEL,
-    )?;
-    let clean_warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let clean_post_cleanup = AllocatorState::capture_current();
-    let cleanup_bounds =
-        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
-    if !quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}",
-            arm.provider
-        ));
-    }
-    reset_peak_memory();
-    let (warm, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&planned_render, &mut |_| {})
-            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
-        LABEL,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    if !cleanup_bounds.allows_warm_peak(warm_peak) {
-        return Err(format!(
-            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%",
-            arm.provider
-        ));
-    }
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
-             cleanup {clean_post_cleanup:?} plus {} bytes",
-            arm.provider, cleanup_bounds.tolerance_bytes,
-        ));
-    }
-    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
-    if !quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err(format!(
-            "{} second warm repeat changed the deterministic output",
-            arm.provider
-        ));
-    }
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above), so
+    // there is no clean warm control to judge determinism against and no warm repeat to bound;
+    // the receipt says so (`warm_repeat` not_run, `quality.warmPasses: 0`) instead of writing
+    // zeros where `lifecycleClean*` / `lifecycleWarmRepeat*` used to be.
 
     // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
     // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    // Against the measured clip itself: the mutation must breach the envelope the arm declares.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
     if quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err(format!(
             "{} output mutation did not breach the determinism envelope",
@@ -1043,7 +1000,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "not_run", "reason": ADMISSION_BLOCKER },
             { "name": "unknown_budget", "result": "not_run", "reason": ADMISSION_BLOCKER },
             { "name": "stale_evidence", "result": "not_run", "reason": ADMISSION_BLOCKER },
-            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
@@ -1056,17 +1013,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, carrier, tier and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": MAX_THRESHOLD,
-            "meanErrorThreshold": MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": RMS_THRESHOLD,
-        },
+        "quality": capture.not_run_quality(
+            "identical artifact, prompt, seed, geometry, frames, fps, steps, carrier, tier and loaded provider contract; the cold measured clip versus a warm repeat, compared over every frame",
+            (MAX_THRESHOLD, MEAN_THRESHOLD, RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -1085,13 +1035,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("predictedOverallCeiling", "bytes", predicted),
                 ("stagedArtifactBytes", "bytes", staged_bytes),
-                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
-                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
-                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
-                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                // sc-22738: no `lifecycleClean*` / `lifecycleWarmRepeat*` figure — the warm
+                // passes were not run (`quality.warmPasses`), and an unmeasured figure is omitted,
+                // never written as 0.
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),

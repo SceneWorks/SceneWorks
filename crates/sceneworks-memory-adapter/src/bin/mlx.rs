@@ -16534,6 +16534,10 @@ fn run_ltx_with_admission(
     phase_sink: &mut dyn LtxCampaignPhaseSink,
 ) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    // The SC-20318 campaign entries below are lifecycle PROOFS, not catalog captures, and keep
+    // their own render counts; the ordinary capture honours this.
+    let capture = protocol::capture_policy(request)?.require_video(LTX_VIDEO_LABEL)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
     if load_shape != LoadShape::EagerMaterialization {
@@ -16828,50 +16832,43 @@ fn run_ltx_with_admission(
         seed,
         fault_phase: decode_plan.lifecycle_fault_phase(),
     };
-    let (lifecycle, bounded_warm) = match admission {
-        LtxRunAdmission::CampaignEntry => (
-            verify_ltx_lifecycle(
-                generator.as_ref(),
-                &context,
-                &measured,
-                lifecycle_input,
-                phase_sink,
-            )?,
-            None,
-        ),
-        LtxRunAdmission::BoundedCampaignEntry => {
-            let warm = verify_ltx_bounded_warm_repeat(
-                generator.as_ref(),
-                &context,
-                &measured,
-                lifecycle_input,
-            )?;
-            (
-                LtxLifecycleMetrics {
-                    maximum_error: warm.maximum_error,
-                    mean_error: warm.mean_error,
-                    rms_error: warm.rms_error,
-                    ..Default::default()
-                },
-                Some(warm),
-            )
-        }
-        // The ordinary capture executes the same runtime-complete lifecycle the supervised entry
-        // does; only the phase sink differs (the catalog runner's watchdog needs no phase channel).
-        LtxRunAdmission::Ordinary => (
-            verify_ltx_lifecycle(
-                generator.as_ref(),
-                &context,
-                &measured,
-                lifecycle_input,
-                phase_sink,
-            )?,
-            None,
-        ),
-    };
-    let maximum_error = lifecycle.maximum_error;
-    let mean_error = lifecycle.mean_error;
-    let rms_error = lifecycle.rms_error;
+    // `lifecycle` is `Some` only when a warm control was rendered: the SC-20318 campaign entries,
+    // which exist to prove the request-scope lifecycle. The ORDINARY capture — the catalog anchor —
+    // is one measured render on the video lane (sc-22738, `capture` above): no clean warm control,
+    // no warm repeat, no fault injection, no recovery render. The 2026-09-07 corpus
+    // (`docs/calibration/sc-22738/ltx-2-3-*-mlx-evidence.json`) was captured under the previous
+    // six-render lifecycle and stays valid as it is.
+    let (lifecycle, bounded_warm): (Option<LtxLifecycleMetrics>, Option<LtxBoundedWarmMetrics>) =
+        match admission {
+            LtxRunAdmission::CampaignEntry => (
+                Some(verify_ltx_lifecycle(
+                    generator.as_ref(),
+                    &context,
+                    &measured,
+                    lifecycle_input,
+                    phase_sink,
+                )?),
+                None,
+            ),
+            LtxRunAdmission::BoundedCampaignEntry => {
+                let warm = verify_ltx_bounded_warm_repeat(
+                    generator.as_ref(),
+                    &context,
+                    &measured,
+                    lifecycle_input,
+                )?;
+                (
+                    Some(LtxLifecycleMetrics {
+                        maximum_error: warm.maximum_error,
+                        mean_error: warm.mean_error,
+                        rms_error: warm.rms_error,
+                        ..Default::default()
+                    }),
+                    Some(warm),
+                )
+            }
+            LtxRunAdmission::Ordinary => (None, None),
+        };
 
     // Runtime-complete keeps the schema's unexecuted mutation slot null. The adapter still proves
     // falsifiability and records the breach in diagnostics.
@@ -16884,7 +16881,25 @@ fn run_ltx_with_admission(
         return Err("LTX-2.3 output mutation did not breach the determinism envelope".to_owned());
     }
 
-    let scenarios = if admission == LtxRunAdmission::BoundedCampaignEntry {
+    let single_render_blocker = format!(
+        "this capture executes ONE measured render inside the selected request scope and no \
+         warm pass ({}); it injects no calibration fault, so the cancellation and \
+         authorized-error scenarios and their recovery renders are unexecuted and this record \
+         claims nothing about them",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
+    );
+    let scenarios = if lifecycle.is_none() {
+        json!([
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": exact_effective_bytes },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
+            capture.not_run_warm_repeat_scenario()?,
+            { "name": "cancel", "result": "not_run", "reason": single_render_blocker },
+            { "name": "error", "result": "not_run", "reason": single_render_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ])
+    } else if admission == LtxRunAdmission::BoundedCampaignEntry {
         let blocker = "SC-20318 executes only selected plus warm-repeat parity; cancellation, authorized-error, and recovery renders remain unexecuted";
         json!([
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": exact_effective_bytes },
@@ -17019,7 +17034,7 @@ fn run_ltx_with_admission(
             ),
             ("providerRequestScopeRenders", "count", 2),
         ]);
-    } else {
+    } else if let Some(lifecycle) = &lifecycle {
         diagnostic_measurements.extend([
             ("warmRepeatPeak", "bytes", lifecycle.clean_warm_peak),
             (
@@ -17065,7 +17080,38 @@ fn run_ltx_with_admission(
             lifecycle.error_recovery,
             lifecycle.measured_clip,
         ));
+    } else {
+        // sc-22738: no `warmRepeat*` / `lifecycleMax*` figure — the warm passes were not run
+        // (`quality.warmPasses`), and an unmeasured figure is omitted, never written as 0.
+        diagnostic_measurements.push(("warmPasses", "count", u64::from(capture.warm_passes)));
     }
+    const LTX_QUALITY_CONTRACT: &str = "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame";
+    let quality = match &lifecycle {
+        Some(lifecycle) => json!({
+            "contract": LTX_QUALITY_CONTRACT,
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": lifecycle.maximum_error,
+            "meanError": lifecycle.mean_error,
+            "rootMeanSquareError": lifecycle.rms_error,
+            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
+            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
+        }),
+        None => capture.not_run_quality(
+            LTX_QUALITY_CONTRACT,
+            (LTX_MAX_THRESHOLD, LTX_MEAN_THRESHOLD, LTX_RMS_THRESHOLD),
+        )?,
+    };
+    let blockers = match &lifecycle {
+        Some(lifecycle) => ltx_lifecycle_blockers(
+            tier,
+            lifecycle_input.fault_phase,
+            lifecycle.cancel_recovery,
+            lifecycle.error_recovery,
+        ),
+        None => vec![single_render_blocker.clone()],
+    };
 
     let mut fragment = json!({
         "status": "runtime_complete",
@@ -17085,17 +17131,7 @@ fn run_ltx_with_admission(
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
-            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
-        },
+        "quality": quality,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -17104,12 +17140,7 @@ fn run_ltx_with_admission(
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:ltx-2-3-provider-contract-video",
             "executed",
-            ltx_lifecycle_blockers(
-                tier,
-                lifecycle_input.fault_phase,
-                lifecycle.cancel_recovery,
-                lifecycle.error_recovery,
-            ),
+            blockers,
             diagnostic_measurements,
         ),
         "capturedAt": protocol::captured_at(),
@@ -18328,6 +18359,8 @@ fn minimax_complete_sweep(request: &Value) -> Result<Value, String> {
 /// load shapes (rung 4 is `Implemented` only under `deferred_materialization`).
 fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     let (member, geometry) = validate_minimax_target(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(MINIMAX_LABEL)?;
     protocol::validate_plain_overlay_target(request, MINIMAX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
     let selection = planned_selection(request)?;
@@ -18633,76 +18666,35 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         );
     }
 
-    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
-    clear_cache();
-    reset_peak_memory();
-    let (baseline, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm MiniMax-H3 control: {error}"))?,
-        MINIMAX_VIDEO_LABEL,
-    )?;
-    let clean_warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let clean_post_cleanup = AllocatorState::capture_current();
-    let cleanup_bounds =
-        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
-    if !minimax_quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "MiniMax-H3 warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
-    }
-    reset_peak_memory();
-    let (warm, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm MiniMax-H3 repeat: {error}"))?,
-        MINIMAX_VIDEO_LABEL,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    if !cleanup_bounds.allows_warm_peak(warm_peak) {
-        return Err(format!(
-            "MiniMax-H3 warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
-        ));
-    }
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "MiniMax-H3 warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
-             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
-        ));
-    }
-    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
-    if !minimax_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("MiniMax-H3 second warm repeat changed the deterministic output".to_owned());
-    }
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above), so
+    // there is no clean warm control to judge determinism against and no warm repeat to bound;
+    // the receipt says so (`warm_repeat` not_run, `quality.warmPasses: 0`) instead of writing
+    // zeros where `lifecycleClean*` / `lifecycleWarmRepeat*` used to be.
 
     // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
     // `negativeMutation` null, so the breach is verified here — the capture FAILS if the envelope
     // cannot be breached — and the measured numbers land in diagnostics rather than in the field.
+    // Against the measured clip itself: the mutation must breach the envelope the arm declares.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
     if minimax_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err(
             "MiniMax-H3 output mutation did not breach the determinism envelope".to_owned(),
         );
     }
 
-    let lifecycle_blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. The pinned provider does register begin_request, so they are implementable — ",
-        "they are not run here, and this record claims nothing about them"
+    let lifecycle_blocker = format!(
+        "this arm executes ONE measured render on the loaded provider and no warm pass ({}); it \
+         opens no memory-strategy request scope and injects no calibration fault, so the scoped \
+         cancellation and authorized-error scenarios and their recovery renders are unexecuted. \
+         The pinned provider does register begin_request, so they are implementable — they are \
+         not run here, and this record claims nothing about them",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
     );
+    let lifecycle_blocker = lifecycle_blocker.as_str();
     let mut fragment = json!({
         "status": "runtime_complete",
         "strategy": strategy,
@@ -18719,7 +18711,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed", "reason": "the registered MiniMax-H3 admission check rejected a zero/unknown budget before load" },
             { "name": "stale_evidence", "result": "passed", "reason": "the registered MiniMax-H3 admission check rejected a mutated calibration fingerprint before load" },
-            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
@@ -18732,17 +18724,10 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, tier, staged components and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": MINIMAX_MAX_THRESHOLD,
-            "meanErrorThreshold": MINIMAX_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": MINIMAX_RMS_THRESHOLD,
-        },
+        "quality": capture.not_run_quality(
+            "identical artifact, prompt, seed, geometry, frames, fps, steps, tier, staged components and loaded provider contract; the cold measured clip versus a warm repeat, compared over every frame",
+            (MINIMAX_MAX_THRESHOLD, MINIMAX_MEAN_THRESHOLD, MINIMAX_RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -18767,13 +18752,10 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
                 ("decodeCloseCache", "bytes", decode_close.cache),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("predictedOverallCeiling", "bytes", predicted),
-                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
-                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
-                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
-                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                // sc-22738: no `lifecycleClean*` / `lifecycleWarmRepeat*` figure — the warm
+                // passes were not run (`quality.warmPasses`), and an unmeasured figure is omitted,
+                // never written as 0.
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -19409,6 +19391,17 @@ fn bernini_output_frames(
 /// cut on the boundaries the shipped `generate` already emits.
 fn run_bernini(request: &Value) -> Result<Value, String> {
     let (arm, geometry) = bernini_target(request)?;
+    // The lane's render plan (sc-22738). This ONE arm serves both catalog members: the still
+    // `bernini_image` entry (frames == 1) is an IMAGE capture and keeps its clean warm control and
+    // warm repeat exactly as before; the video entry is ONE measured render. The branch below is
+    // the lane's — derived from the plan's frame count — never the member's.
+    let capture = protocol::capture_policy(request)?;
+    if (capture.lane == protocol::CaptureLane::Video) != (arm.frames > 1) {
+        return Err(format!(
+            "the {} member renders {} frame(s) but the plan's geometry puts it on the {:?} lane",
+            arm.model_id, arm.frames, capture.lane
+        ));
+    }
     protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let load_shape = planned_load_shape(request)?;
     let selection = planned_selection(request)?;
@@ -19642,82 +19635,241 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
     // generator to admit a synthetic reference-carrying budget here would price an admission
     // decision this request never triggers, and the receipt would carry it as though it did.
 
-    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
-    clear_cache();
-    reset_peak_memory();
-    let baseline = bernini_output_frames(
-        arm,
-        generator
-            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm Bernini control: {error}"))?,
-        fps,
-    )?;
-    let clean_warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let clean_post_cleanup = AllocatorState::capture_current();
-    let cleanup_bounds =
-        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
-    if !bernini_quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "Bernini warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
+    /// The image lane's two warm passes and what they measured (sc-22738): `Some` only when the
+    /// lane runs them. On the video lane there is no clean warm control to judge determinism
+    /// against and no warm repeat to bound, and the receipt says so (`warm_repeat` not_run,
+    /// `quality.warmPasses: 0`) instead of writing zeros where these figures would be.
+    struct BerniniWarmPasses {
+        baseline: Vec<Image>,
+        clean_warm_peak: u64,
+        clean_post_cleanup: AllocatorState,
+        cleanup_bounds: LifecycleMemoryBounds,
+        warm_peak: u64,
+        warm_post_cleanup: AllocatorState,
+        maximum_error: f64,
+        mean_error: f64,
+        rms_error: f64,
     }
-    reset_peak_memory();
-    let warm = bernini_output_frames(
-        arm,
-        generator
-            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm Bernini repeat: {error}"))?,
-        fps,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    if !cleanup_bounds.allows_warm_peak(warm_peak) {
-        return Err(format!(
-            "Bernini warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
-        ));
-    }
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "Bernini warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
-             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
-        ));
-    }
-    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
-    if !bernini_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("Bernini second warm repeat changed the deterministic output".to_owned());
-    }
+    let warm = if capture.warm_passes == 0 {
+        None
+    } else {
+        // Warm repeat determinism + cleanup bounds on this exact loaded provider.
+        clear_cache();
+        reset_peak_memory();
+        let baseline = bernini_output_frames(
+            arm,
+            generator
+                .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+                .map_err(|error| format!("generate warm Bernini control: {error}"))?,
+            fps,
+        )?;
+        let clean_warm_peak = get_peak_memory() as u64;
+        clear_cache();
+        let clean_post_cleanup = AllocatorState::capture_current();
+        let cleanup_bounds =
+            LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+        let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
+        if !bernini_quality_passes(maximum_error, mean_error, rms_error) {
+            return Err(format!(
+                "Bernini warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+                 mean={mean_error:.6}, rms={rms_error:.6}"
+            ));
+        }
+        reset_peak_memory();
+        let repeat = bernini_output_frames(
+            arm,
+            generator
+                .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+                .map_err(|error| format!("generate warm Bernini repeat: {error}"))?,
+            fps,
+        )?;
+        let warm_peak = get_peak_memory() as u64;
+        if !cleanup_bounds.allows_warm_peak(warm_peak) {
+            return Err(format!(
+                "Bernini warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+                 {clean_warm_peak} bytes plus 2%"
+            ));
+        }
+        clear_cache();
+        let warm_post_cleanup = AllocatorState::capture_current();
+        if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+            return Err(format!(
+                "Bernini warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+                 clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                cleanup_bounds.tolerance_bytes,
+            ));
+        }
+        let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &repeat)?;
+        if !bernini_quality_passes(warm_maximum, warm_mean, warm_rms) {
+            return Err("Bernini second warm repeat changed the deterministic output".to_owned());
+        }
+        Some(BerniniWarmPasses {
+            baseline,
+            clean_warm_peak,
+            clean_post_cleanup,
+            cleanup_bounds,
+            warm_peak,
+            warm_post_cleanup,
+            maximum_error,
+            mean_error,
+            rms_error,
+        })
+    };
 
     // Arm-internal negative-mutation falsifiability check: a runtime_complete record keeps
     // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    // Against the clean warm control where one was rendered, else against the measured output
+    // itself: either way the mutation must breach the envelope the arm declares.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    let mutation_reference = warm.as_ref().map_or(&measured, |warm| &warm.baseline);
+    let (mutated_maximum, mutated_mean, mutated_rms) =
+        video_max_mean_rms_abs(&mutated, mutation_reference)?;
     if bernini_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("Bernini output mutation did not breach the determinism envelope".to_owned());
     }
 
+    let renders_executed = match &warm {
+        Some(_) => {
+            "the measured render plus two unscoped warm repeats on the loaded provider".to_owned()
+        }
+        None => format!(
+            "ONE measured render on the loaded provider and no warm pass ({})",
+            protocol::VIDEO_WARM_PASSES_NOT_RUN
+        ),
+    };
     let lifecycle_blocker = format!(
         concat!(
-            "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-            "provider; it opens no memory-strategy request scope and injects no calibration ",
-            "fault, so the scoped cancellation and authorized-error scenarios and their recovery ",
-            "renders are unexecuted. The pinned provider does register begin_request, so they are ",
-            "implementable — they are not run here, and this record claims nothing about them. ",
+            "this arm executes {}; it opens no memory-strategy request scope and injects no ",
+            "calibration fault, so the scoped cancellation and authorized-error scenarios and ",
+            "their recovery renders are unexecuted. The pinned provider does register ",
+            "begin_request, so they are implementable — they are not run here, and this record ",
+            "claims nothing about them. ",
             // sc-22738: stated in the same breath as the lifecycle exclusion because it is the
             // same kind of claim — what this record deliberately does NOT say.
             "Additionally: {}"
         ),
-        BERNINI_ADMISSION_BLOCKER
+        renders_executed, BERNINI_ADMISSION_BLOCKER
     );
     let lifecycle_blocker = lifecycle_blocker.as_str();
+    const BERNINI_QUALITY_CONTRACT: &str = "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame";
+    let warm_repeat_scenario = match &warm {
+        Some(_) => {
+            json!({ "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" })
+        }
+        None => capture.not_run_warm_repeat_scenario()?,
+    };
+    let quality = match &warm {
+        Some(warm) => json!({
+            "contract": BERNINI_QUALITY_CONTRACT,
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": warm.maximum_error,
+            "meanError": warm.mean_error,
+            "rootMeanSquareError": warm.rms_error,
+            "maximumErrorThreshold": BERNINI_MAX_THRESHOLD,
+            "meanErrorThreshold": BERNINI_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": BERNINI_RMS_THRESHOLD,
+        }),
+        None => capture.not_run_quality(
+            BERNINI_QUALITY_CONTRACT,
+            (
+                BERNINI_MAX_THRESHOLD,
+                BERNINI_MEAN_THRESHOLD,
+                BERNINI_RMS_THRESHOLD,
+            ),
+        )?,
+    };
+    let mut measurements = vec![
+        ("preRungActiveAfterClear", "bytes", pre_rung_active),
+        ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+        ("preGenerateActivePeak", "bytes", pre_generate.active),
+        ("conditioningActivePeak", "bytes", conditioning.active),
+        (
+            "conditioningCloseActive",
+            "bytes",
+            conditioning_close.active,
+        ),
+        ("conditioningCloseCache", "bytes", conditioning_close.cache),
+        ("denoiseActivePeak", "bytes", denoise.active),
+        ("denoiseCloseActive", "bytes", denoise_close.active),
+        ("denoiseCloseCache", "bytes", denoise_close.cache),
+        ("decodeActivePeak", "bytes", decode.active),
+        ("decodeCloseActive", "bytes", decode_close.active),
+        ("decodeCloseCache", "bytes", decode_close.cache),
+        (
+            "overallAllocatorEnvelope",
+            "bytes",
+            overall.allocator_bytes(),
+        ),
+        ("predictedOverallCeiling", "bytes", predicted),
+        ("warmPasses", "count", u64::from(capture.warm_passes)),
+    ];
+    // sc-22738: on the video lane no `lifecycleClean*` / `lifecycleWarmRepeat*` figure is emitted —
+    // the warm passes were not run (`quality.warmPasses`), and an unmeasured figure is omitted,
+    // never written as 0.
+    if let Some(warm) = &warm {
+        measurements.extend([
+            ("lifecycleCleanWarmPeak", "bytes", warm.clean_warm_peak),
+            (
+                "lifecycleCleanPostCleanupActive",
+                "bytes",
+                warm.clean_post_cleanup.active,
+            ),
+            (
+                "lifecycleCleanPostCleanupCache",
+                "bytes",
+                warm.clean_post_cleanup.cache,
+            ),
+            (
+                "lifecycleCleanupTolerance",
+                "bytes",
+                warm.cleanup_bounds.tolerance_bytes,
+            ),
+            ("lifecycleWarmRepeatPeak", "bytes", warm.warm_peak),
+            (
+                "lifecycleWarmRepeatPostCleanupActive",
+                "bytes",
+                warm.warm_post_cleanup.active,
+            ),
+            (
+                "lifecycleWarmRepeatPostCleanupCache",
+                "bytes",
+                warm.warm_post_cleanup.cache,
+            ),
+        ]);
+    }
+    measurements.extend([
+        (
+            "negativeMutationMaximumErrorPer255",
+            "count",
+            (mutated_maximum * 255.0).round() as u64,
+        ),
+        (
+            "negativeMutationMeanErrorPer255",
+            "count",
+            (mutated_mean * 255.0).round() as u64,
+        ),
+        (
+            "negativeMutationRootMeanSquareErrorPer255",
+            "count",
+            (mutated_rms * 255.0).round() as u64,
+        ),
+        (
+            "loadShapeDeferred",
+            "count",
+            u64::from(load_shape == LoadShape::DeferredMaterialization),
+        ),
+        ("stagedTierBytes", "bytes", staged_tier_bytes),
+        // sc-22738: the render receipts, published as measurements rather than as a top-level
+        // `output` object the record schema rejects. The member this record is filed under is
+        // `target.modelId`, so the dropped `output.modelId` is not lost.
+        ("renderedFrames", "count", u64::from(expected_frames)),
+        ("requestedFrames", "count", u64::from(geometry.frames)),
+        ("outputFps", "count", u64::from(fps)),
+    ]);
     // GATED, not `runtime_complete` (sc-22738). Runtime activation is exactly the claim that the
     // provider's admission gate accepted an exact-fit budget and rejected the two mutations, and
     // this capture asked it nothing — because production asks it nothing for this request. The
@@ -19739,7 +19891,7 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
             { "name": "unknown_budget", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
             { "name": "stale_evidence", "result": "not_run", "reason": BERNINI_ADMISSION_BLOCKER },
-            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            warm_repeat_scenario,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
@@ -19752,17 +19904,7 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": BERNINI_MAX_THRESHOLD,
-            "meanErrorThreshold": BERNINI_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": BERNINI_RMS_THRESHOLD,
-        },
+        "quality": quality,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -19772,40 +19914,7 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             "memory-mlx-adapter:bernini-dual-expert",
             "executed",
             [lifecycle_blocker.to_owned()],
-            [
-                ("preRungActiveAfterClear", "bytes", pre_rung_active),
-                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
-                ("preGenerateActivePeak", "bytes", pre_generate.active),
-                ("conditioningActivePeak", "bytes", conditioning.active),
-                ("conditioningCloseActive", "bytes", conditioning_close.active),
-                ("conditioningCloseCache", "bytes", conditioning_close.cache),
-                ("denoiseActivePeak", "bytes", denoise.active),
-                ("denoiseCloseActive", "bytes", denoise_close.active),
-                ("denoiseCloseCache", "bytes", denoise_close.cache),
-                ("decodeActivePeak", "bytes", decode.active),
-                ("decodeCloseActive", "bytes", decode_close.active),
-                ("decodeCloseCache", "bytes", decode_close.cache),
-                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
-                ("predictedOverallCeiling", "bytes", predicted),
-                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
-                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
-                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
-                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
-                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
-                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
-                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
-                ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
-                ("stagedTierBytes", "bytes", staged_tier_bytes),
-                // sc-22738: the render receipts, published as measurements rather than as a
-                // top-level `output` object the record schema rejects. The member this record is
-                // filed under is `target.modelId`, so the dropped `output.modelId` is not lost.
-                ("renderedFrames", "count", u64::from(expected_frames)),
-                ("requestedFrames", "count", u64::from(geometry.frames)),
-                ("outputFps", "count", u64::from(fps)),
-            ],
+            measurements,
         ),
         "capturedAt": protocol::captured_at(),
     });
@@ -21697,6 +21806,8 @@ fn krea_realtime_complete_sweep(request: &Value) -> Result<Value, String> {
 /// decides which rungs are capturable, and this provider registers a resident-only witness.
 fn run_krea_realtime(request: &Value) -> Result<Value, String> {
     let geometry = validate_krea_realtime_target(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(KREA_REALTIME_LABEL)?;
     let surface = krea_realtime_target_surface(request)?;
     protocol::validate_plain_overlay_target(request, KREA_REALTIME_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
@@ -21943,62 +22054,19 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
     // t2v surface by name, so an answer here would characterize a decision production never takes.
     // See [`KREA_REALTIME_ADMISSION_BLOCKER`].
 
-    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
-    clear_cache();
-    reset_peak_memory();
-    let (baseline, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&krea_realtime_request(geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm Krea Realtime control: {error}"))?,
-        KREA_REALTIME_VIDEO_LABEL,
-    )?;
-    let clean_warm_peak = get_peak_memory() as u64;
-    clear_cache();
-    let clean_post_cleanup = AllocatorState::capture_current();
-    let cleanup_bounds =
-        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
-    if !krea_realtime_quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "Krea Realtime warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
-    }
-    reset_peak_memory();
-    let (warm, _, _) = diagnostic_video_frames(
-        generator
-            .generate(&krea_realtime_request(geometry, fps, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm Krea Realtime repeat: {error}"))?,
-        KREA_REALTIME_VIDEO_LABEL,
-    )?;
-    let warm_peak = get_peak_memory() as u64;
-    if !cleanup_bounds.allows_warm_peak(warm_peak) {
-        return Err(format!(
-            "Krea Realtime warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
-        ));
-    }
-    clear_cache();
-    let warm_post_cleanup = AllocatorState::capture_current();
-    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
-        return Err(format!(
-            "Krea Realtime warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
-             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
-        ));
-    }
-    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
-    if !krea_realtime_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("Krea Realtime second warm repeat changed the deterministic output".to_owned());
-    }
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above), so
+    // there is no clean warm control to judge determinism against and no warm repeat to bound;
+    // the receipt says so (`warm_repeat` not_run, `quality.warmPasses: 0`) instead of writing
+    // zeros where `lifecycleClean*` / `lifecycleWarmRepeat*` used to be.
 
     // Arm-internal negative-mutation falsifiability check: the capture FAILS if the envelope cannot
-    // be breached, and the measured numbers land in diagnostics rather than in the field.
+    // be breached, and the measured numbers land in diagnostics rather than in the field. Against
+    // the measured clip itself: the mutation must breach the envelope the arm declares.
     let mutated = measured
         .iter()
         .map(qwen_negative_mutation)
         .collect::<Vec<_>>();
-    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
     if krea_realtime_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err(
             "Krea Realtime output mutation did not breach the determinism envelope".to_owned(),
@@ -22007,14 +22075,15 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
 
     let lifecycle_blocker = format!(
         concat!(
-            "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-            "provider; it opens no memory-strategy request scope and injects no calibration ",
-            "fault, so the scoped cancellation and authorized-error scenarios and their recovery ",
-            "renders are unexecuted. This record claims nothing about them. ",
+            "this arm executes ONE measured render on the loaded provider and no warm pass ({}); ",
+            "it opens no memory-strategy request scope and injects no calibration fault, so the ",
+            "scoped cancellation and authorized-error scenarios and their recovery renders are ",
+            "unexecuted. This record claims nothing about them. ",
             // sc-22738: stated in the same breath as the lifecycle exclusion because it is the
             // same kind of claim — what this record deliberately does NOT say.
             "Additionally: {}"
         ),
+        protocol::VIDEO_WARM_PASSES_NOT_RUN,
         KREA_REALTIME_ADMISSION_BLOCKER,
     );
     let lifecycle_blocker = lifecycle_blocker.as_str();
@@ -22040,7 +22109,7 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
             { "name": "unknown_budget", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
             { "name": "stale_evidence", "result": "not_run", "reason": KREA_REALTIME_ADMISSION_BLOCKER },
-            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
@@ -22053,17 +22122,10 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, tier and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": KREA_REALTIME_MAX_THRESHOLD,
-            "meanErrorThreshold": KREA_REALTIME_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": KREA_REALTIME_RMS_THRESHOLD,
-        },
+        "quality": capture.not_run_quality(
+            "identical artifact, prompt, seed, geometry, frames, fps, steps, tier and loaded provider contract; the cold measured clip versus a warm repeat, compared over every frame",
+            (KREA_REALTIME_MAX_THRESHOLD, KREA_REALTIME_MEAN_THRESHOLD, KREA_REALTIME_RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -22088,13 +22150,10 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
                 ("decodeCloseCache", "bytes", decode_close.cache),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("predictedOverallCeiling", "bytes", predicted),
-                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
-                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
-                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
-                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
-                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                // sc-22738: no `lifecycleClean*` / `lifecycleWarmRepeat*` figure — the warm
+                // passes were not run (`quality.warmPasses`), and an unmeasured figure is omitted,
+                // never written as 0.
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -28685,8 +28744,8 @@ mod ltx_tests {
         );
         let post_load = &body[load_at..];
         let lifecycle = &post_load[..post_load
-            .find("let maximum_error = lifecycle.maximum_error;")
-            .expect("the lifecycle match precedes the quality figures")];
+            .find("// Runtime-complete keeps the schema's unexecuted mutation slot null.")
+            .expect("the lifecycle match precedes the falsifiability mutation")];
         let ordinary = &lifecycle[lifecycle
             .rfind("LtxRunAdmission::Ordinary =>")
             .expect("the lifecycle match has an Ordinary arm")..];
@@ -28694,9 +28753,24 @@ mod ltx_tests {
             !ordinary.contains("Err(") && !ordinary.contains("return"),
             "the Ordinary lifecycle arm refuses or exits: {ordinary}"
         );
+        // sc-22738: the ordinary capture is ONE measured render on the video lane. Its lifecycle
+        // arm renders nothing — no clean warm control, no fault, no recovery — and files the
+        // `not_run` receipt instead; only the SC-20318 campaign entries execute a lifecycle.
         assert!(
-            ordinary.contains("verify_ltx_lifecycle("),
-            "the Ordinary lifecycle arm must execute the runtime-complete lifecycle"
+            !ordinary.contains("verify_ltx_lifecycle(")
+                && !ordinary.contains("verify_ltx_bounded_warm_repeat("),
+            "the Ordinary lifecycle arm must not render a warm pass: {ordinary}"
+        );
+        assert!(
+            ordinary.contains("(None, None)"),
+            "the Ordinary lifecycle arm files no lifecycle metrics: {ordinary}"
+        );
+        let campaign = &lifecycle[lifecycle
+            .find("LtxRunAdmission::CampaignEntry =>")
+            .expect("the lifecycle match has a CampaignEntry arm")..];
+        assert!(
+            campaign.contains("verify_ltx_lifecycle("),
+            "the campaign entry keeps its runtime-complete lifecycle proof"
         );
     }
 
@@ -33208,5 +33282,158 @@ mod exceeded_bound_tests {
         assert_eq!(bound.observed_footprint_bytes, 97_147_294_328);
         assert_eq!(bound.host_memory_bytes, 137_438_953_472);
         assert!(bound.observed_footprint_bytes >= bound.ceiling_bytes);
+    }
+}
+
+/// sc-22738 (2026-09-08): a video capture is ONE measured render; the image lane keeps its two
+/// warm passes. The lane is the PLAN's — derived from the row's frame count, exactly as
+/// `measure-memory-catalog.mjs` derives the budget lane — never a per-model choice, and every
+/// changed arm reads it through `protocol::capture_policy` before it renders.
+#[cfg(test)]
+mod single_render_video_lane_tests {
+    use super::*;
+
+    /// The catalog plan, one request per MLX row, in the shape every arm reads (`planned.target`).
+    fn planned_mlx_rows() -> Vec<(String, Value, Value)> {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        plan["anchors"]
+            .as_object()
+            .expect("anchors is an object")
+            .iter()
+            .filter(|(key, _)| key.ends_with(":mlx"))
+            .map(|(key, row)| {
+                let parts: Vec<&str> = key.split(':').collect();
+                let request = json!({
+                    "planned": {
+                        "target": {
+                            "provider": row["provider"],
+                            "modelId": parts[0],
+                            "tier": parts[1],
+                            "mode": row["mode"],
+                            "overlay": row["overlay"],
+                            "geometry": row["geometry"],
+                        },
+                    }
+                });
+                (key.clone(), row.clone(), request)
+            })
+            .collect()
+    }
+
+    /// Every changed arm, by the provider id its plan rows carry, and the video members each one
+    /// captures. The still `bernini_image` member is served by the SAME `run_bernini` and is the
+    /// one row that proves the branch is the lane's and not the arm's.
+    const SINGLE_RENDER_VIDEO_ARMS: [(&str, &str); 8] = [
+        ("run_ltx_with_admission (Ordinary)", LTX_PROVIDER),
+        ("run_minimax_h3", MINIMAX_PROVIDER),
+        ("run_bernini (video member)", BERNINI_PROVIDER),
+        ("run_krea_realtime", KREA_REALTIME_PROVIDER),
+        ("mlx_ltx25::run", "ltx_2_5"),
+        ("mlx_wan_scail2::run (ti2v 5b)", "wan2_2_ti2v_5b"),
+        ("mlx_wan_scail2::run (t2v a14b)", "wan2_2_t2v_14b"),
+        ("mlx_wan_scail2::run (scail2)", "scail2_14b"),
+    ];
+
+    /// Per changed arm: every planned video row resolves to exactly ONE `generate` (no warm pass),
+    /// and every planned image row — the still Bernini member included — to THREE. Mutations that
+    /// fail this: restoring the warm passes on the video lane (`VIDEO_WARM_PASSES = 2`), deriving
+    /// the lane from the provider instead of the frame count, or dropping the image lane's two.
+    #[test]
+    fn every_changed_video_arm_captures_one_render_and_the_image_lane_keeps_three() {
+        let rows = planned_mlx_rows();
+        for (arm, provider) in SINGLE_RENDER_VIDEO_ARMS {
+            let video_rows: Vec<_> = rows
+                .iter()
+                .filter(|(_, row, _)| {
+                    row["provider"] == provider && row["geometry"]["frames"].as_u64() > Some(1)
+                })
+                .collect();
+            assert!(
+                !video_rows.is_empty(),
+                "{arm}: no planned video row for {provider}"
+            );
+            for (key, _, request) in video_rows {
+                let policy = protocol::capture_policy(request)
+                    .unwrap_or_else(|error| panic!("{key}: {error}"));
+                assert_eq!(policy.lane, protocol::CaptureLane::Video, "{arm}: {key}");
+                assert_eq!(policy.warm_passes, 0, "{arm}: {key} must run no warm pass");
+                assert_eq!(policy.renders(), 1, "{arm}: {key} is one measured render");
+                assert!(policy.require_video(arm).is_ok(), "{arm}: {key}");
+                let scenario = policy.not_run_warm_repeat_scenario().unwrap();
+                assert_eq!(scenario["result"], "not_run", "{arm}: {key}");
+                let quality = policy.not_run_quality("c", (1.0, 1.0, 1.0)).unwrap();
+                assert_eq!(
+                    (quality["warmPasses"].as_u64(), quality["result"].as_str()),
+                    (Some(0), Some("not_run")),
+                    "{arm}: {key}"
+                );
+            }
+        }
+        // The image lane, unchanged: three renders, and no `not_run` receipt may be filed for it.
+        let mut image_rows = 0;
+        let mut still_bernini = 0;
+        for (key, row, request) in &rows {
+            if row["geometry"]["frames"].as_u64() != Some(1) {
+                continue;
+            }
+            image_rows += 1;
+            let policy =
+                protocol::capture_policy(request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(policy.lane, protocol::CaptureLane::Image, "{key}");
+            assert_eq!(
+                policy.renders(),
+                3,
+                "{key}: an image capture is measured + two warm passes"
+            );
+            assert!(
+                policy.not_run_quality("c", (1.0, 1.0, 1.0)).is_err(),
+                "{key}"
+            );
+            assert!(policy.require_video("image arm").is_err(), "{key}");
+            if row["provider"] == BERNINI_PROVIDER {
+                still_bernini += 1;
+                assert_eq!(key.split(':').next(), Some(BERNINI_IMAGE_MODEL_ID), "{key}");
+            }
+        }
+        assert!(
+            image_rows > 100,
+            "{image_rows} image rows: the plan changed shape"
+        );
+        assert_eq!(
+            still_bernini,
+            BERNINI_TIERS.len(),
+            "one still Bernini row per tier keeps three renders"
+        );
+    }
+
+    /// The Bernini arm's lane is the plan's frame count checked against the member it names: the
+    /// still member on one frame is the image lane (three renders), the video member is one.
+    #[test]
+    fn the_bernini_lane_check_is_the_plans_frame_count_against_the_members() {
+        for arm in BERNINI_ARMS {
+            let policy = protocol::capture_policy(&json!({
+                "planned": {
+                    "target": {
+                        "geometry": { "width": 848, "height": 480, "batch": 1, "frames": arm.frames }
+                    }
+                }
+            }))
+            .unwrap();
+            assert_eq!(
+                policy.lane == protocol::CaptureLane::Video,
+                arm.frames > 1,
+                "{}",
+                arm.model_id
+            );
+            assert_eq!(
+                policy.renders(),
+                if arm.frames > 1 { 1 } else { 3 },
+                "{}",
+                arm.model_id
+            );
+        }
     }
 }
