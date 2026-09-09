@@ -776,6 +776,51 @@
       "overallAllocatorEnvelopeBytes": 66623825544
     },
     {
+      "id": "flux_dev:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-302fb0e31ed545f30400",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-q4-candle-evidence.json",
+        "sha256": "fe2c21f61f2fc2e9122e2c7a4c17289322d28ba708525c7c3a03bb1e99da1516",
+        "recordId": "imc-302fb0e31ed545f30400",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "a1fea0f76ceef1c1f354462ca7491e32ef15baa20dd2d49db643405285b353ad"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3962568704,
+        "denoise": 10874781696,
+        "decode": 20540555264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3962568704,
+        "denoise": 10874781696,
+        "decode": 20540555264
+      },
+      "overallAllocatorEnvelopeBytes": 20540555264
+    },
+    {
       "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
       "modelId": "flux_dev",
       "modelFamily": "flux",
@@ -6502,27 +6547,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:flux_dev:candle:q4",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-674e1b40640dbf345cce",
-        "envelopeBytes": 17651074970,
-        "values": {
-          "provider": "flux1_dev"
-        }
-      }
     },
     {
       "id": "analytic:flux_dev:candle:q8",
