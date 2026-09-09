@@ -1663,16 +1663,32 @@ reaps a step's direct children.
 `scripts/ci/memory-catalog/gpu-preflight.sh` now runs between *Build the candle memory adapter* and
 *Plan the walk*:
 
-1. `nvidia-smi -i $CUDA_VISIBLE_DEVICES --query-compute-apps=pid,process_name,used_memory
-   --format=csv,noheader`;
+1. censuses by **process type**: `nvidia-smi pmon -i $CUDA_VISIBLE_DEVICES -c 1 -s um` for the
+   `C` / `C+G` / `G` column, joined by pid to `nvidia-smi -i $CUDA_VISIBLE_DEVICES
+   --query-compute-apps=pid,process_name,used_memory --format=csv,noheader` for the full process
+   path and memory that `pmon` truncates. The whole census — graphics rows included — is printed;
 2. terminates anything matching `*memory-candle-adapter*` / `*memory-mlx-adapter*` — **ours, by
    name**. Never an arbitrary pid: this box also serves `windows-candle.yml` and
    `desktop-windows.yml`;
 3. censuses again, and **fails the job** with `::error title=Profiled GPU is not idle` naming the
-   pid, the process and its memory if anything is left. Find out whose it is before killing it.
+   pid, the process and its memory if a **pure-compute (`C`)** row is left. Find out whose it is
+   before killing it.
 
-No `nvidia-smi` on PATH is a warning, not a failure — the engine's stable-idle guard still refuses a
-contaminated peak per anchor; this step is the cheap way to find out early. **The guard itself is
+**Type, not presence (the run-34297841666 false positive).** The first spelling of this step
+censused with `--query-compute-apps` alone, which on Windows WDDM returns every process holding a
+device context. It refused twenty desktop graphics contexts — `explorer.exe`,
+`WindowsTerminal.exe`, `StartMenuExperienceHost.exe`, three pids reading `[Insufficient
+Permissions]`, all with `[N/A]` memory — on a host where the engine's own guard had flagged exactly
+one pid. The engine discriminates by type: `candle-gen/src/testkit.rs::pure_compute_pids` counts
+`C` and explicitly passes over `C+G` and `G` because *"WDDM desktop processes are reported as C+G
+even with zero SM/memory activity"*. This step asks the same question with the same command, so a
+preflight refusal and an engine refusal cannot disagree. An unreadable process name is classified by
+its type like any other row; an *unrecognised* type is warned about, never refused.
+
+No `nvidia-smi` on PATH is a warning, not a failure — and so is an `nvidia-smi` whose `pmon` will
+not run, because without the type column every desktop context reads as compute again. The engine's
+stable-idle guard still refuses a contaminated peak per anchor; this step is the cheap way to find
+out early. **The guard itself is
 untouched.** It is measurement validity — a peak sampled beside a foreign process is not this
 model's peak — not a gate on anything shipping (see FEATURE_DEVELOPMENT.md, *Gate teardown*).
 
