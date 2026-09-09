@@ -28,6 +28,7 @@ import {
   anchorParts,
   anchorSlug,
   appendPackagedSource,
+  rustfmtMaxWidth,
   writePackagedSource,
   RUSTFMT_EDITION,
   capturedInCampaign,
@@ -1356,7 +1357,7 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, current: new Map([["z_image_turbo:q4:candle", true]]),
   });
   assert.equal(current.status, "runnable");
-  assert.equal(current.current, true, "currency is reported; only --skip-current acts on it");
+  assert.equal(current.current, true, "currency is reported here; planRun's settle turns it into a status");
   const undeclared = await classifyAnchor("z_image_turbo:q4:candle", { provider: "z_image_turbo" }, {
     ...base, declaredLanes: new Set(["qwen_image:candle"]),
   });
@@ -1485,33 +1486,71 @@ async function packagedSourceFixture() {
   return { root, source, file: path.join(root, PACKAGED_SOURCES_PATH) };
 }
 
-// sc-22738: the one-line tuple the append writes fits `max_width` only while the corpus name is
-// short. `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so
-// the runner committed a tree whose `cargo fmt --check` reds the `parity-rust` lane — after the
-// push. Every shorter name in the campaign happened to fit, which is why it surfaced this late.
-test("packaging a long-named corpus leaves memory_anchor.rs rustfmt-clean", async () => {
+// sc-22738: a one-line tuple fits `max_width` only while the corpus name is short.
+// `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so a
+// runner that wrote it flat committed a tree whose `cargo fmt --check` reds the `parity-rust` lane
+// — after the push. Every shorter name in the campaign happened to fit, which is why it surfaced
+// this late.
+//
+// The width rule was first delegated to the `rustfmt` pass that follows the append. That stopped
+// working on THIS branch: past ~128 entries rustfmt bails out of the over-large
+// PACKAGED_MEMORY_ANCHOR_SOURCES item and copies it through verbatim, so it no longer wraps, no
+// longer enforces indentation inside the array, and calls the file clean either way — the campaign
+// appended fifteen over-width tuples that `cargo fmt --check` happily passed. So the appender owns
+// the rule now, and this test asks it of `appendPackagedSource` directly rather than of rustfmt,
+// which can no longer be relied on to answer.
+test("packaging a long-named corpus writes the wrapped tuple, without asking rustfmt", async () => {
   const { root, source, file } = await packagedSourceFixture();
   const relative = "docs/calibration/sc-99999/flux2-dev-bf16-mlx-exceeded-evidence.json";
   assert.ok(
     `        include_str!("../../../${relative}"),`.length > 100,
     "the fixture path must be long enough to exceed max_width on one line",
   );
+  const wrapped = ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n");
   assert.equal(await writePackagedSource(root, relative), true);
-  // The gate itself, not a re-implementation of its width rule.
-  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
   const written = await readFile(file, "utf8");
+  assert.ok(written.includes(wrapped), "the argument is on its own line");
+  assert.ok(!written.includes(`include_str!("../../../${relative}"),`), "and not also flat");
+  // Still clean under the real gate — the property the lane cares about.
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+  // The rule is the appender's, so it holds with no rustfmt pass at all...
+  assert.ok(appendPackagedSource(source, relative, 100).includes(wrapped));
+  // ...and it is read from the config rather than hard-coded: a wider `max_width` keeps it flat.
   assert.ok(
-    written.includes(
-      ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n"),
-    ),
-    "rustfmt wrapped the argument onto its own line",
+    appendPackagedSource(source, relative, 120).includes(`        include_str!("../../../${relative}"),`),
+    "the width rule is applied against the declared max_width, not a second literal",
   );
-  // The mutation this guards: the append's own output — the format step skipped — is what red the
-  // lane, so `rustfmt --check` must reject it.
-  await writeFile(file, appendPackagedSource(source, relative));
+  assert.equal(rustfmtMaxWidth('edition = "2021"\nmax_width = 120\n'), 120);
+  assert.equal(rustfmtMaxWidth("edition = \"2021\"\n"), 100, "rustfmt's own default when unset");
+  assert.equal(
+    rustfmtMaxWidth(await readFile(path.join(ROOT, "rustfmt.toml"), "utf8")),
+    100,
+    "the checked-in config is what the runner writes against",
+  );
+  // The mutation this guards: the flat append is what red the lane. rustfmt no longer rejects it —
+  // that is the whole reason the rule moved — so the assertion is on the width itself.
+  const flat = appendPackagedSource(source, relative, Number.MAX_SAFE_INTEGER);
+  const overWide = flat.split("\n").filter((line) => line.includes(relative) && line.length > 100);
+  assert.equal(overWide.length, 1, "an appender that skips the width rule emits an over-wide line");
+  await writeFile(file, flat);
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+});
+
+// The bail-out above, asserted directly, so the day rustfmt regains the item this test says so and
+// the appender's rule can go back to being rustfmt's. Mangled indentation INSIDE the array is not
+// reported; the same mangling elsewhere in the file still is.
+test("rustfmt has bailed out of the packaged-sources array, and still formats the rest of the file", async () => {
+  const { file } = await packagedSourceFixture();
+  const source = await readFile(file, "utf8");
+  const inside = source.match(/^ {8}include_str!\("\.\.\/\.\.\/\.\.\/[^"]+"\),$/m)?.[0];
+  assert.ok(inside, "the array carries at least one flat tuple to mangle");
+  await writeFile(file, source.replace(inside, `  ${inside}`));
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+
+  await writeFile(file, source.replace("pub struct", "pub    struct"));
   await assert.rejects(
     execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]),
-    "an unformatted append must not pass the parity lane's check",
+    "rustfmt is reached by the file, just not by the over-large const",
   );
 });
 
@@ -1702,6 +1741,49 @@ test("the committed exceeded bound keeps its own cell out of the runnable set of
       "no cell with a current bound is scheduled for a capture",
     );
   }
+});
+
+// sc-22738: currency is a FACT about the cell — its packaged anchor was minted under the loader
+// closure the pin loads — not a property of one invocation's schedule, so `--list` states it with
+// or without `--skip-current`. The campaign's final unfiltered MLX listing reported
+// z_image_turbo:q4:mlx `runnable`, which reads as a residue row an operator still owes a capture
+// for, while every campaign run — all of which pass `--skip-current` — correctly skipped it as
+// current. The RUN path is deliberately unchanged: omitting `--skip-current` still schedules a
+// current cell, because forcing a re-measurement is exactly what omitting the flag means.
+test("--list reports a current anchor as `current` whether or not --skip-current is passed", async () => {
+  const opts = { backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], models: [] };
+  const listed = (await planRun({ ...opts, list: true, skipCurrent: false })).rows;
+  const listedSkipping = (await planRun({ ...opts, list: true, skipCurrent: true })).rows;
+  const scheduled = (await planRun({ ...opts, list: false, skipCurrent: false })).rows;
+
+  // The two listings agree cell for cell: the flag changes what a RUN does, never what a listing says.
+  assert.deepEqual(
+    listed.map((row) => `${row.key}=${row.status}`),
+    listedSkipping.map((row) => `${row.key}=${row.status}`),
+    "a listing's statuses do not depend on --skip-current",
+  );
+
+  const scheduledByKey = new Map(scheduled.map((row) => [row.key, row]));
+  let promoted = 0;
+  for (const row of listed) {
+    const runRow = scheduledByKey.get(row.key);
+    assert.ok(runRow, `${row.key}: the run path classifies the same cells`);
+    if (row.status !== "current") {
+      assert.equal(runRow.status, row.status, `${row.key}: only a current cell reads differently in a listing`);
+      continue;
+    }
+    promoted += 1;
+    assert.equal(row.current, true, `${row.key}: promoted only on the currency the classifier reported`);
+    assert.match(row.reason, /current at the pinned inference revision/);
+    assert.match(row.reason, /--skip-current would not schedule it/);
+    assert.equal(runRow.status, "runnable", `${row.key}: a run without --skip-current still captures it`);
+    assert.equal(scheduledByKey.get(row.key).current, true);
+  }
+  assert.ok(
+    promoted > 0,
+    "the shipped catalog carries at least one MLX anchor that is current and not captured in this campaign; "
+      + "if a later campaign captures the last one, re-point this test at whatever cell then holds that shape",
+  );
 });
 
 test("every provider the committed plan declares is either served by a family row or refused by name", async () => {

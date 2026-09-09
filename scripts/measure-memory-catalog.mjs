@@ -2354,8 +2354,40 @@ export async function fetchAnchorSnapshots(row, models, {
   return { fetched, failed: null, unfetchable };
 }
 
+/**
+ * `max_width` from a checkout's `rustfmt.toml`, or the rustfmt default when it declares none.
+ *
+ * Read rather than hard-coded so [`packagedSourceEntry`] keeps writing whatever the checked-in
+ * config says, which is the property the deleted "let rustfmt decide" comment was protecting.
+ */
+export function rustfmtMaxWidth(config) {
+  const declared = /^\s*max_width\s*=\s*(\d+)\s*$/m.exec(config ?? "");
+  return declared ? Number(declared[1]) : 100;
+}
+
+/**
+ * One `PACKAGED_MEMORY_ANCHOR_SOURCES` tuple, in the shape rustfmt would give it.
+ *
+ * The width rule lives HERE rather than in the `rustfmt` pass that follows the append (sc-22738).
+ * It used to be delegated: the appender wrote the `include_str!` on one line and `formatRustSource`
+ * wrapped it if `max_width` demanded. That delegation silently stopped working when this campaign
+ * pushed the array past 128 entries — rustfmt bails out of an over-large item and copies it through
+ * verbatim, so it stopped wrapping, stopped enforcing indentation inside the array, and reported
+ * the file clean either way. `cargo fmt --check` stayed green because rustfmt accepts what it
+ * declines to touch, so nothing red; the array simply drifted into two shapes at once, and the
+ * canary was this file's own "long-named corpus" test. rustfmt is still run afterwards — it formats
+ * the rest of the file — but the tuple's shape no longer depends on rustfmt reaching it.
+ */
+export function packagedSourceEntry(relativePath, maxWidth = 100) {
+  const oneLine = `        include_str!("../../../${relativePath}"),`;
+  const macro = oneLine.length <= maxWidth
+    ? [oneLine]
+    : ["        include_str!(", `            "../../../${relativePath}"`, "        ),"];
+  return ["    (", `        "${relativePath}",`, ...macro, "    ),"].join("\n");
+}
+
 /** Append one evidence corpus to the Rust loader's compiled-in list, idempotently. */
-export function appendPackagedSource(source, relativePath) {
+export function appendPackagedSource(source, relativePath, maxWidth = 100) {
   const start = source.indexOf("PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[");
   if (start === -1) fail(`${PACKAGED_SOURCES_PATH} no longer declares PACKAGED_MEMORY_ANCHOR_SOURCES`);
   const end = source.indexOf("\n];", start);
@@ -2368,12 +2400,7 @@ export function appendPackagedSource(source, relativePath) {
   // the very corpus it was about to package.
   const block = source.slice(start, end);
   if (block.includes(`"${relativePath}"`)) return source;
-  const entry = [
-    "    (",
-    `        "${relativePath}",`,
-    `        include_str!("../../../${relativePath}"),`,
-    "    ),",
-  ].join("\n");
+  const entry = packagedSourceEntry(relativePath, maxWidth);
   // IN SORTED POSITION, not at the end (sc-22738). `memory_anchor.rs` asserts the compiled-in list
   // stays sorted, and appending blindly only happened to hold while every new corpus landed under
   // `docs/generated/`. This campaign's corpora live under `docs/calibration/sc-22738/`, which sorts
@@ -2418,21 +2445,24 @@ export async function formatRustSource(file) {
 /**
  * Package `relativePath` into [`PACKAGED_SOURCES_PATH`] and leave the file rustfmt-stable.
  *
- * The append writes the tuple on one line (sc-22738), which fits `max_width = 100` only while the
- * corpus name is short: `docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json` makes
- * the `include_str!` line 101 columns and rustfmt wants it wrapped, so the runner's own commit red
- * the `parity-rust` lane's `cargo fmt --check` — on a tree it had already pushed. Earlier commits
- * passed only because their names happened to be a few characters shorter.
+ * A one-line tuple fits `max_width = 100` only while the corpus name is short:
+ * `docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!`
+ * line 101 columns and must be wrapped, so a runner that wrote it flat red the `parity-rust` lane's
+ * `cargo fmt --check` — on a tree it had already pushed. Earlier commits passed only because their
+ * names happened to be a few characters shorter.
  *
- * The width rule is therefore not re-implemented here: rustfmt itself is run over the written file,
- * so whatever the checked-in `rustfmt.toml` says — now or after a config change — is what lands.
+ * [`packagedSourceEntry`] applies that width rule against the `max_width` this checkout's
+ * `rustfmt.toml` declares, so a config change still lands, and the shape no longer depends on
+ * rustfmt reaching an array it now bails out of. rustfmt is still run over the written file, for
+ * everything else in it.
  *
  * Returns whether the file changed; a corpus already packaged rewrites (and reformats) nothing.
  */
 export async function writePackagedSource(root, relativePath) {
   const file = path.join(root, PACKAGED_SOURCES_PATH);
   const source = await readFile(file, "utf8");
-  const appended = appendPackagedSource(source, relativePath);
+  const config = await readFile(path.join(root, "rustfmt.toml"), "utf8").catch(() => "");
+  const appended = appendPackagedSource(source, relativePath, rustfmtMaxWidth(config));
   if (appended === source) return false;
   await writeFile(file, appended);
   await formatRustSource(file);
@@ -3473,9 +3503,18 @@ export async function planRun(args, root = ROOT) {
     if (row.routeCheck && ["runnable", "weights_missing"].includes(row.status)) {
       row.reason = row.reason ? `${row.reason}; ${row.routeCheck}` : row.routeCheck;
     }
-    if (row.status === "runnable" && args.skipCurrent && row.current) {
+    // sc-22738: currency is a FACT about the cell — its packaged anchor was minted under the loader
+    // closure the pin loads — exactly as an exceeded bound is, so `--list` states it unconditionally.
+    // `--list` reports what the catalog holds, not what one invocation would schedule, and reporting
+    // the same cell `runnable` or `current` depending on a scheduling flag made the campaign's final
+    // listing misread as a residue row an operator still owed a capture for. The RUN path is
+    // unchanged: without `--skip-current` a current cell is still scheduled, because forcing a
+    // re-measurement of a current anchor is what omitting the flag means.
+    if (row.status === "runnable" && (args.list || args.skipCurrent) && row.current) {
       row.status = "current";
-      row.reason = "anchor is current at the pinned inference revision (--skip-current)";
+      row.reason = args.skipCurrent
+        ? "anchor is current at the pinned inference revision (--skip-current)"
+        : "anchor is current at the pinned inference revision; a run passing --skip-current would not schedule it";
     }
     return row;
   };

@@ -574,51 +574,75 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json",
@@ -640,11 +664,15 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json",
@@ -656,7 +684,9 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json"),
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json"
+        ),
     ),
     (
         "docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json",
