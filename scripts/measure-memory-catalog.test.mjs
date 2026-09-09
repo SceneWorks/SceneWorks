@@ -117,6 +117,8 @@ import {
   HF_CLI_CANDIDATES,
   EMPTY_SNAPSHOT_PREFIX,
   directoryHasFiles,
+  missingIndexedShards,
+  SAFETENSORS_INDEX_PATTERN,
   inventoryUnusableReason,
   firstAvailableHfCli,
   DOWNLOAD_UNAVAILABLE_REASON,
@@ -477,6 +479,56 @@ test("classification: runnable anchors carry the adapter env family and the cano
   const missingTier = await classifyAnchor("qwen_image:q8:mlx", { provider: "qwen_image" }, context);
   assert.equal(missingTier.status, "weights_missing");
   assert.match(missingTier.reason, /q8 on this host/);
+});
+
+// sc-22738. CUDA campaign run 34356681566 lost `qwen_image:bf16:candle` to `text encoder contract
+// mismatch … field architecture_header expected qwen2_5_vl_text` against a `bf16/text_encoder`
+// whose pinned revision is byte-identical to the one the same contract accepted for
+// `qwen_image_edit_2511` on the same box: a partial shard set (no `model-00001-of-00004`, so no
+// `model.layers.0.*`) is the only artifact that fails that signature, and `--list` had called the
+// cell runnable because the tier-root probe asks only whether the directory holds a file. A sharded
+// component's own index names the shards the engine will open, so an index naming an absent shard
+// is `weights_missing` — named shard by shard — and eligible for the resuming `--download-missing`.
+test("classification: a tier root whose safetensors index names an absent shard is weights_missing, not runnable", async () => {
+  const hub = await fakeHub([["SceneWorks/qwen-image-mlx", REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, "SceneWorks/qwen-image-mlx", REVISION, "q4");
+  const textEncoder = path.join(tierRoot, "text_encoder");
+  await mkdir(textEncoder, { recursive: true });
+  await writeFile(path.join(textEncoder, "model.safetensors.index.json"), JSON.stringify({
+    metadata: { total_size: 2 },
+    weight_map: {
+      "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+      "model.layers.0.self_attn.q_proj.bias": "model-00001-of-00002.safetensors",
+      "model.norm.weight": "model-00002-of-00002.safetensors",
+    },
+  }));
+  await writeFile(path.join(textEncoder, "model-00002-of-00002.safetensors"), "w");
+  // Kolors' upstream index spelling is a shard index too; a derived dot-directory is not walked.
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), "");
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors.index.fp16.json"), true);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors"), false);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("config.json"), false);
+  const cache = path.join(textEncoder, ".candle-device-format-v1");
+  await mkdir(cache, { recursive: true });
+  await writeFile(path.join(cache, "model.safetensors.index.json"), JSON.stringify({ weight_map: { x: "gone.safetensors" } }));
+
+  assert.deepEqual(await missingIndexedShards(tierRoot), [
+    "model.safetensors.index.fp16.json (unreadable: Unexpected end of JSON input)",
+    path.join("text_encoder", "model-00001-of-00002.safetensors"),
+  ]);
+
+  const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const partial = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /is missing model\.safetensors\.index\.fp16\.json \(unreadable: .*\), text_encoder[\\/]model-00001-of-00002\.safetensors, which its own safetensors shard index names beside it; the mirror is partial and --download-missing resumes it$/);
+
+  // Complete the mirror and the same root is runnable again: the probe is derived from the
+  // artifact's own inventory, not a per-family declaration.
+  await writeFile(path.join(textEncoder, "model-00001-of-00002.safetensors"), "w");
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), JSON.stringify({ weight_map: {} }));
+  assert.deepEqual(await missingIndexedShards(tierRoot), []);
+  const complete = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(complete.status, "runnable", complete.reason);
 });
 
 // sc-22738. The campaign lost a booked `minimax_h3:bf16:mlx` capture to
@@ -899,6 +951,118 @@ test("a staged snapshot carrying a .gitattributes is runnable, and the dotfile i
   });
   assert.equal(row.status, "runnable", row.reason);
   assert.deepEqual(await hashArtifactInventory(tierRoot), clean, "a dotfile does not move the receipt");
+});
+
+/**
+ * sc-22738. One SDXL-family model in the fixture manifest's shape: a tiered rehost plus the three
+ * caller-staged components as co-requisites, exactly as the shipped manifest declares them.
+ */
+const SDXL_FIXTURE_MODEL = {
+  id: "sdxl",
+  downloads: [
+    { repo: "SceneWorks/sdxl-base-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+    ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
+  ],
+};
+
+// sc-22738: a co-requisite is a co-requisite of the ENGINE that opens it, not of the model id. The
+// two upstream SDXL components were bound on BOTH lanes, so an MLX `sdxl`/`realvisxl`/`illustrious`
+// cell was booked `weights_missing` for a `laion/CLIP-ViT-bigG-14…` (or fp16-fix VAE) snapshot that
+// `mlx-gen-sdxl` never opens: it declares `required_components: &[]` (mlx-gen-sdxl/src/model.rs:167)
+// and loads `tokenizer/`, `tokenizer_2/` and `vae/` out of its own tier root
+// (mlx-gen-sdxl/src/loader.rs:29-30,277,293). Only `candle-gen-sdxl` declares them
+// (candle-gen-sdxl/src/lib.rs:593 → pipeline.rs:186-190), and only the candle adapter binary binds
+// their env vars. The row must reflect what THIS lane's engine requires.
+test("an SDXL co-requisite is required only on the lane whose engine opens it", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  // Everything staged EXCEPT the CLIP-bigG tokenizer — the snapshot the MLX cells were blocked on.
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  // The tier root is FULLY staged (sc-22738 `requiredTierFiles`), so the only thing either lane can
+  // still be missing is the co-requisite — which is the whole question this case asks.
+  await stageSdxlTierMainTensors(hub, "SceneWorks/sdxl-base-mlx", REVISION, "q4");
+  const context = (backend) => ({ models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  const mlx = await classifyAnchor("sdxl:q4:mlx", { provider: "sdxl" }, context("mlx"));
+  assert.equal(mlx.status, "runnable", `the MLX engine never opens ${bigG}: ${mlx.reason}`);
+  // Not merely "not the reason" — the lane binds no component env at all, because it reads none.
+  for (const component of SDXL_COMPONENTS) {
+    assert.equal(mlx.env[component.env], undefined, `${component.env} must not be bound on the MLX lane`);
+  }
+  assert.ok(
+    !mlx.roots.some((root) => root.label.startsWith("component ")),
+    "an MLX SDXL row must not even report a component root it will never read",
+  );
+  // …and it is not a fetch either: `--download-missing` must never book the component snapshots for
+  // a lane that does not need them. `anchorDownloadTargets` names exactly what `classifyAnchor` probes.
+  const mlxTargets = anchorDownloadTargets(mlx, models, { platform: "macos" });
+  assert.deepEqual(
+    mlxTargets.targets.map((target) => target.repo),
+    ["SceneWorks/sdxl-base-mlx"],
+    "the MLX SDXL cell fetches its tier root and nothing else",
+  );
+
+  // The same cell on candle is unchanged: the engine requires all three, so an absent one is
+  // `weights_missing`, named.
+  const candle = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, context("candle"));
+  assert.equal(candle.status, "weights_missing", "candle-gen-sdxl require_components all three");
+  assert.match(candle.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  const candleTargets = anchorDownloadTargets(candle, models, { platform: "macos" });
+  assert.deepEqual(
+    candleTargets.targets.map((target) => target.repo).sort(),
+    ["SceneWorks/sdxl-base-mlx", ...SDXL_COMPONENTS.map(({ repo }) => repo)].sort(),
+    "the candle SDXL cell fetches its tier root AND all three co-requisites",
+  );
+});
+
+// The lane split is DATA, not a hard-coded `backend === "candle"`: widen a component's `arms` and
+// the requirement comes back on that lane. This is the test that reds if the MLX engine ever
+// declares a required component and the table is not widened to match — and the mutation guard on
+// the gate itself: drop the `arms` filter in `requiredComponentsFor` and the case above goes red
+// while this one stays green, so the two together pin the behaviour in both directions.
+test("a component the MLX engine declares is still required of the MLX lane", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  // Fully staged tier root again, so `requiredTierFiles` is satisfied and the component is the only
+  // thing left that can hold this cell back.
+  await stageSdxlTierMainTensors(hub, "SceneWorks/sdxl-base-mlx", REVISION, "q4");
+  // A fixture engine that DOES open the components on both lanes.
+  const families = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map((component) => ({ ...component, arms: ["mlx", "candle"] })),
+    },
+  };
+  const row = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families },
+  );
+  assert.equal(row.status, "weights_missing", "a component the lane's engine opens is still a hard requirement");
+  assert.match(row.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  // And a component with no `arms` at all stays lane-blind — the default is unchanged for every
+  // other family, which is why nothing but SDXL moves.
+  const laneBlind = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map(({ env, repo }) => ({ env, repo })),
+    },
+  };
+  const blind = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families: laneBlind },
+  );
+  assert.equal(blind.status, "weights_missing", "an undeclared `arms` requires the component on every lane");
 });
 
 // The three declarations above are the ADAPTER's own constants, not this script's opinion of them.
@@ -2729,13 +2893,33 @@ pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
 // validates all three at exact upstream revisions. A rename on one side would leave a capture
 // binding a component the engine never sees, so the two lists are proven equal here.
 test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
-  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
-  const declared = [...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]);
+  const adapterEnvs = async (binary) => {
+    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`), "utf8");
+    return [...new Set([...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]))];
+  };
+  const declared = await adapterEnvs("candle");
   assert.deepEqual(
-    [...new Set(declared)].sort(),
+    [...declared].sort(),
     SDXL_COMPONENTS.map((component) => component.env).sort(),
     "candle.rs SDXL_COMPONENTS and the catalog's SDXL_COMPONENTS must name the same env vars",
   );
+  // sc-22738: and the LANE split is derived from the same source rather than asserted. A component
+  // is bound for the arm whose adapter binary reads its env var — `candle.rs` reads all three,
+  // `mlx.rs` reads none, because `mlx-gen-sdxl` declares `required_components: &[]`
+  // (mlx-gen-sdxl/src/model.rs:167) and opens `tokenizer/`/`tokenizer_2/`/`vae/` inside its own
+  // tier root instead. If an MLX arm ever starts binding one, this reds and `SDXL_COMPONENTS`
+  // must widen its `arms` — the requirement can never silently come back on a lane, nor silently
+  // vanish from one.
+  const mlxDeclared = await adapterEnvs("mlx");
+  for (const component of SDXL_COMPONENTS) {
+    const arms = ["candle", "mlx"].filter((backend) =>
+      (backend === "candle" ? declared : mlxDeclared).includes(component.env));
+    assert.deepEqual(
+      [...(component.arms ?? [])].sort(),
+      arms.sort(),
+      `${component.env} must declare arms exactly matching the adapter binaries that bind it`,
+    );
+  }
   // Every component repo is a real corequisite of every SDXL-family model, so `tierDownload`
   // resolves a revision for it rather than falling back to an unrelated download.
   const models = await readManifestModels();

@@ -147,16 +147,63 @@ export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
 export const LTX_2_3_REPOSITORY = "SceneWorks/ltx-2.3-mlx";
 
 /**
- * The three caller-staged SDXL components, as `{ env, repo }` pairs. Declared once: every SDXL-family
- * model — and InstantID, which composes the same SDXL base — stages exactly these, and the Rust side
- * declares the same three ids in `candle.rs` `SDXL_COMPONENTS`. `sdxl_component_env_matches_the_catalog`
- * proves the two lists agree.
+ * The three caller-staged SDXL components, as `{ env, repo, arms }` triples. Declared once: every
+ * SDXL-family model — and InstantID, which composes the same SDXL base — stages exactly these, and
+ * the Rust side declares the same three ids in `candle.rs` `SDXL_COMPONENTS`. `the staged SDXL
+ * component env vars agree between the catalog and the candle adapter` proves the two lists agree.
+ *
+ * sc-22738: `arms` is the LANE the co-requisite is a co-requisite OF, and it is `candle` only.
+ * A component is a load requirement of the ENGINE that opens it, not of the model id, so a cell
+ * may only be held `weights_missing` on a component its own lane's engine actually reads:
+ *
+ *   - `candle-gen-sdxl` declares all three on the ordinary snapshot route —
+ *     `plain_descriptor()` sets `required_components: pipeline::REQUIRED_COMPONENTS`
+ *     (candle-gen-sdxl/src/lib.rs:593), and that table is the three ids
+ *     (candle-gen-sdxl/src/pipeline.rs:186-190). `SdxlComponents::from_spec` then `require_component`s
+ *     each one at load, so a candle load without them cannot open.
+ *   - `mlx-gen-sdxl` declares NONE: `descriptor()` sets `required_components: &[]`
+ *     (mlx-gen-sdxl/src/model.rs:167). Its snapshot load (`load` → `load_concrete`,
+ *     mlx-gen-sdxl/src/model.rs:345/377) reads the tokenizer and VAE from INSIDE the tier root —
+ *     `<root>/tokenizer/`, `<root>/tokenizer_2/`, `<root>/vae/…` (mlx-gen-sdxl/src/loader.rs:8,12,29-30,277,293).
+ *     The MLX turnkey rehost is self-contained; it never opens either upstream repo.
+ *
+ * The one MLX route that DOES require a component is the imported fused LDM checkpoint
+ * (`WeightsSource::File`), which requires the caller-staged `ldm_tokenizer` directory
+ * (mlx-gen-sdxl/src/model.rs:354-368, registered at mlx-gen-sdxl/src/lib.rs:164/172). That is a
+ * community-checkpoint import, not a manifest-shipped tiered rehost, so no anchor this runner
+ * measures takes it — and `ldm_tokenizer` is an operator-staged directory, never one of these
+ * three hub repos, so it would not be satisfied by them either.
+ *
+ * The worker's own plan agrees and is derived from exactly those declarations:
+ * `attach_required_components` reads the descriptor's `required_components` and takes an early
+ * no-op path when it is empty (crates/sceneworks-worker/src/image_jobs/base.rs:6146-6156).
+ * Downstream of this runner the split is visible in-repo: the three
+ * `SCENEWORKS_SDXL_COMPONENT_*` env vars this table binds are read by the CANDLE adapter binary
+ * alone (`crates/sceneworks-memory-adapter/src/bin/candle.rs:102-111`) and by no arm of
+ * `bin/mlx.rs`. `the staged SDXL component env vars agree between the catalog and the candle
+ * adapter` reads both binaries and reds if that ever stops being true, so an MLX arm that starts
+ * binding a component forces this `arms` list to be widened rather than silently diverging.
  */
 export const SDXL_COMPONENTS = Object.freeze([
-  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", repo: "openai/clip-vit-large-patch14" },
-  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k" },
-  { env: "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX", repo: "madebyollin/sdxl-vae-fp16-fix" },
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", repo: "openai/clip-vit-large-patch14", arms: ["candle"] },
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", arms: ["candle"] },
+  { env: "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX", repo: "madebyollin/sdxl-vae-fp16-fix", arms: ["candle"] },
 ]);
+
+/**
+ * The array-shape caller-staged components a `backend` cell must actually resolve — the co-requisites
+ * whose own lane engine opens them. A component with no `arms` is required on every lane the family
+ * declares (the historical behaviour, and still the right default: a co-requisite is lane-blind
+ * unless something is known to make it otherwise).
+ *
+ * Both sites that walk these components go through here, so `anchorDownloadTargets` keeps naming
+ * exactly the repositories `classifyAnchor` probes for the same cell — a component this lane never
+ * opens is neither a `weights_missing` reason nor a `--download-missing` fetch.
+ */
+export function requiredComponentsFor(family, backend) {
+  if (!Array.isArray(family?.components)) return [];
+  return family.components.filter((component) => (component.arms ?? [backend]).includes(backend));
+}
 
 /**
  * The three main tensor files `candle-gen-sdxl` opens inside a staged SDXL tier root, per tier
@@ -923,7 +970,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `tokenizer_clip_bigg`, `vae_fp16_fix`). `candle-gen-sdxl`'s `validate_shared_component_revisions`
   // REQUIRES all three at exact upstream revisions, so a candle capture stages the same corequisite
   // snapshots the worker's `attach_required_components` stages. The MLX turnkey is self-contained
-  // and ignores them, so they are bound on both lanes and simply unused on one.
+  // and ignores them, which is why each carries `arms: ["candle"]` (see `SDXL_COMPONENTS`): they are
+  // a co-requisite of the CANDLE cell only. Binding them on both lanes was not merely redundant —
+  // it made an MLX cell `weights_missing` on a snapshot its engine never opens (sc-22738).
   //
   // `sdxlRoute` marks the members `candle-gen-sdxl` seals through `SDXL_ROUTES`. It is carried by
   // ALL FIVE, not only the two that disagree today: the check is over the engine's declaration, so
@@ -1766,6 +1815,63 @@ export async function directoryHasFiles(directory) {
   return false;
 }
 
+/** A sharded safetensors component's index (`model.safetensors.index.json`, or Kolors' upstream
+ *  `model.safetensors.index.fp16.json`): its `weight_map` names every shard the loader opens. */
+export const SAFETENSORS_INDEX_PATTERN = /\.safetensors\.index(?:\.[^.]+)?\.json$/;
+
+/**
+ * The shards a tier root's own safetensors indexes name but the root does not hold, as paths
+ * relative to `tierRoot` (sc-22738).
+ *
+ * A PRESENT tier root is not a complete one, and [`directoryHasFiles`] cannot tell them apart. CUDA
+ * campaign run 34356681566 lost `qwen_image:bf16:candle` to `text encoder contract mismatch …
+ * field architecture_header expected qwen2_5_vl_text` against a `bf16/text_encoder` whose pinned
+ * revision is byte-identical to the q4/q8 one that the same contract accepted for
+ * `qwen_image_edit_2511` on the same box — the only artifact that fails that signature is one with
+ * no `model.layers.0.*` tensors, i.e. a partial shard set. Every sharded component ships the
+ * inventory the engine will open, so an index naming an absent shard is `weights_missing` — named
+ * shard by shard, like every other incomplete mirror this file classifies — and, because the hub CLI
+ * resumes a partial download, `--download-missing` repairs it on the same pass instead of booking a
+ * capture that dies inside the engine's contract. An unreadable index is reported the same way: a
+ * truncated JSON is itself the incomplete mirror. Dot-directories are skipped as the engine's own
+ * walkers skip them (`gen_core::weightsmeta::is_hidden_file`).
+ */
+export async function missingIndexedShards(tierRoot) {
+  const missing = [];
+  const visit = async (dir) => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith(".")) continue;
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await visit(child); continue; }
+      if (!SAFETENSORS_INDEX_PATTERN.test(entry.name)) continue;
+      const relativeIndex = path.relative(tierRoot, child);
+      let weightMap;
+      try {
+        weightMap = JSON.parse(await readFile(child, "utf8")).weight_map;
+      } catch (error) {
+        missing.push(`${relativeIndex} (unreadable: ${String(error?.message ?? error)})`);
+        continue;
+      }
+      if (!weightMap || typeof weightMap !== "object") {
+        missing.push(`${relativeIndex} (no weight_map)`);
+        continue;
+      }
+      for (const shard of [...new Set(Object.values(weightMap))].sort()) {
+        if (typeof shard !== "string") continue;
+        const candidate = path.join(dir, shard);
+        try {
+          if ((await stat(candidate)).isFile()) continue;
+        } catch { /* absent or a dangling blob symlink: named below */ }
+        missing.push(path.relative(tierRoot, candidate));
+      }
+    }
+  };
+  await visit(tierRoot);
+  return missing;
+}
+
 /**
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
@@ -1934,6 +2040,15 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       reason: `tier root ${resolved.root} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
     };
   }
+  // sc-22738: a sharded component whose own index names a shard the root does not hold is a partial
+  // mirror the engine's contract will refuse hours later (see `missingIndexedShards`).
+  const missingShards = await missingIndexedShards(tierRoot);
+  if (missingShards.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${tierRoot} is missing ${missingShards.join(", ")}, which its own safetensors shard index names beside it; the mirror is partial and --download-missing resumes it`,
+    };
+  }
   if (family.bundle) {
     // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
     // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
@@ -2011,7 +2126,10 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   }
   // sc-22729: the caller-staged SDXL components. Their revisions come from the model's own
   // corequisite downloads, which are exactly the revisions `candle-gen-sdxl` validates against.
-  for (const component of Array.isArray(family.components) ? family.components : []) {
+  // sc-22738: only on the lane whose engine opens them (`requiredComponentsFor`). An MLX SDXL cell
+  // was reported `weights_missing` for a CLIP-bigG / fp16-fix-VAE snapshot that `mlx-gen-sdxl`
+  // never reads — it declares `required_components: &[]` and loads both out of its own tier root.
+  for (const component of requiredComponentsFor(family, backend)) {
     const download = tierDownload(models, parts.modelId, component.repo, parts.tier);
     const root = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, component.repo, download.revision)));
     row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
@@ -2220,9 +2338,10 @@ export function tierDownloadRows(models, modelId, repo, tier, platform = manifes
  * The repositories are exactly the ones `classifyAnchor` probes for this cell — the LTX-2.5
  * snapshot the harness binds through `--ltx25-snapshot-root`, or else the per-(lane, tier) artifact
  * `familyArtifact` resolves; the `upstream` root; the caller-staged `components` in both their array
- * (SDXL) and object (Mage-Flow) shapes; and the member's `sideArtifact`. `siblingRoots` need no
- * entry: a sibling lives INSIDE the artifact's own snapshot at the same revision, so the tier root's
- * co-requisite rows already carry its globs.
+ * (SDXL — lane-filtered by `requiredComponentsFor`, so a lane whose engine never opens a co-requisite
+ * is never asked to fetch it) and object (Mage-Flow) shapes; and the member's `sideArtifact`.
+ * `siblingRoots` need no entry: a sibling lives INSIDE the artifact's own snapshot at the same
+ * revision, so the tier root's co-requisite rows already carry its globs.
  *
  * Two things are deliberately NOT fetchable, and are reported rather than guessed at:
  *
@@ -2243,7 +2362,7 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
   if (family.ltx25) repositories.push({ label: "ltx25 snapshot", repo: family.repo });
   else repositories.push({ label: "tier root", repo: familyArtifact(family, row.backend, row.tier).repo });
   if (family.upstream) repositories.push({ label: "upstream root", repo: family.upstream.repo });
-  for (const component of Array.isArray(family.components) ? family.components : []) {
+  for (const component of requiredComponentsFor(family, row.backend)) {
     repositories.push({ label: `component ${component.env}`, repo: component.repo });
   }
   if (family.components && !Array.isArray(family.components)) {
