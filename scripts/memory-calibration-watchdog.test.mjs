@@ -92,7 +92,6 @@ async function run(
 ) {
   const files = await fixture();
   await writeFile(files.telemetry, `${telemetry}\n`);
-  const started = Date.now();
   let status = 0;
   try {
     const args = [
@@ -110,13 +109,18 @@ async function run(
     if (maxRuntimeSeconds !== null) {
       args.splice(3, 0, "--max-runtime-seconds", `${maxRuntimeSeconds}`);
     }
-    await execFileAsync("python3", args, { timeout: 10_000, env: withVirtualClock() });
+    // Harness backstop only, sized for a cold runner rather than for this laptop: see the floor
+    // note in runWithMockedProductionTelemetry. Every assertion below is on exit status and
+    // receipt content, never on how long this took.
+    await execFileAsync("python3", args, { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
-  return { status, events, pids, elapsed: Date.now() - started };
+  // No elapsed figure is returned on purpose: nothing in this suite may assert on how long a
+  // run took. Every timing claim is read out of the guard's own event log instead.
+  return { status, events, pids };
 }
 
 async function waitForJsonEvent(file, predicate) {
@@ -195,7 +199,14 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
   // Harness backstop only: it must stay clear of the watchdog's own derived deadline so a
   // real hard stop, not this timeout, is always what a test observes. The longest phase
   // profile today is ten phases; the bound is deliberately looser than that.
-  const harnessTimeoutMs = Math.max(10_000, Math.round(1_000 * (6 + (maxRuntimeSeconds
+  // The FLOOR is what a slow runner tests. Under the quantized clock the guard's deadlines are
+  // counted in ticks, and a tick costs real seconds — a census subprocess plus a socket poll —
+  // so a 75-tick startup window that takes four seconds on an idle laptop takes multiples of
+  // that on a cold hosted runner, with the guard having been exactly as patient in its own time
+  // base. A ten-second floor turned that into a SIGTERM the assertions read as the wrong exit
+  // status (sc-22738). The floor is now an order of magnitude past the local timing; nothing
+  // asserts on it, so its only cost is how long a genuine hang takes to surface.
+  const harnessTimeoutMs = Math.max(60_000, Math.round(1_000 * (6 + (maxRuntimeSeconds
     ?? Math.max(MIN_MAX_RUNTIME_SECONDS, childAttestationTimeout
       + (16 + ATTESTATION_HANDSHAKE_BARRIERS) * telemetryTimeout)))));
   const launcher = `${files.program}.production-watchdog.py`;
@@ -240,10 +251,14 @@ raise SystemExit(module.guard(module.parse_args()))
 test("physical-footprint hard stop terminates the responsive owned group with no residue", async () => {
   const result = await run("high", 100);
   assert.equal(result.status, 97);
-  assert.ok(result.elapsed < 5_000, `termination took ${result.elapsed}ms`);
   assert.ok(result.events.some((event) =>
     event.event === "hard_stop" && event.reason.includes("physical_footprint")));
   assert.equal(result.events.at(-1).event, "terminated");
+  // "The group came down promptly" is a claim about the guard's own record, not about the
+  // seconds a loaded runner spent scheduling it: nothing is sampled, tolerated or re-observed
+  // between the stop and the escalation. A wall-clock bound here said less and flaked more.
+  const names = result.events.map((event) => event.event);
+  assert.equal(names.indexOf("terminated") - names.indexOf("hard_stop"), 1);
   result.pids.forEach(assertGone);
 });
 
@@ -310,7 +325,14 @@ test("a probe stopped by its wall-clock budget takes the ceiling stop's exact pa
 test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", async () => {
   const files = await fixture();
   const launcher = `${files.program}.predeadline-failure.py`;
-  await writeFile(launcher, String.raw`import importlib.util, sys, time
+  // The cleanup that crosses the deadline is charged to the guard's OWN clock, not to a real
+  // sleep. The guard reads every policy deadline through CLOCK, so a real sleep never actually
+  // moved the runtime deadline under this suite's quantized clock — it only made the run long
+  // enough for the tick accumulation to reach it, which is a property of the runner's scheduler
+  // and cost a hosted runner ten seconds of `ps` spawns (sc-22738). Advancing the clock inside
+  // the delayed refresh states the timeline exactly: the deadline is crossed DURING the cleanup
+  // that follows the telemetry failure, in the only time base the guard can observe.
+  await writeFile(launcher, String.raw`import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 state = {"samples": 0, "failed": False, "delayed": False}
@@ -324,7 +346,7 @@ original_refresh = module.OwnedGroup.refresh
 def delayed_refresh(self):
     if state["failed"] and not state["delayed"]:
         state["delayed"] = True
-        time.sleep(1.1)
+        module.CLOCK.advance(1.1)
     return original_refresh(self)
 module.DarwinFootprintSampler = Footprint
 module.OwnedGroup.refresh = delayed_refresh
@@ -339,8 +361,12 @@ raise SystemExit(module.guard(module.parse_args()))
 `);
   let status = 0;
   try {
+    // Harness backstop only, never the property under test: the guard's own virtual deadline
+    // ends this run inside a handful of ticks, so this bound is an order of magnitude past the
+    // local timing purely so a cold hosted interpreter cannot turn a slow start into a SIGTERM
+    // that the assertion below would read as the wrong exit status.
     await execFileAsync("python3", [launcher],
-      { timeout: 10_000, env: withVirtualClock() });
+      { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -372,7 +398,7 @@ test("host memory and swap floors are enforced inside the owned-group watchdog",
       "--event-file", files.events, "--telemetry-file", files.telemetry,
       "--host-pressure-file", pressure, "--allow-synthetic-telemetry",
       "--", "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000, env: withVirtualClock() });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -814,20 +840,29 @@ time.sleep(60)
 
 test("a child that cannot attest is terminated with no owned residue", async () => {
   const files = await fixture();
-  const started = Date.now();
+  // A round multiple of the sample interval, so "the startup window, and not one tick past it"
+  // is an exact tick count rather than a rounding.
+  const childAttestationTimeout = 0.24;
   let status = 0;
   try {
     await runWithMockedProductionTelemetry(files, [
       "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { telemetryTimeout: 0.2, childAttestationTimeout: 0.25 });
+    ], { telemetryTimeout: 0.2, childAttestationTimeout });
   } catch (error) {
     status = error.code;
   }
   assert.equal(status, 97);
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) =>
-    event.reason === "child_attestation_timeout_at_or_above_0.25s"));
-  assert.ok(Date.now() - started < 1_500, "startup timeout drifted toward the runtime deadline");
+    event.reason === `child_attestation_timeout_at_or_above_${childAttestationTimeout}s`));
+  // The startup window did not drift toward the far larger runtime deadline. A real-elapsed
+  // bound was the flake: a cold hosted runner made the same ticks take longer in seconds without
+  // the guard having been one tick more patient (sc-22738). The guard's own clock fixes the
+  // count exactly — the startup window divided by the sample interval — so the assertion is on
+  // the ticks the guard spent waiting, which is the quantity the claim is actually about.
+  const startupSamples = events.filter((event) => event.event === "sample"
+    && event.phase === "awaiting_child_attestation");
+  assert.equal(startupSamples.length, Math.round(childAttestationTimeout / SAMPLE_INTERVAL));
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
 });
@@ -955,7 +990,7 @@ test("child attestation categorically rejects every synthetic telemetry surface"
       "--min-swap-free-bytes", "100", "--telemetry-file", files.telemetry,
       "--allow-synthetic-telemetry", "--require-child-attestation", "--",
       "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000, env: withVirtualClock() });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
     assert.match(error.stderr, /requires production Darwin telemetry and launch controls/);
@@ -1173,7 +1208,7 @@ test("event-log failure is a monitor failure and still leaves no owned residue",
       "--event-file", files.events, "--telemetry-file", files.telemetry,
       "--allow-synthetic-telemetry", "--", "python3", files.program, "event-failure",
       files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000, env: withVirtualClock() });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
