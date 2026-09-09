@@ -283,3 +283,35 @@ entries were extended (`attestedRevision` → `e34d7b46`, the reading appended t
 added to any `filesChangedSinceMeasurement`; no re-measure was taken. The six SenseNova model
 closures and the two SenseNova provider closures are the only closures that moved at this pin, and
 no packaged anchor or bound is keyed to them. Matrix after `--stamp-anchors`: unchanged set.
+
+## Extension to inference `e11fd9f0` (sc-22738, sixth terminal pin, 2026-09-09)
+
+The sc-22738 pin moved again (`e34d7b46` →
+`e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8`, inference `main` = PR #967
+`fix/sc-22738-candle-kolors-ideogram-predicates`, first-parent over `e34d7b46`). The
+`e34d7b46..e11fd9f0` range changes **exactly three inference files**, each a `memory_strategy.rs`
+under `crates/media/candle-gen`:
+
+| File | Change |
+| --- | --- |
+| `candle-gen-kolors/src/memory_strategy.rs` | `inspect_component_tier` accepts F16 as well as BF16 for dense components and for the non-packed tensors of a packed tier (`is_dense_half`). The shipped `SceneWorks/kolors-mlx` rehost stores the upstream Kwai `model.fp16-*` shards as F16, and every dense tensor is read at F32 through `mmap_var_builder` / `load_sorted_mmap`, so the two storages are the same load. F32 dense components and F16 `.scales` stay refused. |
+| `candle-gen-ideogram/src/memory_strategy.rs` | `f32_projection` prices a rank-0 I32/I64 tensor (the VAE's `bn.num_batches_tracked` BatchNorm counter, which `Flux2Vae` never loads) at zero instead of refusing it; the turbo id no longer refuses a root that carries the co-located `unconditional_transformer/`, and `recursive_loader_inventory` skips that directory on the turbo route because `pipeline::load_components_turbo` never opens it. A rank-1 integer tensor is still refused. |
+| `candle-gen-bernini/src/memory_strategy.rs` | the new `production_calibration_identity` is called by `memory_strategy_contract`, `contract_for_loaded` **and** `validate_loaded_contract`, so the contract a loaded generator publishes (the one admission and the SceneWorks worker read) carries the same identity the registry closure computes instead of a hard-coded `None`. |
+
+**Closures that moved:** five model closures (`bernini:candle`, `bernini_image:candle`,
+`ideogram_4:candle`, `ideogram_4_turbo:candle`, `kolors:candle`) of 111, and four provider closures
+(`candle:bernini`, `candle:ideogram_4`, `candle:ideogram_4_turbo`, `candle:kolors`) of 89. No
+packaged anchor or measured lower bound is keyed to any of them — the candle rows for these three
+providers are exactly the cells this pin makes *capturable*; there is nothing measured yet to
+stale.
+
+**Attestations:** none of the fourteen attested closures (five anchors, nine measured lower bounds)
+reaches any of the three crates at all — a grep of each closure's `closureFiles` for
+`candle-gen-kolors` / `candle-gen-ideogram` / `candle-gen-bernini` returns zero hits, which is a
+stronger reading than an empty intersection with the three changed paths. Every closure is
+byte-identical across the range and derives the same currency key at `e11fd9f0` as at `e34d7b46`.
+All fourteen entries were extended (`attestedRevision` → `e11fd9f0`, the reading appended to
+`why`); no file is added to any `filesChangedSinceMeasurement`, and no re-measure was taken. The
+extension is required rather than optional: `a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to`
+(`sceneworks-core`) asserts `is_current == (attestedRevision == pin)`, so an attestation left at the
+previous pin would red on a row that is in fact still current.

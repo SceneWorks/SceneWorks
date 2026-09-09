@@ -1,11 +1,11 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "e34d7b46a301376676bd8a60419190c7be9aa4f0",
+  "inferenceRevision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
-      "digest": "11262e47271ec519a827e00c2164b4234e808e5d071a823e76fe2b68dcd23712",
+      "digest": "cfde9aa2c9342d5764526ba934b29187d2e3d52be89f4461c3f6f4aec9ee9a62",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -175,7 +175,7 @@
     },
     "candle:ideogram_4": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "97be80296e2cea3f411e4ef08451ee61fb4283a27030db89d78ca9b625f0fccb",
+      "digest": "aede93e796ec1c7af3d2264a824997a5580247b63026827f0f3cbed016f25a3e",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -197,7 +197,7 @@
     },
     "candle:ideogram_4_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "81a55f805139d079bf9303bc28c4953dce2cbfdb675e50408144bf562e8097a2",
+      "digest": "4bdc1b8dc5f9ac438c2ac2737ce9328f07e464dcc63aee5fc702945b44e3b516",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -241,7 +241,7 @@
     },
     "candle:kolors": {
       "crate": "crates/media/candle-gen/candle-gen-kolors",
-      "digest": "c79eb39ee6cac15f435f525c3f7482e1494ed56bb1c5d594a4cf3c9cb9e8c140",
+      "digest": "8c484089f2969173273589c0a512eac53341ca26c3bd524a026bbdc7434d1b1d",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
