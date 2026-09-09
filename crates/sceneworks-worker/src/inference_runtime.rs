@@ -468,6 +468,11 @@ pub(crate) fn load_for_model_with(
 /// builder refuses both at once); SDXL and FLUX.2-dev intentionally fall back to their normal
 /// registrations, whose contract builders are themselves weights-free.
 ///
+/// A weights-free contract is not required to carry a calibration identity (sc-22738): families
+/// whose identity is keyed on the artifact-proven tier (Candle SD3.5, Ideogram 4) publish it only
+/// from a sealed load receipt. Where a weights-free surface does publish one, it must preserve the
+/// row's load shape.
+///
 /// The planned rung is exactly what `memory-calibration-harness.mjs` `planAnchor` sends: the row's
 /// own `rung` when it states one, else the lane default. That default is not respelled here
 /// (sc-22738) — both sides read `config/anchor-lane-default-strategy.json`, so a change to either
@@ -591,7 +596,18 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         // not a fixture `LoadSpec`. Skipping silently would let a genuinely registered provider
         // take the same exit and lose its coverage, so the absence is ASSERTED here rather than
         // assumed, and the lane is not counted toward `checked`.
-        const BESPOKE_PROVIDERS: [(&str, &str); 1] = [("mlx", "instantid")];
+        //
+        // sc-22738: the Candle catalog registers no descriptor named `instantid`, `pulid` or
+        // `pulid_flux` either (`candle-gen-catalog`: "PuLID is a plain struct the worker drives");
+        // `image_jobs/pulid_candle.rs` builds its contract from resolved paths through
+        // `runtime_cuda::providers::pulid::memory_strategy::provider_contract` and prices it via
+        // `evaluate_shared_bespoke_image`, which is the bespoke seam this walk cannot reach
+        // weights-free.
+        const BESPOKE_PROVIDERS: [(&str, &str); 3] = [
+            ("mlx", "instantid"),
+            ("candle", "instantid"),
+            ("candle", "pulid_flux"),
+        ];
         if BESPOKE_PROVIDERS.contains(&(lane, provider)) {
             assert!(
                 registry
@@ -654,17 +670,22 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
             contract.load_shape, load_shape,
             "planned {lane} lane {provider}/{mode} contract does not preserve its load shape"
         );
-        let calibration = contract.calibration.as_ref().unwrap_or_else(|| {
-            panic!(
-                "planned {lane} lane {provider}/{mode} resolves only an uncalibratable \
-                 compatibility contract"
-            )
-        });
-        assert_eq!(
-            calibration.load_shape, load_shape,
-            "planned {lane} lane {provider}/{mode} calibration identity does not preserve its \
-             load shape"
-        );
+        // A weights-free contract MAY carry no calibration identity (sc-22738). Epic 22723 keyed
+        // the production identity on the ARTIFACT-PROVEN tier — the Candle SD3.5 (sc-22730) and
+        // Ideogram 4 (sc-22732) families publish it only from a sealed load receipt, and every
+        // weights-free path in those crates passes `None` on purpose ("a named tier is not a
+        // proven one"). That `None` is not the pre-epic "provider has not adopted calibration"
+        // compatibility default this walk used to refuse: the loaded contract the capture arm
+        // reads does publish the identity, and the adapter refuses a loaded contract without one.
+        // So the identity is asserted only where a weights-free surface publishes it, and what
+        // every row is held to weights-free is the rung check below.
+        if let Some(calibration) = contract.calibration.as_ref() {
+            assert_eq!(
+                calibration.load_shape, load_shape,
+                "planned {lane} lane {provider}/{mode} calibration identity does not preserve \
+                 its load shape"
+            );
+        }
 
         // The planned rung — the row's own `strategy.rung` (sc-22734's single-composition
         // override), else the lane default `planAnchor` applies — must be one this contract
