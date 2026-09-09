@@ -5159,6 +5159,13 @@ struct Sc22737VideoArm {
     validate_geometry: fn(u32, u32, u32) -> Result<(), String>,
     /// How the family stages its load. The one thing that genuinely differs between the three.
     load_plan: fn(&Value, &Sc22737VideoTarget) -> Result<Sc22737LoadPlan, String>,
+    /// The load shape `load_plan` stages, which is the ONLY shape the engine executes for this
+    /// family (sc-22738): `candle-gen-ltx` and `candle-gen-bernini` refuse a non-eager spec on
+    /// their production contract path, and `candle-gen-minimax-h3` pins the loaded contract to
+    /// eager whatever the spec asks. The plan rows this arm serves must declare the same shape —
+    /// `sc22737_plan_rows_declare_the_load_shape_their_arm_stages` holds them to it weights-free,
+    /// because `run_sc22737_video_capture`'s plan/provider re-assert only fires on a CUDA host.
+    load_shape: LoadShape,
 }
 
 /// The exact cell a plan row asks for, after the target and the fixture have been reconciled.
@@ -5170,6 +5177,16 @@ struct Sc22737VideoTarget {
     fps: u32,
     seed: u64,
 }
+
+/// `candle-gen-bernini`'s production contract: "Bernini Candle memory contract requires
+/// EagerMaterialization" (sc-22738).
+const BERNINI_CANDLE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
+/// `candle-gen-ltx`'s production contract path (`memory_strategy_contract` -> `tier_paths`):
+/// "calibrated q4 memory admission requires eager bf16 component loading" (sc-22738).
+const LTX23_CANDLE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
+/// `candle-gen-minimax-h3` pins `LOAD_SHAPE = EagerMaterialization` on the loader "whatever a
+/// caller asks for", so the loaded contract's calibration identity is eager (sc-22738).
+const MINIMAX_CANDLE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
 
 const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     engine_id: BERNINI_CANDLE_ID,
@@ -5185,6 +5202,7 @@ const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:bernini-dual-expert",
     validate_geometry: validate_bernini_candle_geometry,
     load_plan: bernini_candle_load_plan,
+    load_shape: BERNINI_CANDLE_LOAD_SHAPE,
 };
 
 const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
@@ -5201,6 +5219,7 @@ const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:ltx-2.3",
     validate_geometry: validate_ltx23_candle_geometry,
     load_plan: ltx23_candle_load_plan,
+    load_shape: LTX23_CANDLE_LOAD_SHAPE,
 };
 
 const MINIMAX_CANDLE_BASE_ARM: Sc22737VideoArm = Sc22737VideoArm {
@@ -5217,6 +5236,7 @@ const MINIMAX_CANDLE_BASE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
 /// The reference partition. ONE image reference — the smallest set the shared verdict
@@ -5238,6 +5258,7 @@ const MINIMAX_CANDLE_REFERENCE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
 /// Every cell this block serves, in one place so the tables and the tests cannot disagree.
@@ -5407,9 +5428,13 @@ fn bernini_candle_load_plan(
     Ok(Sc22737LoadPlan {
         artifact: artifact(&repository, &revision, &target.tier),
         resolved_path_fingerprint: loadability_fingerprint(&repository, &revision, &target.tier),
+        // sc-22738: EAGER — `candle-gen-bernini`'s production contract refuses anything else.
+        // Its registry fixture merely mirrors the spec's shape, which is why the weights-free walk
+        // in `inference_runtime.rs` could not see that the `Deferred` this arm shipped with (and
+        // the six plan rows beside it) was uncapturable; the plan rows now say eager too.
         spec: LoadSpec::new(WeightsSource::Dir(root))
             .with_offload_policy(OffloadPolicy::Sequential)
-            .with_load_shape(LoadShape::DeferredMaterialization)
+            .with_load_shape(BERNINI_CANDLE_LOAD_SHAPE)
             .with_resolved_route(BERNINI_CANDLE_VIDEO_MODEL_ID.to_owned()),
     })
 }
@@ -5454,9 +5479,15 @@ fn ltx23_candle_load_plan(
         "gemma",
         protocol::LTX_REPOSITORY,
     )?;
+    // sc-22738: EAGER, not deferred. `candle-gen-ltx` refuses any other LTX-2.3 load shape on its
+    // production contract path, and its registry fixture pins the same shape — so the `Deferred`
+    // this arm shipped with in sc-22737 could never produce a contract, and the plan rows that
+    // declared `deferred_materialization` alongside it were uncapturable. The plan rows now say
+    // eager too; `run_sc22737_video_capture` still re-asserts the plan's shape against the LOADED
+    // contract.
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LoadShape::DeferredMaterialization);
+        .with_load_shape(LTX23_CANDLE_LOAD_SHAPE);
     spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
     Ok(Sc22737LoadPlan {
         artifact: artifact(&repository, &revision, &target.tier),
@@ -5507,9 +5538,12 @@ fn minimax_candle_load_plan(
         protocol::MINIMAX_UPSTREAM_REPOSITORY,
     )?;
 
+    // sc-22738: EAGER — the loader pins it, so the loaded contract's calibration identity is
+    // eager and the `Deferred` this arm shipped with could only ever fail the plan/provider
+    // load-shape re-assert below; the six plan rows now say eager too.
     let mut spec = LoadSpec::new(WeightsSource::Dir(upstream_root))
         .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LoadShape::DeferredMaterialization);
+        .with_load_shape(MINIMAX_CANDLE_LOAD_SHAPE);
     let quant = numeric_tier(&target.tier)?.quant;
     let is_reference = arm.model_id == MINIMAX_CANDLE_REFERENCE_MODEL_ID;
     let staged = if quant.is_some() || is_reference {
@@ -8326,6 +8360,61 @@ mod mage_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-22738: every plan row an sc-22737 video arm serves declares the load shape that arm
+    /// stages. The engines behind these arms execute exactly one shape (see
+    /// `Sc22737VideoArm::load_shape`), and the only production check — the plan/provider
+    /// re-assert in `run_sc22737_video_capture` — fires after a real load on a CUDA host. sc-22737
+    /// shipped all fourteen rows as `deferred_materialization` against eager-only engines, so
+    /// none was capturable and nothing weights-free said so.
+    #[test]
+    fn sc22737_plan_rows_declare_the_load_shape_their_arm_stages() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("memory calibration plan parses");
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
+        for arm in SC22737_VIDEO_ARMS {
+            let expected = match arm.load_shape {
+                LoadShape::EagerMaterialization => protocol::LOAD_SHAPE_EAGER,
+                LoadShape::DeferredMaterialization => protocol::LOAD_SHAPE_DEFERRED,
+            };
+            let mut rows = 0_usize;
+            for (key, row) in anchors {
+                let mut coordinates = key.split(':');
+                let (Some(model_id), Some(_tier), Some("candle"), None) = (
+                    coordinates.next(),
+                    coordinates.next(),
+                    coordinates.next(),
+                    coordinates.next(),
+                ) else {
+                    continue;
+                };
+                if model_id != arm.model_id {
+                    continue;
+                }
+                assert_eq!(
+                    row["provider"].as_str(),
+                    Some(arm.engine_id),
+                    "{key}: filed under {} but names another engine",
+                    arm.model_id
+                );
+                assert_eq!(
+                    row["loadShape"].as_str(),
+                    Some(expected),
+                    "{key}: the {} arm stages {expected}, which is the only shape its engine \
+                     executes; a row declaring another shape cannot be captured",
+                    arm.engine_id
+                );
+                rows += 1;
+            }
+            assert!(
+                rows > 0,
+                "the plan carries no candle row for {} — the arm has nothing to serve",
+                arm.model_id
+            );
+        }
+    }
 
     #[test]
     fn candle_krea_wddm_idle_proof_keeps_the_measured_strict_bounds() {

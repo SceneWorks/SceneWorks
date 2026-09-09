@@ -4779,7 +4779,7 @@
         "frames": 49
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
       "fixture": "bernini-video-candle-bf16-848x480-f49-fps16-seed22737",
       "strategy": {
@@ -4815,7 +4815,7 @@
         "frames": 49
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
       "fixture": "bernini-video-candle-q4-848x480-f49-fps16-seed22737",
       "strategy": {
@@ -4851,7 +4851,7 @@
         "frames": 49
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
       "fixture": "bernini-video-candle-q8-848x480-f49-fps16-seed22737",
       "strategy": {
@@ -4887,7 +4887,7 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
       "fixture": "fresh-five-rung-bernini-image-bf16-848-seed16402-step2",
       "strategy": {
@@ -4923,7 +4923,7 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
       "fixture": "fresh-five-rung-bernini-image-q4-848-seed16402-step2",
       "strategy": {
@@ -4959,7 +4959,7 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
       "fixture": "fresh-five-rung-bernini-image-q8-848-seed16402-step2",
       "strategy": {
@@ -5010,7 +5010,7 @@
         "frames": 97
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
       "fixture": "ltx-2-3-candle-q4-768x512-f97-fps24-seed22737",
       "strategy": {
@@ -5046,7 +5046,7 @@
         "frames": 97
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q8-i2v-v1",
       "fixture": "ltx-2-3-candle-q8-768x512-f97-fps24-seed22737",
       "strategy": {
@@ -5082,7 +5082,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-candle-bf16-576x320-f124-fps24-seed22737",
       "strategy": {
@@ -5103,7 +5103,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-candle-q4-576x320-f124-fps24-seed22737",
       "strategy": {
@@ -5124,7 +5124,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-candle-q8-576x320-f124-fps24-seed22737",
       "strategy": {
@@ -5145,7 +5145,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-ref-candle-bf16-576x320-f124-fps24-seed22737",
       "strategy": {
@@ -5181,7 +5181,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-ref-candle-q4-576x320-f124-fps24-seed22737",
       "strategy": {
@@ -5217,7 +5217,7 @@
         "frames": 124
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
+      "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
       "fixture": "minimax-h3-ref-candle-q8-576x320-f124-fps24-seed22737",
       "strategy": {
