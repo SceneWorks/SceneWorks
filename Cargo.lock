@@ -6755,6 +6755,7 @@ version = "0.8.7"
 dependencies = [
  "candle-gen",
  "candle-gen-scail2",
+ "candle-gen-sdxl",
  "candle-gen-wan",
  "mlx-gen",
  "mlx-gen-flux2",

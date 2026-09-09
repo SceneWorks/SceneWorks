@@ -110,6 +110,16 @@ import {
   tierDownloadRows,
   manifestPlatform,
   HF_CLI_CANDIDATES,
+  EMPTY_SNAPSHOT_PREFIX,
+  directoryHasFiles,
+  inventoryUnusableReason,
+  firstAvailableHfCli,
+  DOWNLOAD_UNAVAILABLE_REASON,
+  CONTAMINATION_ABORT_STREAK,
+  contaminationPids,
+  gpuComputeProcesses,
+  nameContaminatingProcesses,
+  contaminatedHostHalt,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -272,10 +282,20 @@ async function stageQwenLightningLora(hub, file = QWEN_EDIT_LIGHTNING_LORA.file)
   await writeFile(path.join(root, file), "lora");
 }
 
-async function fakeHub(layout) {
+/**
+ * A hub whose listed roots are STAGED, not merely present.
+ *
+ * sc-22738: every root gets a weight file in it. An empty directory is now a distinct host
+ * condition (`EMPTY_SNAPSHOT_PREFIX` — the interrupted `Mage-Flow-Base/…/q4` fetch that aborted
+ * CUDA run 34272596969 at cell 61), so a fixture that models a staged snapshot has to look like
+ * one. `{ empty: true }` is how a test asks for the OTHER condition on purpose.
+ */
+async function fakeHub(layout, { empty = false } = {}) {
   const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-"));
   for (const [repo, revision, ...rest] of layout) {
-    await mkdir(snapshotPath(hub, repo, revision, ...rest), { recursive: true });
+    const root = snapshotPath(hub, repo, revision, ...rest);
+    await mkdir(root, { recursive: true });
+    if (!empty) await writeFile(path.join(root, "weights.safetensors"), "w");
   }
   return hub;
 }
@@ -5387,6 +5407,10 @@ async function stubHuggingFaceCli({ fail = false } = {}) {
       'for (const glob of includes.length > 0 ? includes : ["."]) {',
       '  const directory = glob.includes("/") ? glob.slice(0, glob.lastIndexOf("/")) : ".";',
       '  fs.mkdirSync(path.join(snapshot, directory), { recursive: true });',
+      // sc-22738: and a FILE in it. `hf download --include q4/*` materialises weights, and an
+      // empty `q4/` is now its own host condition (`EMPTY_SNAPSHOT_PREFIX`) rather than a staged
+      // root — a stub that created only the directory was asserting the wrong outcome.
+      '  fs.writeFileSync(path.join(snapshot, directory, "weights.safetensors"), "w");',
       '}',
       'fs.writeFileSync(path.join(snapshot, "config.json"), "{}");',
       // `refs/` is written exactly as the hub CLI writes it: not at all for a 40-hex revision.
@@ -5397,6 +5421,11 @@ async function stubHuggingFaceCli({ fail = false } = {}) {
     'const fs = require("node:fs");',
     'const path = require("node:path");',
     "const argv = process.argv.slice(2);",
+    // sc-22738: `firstAvailableHfCli` probes with `--version` before any fetch, so the runner can
+    // say ONCE and loudly that this box has no hub CLI instead of leaving N identical ENOENTs in a
+    // multi-hour log. A probe is not a download: it answers and is deliberately NOT logged, so the
+    // invocation assertions below still count fetches.
+    'if (argv[0] === "--version") { process.stdout.write("stub 1.0\\n"); process.exit(0); }',
     'fs.appendFileSync(process.env.STUB_HF_LOG, JSON.stringify(argv) + "\\n");',
     body,
     "",
@@ -5615,4 +5644,225 @@ test("download rows are narrowed to this host's platform, and fall back rather t
   );
   assert.deepEqual(tierDownloadRows(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "bf16", "plan9"), unfiltered);
   assert.ok(unfiltered.length > macos.length, "the fallback is wider than one platform's rows");
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: the four defects CUDA campaign run 34272596969 surfaced
+// ---------------------------------------------------------------------------------------------
+
+test("an EMPTY staged snapshot is weights_missing by name, never a runnable root", async () => {
+  const models = fakeModels();
+  // The same LOCAL family literal the per-(lane, tier) test owns — a per-lane rehost with packed
+  // tiers on the candle side and the unpinned upstream Diffusers checkpoint as its bf16 leg.
+  const family = {
+    env: "WAN_TI2V_5B",
+    repo: "SceneWorks/wan2.2-ti2v-5b-mlx",
+    arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        q4: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        q8: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  };
+  const artifact = familyArtifact(family, "candle", "q4");
+
+  const staged = await fakeHub([["SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"]]);
+  const empty = await fakeHub([["SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"]], { empty: true });
+
+  const refused = await resolveArtifactRoot(models, "wan_2_2", "q4", artifact, [empty, staged]);
+  assert.equal(refused.root, null, "an empty tier root is never handed back as a load root");
+  assert.equal(
+    refused.reason,
+    `${EMPTY_SNAPSHOT_PREFIX}${snapshotPath(empty, "SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4")}`,
+  );
+
+  // The run that produced the defect: `…\Mage-Flow-Base\snapshots\d642…\q4` existed and held
+  // nothing, so the cell planned `runnable`, the walk booked it, and the artifact inventory threw
+  // out of `measureAnchor` and killed the remaining 71 of 132 cells.
+  assert.equal(await directoryHasFiles(snapshotPath(empty, "SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4")), false);
+  assert.equal(await directoryHasFiles(snapshotPath(staged, "SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4")), true);
+  assert.equal(await directoryHasFiles(path.join(staged, "no-such-directory")), false);
+
+  // A file at ANY depth is staged, not empty.
+  const nested = await mkdtemp(path.join(tmpdir(), "catalog-nested-"));
+  await mkdir(path.join(nested, "a", "b"), { recursive: true });
+  assert.equal(await directoryHasFiles(nested), false, "directories alone are not files");
+  await writeFile(path.join(nested, "a", "b", "w.safetensors"), "w");
+  assert.equal(await directoryHasFiles(nested), true);
+});
+
+test("an unpinned repository skips an empty staged revision, and reports one only when no other holds weights", async () => {
+  const models = fakeModels();
+  // The same LOCAL family literal the per-(lane, tier) test owns — a per-lane rehost with packed
+  // tiers on the candle side and the unpinned upstream Diffusers checkpoint as its bf16 leg.
+  const family = {
+    env: "WAN_TI2V_5B",
+    repo: "SceneWorks/wan2.2-ti2v-5b-mlx",
+    arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        q4: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        q8: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  };
+  const artifact = familyArtifact(family, "candle", "bf16");
+  assert.equal(artifact.layout, "flat", "the unpinned upstream leg is the flat one");
+
+  const both = await fakeHub([["Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION]]);
+  await mkdir(snapshotPath(both, "Wan-AI/Wan2.2-TI2V-5B-Diffusers", UPSTREAM), { recursive: true });
+  const resolved = await resolveArtifactRoot(models, "wan_2_2", "bf16", artifact, [both]);
+  assert.equal(
+    resolved.root,
+    snapshotPath(both, "Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION),
+    "the STAGED revision wins over the empty one, whichever order the hub lists them in",
+  );
+
+  const onlyEmpty = await fakeHub([["Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION]], { empty: true });
+  const refused = await resolveArtifactRoot(models, "wan_2_2", "bf16", artifact, [onlyEmpty]);
+  assert.equal(refused.root, null);
+  assert.match(refused.reason, new RegExp(`^${EMPTY_SNAPSHOT_PREFIX}`));
+});
+
+test("an inventory the capture cannot hash is a per-cell weights_missing, not a thrown walk", () => {
+  // The exact message `hash-artifact-inventory.mjs` threw at cell 61 of 132, rewritten into this
+  // file's one spelling for the condition.
+  assert.equal(
+    inventoryUnusableReason("/hub/q4", new Error("artifact inventory is empty: /hub/q4")),
+    `${EMPTY_SNAPSHOT_PREFIX}/hub/q4`,
+  );
+  // Anything else the inventory refuses is still a per-cell status, quoted rather than guessed at.
+  const escaped = inventoryUnusableReason("/hub/q4", new Error("artifact inventory file escaped its trusted root: x"));
+  assert.match(escaped, /^artifact inventory unusable at \/hub\/q4: artifact inventory file escaped/);
+  assert.ok(inventoryUnusableReason("/hub/q4", new Error("x".repeat(999))).length <= FAILURE_REASON_LIMIT);
+});
+
+test("--download-missing fetches an EMPTY snapshot too: the hub CLI resumes an interrupted fetch", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // Both anchors' roots EXIST; z-image-turbo's holds weights, qwen's is the interrupted fetch.
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  await mkdir(snapshotPath(hub, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4"), { recursive: true });
+  const stub = await stubHuggingFaceCli();
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-empty", hfCache: [hub],
+  };
+
+  const before = await planRun({ ...args, downloadMissing: false }, root);
+  const planned = before.rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(planned.status, "weights_missing", "an empty tier root is never booked as runnable");
+  assert.match(planned.reason, new RegExp(`^${EMPTY_SNAPSHOT_PREFIX}`));
+
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(fetched.status, "runnable", fetched.reason);
+  assert.equal((await stub.invocations()).length, 1, "the already-staged anchor is never re-fetched");
+});
+
+test("with no Hugging Face CLI on PATH, --download-missing says so ONCE and on every cell it silenced", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-nocli", hfCache: [hub],
+  };
+
+  const emptyPath = await mkdtemp(path.join(tmpdir(), "catalog-no-cli-"));
+  const originalPath = process.env.PATH;
+  const written = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => { written.push(String(chunk)); return true; };
+  let rows;
+  try {
+    process.env.PATH = emptyPath;
+    assert.equal(await firstAvailableHfCli(), null);
+    ({ rows } = await planRun(args, root));
+  } finally {
+    process.env.PATH = originalPath;
+    process.stdout.write = originalWrite;
+  }
+
+  const warnings = written.filter((line) => line.includes("::warning title=Hugging Face CLI missing"));
+  assert.equal(warnings.length, 1, "stated once for the run, not once per cell");
+  assert.match(warnings[0], new RegExp(HF_CLI_CANDIDATES.join(", ")));
+
+  const silenced = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(silenced.status, "weights_missing");
+  assert.ok(silenced.reason.includes(`(download unavailable: ${DOWNLOAD_UNAVAILABLE_REASON})`), silenced.reason);
+  assert.equal(rows.find((row) => row.key === "z_image_turbo:q4:mlx").status, "runnable");
+});
+
+test("a broken-but-present hub CLI is used anyway: only ENOENT falls through to the next spelling", async () => {
+  const tried = [];
+  const enoent = (command) => { tried.push(command); return Promise.reject(Object.assign(new Error("nope"), { code: "ENOENT" })); };
+  assert.equal(await firstAvailableHfCli({ runCommand: enoent }), null);
+  assert.deepEqual(tried, [...HF_CLI_CANDIDATES]);
+
+  // Present but exiting non-zero: its own download error describes the broken install better than
+  // anything guessed here, so it counts as available.
+  assert.equal(
+    await firstAvailableHfCli({ runCommand: () => Promise.reject(Object.assign(new Error("bad install"), { code: 1 })) }),
+    HF_CLI_CANDIDATES[0],
+  );
+  assert.equal(await firstAvailableHfCli({ runCommand: () => Promise.resolve({ stdout: "", stderr: "" }) }), HF_CLI_CANDIDATES[0]);
+});
+
+test("a contaminated GPU is named by process and aborts the walk after a streak, not cell by cell", async () => {
+  // The literal reason `candle-gen`'s stable-idle guard produced 51 times on run 34272596969.
+  const reason = "untrustworthy stable idle baseline: pure compute processes [6308] are resident on the profiled GPU; the peak is contaminated";
+  assert.deepEqual(contaminationPids(reason), [6308]);
+  assert.deepEqual(contaminationPids("pure compute processes [6308, 42] are resident"), [6308, 42]);
+  // Every OTHER failure is not this host condition and must never feed the streak.
+  assert.equal(contaminationPids("sampled GPU was not idle (baseline 1.2 GB, required < 1.0 GB); the peak is contaminated"), null);
+  assert.equal(contaminationPids("pure compute processes [] are resident"), null);
+  assert.equal(contaminationPids(null), null);
+
+  const csv = "6308, D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks\\target\\release\\memory-candle-adapter.exe, 12345 MiB\n";
+  const processes = await gpuComputeProcesses({
+    runCommand: (command, argv) => {
+      assert.equal(command, "nvidia-smi");
+      assert.ok(argv.includes("--query-compute-apps=pid,process_name,used_memory"));
+      assert.deepEqual(argv.slice(0, 2), ["-i", "1"], "the census stays on the PROFILED device");
+      return Promise.resolve({ stdout: csv, stderr: "" });
+    },
+    env: { CUDA_VISIBLE_DEVICES: "1" },
+  });
+  assert.match(processes.get(6308), /memory-candle-adapter\.exe \(12345 MiB\)/);
+
+  // A pid alone is useless to whoever has to go and kill it; the name is what makes it actionable.
+  assert.match(nameContaminatingProcesses(reason, [6308], processes), /\[6308 = .*memory-candle-adapter\.exe \(12345 MiB\)\]$/);
+  assert.equal(nameContaminatingProcesses(reason, [6308], new Map()), reason, "an unavailable census changes nothing");
+  // An unreachable nvidia-smi is not an error here — the reason simply keeps the bare pid.
+  assert.equal((await gpuComputeProcesses({ runCommand: () => Promise.reject(new Error("no nvidia-smi")) })).size, 0);
+
+  assert.ok(CONTAMINATION_ABORT_STREAK >= 2 && CONTAMINATION_ABORT_STREAK <= 10);
+  const halt = contaminatedHostHalt([6308], processes);
+  assert.match(halt, /memory-candle-adapter\.exe/);
+  assert.match(halt, new RegExp(`${CONTAMINATION_ABORT_STREAK} consecutive captures`));
+  assert.match(halt, /contaminated HOST/);
+});
+
+test("the campaign's GPU preflight step runs before the walk and only ever reaps our own binaries", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  // Scoped to the CANDLE job: the mlx job above it walks with `run.sh` too, and there is no
+  // nvidia-smi on a Mac to census with.
+  const candle = workflow.slice(workflow.indexOf("\n  candle:"));
+  assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "the candle job was located");
+  const preflight = candle.indexOf("scripts/ci/memory-catalog/gpu-preflight.sh");
+  const walk = candle.indexOf("scripts/ci/memory-catalog/run.sh");
+  assert.ok(preflight > -1, "the candle job censuses the GPU before it spends an hour on a dirty one");
+  assert.ok(preflight < walk, "and it does so BEFORE the walk");
+  assert.ok(!workflow.slice(0, workflow.indexOf("\n  candle:")).includes("gpu-preflight.sh"));
+
+  const script = await readFile(path.join(ROOT, "scripts/ci/memory-catalog/gpu-preflight.sh"), "utf8");
+  assert.match(script, /--query-compute-apps=pid,process_name,used_memory/);
+  assert.match(script, /-i "\$CUDA_VISIBLE_DEVICES"/, "the census stays on the profiled device");
+  // Ours BY NAME. Never an arbitrary pid: this box serves other self-hosted lanes.
+  assert.match(script, /\*memory-candle-adapter\* \| \*memory-mlx-adapter\*/);
+  assert.match(script, /::error title=Profiled GPU is not idle/);
 });

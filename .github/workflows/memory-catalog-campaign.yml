@@ -388,6 +388,12 @@ jobs:
           if errorlevel 1 exit /b 1
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
 
+      # BEFORE the walk, and it FAILS THE JOB rather than warning (sc-22738). Run 34272596969 spent
+      # 51 guarded renders -- about an hour of GPU time -- refusing every peak as contaminated by
+      # pid 6308, an adapter orphaned by the cancelled run before it. See the script's header.
+      - name: Census the profiled GPU
+        run: bash scripts/ci/memory-catalog/gpu-preflight.sh
+
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
 

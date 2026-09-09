@@ -113,10 +113,21 @@ const SDXL_COMPONENTS: [(&str, &str); 3] = [
 
 /// One member of the Candle SDXL family.
 ///
-/// `route_revision` is the revision `candle-gen-sdxl`'s own `SDXL_ROUTES` table pins for this
-/// member. It is recorded here — rather than only in the env — because the engine's
-/// `path_has_snapshot` matches the staged root against that literal, so a member whose route
-/// revision has drifted from the shipped manifest cannot seal a contract and cannot load at all.
+/// The revision this member's route pins is NOT a field here. It used to be — transcribed from
+/// `candle-gen-sdxl`'s own `SDXL_ROUTES` table — and sc-22738 is what a transcription costs: the
+/// inference-side sc-22729 repair moved `illustrious_xl_v1` to `778c3f02…` and `illustrious_xl_v2`
+/// to `672e9851…`, the copies here stayed at `c5a92a90…` / `7c5c8b2b…`, and on CUDA run
+/// 34272596969 all six Illustrious cells failed with this adapter's own drift refusal — against a
+/// pin at which the engine and the manifest AGREED. The runner's plan-time check
+/// (`sdxlCandleRouteDrift` in `scripts/measure-memory-catalog.mjs`) derives both sides and had
+/// correctly classified every one of them `runnable`.
+///
+/// So the revision is read from the linked engine crate at the pin, by
+/// [`sdxl_candle_route_revision`]. The check itself stays: the engine's `path_has_snapshot` matches
+/// a staged root against that literal, so a member whose route revision has drifted from the
+/// shipped manifest cannot seal a contract and cannot load at all — and saying which two revisions
+/// disagree is more useful than the engine's own message. It simply can no longer be wrong about
+/// what the engine pins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SdxlCandleArm {
     model_id: &'static str,
@@ -126,7 +137,40 @@ struct SdxlCandleArm {
     revision_env: &'static str,
     root_env: &'static str,
     expected_repository: &'static str,
-    route_revision: &'static str,
+}
+
+/// The revision `candle-gen-sdxl` pins for this member, read out of the ENGINE's own
+/// `SDXL_ROUTES` at the compiled pin.
+///
+/// Fail-closed in both directions: a member the engine declares no route for, and a route whose
+/// repository disagrees with the one this adapter stages, are both errors rather than a silently
+/// skipped comparison. `SdxlRoute` is not nameable from outside the crate (only the const is
+/// re-exported), which is why this returns the field rather than the row.
+fn sdxl_candle_route_revision(arm: &SdxlCandleArm) -> Result<&'static str, String> {
+    let route = candle_gen_sdxl::SDXL_ROUTES
+        .iter()
+        .find(|route| route.id == arm.model_id)
+        .ok_or_else(|| {
+            format!(
+                "candle-gen-sdxl's SDXL_ROUTES declares no route {:?} at {}, so this adapter has \
+                 no engine revision to bind {} against",
+                arm.model_id,
+                protocol::INFERENCE_PIN,
+                arm.expected_repository
+            )
+        })?;
+    if route.repository != arm.expected_repository {
+        return Err(format!(
+            "candle-gen-sdxl routes {:?} to {} at {}, but this adapter stages {} through {}; the \
+             two disagree about which repository the route loads",
+            arm.model_id,
+            route.repository,
+            protocol::INFERENCE_PIN,
+            arm.expected_repository,
+            arm.repository_env
+        ));
+    }
+    Ok(route.revision)
 }
 
 const SDXL_CANDLE_BASE_ARM: SdxlCandleArm = SdxlCandleArm {
@@ -137,7 +181,6 @@ const SDXL_CANDLE_BASE_ARM: SdxlCandleArm = SdxlCandleArm {
     revision_env: "SCENEWORKS_SDXL_REVISION",
     root_env: "SCENEWORKS_SDXL_ROOT",
     expected_repository: protocol::SDXL_REPOSITORY,
-    route_revision: "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
 };
 
 const SDXL_CANDLE_REALVISXL_ARM: SdxlCandleArm = SdxlCandleArm {
@@ -148,7 +191,6 @@ const SDXL_CANDLE_REALVISXL_ARM: SdxlCandleArm = SdxlCandleArm {
     revision_env: "SCENEWORKS_REALVISXL_REVISION",
     root_env: "SCENEWORKS_REALVISXL_ROOT",
     expected_repository: protocol::REALVISXL_REPOSITORY,
-    route_revision: "e40202d63baef826c7df95a639a811698c1178d2",
 };
 
 const SDXL_CANDLE_LIGHTNING_ARM: SdxlCandleArm = SdxlCandleArm {
@@ -159,7 +201,6 @@ const SDXL_CANDLE_LIGHTNING_ARM: SdxlCandleArm = SdxlCandleArm {
     revision_env: "SCENEWORKS_REALVISXL_LIGHTNING_REVISION",
     root_env: "SCENEWORKS_REALVISXL_LIGHTNING_ROOT",
     expected_repository: protocol::REALVISXL_LIGHTNING_REPOSITORY,
-    route_revision: "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
 };
 
 const SDXL_CANDLE_ILLUSTRIOUS_V1_ARM: SdxlCandleArm = SdxlCandleArm {
@@ -170,7 +211,6 @@ const SDXL_CANDLE_ILLUSTRIOUS_V1_ARM: SdxlCandleArm = SdxlCandleArm {
     revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REVISION",
     root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_ROOT",
     expected_repository: protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
-    route_revision: "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
 };
 
 const SDXL_CANDLE_ILLUSTRIOUS_V2_ARM: SdxlCandleArm = SdxlCandleArm {
@@ -181,7 +221,6 @@ const SDXL_CANDLE_ILLUSTRIOUS_V2_ARM: SdxlCandleArm = SdxlCandleArm {
     revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REVISION",
     root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_ROOT",
     expected_repository: protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
-    route_revision: "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
 };
 
 const SDXL_CANDLE_FAMILY: [SdxlCandleArm; 5] = [
@@ -1080,13 +1119,14 @@ fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
 fn sdxl_candle_spec(request: &Value, spec: LoadSpec) -> Result<LoadSpec, String> {
     let arm = sdxl_candle_arm(request)?;
     let revision = protocol::required_env(arm.revision_env)?;
-    if revision != arm.route_revision {
+    let route_revision = sdxl_candle_route_revision(&arm)?;
+    if revision != route_revision {
         return Err(format!(
             "candle-gen-sdxl pins route {:?} at {} ({}), but {} names {revision}; the engine's \
              `path_has_snapshot` matches that literal, so no staged root can seal this route at \
              {}. This cell is not capturable until the two revisions agree.",
             arm.model_id,
-            arm.route_revision,
+            route_revision,
             arm.expected_repository,
             arm.revision_env,
             protocol::INFERENCE_PIN
@@ -7680,7 +7720,10 @@ mod sdxl_family_tests {
             let arm = sdxl_candle_arm(&planned(SDXL_ID, model_id)).unwrap();
             assert_eq!(arm.model_id, model_id);
             assert_eq!(arm.expected_repository, repository);
-            assert_eq!(arm.route_revision.len(), 40, "{model_id} route revision");
+            // sc-22738: DERIVED from the linked engine crate, never transcribed here — so this
+            // asserts the lookup resolves, not that a literal in this file is 40 characters long.
+            let route_revision = sdxl_candle_route_revision(&arm).expect(model_id);
+            assert_eq!(route_revision.len(), 40, "{model_id} route revision");
         }
         // Every member's env family and execution path is its own.
         for field in [
@@ -7692,7 +7735,9 @@ mod sdxl_family_tests {
                 .to_vec(),
             SDXL_CANDLE_FAMILY.map(|arm| arm.execution_path).to_vec(),
             SDXL_CANDLE_FAMILY.map(|arm| arm.still_calibration).to_vec(),
-            SDXL_CANDLE_FAMILY.map(|arm| arm.route_revision).to_vec(),
+            SDXL_CANDLE_FAMILY
+                .map(|arm| sdxl_candle_route_revision(&arm).expect(arm.model_id))
+                .to_vec(),
         ] {
             let mut unique = field.clone();
             unique.sort_unstable();

@@ -195,6 +195,18 @@ on the SAME `SceneWorks/realvisxl-mlx` backbone, bound through its own
 every routed lane. Two engine-side facts keep some of them from being CAPTURABLE at inference
 `c6d6a4db`, and neither is adapter or plan work:**
 
+> ✅ **RESOLVED at the current pin `e34d7b46` (sc-22738).** The inference-side repair landed:
+> `SDXL_ROUTES` now pins `illustrious_xl_v1` at `778c3f02…` and `illustrious_xl_v2` at `672e9851…`,
+> which is exactly what `config/manifests/builtin.models.jsonc` ships, so the plan classifies all
+> six cells `runnable`. On CUDA run 34272596969 they nonetheless failed — because
+> `memory-candle-adapter` **transcribed** the old revisions into `SdxlCandleArm::route_revision` and
+> refused a drift that no longer existed. That field is gone: `sdxl_candle_route_revision` reads
+> `candle_gen_sdxl::SDXL_ROUTES` out of the linked engine crate at the pin, and additionally refuses
+> a route whose repository disagrees with the one the adapter stages. The check survives; it can no
+> longer be wrong about what the engine pins, and a future route move needs no edit here. **The
+> paragraph below is kept as the description of the CONDITION** — read it if `--list` ever reports
+> these cells `harness_unsupported` again.
+
 - `illustrious_xl_v1` / `illustrious_xl_v2` on **candle**, all three tiers — six cells.
   `candle-gen-sdxl`'s `SDXL_ROUTES`
   (`crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs`) pins those two routes at
@@ -1640,6 +1652,37 @@ on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a
 error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
 snapshot is under none of them plans as `weights_missing` rather than failing the run.
 
+**The candle job censuses the GPU before it walks (sc-22738).** Run 34272596969 spent 51 guarded
+renders — roughly an hour of GPU time — producing 51 copies of one sentence: *"untrustworthy stable
+idle baseline: pure compute processes [6308] are resident on the profiled GPU; the peak is
+contaminated"*. Pid 6308 was a `memory-candle-adapter.exe` orphaned when the previous dispatch
+(34271044903) was cancelled: the harness launches the adapter **detached**, deliberately, so a
+Ctrl-C cannot reach it mid-command-buffer, and the runner's own *"Cleaning up orphan processes"* only
+reaps a step's direct children.
+
+`scripts/ci/memory-catalog/gpu-preflight.sh` now runs between *Build the candle memory adapter* and
+*Plan the walk*:
+
+1. `nvidia-smi -i $CUDA_VISIBLE_DEVICES --query-compute-apps=pid,process_name,used_memory
+   --format=csv,noheader`;
+2. terminates anything matching `*memory-candle-adapter*` / `*memory-mlx-adapter*` — **ours, by
+   name**. Never an arbitrary pid: this box also serves `windows-candle.yml` and
+   `desktop-windows.yml`;
+3. censuses again, and **fails the job** with `::error title=Profiled GPU is not idle` naming the
+   pid, the process and its memory if anything is left. Find out whose it is before killing it.
+
+No `nvidia-smi` on PATH is a warning, not a failure — the engine's stable-idle guard still refuses a
+contaminated peak per anchor; this step is the cheap way to find out early. **The guard itself is
+untouched.** It is measurement validity — a peak sampled beside a foreign process is not this
+model's peak — not a gate on anything shipping (see FEATURE_DEVELOPMENT.md, *Gate teardown*).
+
+The walk carries the other half. A `capture_failed` reason naming pids is annotated with each
+process's **name** (queried once per streak, so the operator gets `[6308 = …\memory-candle-adapter.exe
+(12345 MiB)]` rather than a bare number), and `CONTAMINATION_ABORT_STREAK` (5) consecutive refusals
+naming the *same* process halt the walk with a summary line instead of burning the rest of the
+catalog. That is deliberately a **host**-level abort: a per-cell host condition — an empty snapshot,
+an unstaged component — must never abort the walk, and no longer can.
+
 **Fetching the missing snapshots — `download_missing` / `--download-missing` (sc-22738).** Neither
 box holds the whole catalog. Copying the missing snapshots off the Mac's SSD is slower than fetching
 them from the hub on the Windows box's own link (measured 2026-09-08), so the campaign can fetch
@@ -1675,6 +1718,20 @@ gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
   missing. Each landed snapshot logs `download: <key> <repo>@<rev> <n> files, <bytes> bytes`.
 - **A failed fetch never stops the walk.** That one anchor stays `weights_missing (download failed:
   <reason>)` and the campaign moves on, exactly as an absent snapshot does today.
+- **An EMPTY snapshot directory is fetchable, and is never booked as runnable** (sc-22738, run
+  34272596969). A hub fetch interrupted after the snapshot tree was created and before a blob landed
+  leaves `models--<org>--<name>/snapshots/<rev>/<tier>/` present and empty. That plans as
+  `weights_missing (snapshot present but empty: <path>)`, which makes it eligible here — the CLI
+  resumes an interrupted download — instead of being booked, loaded, and then thrown out of the walk
+  by the artifact inventory. (It was: `artifact inventory is empty:
+  E:\huggingface\hub\models--SceneWorks--Mage-Flow-Base\snapshots\d642341926…\q4` aborted that run at
+  cell 61 of 132 and discarded the remaining 71.)
+- **No hub CLI on PATH is stated ONCE, loudly.** Before it fetches anything the walk probes
+  `hf --version`, then `huggingface-cli --version`. When neither runs, it writes a
+  `::warning title=Hugging Face CLI missing` at the top of the step and every cell it silenced
+  carries `weights_missing (… download unavailable: no Hugging Face CLI on PATH …)` — rather than N
+  identical `ENOENT` lines buried in a multi-hour log. A CLI that is present but exits non-zero
+  counts as installed: its own download error describes a broken install better.
 - **`$HF_TOKEN`** is exported into the job from the repository/org secret of that name and is read
   by the CLI, not by this script. Every artifact the campaign fetches today is public, so an unset
   token only matters for a gated repository; set the secret (or export `HF_TOKEN` /
