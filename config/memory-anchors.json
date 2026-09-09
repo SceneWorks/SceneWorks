@@ -2369,6 +2369,51 @@
       "overallAllocatorEnvelopeBytes": 92080257780
     },
     {
+      "id": "lens_turbo:candle:bf16:base:base:lens-turbo-bf16-candle-cuda-shared-ladder-v1:imc-6870ecc9389ed4bc03f3",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json",
+        "sha256": "9f5dd3e1973b1315fcac25bc797f3634ad3ec8570cf009451b7f864dcc75aef5",
+        "recordId": "imc-6870ecc9389ed4bc03f3",
+        "calibrationFingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "beb6a10994052580052d69b9788f63285fa57ff8c5135aa1ba655456d478a607"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 42550165504,
+        "denoise": 12049186816,
+        "decode": 26546798592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 42550165504,
+        "denoise": 12049186816,
+        "decode": 26546798592
+      },
+      "overallAllocatorEnvelopeBytes": 42550165504
+    },
+    {
       "id": "lens_turbo:mlx:bf16:base:base:lens-turbo-bf16-mlx-shared-ladder-v1:imc-9faaaa1095d39acaba6f",
       "modelId": "lens_turbo",
       "modelFamily": "lens",
@@ -7453,17 +7498,6 @@
       "route": "lens",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:candle:bf16",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
