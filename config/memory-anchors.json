@@ -1004,6 +1004,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux_schnell:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-9bb7a4d7fb80ee5d3f02",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-q4-candle-evidence.json",
+        "sha256": "3f73d285b5724c485922a90077394524d740a29fa2d39f22f2d254d56f53e915",
+        "recordId": "imc-9bb7a4d7fb80ee5d3f02",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "6ec1516e2324d822b07ee23e9d6b1fbd4f9b72b9312f84343da3d10693983959"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3962568704,
+        "denoise": 11545870336,
+        "decode": 19064160256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3962568704,
+        "denoise": 11545870336,
+        "decode": 19064160256
+      },
+      "overallAllocatorEnvelopeBytes": 19064160256
+    },
+    {
       "id": "flux_schnell:mlx:bf16:base:base:flux1-schnell-bf16-mlx-shared-ladder-v1:imc-0be4aefad13dec909d8e",
       "modelId": "flux_schnell",
       "modelFamily": "flux",
@@ -6592,27 +6637,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:flux_schnell:candle:q4",
-      "modelId": "flux_schnell",
-      "modelFamily": "flux",
-      "route": "flux1_schnell",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-3e535b3422a162b35758",
-        "envelopeBytes": 17642573594,
-        "values": {
-          "provider": "flux1_schnell"
-        }
-      }
     },
     {
       "id": "analytic:flux_schnell:candle:q8",
