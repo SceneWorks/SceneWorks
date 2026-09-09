@@ -23140,7 +23140,16 @@
           "variant": "q4",
           "coRequisite": true,
           "files": ["q4/transformer_ref/*"],
-          "platforms": ["macos"],
+          // sc-22738 — `["macos", "windows", "linux"]`, NOT macOS. The packed q4/q8 primaries above
+          // ship for all three platforms, and the sibling partition is part of the minimum loadable
+          // set on every one of them (the paragraph above; `MINIMAX_TIER_DIT_FILES` in
+          // `scripts/measure-memory-catalog.mjs` probes `transformer_ref/config.json` for every tier
+          // on BOTH lanes). Scoping it to macOS made the off-Mac q4/q8 install a hard load failure
+          // by construction: run 34356681566 fetched both tier roots on the CUDA box and every
+          // `minimax_h3`/`minimax_h3_ref` q4/q8 cell still planned `weights_missing` naming
+          // `transformer_ref/config.json`. `minimax_h3_ref` already ships its mirror of these rows
+          // for all three platforms — the two entries' axes were never meant to differ here.
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18780109783
         },
         {
@@ -23150,7 +23159,7 @@
           "variant": "q8",
           "coRequisite": true,
           "files": ["q8/transformer_ref/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35302064357
         },
         {
@@ -23160,6 +23169,10 @@
           "variant": "bf16",
           "coRequisite": true,
           "files": ["bf16/transformer_ref/*"],
+          // bf16 STAYS macOS-only, unlike its q4/q8 siblings above: this entry's bf16 primary is
+          // macOS-only too, and the off-Mac dense leg loads from the `MiniMaxAI/MiniMax-H3` snapshot
+          // ROOT instead of this rehost. Widening it would make a Windows box fetch 66 GB of a tier
+          // root nothing off-Mac ever binds.
           "platforms": ["macos"],
           "estimatedSizeBytes": 66280569250
         },

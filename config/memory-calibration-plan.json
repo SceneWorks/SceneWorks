@@ -1934,7 +1934,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "qwen-image-candle-bf16-seed15817-step2"
     },
     "qwen_image:bf16:mlx": {
@@ -1965,7 +1965,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "qwen-image-candle-q4-seed15817-step2"
     },
     "qwen_image:q4:mlx": {
@@ -1996,7 +1996,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "qwen-image-candle-q8-seed15817-step2"
     },
     "qwen_image:q8:mlx": {
