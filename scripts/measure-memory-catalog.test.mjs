@@ -113,6 +113,8 @@ import {
   HF_CLI_CANDIDATES,
   EMPTY_SNAPSHOT_PREFIX,
   directoryHasFiles,
+  missingIndexedShards,
+  SAFETENSORS_INDEX_PATTERN,
   inventoryUnusableReason,
   firstAvailableHfCli,
   DOWNLOAD_UNAVAILABLE_REASON,
@@ -463,6 +465,56 @@ test("classification: runnable anchors carry the adapter env family and the cano
   const missingTier = await classifyAnchor("qwen_image:q8:mlx", { provider: "qwen_image" }, context);
   assert.equal(missingTier.status, "weights_missing");
   assert.match(missingTier.reason, /q8 on this host/);
+});
+
+// sc-22738. CUDA campaign run 34356681566 lost `qwen_image:bf16:candle` to `text encoder contract
+// mismatch … field architecture_header expected qwen2_5_vl_text` against a `bf16/text_encoder`
+// whose pinned revision is byte-identical to the one the same contract accepted for
+// `qwen_image_edit_2511` on the same box: a partial shard set (no `model-00001-of-00004`, so no
+// `model.layers.0.*`) is the only artifact that fails that signature, and `--list` had called the
+// cell runnable because the tier-root probe asks only whether the directory holds a file. A sharded
+// component's own index names the shards the engine will open, so an index naming an absent shard
+// is `weights_missing` — named shard by shard — and eligible for the resuming `--download-missing`.
+test("classification: a tier root whose safetensors index names an absent shard is weights_missing, not runnable", async () => {
+  const hub = await fakeHub([["SceneWorks/qwen-image-mlx", REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, "SceneWorks/qwen-image-mlx", REVISION, "q4");
+  const textEncoder = path.join(tierRoot, "text_encoder");
+  await mkdir(textEncoder, { recursive: true });
+  await writeFile(path.join(textEncoder, "model.safetensors.index.json"), JSON.stringify({
+    metadata: { total_size: 2 },
+    weight_map: {
+      "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+      "model.layers.0.self_attn.q_proj.bias": "model-00001-of-00002.safetensors",
+      "model.norm.weight": "model-00002-of-00002.safetensors",
+    },
+  }));
+  await writeFile(path.join(textEncoder, "model-00002-of-00002.safetensors"), "w");
+  // Kolors' upstream index spelling is a shard index too; a derived dot-directory is not walked.
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), "");
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors.index.fp16.json"), true);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors"), false);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("config.json"), false);
+  const cache = path.join(textEncoder, ".candle-device-format-v1");
+  await mkdir(cache, { recursive: true });
+  await writeFile(path.join(cache, "model.safetensors.index.json"), JSON.stringify({ weight_map: { x: "gone.safetensors" } }));
+
+  assert.deepEqual(await missingIndexedShards(tierRoot), [
+    "model.safetensors.index.fp16.json (unreadable: Unexpected end of JSON input)",
+    path.join("text_encoder", "model-00001-of-00002.safetensors"),
+  ]);
+
+  const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const partial = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /is missing model\.safetensors\.index\.fp16\.json \(unreadable: .*\), text_encoder[\\/]model-00001-of-00002\.safetensors, which its own safetensors shard index names beside it; the mirror is partial and --download-missing resumes it$/);
+
+  // Complete the mirror and the same root is runnable again: the probe is derived from the
+  // artifact's own inventory, not a per-family declaration.
+  await writeFile(path.join(textEncoder, "model-00001-of-00002.safetensors"), "w");
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), JSON.stringify({ weight_map: {} }));
+  assert.deepEqual(await missingIndexedShards(tierRoot), []);
+  const complete = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(complete.status, "runnable", complete.reason);
 });
 
 // sc-22738. The campaign lost a booked `minimax_h3:bf16:mlx` capture to
