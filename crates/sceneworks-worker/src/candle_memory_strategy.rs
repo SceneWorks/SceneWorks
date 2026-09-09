@@ -5333,17 +5333,23 @@ mod tests {
                 .observed_peak_bytes
                 .is_some_and(|active| candidate.predicted_peak_bytes > active)
         }));
-        let mut unaudited_manifest = manifest.clone();
-        for binding in unaudited_manifest["candle"]["calibrations"]
+        let mut foreign_campaign_manifest = manifest.clone();
+        for binding in foreign_campaign_manifest["candle"]["calibrations"]
             .as_array_mut()
             .expect("mutable FLUX.2-dev calibration bindings")
         {
-            // sc-17774: as above — the deleted hatch cannot make a binding unaudited any more, so
-            // move the mutation onto the closure digest currency actually compares.
-            binding["inferenceClosureDigest"] = json!("a".repeat(64));
+            // sc-17774 retired the hand-audited `compatibleInferenceRevision` hatch, and sc-22738
+            // retired the closure-digest currency conjunct that replaced it as this test's
+            // discriminator: the runtime never demotes a measurement for a moved closure, so a
+            // rotated `inferenceClosureDigest` is served exactly as the packaged one. What still
+            // keeps a binding out is its AUDIT identity — a binding that cites a calibration
+            // campaign the packaged record was not produced under is not evidence
+            // (`EvidenceMismatchReason::CalibrationFingerprint` in `evidence_for`), whether or not
+            // any closure moved.
+            binding["fingerprint"] = json!("flux2-dev-foreign-campaign-fingerprint");
         }
         assert!(verified_candidates(
-            &unaudited_manifest,
+            &foreign_campaign_manifest,
             "flux2_dev",
             "flux2_dev",
             "q4",
