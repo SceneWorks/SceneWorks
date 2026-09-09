@@ -1727,6 +1727,51 @@
       "overallAllocatorEnvelopeBytes": 17587765248
     },
     {
+      "id": "krea_2_raw:candle:q8:base:base:krea-2-raw-q8-cuda-staged-residency-v1:imc-15d5140d06c21cbc37c6",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-q8-candle-evidence.json",
+        "sha256": "507ac703db0f3f5638f0ee46839490ebfcead71ea8398d5cce5a11ad26f4e7ce",
+        "recordId": "imc-15d5140d06c21cbc37c6",
+        "calibrationFingerprint": "krea-2-raw-q8-cuda-staged-residency-v1",
+        "loaderClosureDigest": "edf9dbc5a89f09d769d0ed81c1a5af9bc4fb728948586992a715189eb0a605ce"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5371854848,
+        "denoise": 16849567744,
+        "decode": 22990028800
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5371854848,
+        "denoise": 16849567744,
+        "decode": 22990028800
+      },
+      "overallAllocatorEnvelopeBytes": 22990028800
+    },
+    {
       "id": "krea_2_raw:mlx:bf16:base:base:krea-2-raw-bf16-mlx-shared-ladder-v1:imc-9511a33e5d5748de9ae7",
       "modelId": "krea_2_raw",
       "modelFamily": "krea_2",
@@ -7221,17 +7266,6 @@
           "vramGbByTier": "30.4"
         }
       }
-    },
-    {
-      "id": "analytic:krea_2_raw:candle:q8",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:krea_2_turbo:candle:bf16",
