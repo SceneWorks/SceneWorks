@@ -861,18 +861,46 @@ test("a candle lane whose engine has no staged composition is anchored by its re
       );
     }
   }
+  // sc-22738: the exemption is no longer hypothetical. When sc-22734 landed it, no packaged anchor
+  // sat on an exempt lane, and this asserted that "before" state — which the wave-3 MLX campaign
+  // was built to end: it captured all eighteen SenseNova MLX cells, every one in the resident
+  // composition the exemption exists to admit. So the snapshot is replaced by the invariant it was
+  // standing in for, which holds on both sides of that campaign.
   const store = await buildAnchorStore({ matrix });
+  const onExemptLane = store.anchors.filter((anchor) => realLanes.has(`${anchor.modelId}:${anchor.backend}`));
   for (const anchor of store.anchors) {
-    assert.ok(
-      !realLanes.has(`${anchor.modelId}:${anchor.backend}`),
-      `${anchor.id}: no packaged anchor is on an exempt lane yet, so no packaged row moved`,
-    );
+    if (realLanes.has(`${anchor.modelId}:${anchor.backend}`)) {
+      // The only composition such a cell can be captured in, and the flag that says so.
+      assert.equal(anchor.measuredRegime.staged, false, `${anchor.id}: an exempt lane anchors resident`);
+      assert.equal(
+        anchor.stagedResidencyStructurallyNotApplicable,
+        true,
+        `${anchor.id}: an exempt lane's packaged row states the exemption`,
+      );
+      continue;
+    }
     assert.equal(
       anchor.stagedResidencyStructurallyNotApplicable,
       undefined,
-      `${anchor.id}: the new field is emitted only when true, so packaged rows stay byte-identical`,
+      `${anchor.id}: the field is emitted only when true, so every other packaged row is byte-identical`,
     );
   }
+  // Every exempt-lane anchor the store holds is a SenseNova MLX one; the candle half of each
+  // exempt lane is still uncaptured, which is what keeps the `default argument` assertions above
+  // meaningful rather than vacuous.
+  assert.deepEqual(
+    [...new Set(onExemptLane.map((anchor) => `${anchor.modelId}:${anchor.backend}`))].sort(),
+    [
+      "sensenova_u1_8b:mlx",
+      "sensenova_u1_8b_fast:mlx",
+      "sensenova_u1_8b_infographic_v2:mlx",
+      "sensenova_u1_8b_infographic_v2_fast:mlx",
+      "sensenova_u1_8b_infographic_v3:mlx",
+      "sensenova_u1_8b_infographic_v3_fast:mlx",
+    ],
+    "the wave-3 campaign's six SenseNova MLX lanes are the exempt lanes the store carries",
+  );
+  assert.equal(onExemptLane.length, 18, "three tiers on each of those six lanes");
 });
 
 // sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a

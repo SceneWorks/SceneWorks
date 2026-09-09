@@ -4376,6 +4376,834 @@
       "overallAllocatorEnvelopeBytes": 30648094704
     },
     {
+      "id": "sensenova_u1_8b:mlx:bf16:base:base:sensenova-u1-quality-bf16-mlx-shared-ladder-v1:imc-989847820f3a5dcbe171",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-bf16-mlx-evidence.json",
+        "sha256": "c54d97446a17c429f029d00e2ca51ade3937c5fe53fa027884c6b0da6ec50b08",
+        "recordId": "imc-989847820f3a5dcbe171",
+        "calibrationFingerprint": "sensenova-u1-quality-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 35621743708,
+        "decode": 33518691240
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 39506784812,
+        "decode": 37623933328
+      },
+      "overallAllocatorEnvelopeBytes": 39726985796,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b:mlx:q4:base:base:sensenova-u1-quality-q4-mlx-shared-ladder-v1:imc-623341bc53f0139b199a",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json",
+        "sha256": "c0c750616b50b17627025a387db1e1dbd03bc7e2aadd2e94c984dd3007758cbf",
+        "recordId": "imc-623341bc53f0139b199a",
+        "calibrationFingerprint": "sensenova-u1-quality-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 12139424880,
+        "decode": 10491175720
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 14910913600,
+        "decode": 13482898192
+      },
+      "overallAllocatorEnvelopeBytes": 15131147352,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b:mlx:q8:base:base:sensenova-u1-quality-q8-mlx-shared-ladder-2026-08-03-v1:imc-f566f917d492c14376d3",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json",
+        "sha256": "0880c68d95f954ec7e2868cb091904009dd4dae94de015beacdaa88abcbf4b91",
+        "recordId": "imc-f566f917d492c14376d3",
+        "calibrationFingerprint": "sensenova-u1-quality-q8-mlx-shared-ladder-2026-08-03-v1",
+        "loaderClosureDigest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 19988770928,
+        "decode": 18502362920
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 22421075776,
+        "decode": 21154901520
+      },
+      "overallAllocatorEnvelopeBytes": 22641309528,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json",
+        "sha256": "ddbf40d1e3d10957e4d7364cc2e187d2147e597efeacbb1dbb69287f1203acae",
+        "recordId": "imc-6104367f39ad6d83794c",
+        "calibrationFingerprint": "sensenova-u1-fast-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 35488173004,
+        "decode": 33518683944
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 38689068392,
+        "decode": 36984918228
+      },
+      "overallAllocatorEnvelopeBytes": 38954407288,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:mlx:q4:base:base:sensenova-u1-fast-q4-mlx-shared-ladder-v1:imc-60410f7ac6d53e120530",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-mlx-evidence.json",
+        "sha256": "c0d2e418d7028688e7597d77875ceacba25acbbd41937520d14a8851e6694c49",
+        "recordId": "imc-60410f7ac6d53e120530",
+        "calibrationFingerprint": "sensenova-u1-fast-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 12158292432,
+        "decode": 10491103016
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 14417290092,
+        "decode": 13015374036
+      },
+      "overallAllocatorEnvelopeBytes": 14682563452,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:mlx:q8:base:base:sensenova-u1-fast-q8-mlx-shared-ladder-2026-08-03-v1:imc-3ba3344d1f1c67531151",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-mlx-evidence.json",
+        "sha256": "e86acd22a7e5d0616d452e2303d361f57ad280cfdd632b919446cb9a478673da",
+        "recordId": "imc-3ba3344d1f1c67531151",
+        "calibrationFingerprint": "sensenova-u1-fast-q8-mlx-shared-ladder-2026-08-03-v1",
+        "loaderClosureDigest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 19961919952,
+        "decode": 18502403880
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 21884619628,
+        "decode": 20623251668
+      },
+      "overallAllocatorEnvelopeBytes": 22082767740,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2:mlx:bf16:base:base:sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1:imc-f3714df49f7065bc00ce",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json",
+        "sha256": "e5aec783d3b82ff6cd8d4fb9338741be598a32e3d6ec8d5f52c0439e18d4682b",
+        "recordId": "imc-f3714df49f7065bc00ce",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 35621742556,
+        "decode": 33518690088
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 39506783660,
+        "decode": 37623932176
+      },
+      "overallAllocatorEnvelopeBytes": 39726984644,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2:mlx:q4:base:base:sensenova-u1-infographic-v2-q4-mlx-shared-ladder-v1:imc-852f997f7beb80fe9b9a",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json",
+        "sha256": "f5b56b97ec9238eb9c6cec97eefdc29ab340f6e3dba1929034c26ff44aedcebe",
+        "recordId": "imc-852f997f7beb80fe9b9a",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 12139393136,
+        "decode": 10491143976
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 14910865216,
+        "decode": 13482849808
+      },
+      "overallAllocatorEnvelopeBytes": 15131098968,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2:mlx:q8:base:base:sensenova-u1-infographic-v2-q8-mlx-shared-ladder-v1:imc-1213768545368ed01c10",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json",
+        "sha256": "585c7af21ef98ff17e33b04b872e0c4d3fac78c94d8fe99d08638ec79bf42904",
+        "recordId": "imc-1213768545368ed01c10",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 19988705392,
+        "decode": 18502297384
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 22421045056,
+        "decode": 21154870800
+      },
+      "overallAllocatorEnvelopeBytes": 22641278808,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:mlx:bf16:base:base:sensenova-u1-infographic-v2-fast-bf16-mlx-shared-ladder-v1:imc-9eb7e5273c385e455415",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json",
+        "sha256": "fed959e629088b3fa43dd44e3341cea86f0ad3d1556a7c1ae7f1a597581c48c6",
+        "recordId": "imc-9eb7e5273c385e455415",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "73408aaecda389b53a2eff11f15b327f33775e73b0158d36d3e10f42d99209fc"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 35488173004,
+        "decode": 33518683944
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 38785537384,
+        "decode": 37001679060
+      },
+      "overallAllocatorEnvelopeBytes": 38971168120,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:mlx:q4:base:base:sensenova-u1-infographic-v2-fast-q4-mlx-shared-ladder-v1:imc-6f70af50d9e576688bc6",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json",
+        "sha256": "9614e56f75d601e07a6909fee67b931c361236c172057a090f2577a2e853fef4",
+        "recordId": "imc-6f70af50d9e576688bc6",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "73408aaecda389b53a2eff11f15b327f33775e73b0158d36d3e10f42d99209fc"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 12158292432,
+        "decode": 10491103016
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 14496998252,
+        "decode": 13015374036
+      },
+      "overallAllocatorEnvelopeBytes": 14682563452,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:mlx:q8:base:base:sensenova-u1-infographic-v2-fast-q8-mlx-shared-ladder-v1:imc-482691bb3cf526d6aa29",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json",
+        "sha256": "b58a559a99b32ff1d69ab587534b6f144bc94ad672038eb6881c8f2a14169fe3",
+        "recordId": "imc-482691bb3cf526d6aa29",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "73408aaecda389b53a2eff11f15b327f33775e73b0158d36d3e10f42d99209fc"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 19961919952,
+        "decode": 18502403880
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 21896481648,
+        "decode": 20622530772
+      },
+      "overallAllocatorEnvelopeBytes": 22082046844,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3:mlx:bf16:base:base:sensenova-u1-infographic-v3-bf16-mlx-shared-ladder-v1:imc-04cb3e24a7ad717c592d",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json",
+        "sha256": "95f7a3212ec59131e598483606d8482526183d7f595fa13f73b1498289f23ecc",
+        "recordId": "imc-04cb3e24a7ad717c592d",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "0f0a069086eba2b4595404e4d7ff12edf4524ec668d2cc308673ee386ac1c82a"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 35621742556,
+        "decode": 33518690088
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 39507750316,
+        "decode": 37624898832
+      },
+      "overallAllocatorEnvelopeBytes": 39727951300,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3:mlx:q4:base:base:sensenova-u1-infographic-v3-q4-mlx-shared-ladder-v1:imc-c25c6dd65c15c79986e2",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json",
+        "sha256": "29ee3d1be2d770f5a9e5a4b7a53b51bd31211f6118814339103929bb580fb1ba",
+        "recordId": "imc-c25c6dd65c15c79986e2",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "0f0a069086eba2b4595404e4d7ff12edf4524ec668d2cc308673ee386ac1c82a"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 12139376752,
+        "decode": 10491127592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 14910847680,
+        "decode": 13482832272
+      },
+      "overallAllocatorEnvelopeBytes": 15131081432,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3:mlx:q8:base:base:sensenova-u1-infographic-v3-q8-mlx-shared-ladder-v1:imc-2c2fc5ed4f96de471730",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json",
+        "sha256": "12eca1e38ea08f770662e3dcb66a358b5a0d0f879ffa8e1b9f6b765513235c9e",
+        "recordId": "imc-2c2fc5ed4f96de471730",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "0f0a069086eba2b4595404e4d7ff12edf4524ec668d2cc308673ee386ac1c82a"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23620312,
+        "denoise": 19988804848,
+        "decode": 18502396840
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23620372,
+        "denoise": 22421118912,
+        "decode": 21154944656
+      },
+      "overallAllocatorEnvelopeBytes": 22641352664,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:mlx:bf16:base:base:sensenova-u1-infographic-v3-fast-bf16-mlx-shared-ladder-v1:imc-8467900a349995491901",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json",
+        "sha256": "f1b3f15e78ddede6c0e3d5a8bb60b1332d43756248551f57229786df9fd7d175",
+        "recordId": "imc-8467900a349995491901",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "e402fa43ca305ee749293b2b0cb161a2616d7c5d2b8c5cc45c70c841a485e2ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 35488173004,
+        "decode": 33518683944
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 38710154600,
+        "decode": 37006004436
+      },
+      "overallAllocatorEnvelopeBytes": 38975493496,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:mlx:q4:base:base:sensenova-u1-infographic-v3-fast-q4-mlx-shared-ladder-v1:imc-c825f26531abdf5d0d54",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json",
+        "sha256": "8a2a753b64f379e94b777cee393fd79b6e9f134b637abd3fdd816fc7a3094978",
+        "recordId": "imc-c825f26531abdf5d0d54",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "e402fa43ca305ee749293b2b0cb161a2616d7c5d2b8c5cc45c70c841a485e2ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 12158390736,
+        "decode": 10491201320
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 14484480876,
+        "decode": 13015439572
+      },
+      "overallAllocatorEnvelopeBytes": 14682628988,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:mlx:q8:base:base:sensenova-u1-infographic-v3-fast-q8-mlx-shared-ladder-v1:imc-21fecac34c99289e0b87",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json",
+        "sha256": "2e755ebe07894c217b1527aef2c3dedcde790f977816fd3947ef4ad34255389e",
+        "recordId": "imc-21fecac34c99289e0b87",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "e402fa43ca305ee749293b2b0cb161a2616d7c5d2b8c5cc45c70c841a485e2ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18847436,
+        "denoise": 19961936336,
+        "decode": 18502420264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18847496,
+        "denoise": 21883652972,
+        "decode": 20622285012
+      },
+      "overallAllocatorEnvelopeBytes": 22081801084,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -7554,39 +8382,6 @@
       }
     },
     {
-      "id": "analytic:sensenova_u1_8b:mlx:bf16",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:mlx:q4",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:mlx:q8",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sensenova_u1_8b_fast:candle:bf16",
       "modelId": "sensenova_u1_8b_fast",
       "modelFamily": "sensenova-u1",
@@ -7648,39 +8443,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:mlx:bf16",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:mlx:q4",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:mlx:q8",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:sensenova_u1_8b_infographic_v2:candle:bf16",
@@ -7746,39 +8508,6 @@
       }
     },
     {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:q4",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:q8",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:bf16",
       "modelId": "sensenova_u1_8b_infographic_v2_fast",
       "modelFamily": "sensenova-u1",
@@ -7840,39 +8569,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:q4",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:q8",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:sensenova_u1_8b_infographic_v3:candle:bf16",
@@ -7938,39 +8634,6 @@
       }
     },
     {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:q4",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:q8",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:bf16",
       "modelId": "sensenova_u1_8b_infographic_v3_fast",
       "modelFamily": "sensenova-u1",
@@ -8032,39 +8695,6 @@
           "vramGbByTier": "22.5"
         }
       }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:q4",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:q8",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:svd:candle:default",
@@ -9017,6 +9647,198 @@
       }
     },
     {
+      "id": "exceeded:scail2_14b:mlx:bf16:base:base:scail2-14b-bf16-mlx-resident-eager-v1:exc-894dddc3cb0dc5215472",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 109821268736,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_109821268736",
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-bf16-mlx-exceeded-evidence.json",
+        "sha256": "18f614a65cc897ef99af3771872f827452033292828804a12ad57443869eb35d",
+        "recordId": "exc-894dddc3cb0dc5215472",
+        "calibrationFingerprint": "scail2-14b-bf16-mlx-resident-eager-v1",
+        "loaderClosureDigest": "973a84206d5fc49295161f9c6cfc8ae19d90ad9294bb8e65476649251bc8f1cb"
+      }
+    },
+    {
+      "id": "exceeded:scail2_14b:mlx:q4:base:base:scail2-14b-q4-mlx-resident-eager-v1:exc-48fbd21b5f3a0b3a8121",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 95299408488,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_95299408488",
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json",
+        "sha256": "55ca81ed9c41f7d8785173f2ce59d7d5b122ddeb5a2e061d518ac0686f0cbfe3",
+        "recordId": "exc-48fbd21b5f3a0b3a8121",
+        "calibrationFingerprint": "scail2-14b-q4-mlx-resident-eager-v1",
+        "loaderClosureDigest": "973a84206d5fc49295161f9c6cfc8ae19d90ad9294bb8e65476649251bc8f1cb"
+      }
+    },
+    {
+      "id": "exceeded:scail2_14b:mlx:q8:base:base:scail2-14b-q8-mlx-resident-eager-v1:exc-b66d77965d2999ba9bcc",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 104236837336,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_104236837336",
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q8-mlx-exceeded-evidence.json",
+        "sha256": "a332b7ef1fa295e02be4da089e25cae0f067852b9b2654f4cd0d91bd70e62963",
+        "recordId": "exc-b66d77965d2999ba9bcc",
+        "calibrationFingerprint": "scail2-14b-q8-mlx-resident-eager-v1",
+        "loaderClosureDigest": "973a84206d5fc49295161f9c6cfc8ae19d90ad9294bb8e65476649251bc8f1cb"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2:mlx:bf16:base:base:sc-19236-wan2-2-ti2v-5b-mlx-dense-v1:exc-f38f26d4174a26acd347",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "observedFootprintBytes": 95946527336,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_95946527336",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json",
+        "sha256": "81e5cc53892dd1fec8b46c55aa8add7d6cc7e9a91ed13de01f22f0546dc75ce1",
+        "recordId": "exc-f38f26d4174a26acd347",
+        "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-dense-v1",
+        "loaderClosureDigest": "c449f192aaf7942ab19cdb030afbd411cd107da4354c1e98ad689a9e52e6d34e"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2:mlx:q4:base:base:sc-19236-wan2-2-ti2v-5b-mlx-q4-g64-teq8-v1:exc-81e8d5a7e69497c75735",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "observedFootprintBytes": 96198818936,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_96198818936",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json",
+        "sha256": "4e35f185ea6112d8d5f61f15a237a27597eaa893f48f87c449c6e22452bdf1cb",
+        "recordId": "exc-81e8d5a7e69497c75735",
+        "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q4-g64-teq8-v1",
+        "loaderClosureDigest": "c449f192aaf7942ab19cdb030afbd411cd107da4354c1e98ad689a9e52e6d34e"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2:mlx:q8:base:base:sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1:exc-936100facdf5f3a6ac1d",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "observedFootprintBytes": 97426834160,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_97426834160",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json",
+        "sha256": "c6a678c709851ea0d1da0b4cb638d853550d6c91eb4ed1607ae6f31c8b78f674",
+        "recordId": "exc-936100facdf5f3a6ac1d",
+        "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1",
+        "loaderClosureDigest": "c449f192aaf7942ab19cdb030afbd411cd107da4354c1e98ad689a9e52e6d34e"
+      }
+    },
+    {
       "id": "exceeded:wan_2_2_i2v_14b:mlx:bf16:base:base:sc-22736-wan2-2-i2v-a14b-mlx-dense-v1:exc-8071db4312d55971c74b",
       "modelId": "wan_2_2_i2v_14b",
       "modelFamily": "wan-video",
@@ -9055,6 +9877,102 @@
           "why": "A MEASURED LOWER BOUND, not an anchor (sc-22738): wan_2_2_i2v_14b:bf16:mlx (image_to_video) at 1280x720x77 was stopped by the footprint watchdog at 106,174,403,704 bytes against the 94,822,600,832-byte ceiling of a 137,438,953,472-byte host at 3b922bac (the record names the ceiling, the observed footprint and the geometry; it does not name the phase the stop landed in, and this attestation claims nothing about that). The claim attested is that the closure diff 3b922bac..e16c6a55 cannot change that render's peak, so a re-run under e16c6a55 would re-establish the same inequality and the probe tooling should keep the cell exceeded_current rather than book the same guarded render again. 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test). The intersection with this closure is 5 files, read one by one. crates/contracts/gen-core/src/wan_i2v_memory.rs: packed_transformer_bytes skips a float 2-D weight carrying no quant leaves (the dense output head on PACKED Wan tiers) plus a test; it is the (MemoryPhase::Denoise, Some(quant)) pricing arm of the Wan I2V contract walker (wan_i2v_memory.rs:1429), reached only for a packed tier. mlx-gen-wan/src/config.rs: adds the LEGACY_INERT_CONFIG_KEYS constant and without_legacy_inert_keys plus a test; WanModelConfig and WanQuant, the items other crates import from it, are untouched. mlx-gen-wan/src/memory_strategy.rs: canonical_config drops the inert max_area key before the TI2V-5B identity comparison plus a test; canonical_config is reached only from memory_strategy_contract / resolved_numeric_tier, which model.rs calls from `load` (line 441, MODEL_ID = wan2_2_ti2v_5b) and nowhere else. mlx-gen-wan/src/i2v_memory_strategy.rs: tests only (the single hunk starts at line 659, inside #[cfg(test)] mod tests). mlx-gen-wan/src/model.rs: three changes - a new a14b_decode_tiling that wraps Wan14b::generate_impl's existing decode-tiling selection (its image_to_video-with-memory arm is the unchanged i2v_memory_strategy::decode_tiling call, and the new tile_vae_decode door only widens the same call), load_t2v_14b sealing an i2v_memory receipt when resolved_route == wan2_2_t2v_14b, and generate_impl calling the wrapper. effective_te_quant, descriptor_t2v_14b, the Wan type, WanTransformer, WanVae and every other item outside those three functions are byte-identical. The wan_2_2_i2v_14b route loads through load_i2v_14b (model.rs:2214), which calls i2v_memory_strategy::prepare(spec, MODEL_ID_I2V_14B) - unchanged, since that file's diff is tests only - and renders through Wan14b::generate_impl, whose decode tiling is now selected by a14b_decode_tiling: for an image_to_video request the arm taken is the same i2v_memory_strategy::decode_tiling call whether or not the request carries memory.tile_vae_decode, and a request without a memory contract falls to auto_tiling_budgeted_z16 at both revisions, so the selection is identical for every I2V input. load_t2v_14b's receipt seal is the T2V route. packed_transformer_bytes prices packed tiers only and this is the dense bf16 tier (tier.quant is None, the dense arm, unchanged). canonical_config is the TI2V-5B loader's. The z16 decode tile budget itself (pipeline.rs auto_tiling_budgeted_z16*, mlx-gen/src/vae_tiling.rs) is not in the diff. EXTENDED to e34d7b46 (sc-22738, fifth terminal pin; inference main = PR #966 fix/sc-22738-sensenova-measurable over e16c6a55): the e16c6a55..e34d7b46 range changes five inference files, all under crates/media/mlx-gen/mlx-gen-sensenova (src/memory_strategy.rs, src/model.rs, src/t2i.rs and the two parity tests), and the intersection with this closure's closureFiles (95 files) is EMPTY - the closure is byte-identical across the range and derives the same currency key at e34d7b46 as at e16c6a55. The trivial extension the doctrine names; no file is added to filesChangedSinceMeasurement and no re-measure was taken.",
           "witness": "None, and none is needed under the doctrine: no file this bound loads or executes changed in a way that alters what is loaded, in what order, on which device, at what dtype, or how the decode is tiled; the changed lines it can reach are progress-report instrumentation, pricing for tiers or routes it does not take, the TI2V-5B contract identity, tests, and a behaviour-preserving wrapper. Assembled in the campaign evidence PR beside the record it cites (the same reading PR #2782 recorded for the bernini bf16 and flux2_dev bf16 bounds and deliberately withheld there because these records were not yet in that tree)."
         }
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2_i2v_14b:mlx:q4:base:base:sc-22736-wan2-2-i2v-a14b-mlx-q4-v1:exc-a4760f3cf30e39b2cf16",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "provider": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 105509080336,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_105509080336",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json",
+        "sha256": "65cdb5aaa2d42ce62050377561417a1ab37cbaf929ebadc506d688d6c2d2cccf",
+        "recordId": "exc-a4760f3cf30e39b2cf16",
+        "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q4-v1",
+        "loaderClosureDigest": "be4ac7bd5a2f220f549ce09e5eac983e0354ed87a1e045f194035901d91867f0"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2_i2v_14b:mlx:q8:base:base:sc-22736-wan2-2-i2v-a14b-mlx-q8-v1:exc-1d3d441eb7342aefa724",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "provider": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 104798013776,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_104798013776",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json",
+        "sha256": "fa579b59b7b60d5770c638c65474cebfd4aa2a463c10a0635b21f622b01eab7f",
+        "recordId": "exc-1d3d441eb7342aefa724",
+        "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q8-v1",
+        "loaderClosureDigest": "be4ac7bd5a2f220f549ce09e5eac983e0354ed87a1e045f194035901d91867f0"
+      }
+    },
+    {
+      "id": "exceeded:wan_2_2_t2v_14b:mlx:bf16:base:base:sc-22736-wan2-2-t2v-a14b-mlx-dense-v1:exc-c467ba8757f6cdc2b255",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "provider": "wan2_2_t2v_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "observedFootprintBytes": 94989839944,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_94989839944",
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json",
+        "sha256": "1871faef18f8677801a039fb4dea59629313ee426ef8c36565aa874bf701cb3b",
+        "recordId": "exc-c467ba8757f6cdc2b255",
+        "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-dense-v1",
+        "loaderClosureDigest": "43de50db8e96e563c52fc639e4d9fa20775d9fe597bc40f0ee774fbfac9242fc"
       }
     }
   ]

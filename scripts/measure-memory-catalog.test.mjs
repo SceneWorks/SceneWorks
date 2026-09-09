@@ -28,6 +28,7 @@ import {
   anchorParts,
   anchorSlug,
   appendPackagedSource,
+  rustfmtMaxWidth,
   writePackagedSource,
   RUSTFMT_EDITION,
   capturedInCampaign,
@@ -1356,7 +1357,7 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, current: new Map([["z_image_turbo:q4:candle", true]]),
   });
   assert.equal(current.status, "runnable");
-  assert.equal(current.current, true, "currency is reported; only --skip-current acts on it");
+  assert.equal(current.current, true, "currency is reported here; planRun's settle turns it into a status");
   const undeclared = await classifyAnchor("z_image_turbo:q4:candle", { provider: "z_image_turbo" }, {
     ...base, declaredLanes: new Set(["qwen_image:candle"]),
   });
@@ -1485,33 +1486,71 @@ async function packagedSourceFixture() {
   return { root, source, file: path.join(root, PACKAGED_SOURCES_PATH) };
 }
 
-// sc-22738: the one-line tuple the append writes fits `max_width` only while the corpus name is
-// short. `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so
-// the runner committed a tree whose `cargo fmt --check` reds the `parity-rust` lane — after the
-// push. Every shorter name in the campaign happened to fit, which is why it surfaced this late.
-test("packaging a long-named corpus leaves memory_anchor.rs rustfmt-clean", async () => {
+// sc-22738: a one-line tuple fits `max_width` only while the corpus name is short.
+// `flux2-dev-bf16-mlx-exceeded-evidence.json` makes the `include_str!` line 101 columns, so a
+// runner that wrote it flat committed a tree whose `cargo fmt --check` reds the `parity-rust` lane
+// — after the push. Every shorter name in the campaign happened to fit, which is why it surfaced
+// this late.
+//
+// The width rule was first delegated to the `rustfmt` pass that follows the append. That stopped
+// working on THIS branch: past ~128 entries rustfmt bails out of the over-large
+// PACKAGED_MEMORY_ANCHOR_SOURCES item and copies it through verbatim, so it no longer wraps, no
+// longer enforces indentation inside the array, and calls the file clean either way — the campaign
+// appended fifteen over-width tuples that `cargo fmt --check` happily passed. So the appender owns
+// the rule now, and this test asks it of `appendPackagedSource` directly rather than of rustfmt,
+// which can no longer be relied on to answer.
+test("packaging a long-named corpus writes the wrapped tuple, without asking rustfmt", async () => {
   const { root, source, file } = await packagedSourceFixture();
   const relative = "docs/calibration/sc-99999/flux2-dev-bf16-mlx-exceeded-evidence.json";
   assert.ok(
     `        include_str!("../../../${relative}"),`.length > 100,
     "the fixture path must be long enough to exceed max_width on one line",
   );
+  const wrapped = ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n");
   assert.equal(await writePackagedSource(root, relative), true);
-  // The gate itself, not a re-implementation of its width rule.
-  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
   const written = await readFile(file, "utf8");
+  assert.ok(written.includes(wrapped), "the argument is on its own line");
+  assert.ok(!written.includes(`include_str!("../../../${relative}"),`), "and not also flat");
+  // Still clean under the real gate — the property the lane cares about.
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+  // The rule is the appender's, so it holds with no rustfmt pass at all...
+  assert.ok(appendPackagedSource(source, relative, 100).includes(wrapped));
+  // ...and it is read from the config rather than hard-coded: a wider `max_width` keeps it flat.
   assert.ok(
-    written.includes(
-      ["        include_str!(", `            "../../../${relative}"`, "        ),"].join("\n"),
-    ),
-    "rustfmt wrapped the argument onto its own line",
+    appendPackagedSource(source, relative, 120).includes(`        include_str!("../../../${relative}"),`),
+    "the width rule is applied against the declared max_width, not a second literal",
   );
-  // The mutation this guards: the append's own output — the format step skipped — is what red the
-  // lane, so `rustfmt --check` must reject it.
-  await writeFile(file, appendPackagedSource(source, relative));
+  assert.equal(rustfmtMaxWidth('edition = "2021"\nmax_width = 120\n'), 120);
+  assert.equal(rustfmtMaxWidth("edition = \"2021\"\n"), 100, "rustfmt's own default when unset");
+  assert.equal(
+    rustfmtMaxWidth(await readFile(path.join(ROOT, "rustfmt.toml"), "utf8")),
+    100,
+    "the checked-in config is what the runner writes against",
+  );
+  // The mutation this guards: the flat append is what red the lane. rustfmt no longer rejects it —
+  // that is the whole reason the rule moved — so the assertion is on the width itself.
+  const flat = appendPackagedSource(source, relative, Number.MAX_SAFE_INTEGER);
+  const overWide = flat.split("\n").filter((line) => line.includes(relative) && line.length > 100);
+  assert.equal(overWide.length, 1, "an appender that skips the width rule emits an over-wide line");
+  await writeFile(file, flat);
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+});
+
+// The bail-out above, asserted directly, so the day rustfmt regains the item this test says so and
+// the appender's rule can go back to being rustfmt's. Mangled indentation INSIDE the array is not
+// reported; the same mangling elsewhere in the file still is.
+test("rustfmt has bailed out of the packaged-sources array, and still formats the rest of the file", async () => {
+  const { file } = await packagedSourceFixture();
+  const source = await readFile(file, "utf8");
+  const inside = source.match(/^ {8}include_str!\("\.\.\/\.\.\/\.\.\/[^"]+"\),$/m)?.[0];
+  assert.ok(inside, "the array carries at least one flat tuple to mangle");
+  await writeFile(file, source.replace(inside, `  ${inside}`));
+  await execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]);
+
+  await writeFile(file, source.replace("pub struct", "pub    struct"));
   await assert.rejects(
     execFileAsync("rustfmt", ["--edition", RUSTFMT_EDITION, "--check", file]),
-    "an unformatted append must not pass the parity lane's check",
+    "rustfmt is reached by the file, just not by the over-large const",
   );
 });
 
@@ -1701,6 +1740,78 @@ test("the committed exceeded bound keeps its own cell out of the runnable set of
       !rows.filter((row) => row.status === "runnable").some((row) => bounds.get(row.key)?.current),
       "no cell with a current bound is scheduled for a capture",
     );
+  }
+});
+
+// sc-22738: currency is a FACT about the cell — its packaged anchor was minted under the loader
+// closure the pin loads — not a property of one invocation's schedule, so `--list` states it with
+// or without `--skip-current`. The campaign's final unfiltered MLX listing reported
+// z_image_turbo:q4:mlx `runnable`, which reads as a residue row an operator still owes a capture
+// for, while every campaign run — all of which pass `--skip-current` — correctly skipped it as
+// current. The RUN path is deliberately unchanged: omitting `--skip-current` still schedules a
+// current cell, because forcing a re-measurement is exactly what omitting the flag means.
+//
+// The fixture is SYNTHETIC on purpose. The first version of this test asked the shipped catalog and
+// the host's hub roots for a cell in the `current` shape; that made the assertion machine-dependent
+// (it held on the capture Mac, where `z_image_turbo:q4:mlx` fits, and failed on a CI runner with no
+// hub roots staged) and it would also have gone green-by-vacuum the day a campaign captured the last
+// such cell. A plan root with one current and one stale cell states the rule itself.
+test("--list reports a current anchor as `current` whether or not --skip-current is passed", async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // The currency map is the matrix's, so the fixture declares it: one anchor minted under the
+  // loader closure the pin loads, one that is not. Neither is in this campaign's captured set —
+  // the plan root has no `docs/calibration/<campaign>` at all — so both reach the currency branch.
+  await mkdir(path.join(root, "docs", "generated"), { recursive: true });
+  await writeFile(path.join(root, MATRIX_PATH), JSON.stringify({
+    anchors: [
+      { modelId: "z_image_turbo", tier: "q4", backend: "mlx", current: true },
+      { modelId: "qwen_image", tier: "q4", backend: "mlx", current: false },
+    ],
+  }));
+  const hub = await fakeHub([
+    [PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"],
+    [PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4"],
+  ]);
+  const opts = { backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [hub], models: [] };
+  const current = "z_image_turbo:q4:mlx";
+  const stale = "qwen_image:q4:mlx";
+
+  const listed = (await planRun({ ...opts, list: true, skipCurrent: false }, root)).rows;
+  const listedSkipping = (await planRun({ ...opts, list: true, skipCurrent: true }, root)).rows;
+  const scheduled = (await planRun({ ...opts, list: false, skipCurrent: false }, root)).rows;
+  const scheduledSkipping = (await planRun({ ...opts, list: false, skipCurrent: true }, root)).rows;
+  const at = (rows, key) => rows.find((row) => row.key === key);
+
+  // The two listings agree cell for cell: the flag changes what a RUN does, never what a listing says.
+  assert.deepEqual(
+    listed.map((row) => `${row.key}=${row.status}`),
+    listedSkipping.map((row) => `${row.key}=${row.status}`),
+    "a listing's statuses do not depend on --skip-current",
+  );
+  assert.deepEqual(listed.map((row) => row.key).sort(), [stale, current].sort());
+
+  // The current cell reads `current` in BOTH listings — the defect was that it read `runnable`
+  // without the flag — and the classifier's own currency is what promoted it.
+  for (const rows of [listed, listedSkipping]) {
+    assert.equal(at(rows, current).status, "current");
+    assert.equal(at(rows, current).current, true);
+  }
+  assert.match(at(listed, current).reason, /current at the pinned inference revision/);
+  assert.match(at(listed, current).reason, /--skip-current would not schedule it/);
+  assert.match(at(listedSkipping, current).reason, /\(--skip-current\)/);
+
+  // The RUN path is untouched: without `--skip-current` the same cell is still scheduled, carrying
+  // the currency the classifier reported; with the flag it is skipped.
+  assert.equal(at(scheduled, current).status, "runnable", "a run without --skip-current still captures a current cell");
+  assert.equal(at(scheduled, current).current, true);
+  assert.equal(at(scheduledSkipping, current).status, "current");
+
+  // A cell the matrix does not call current is `runnable` on every one of the four paths, so the
+  // promotion above is keyed on currency and not on the listing flag.
+  for (const rows of [listed, listedSkipping, scheduled, scheduledSkipping]) {
+    assert.equal(at(rows, stale).status, "runnable", at(rows, stale).reason);
+    assert.notEqual(at(rows, stale).current, true);
   }
 });
 
