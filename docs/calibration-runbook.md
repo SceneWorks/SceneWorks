@@ -1564,9 +1564,12 @@ measurement runs at epic end or on explicit request, never per code change.
 **Inputs.** `backend` (`mlx` | `candle`), `campaign` (one path segment, e.g. `sc-22738`), `anchors`
 (comma-separated keys), `models` (space-separated ids), `skip_current` (default true),
 `hf_cache_roots`, `download_missing` (default false), `ref` (the branch to walk from and the PR
-base), `runner_label` (mlx only), `push_every`. `anchors`, `models`, `skip_current`,
-`hf_cache_roots` and `download_missing` map one-for-one onto the script's `--anchors` / `--model` /
-`--skip-current` / `--hf-cache` / `--download-missing` flags.
+base), `runner_label` (mlx only), `push_every`, and the three operator-staged identity-bundle paths
+`instantid_weights` / `instantid_controlnet` / `pulid_weights` (sc-22738 — see the staging note in
+§6a-bis's download section below). `anchors`, `models`, `skip_current`, `hf_cache_roots` and
+`download_missing` map one-for-one onto the script's `--anchors` / `--model` / `--skip-current` /
+`--hf-cache` / `--download-missing` flags; the three bundle paths are not flags at all — they are
+copied into the job environment under the names the worker itself reads.
 
 **Where each lane runs.**
 
@@ -1757,6 +1760,48 @@ gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
   manifest's own `estimatedSizeBytes` where the rows declare it, and fetches nothing. That is what
   the workflow's *Plan the walk* step runs; the `--list` table in the same step deliberately does
   **not** carry the flag, so reading the plan can never start a download.
+- **ONE GLOB PER INVOCATION, and never a dotfile** (sc-22738, run 34356681566). The fetch used to
+  hand `hf download` a repeated `--include` per glob. The modern `hf` (typer, `list[str]`) appends
+  a repeated option; the `huggingface-cli` spelling it superseded parses it with argparse
+  `nargs="*"` and keeps only the **last** occurrence — so on a runner carrying the older spelling
+  every multi-glob target fetched its last glob and nothing else. That cost 19 cells in one run:
+  Mage-Flow landed `<tier>/vae` and no `<tier>/text_encoder` (12 cells), LTX-2.3 landed the tier and
+  no `gemma/` sibling, MiniMax-H3 landed the base DiT and no `transformer_ref/`. Neither
+  single-invocation spelling is safe on both grammars (`--include a b` is two POSITIONAL filenames
+  to the new CLI, which then *ignores* `--include`), so the fetch now runs one invocation per glob,
+  which reads identically under both and re-downloads nothing because the CLI resumes. Every
+  invocation also carries `--exclude "*/.*" --exclude ".*"`: `candle-gen-sdxl`'s `collect_files`
+  refuses **any** dot-prefixed file anywhere under a sealed source, which is how the two Illustrious
+  bf16 cells died on a snapshot's own `.gitattributes`. The top-level pattern is passed **last** so
+  it is the one the argparse CLI keeps. `scripts/hash-artifact-inventory.mjs` ignores dotfiles for
+  the same reason — a receipt must not depend on how the operator obtained the snapshot.
+
+**The three identity stacks `--download-missing` cannot fetch, and how to stage them on the CUDA
+box (sc-22738).** `instantid_realvisxl` and `pulid_flux` load identity stacks the worker fetches on
+FIRST USE rather than declaring as manifest downloads, so there is no repository for the walk to
+resolve and `--list` reports them by variable name. Run 34356681566 planned all four of those cells
+`weights_missing` for exactly that reason. There is **no staging script** — the files are three
+loose bundles, listed with their upstream repositories in the *Adapter environment for the SDXL
+family* note above and in the `SCENEWORKS_PULID_WEIGHTS` block of the adapter-environment listing.
+Stage them anywhere on the box and name the directories at dispatch:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=candle -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f download_missing=true \
+  -f instantid_weights='E:\identity\instantid' \
+  -f instantid_controlnet='E:\identity\instantid-controlnet' \
+  -f pulid_weights='E:\identity\pulid-flux'
+```
+
+`scripts/ci/memory-catalog/stage-identity-bundles.sh` copies each **non-empty** input into
+`$GITHUB_ENV` under the name the worker reads (`SCENEWORKS_INSTANTID_WEIGHTS`,
+`SCENEWORKS_INSTANTID_CONTROLNET`, `SCENEWORKS_PULID_WEIGHTS`). An input left empty is *not*
+exported, so a runner whose service environment already carries the real path keeps it — the input
+is an override, never a blanking. Whether the named directory is complete stays `--list`'s question:
+a half-staged bundle is `weights_missing` naming the missing file, not `runnable`.
 
 ### 6b. Through the guarded dispatch
 

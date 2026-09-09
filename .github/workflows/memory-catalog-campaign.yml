@@ -28,6 +28,23 @@
 # that one anchor `weights_missing (download failed: …)` and never stops the walk. The flag reaches
 # the dry run (which fetches nothing) and the walk, never the `--list` pass.
 #
+# WHAT `--download-missing` CANNOT FETCH, AND WHO STAGES IT (sc-22738). Two identity stacks are not
+# manifest downloads on either lane — the worker fetches them on FIRST USE — so there is nothing for
+# the walk to resolve and no repository to pass the hub CLI. They are operator-staged, by design,
+# through the same env vars both worker lanes already read, and `--list` reports an unset or
+# half-staged one as `weights_missing` naming the variable and the missing file:
+#
+#   SCENEWORKS_INSTANTID_WEIGHTS     ip-adapter / scrfd_10g / arcface_iresnet100 (instantid_realvisxl)
+#   SCENEWORKS_INSTANTID_CONTROLNET  the IdentityNet `ControlNetModel` directory
+#   SCENEWORKS_PULID_WEIGHTS         the five loose PuLID files (pulid_flux, all three tiers)
+#
+# Run 34356681566 planned all four of those cells `weights_missing` because the CUDA box carries
+# none of the three variables. The inputs below are the way to supply them without touching the
+# runner service: each is optional, and an EMPTY one leaves whatever the runner's own environment
+# already exports intact rather than blanking it. `docs/calibration-runbook.md` §"Adapter
+# environment for the SDXL family" and the `SCENEWORKS_PULID_WEIGHTS` block list the exact file
+# names each directory must hold.
+#
 # THE SCARCE RESOURCE IS THE GPU, NOT THE RUNNER. Each job takes a job-level `concurrency` group
 # keyed on (backend, runner) with `cancel-in-progress: false`, so two campaigns can never share one
 # box's GPU: the second dispatch queues behind the first rather than fighting it for unified memory
@@ -105,6 +122,31 @@ on:
         required: false
         type: string
         default: "1"
+      instantid_weights:
+        description: >-
+          Absolute path on the runner to the InstantID identity bundle DIRECTORY holding
+          ip-adapter.safetensors, scrfd_10g.safetensors and arcface_iresnet100.safetensors. Not a
+          manifest download on either lane -- the worker fetches it on first use -- so
+          --download-missing cannot supply it and the operator stages it. Empty keeps whatever the
+          runner already exports as $SCENEWORKS_INSTANTID_WEIGHTS.
+        required: false
+        type: string
+        default: ""
+      instantid_controlnet:
+        description: >-
+          Absolute path on the runner to the InstantID IdentityNet `ControlNetModel` directory
+          (diffusion_pytorch_model.safetensors). Empty keeps $SCENEWORKS_INSTANTID_CONTROLNET.
+        required: false
+        type: string
+        default: ""
+      pulid_weights:
+        description: >-
+          Absolute path on the runner to the PuLID-FLUX bundle DIRECTORY holding all five loose
+          files (pulid_flux_v0.9.1, eva02_clip_l_336, bisenet_parsing, scrfd_10g,
+          arcface_iresnet100). Empty keeps $SCENEWORKS_PULID_WEIGHTS.
+        required: false
+        type: string
+        default: ""
 
 # `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. The only other secret
 # this workflow reads is `HF_TOKEN`, and only the Hugging Face CLI sees it, only under
@@ -126,6 +168,13 @@ env:
   SKIP_CURRENT: ${{ inputs.skip_current }}
   HF_CACHE_INPUT: ${{ inputs.hf_cache_roots }}
   DOWNLOAD_MISSING: ${{ inputs.download_missing }}
+  # The three operator-staged identity stacks (sc-22738). Carried as INPUT_-prefixed names on
+  # purpose: `stage-identity-bundles.sh` copies each into $GITHUB_ENV under the name the worker
+  # actually reads ONLY when it is non-empty, so an unused input can never blank a runner that
+  # already exports the real variable.
+  INPUT_INSTANTID_WEIGHTS: ${{ inputs.instantid_weights }}
+  INPUT_INSTANTID_CONTROLNET: ${{ inputs.instantid_controlnet }}
+  INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
   # Read by the Hugging Face CLI itself when --download-missing fetches a gated repository. Absent
   # is not an error: every SceneWorks rehost and every upstream this campaign fetches is public, so
   # an unset token only matters for a gated one. `hf_transfer` is opt-in on the runner, not here.
@@ -218,6 +267,9 @@ jobs:
           cargo build --release --locked -p sceneworks-memory-adapter \
             --features mlx --bin memory-mlx-adapter
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
+
+      - name: Bind the operator-staged identity bundles
+        run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
@@ -393,6 +445,9 @@ jobs:
       # pid 6308, an adapter orphaned by the cancelled run before it. See the script's header.
       - name: Census the profiled GPU
         run: bash scripts/ci/memory-catalog/gpu-preflight.sh
+
+      - name: Bind the operator-staged identity bundles
+        run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh

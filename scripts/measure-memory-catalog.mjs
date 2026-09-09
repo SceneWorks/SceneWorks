@@ -206,6 +206,43 @@ export function requiredComponentsFor(family, backend) {
 }
 
 /**
+ * The three main tensor files `candle-gen-sdxl` opens inside a staged SDXL tier root, per tier
+ * (sc-22738) — its `main_tensor_paths(root, packed)`, which is the ONE place the packed and dense
+ * legs of that engine name different files.
+ *
+ * WHY THIS IS DECLARED, and it is not belt-and-braces. `resolveArtifactRoot` asks only whether the
+ * tier root holds A file, and every SDXL tier root also holds a `config.json` per component. A tier
+ * root staged with its JSONs but not its weights therefore classified `runnable`, `--download-missing`
+ * skipped it because a runnable anchor is never re-fetched, and the walk paid a real load to
+ * discover it: run 34356681566's four Illustrious q4/q8 cells died four seconds in with a bare
+ * `The system cannot find the path specified. (os error 3)` — the engine's `safetensors_path_tensor_headers`
+ * finds the file absent, falls through to treating the path as a directory, and Windows answers a
+ * missing intermediate component with ERROR_PATH_NOT_FOUND and no path in the message.
+ *
+ * Declaring the files turns that into a named `weights_missing` — which is what it is, a host that
+ * does not hold the weights — and, because it IS `weights_missing`, `--download-missing` fetches the
+ * tier and the CLI resumes into the partial snapshot. All five members ship all three files at all
+ * three tiers (`config/download-pattern-evidence.json`), so nothing that is staged today is demoted.
+ */
+export const SDXL_TIER_MAIN_TENSORS = Object.freeze({
+  q4: [
+    "unet/diffusion_pytorch_model.safetensors",
+    "text_encoder/model.safetensors",
+    "text_encoder_2/model.safetensors",
+  ],
+  q8: [
+    "unet/diffusion_pytorch_model.safetensors",
+    "text_encoder/model.safetensors",
+    "text_encoder_2/model.safetensors",
+  ],
+  bf16: [
+    "unet/diffusion_pytorch_model.fp16.safetensors",
+    "text_encoder/model.fp16.safetensors",
+    "text_encoder_2/model.fp16.safetensors",
+  ],
+});
+
+/**
  * sc-22729. `candle-gen-sdxl`'s `SDXL_ROUTES` pins each route's repository AND revision, and its
  * `path_has_snapshot` matches a staged root against that literal before `SdxlArtifactSeal::capture`
  * will seal a contract. When the pinned revision is not the one this repository ships, no root the
@@ -940,11 +977,18 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `sdxlRoute` marks the members `candle-gen-sdxl` seals through `SDXL_ROUTES`. It is carried by
   // ALL FIVE, not only the two that disagree today: the check is over the engine's declaration, so
   // a future revision drift on any member is caught the same way rather than needing a new entry.
-  sdxl: { provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
-  realvisxl: { provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  sdxl: {
+    provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"],
+    components: SDXL_COMPONENTS, sdxlRoute: true, requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
+  },
+  realvisxl: {
+    provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"],
+    components: SDXL_COMPONENTS, sdxlRoute: true, requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
+  },
   realvisxl_lightning: {
     provider: "sdxl", env: "REALVISXL_LIGHTNING", repo: "SceneWorks/realvisxl-lightning-mlx",
     arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+    requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
   },
   // The candle lane routes all five `sdxl` members (`routing/candle.rs` `is_sdxl_family_candle_model`
   // / `SDXL_CONTROL_MODELS`), so all five are DECLARED on both lanes. Whether a member's candle cell
@@ -954,10 +998,12 @@ export const PROVIDER_FAMILIES = Object.freeze({
   illustrious_xl_v1: {
     provider: "sdxl", env: "ILLUSTRIOUS_XL_V1", repo: "SceneWorks/illustrious-xl-v1-mlx",
     arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+    requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
   },
   illustrious_xl_v2: {
     provider: "sdxl", env: "ILLUSTRIOUS_XL_V2", repo: "SceneWorks/illustrious-xl-v2-mlx",
     arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+    requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
   },
   // The InstantID backbone IS the plain RealVisXL rehost (`image_jobs/instantid.rs`
   // `INSTANTID_SDXL_REPO`), bound through its own env family so an InstantID plan can never be
@@ -967,7 +1013,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // capture binds the staged copy through the same env seams the worker reads.
   instantid_realvisxl: {
     provider: "instantid", env: "INSTANTID_REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"],
-    components: SDXL_COMPONENTS,
+    components: SDXL_COMPONENTS, requiredTierFiles: SDXL_TIER_MAIN_TENSORS,
     // Each staged directory declares the files the adapter opens INSIDE it (sc-22738): a directory
     // that exists but is half-staged is exactly as unloadable as an absent one.
     stagedEnv: [
@@ -2378,15 +2424,64 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
 }
 
 /**
- * The CLI arguments for one target. `--revision` is ALWAYS the pinned revision: the whole point of
- * the flag is to land the snapshot the anchor prices, and a fetch that resolved a branch would
- * quietly measure some other artifact.
+ * Dotfile exclusions passed on EVERY fetch (sc-22738).
+ *
+ * `candle-gen-sdxl`'s `collect_files` refuses any file whose name starts with `.` anywhere under a
+ * sealed source, so a snapshot that carries the repository's own `.gitattributes` is not loadable
+ * at all: the CUDA campaign's two Illustrious bf16 cells died on
+ * `sdxl: refusing incomplete or hidden artifact …\.gitattributes` after a whole-snapshot fetch.
+ * Nothing any lane loads is a dotfile, so they are excluded from every fetch rather than from the
+ * SDXL family's alone.
+ *
+ * ORDER IS LOAD-BEARING, and the reason is the hub CLI's own argument grammar. The modern `hf`
+ * (typer, `list[str]`) APPENDS a repeated option, so both patterns apply; the older
+ * `huggingface-cli` (argparse, `nargs="*"`) keeps only the LAST occurrence. The top-level pattern
+ * is therefore last: on the old CLI it is the one that survives, and top-level is where a repo's
+ * `.gitattributes`/`.gitignore` actually live.
  */
-export function hfDownloadArgv(target, cacheRoot) {
+export const HF_DOTFILE_EXCLUDES = Object.freeze(["*/.*", ".*"]);
+
+/**
+ * The CLI arguments for ONE fetch of `target` — at most one `--include`.
+ *
+ * `--revision` is ALWAYS the pinned revision: the whole point of the flag is to land the snapshot
+ * the anchor prices, and a fetch that resolved a branch would quietly measure some other artifact.
+ *
+ * `glob` is a single pattern or `null` for "the whole snapshot". One pattern per invocation is not
+ * a style choice — see [`hfDownloadArgvs`].
+ */
+export function hfDownloadArgv(target, cacheRoot, glob = null) {
   const argv = ["download", target.repo, "--revision", target.revision];
-  for (const glob of target.include) argv.push("--include", glob);
+  if (glob !== null) argv.push("--include", glob);
+  for (const pattern of HF_DOTFILE_EXCLUDES) argv.push("--exclude", pattern);
   argv.push("--cache-dir", cacheRoot);
   return argv;
+}
+
+/**
+ * Every CLI invocation one target needs: ONE PER GLOB (sc-22738).
+ *
+ * WHY, and it is not defensive programming. This used to pass one `hf download` a repeated
+ * `--include` per glob. The modern `hf` CLI declares `include` as a typer `list[str]`, which
+ * appends; the `huggingface-cli` spelling it superseded declares it as argparse `nargs="*"`, which
+ * keeps only the LAST occurrence. On a runner carrying the older spelling every multi-glob target
+ * silently fetched its LAST glob and nothing else — and the CUDA campaign's evidence is three
+ * independent confirmations of exactly that, each naming the glob that was NOT last:
+ *
+ *   - Mage-Flow-Components (`<tier>/text_encoder/*`, `<tier>/vae/*`) landed the VAE and no text
+ *     encoder — 12 cells;
+ *   - LTX-2.3 (`gemma/*`, `<tier>/*`) landed the tier and no `gemma/` sibling;
+ *   - MiniMax-H3 `_ref` (`<tier>/transformer_ref/*`, `<tier>/text_encoder/*`, `<tier>/transformer/*`)
+ *     landed the base DiT and no reference partition.
+ *
+ * Neither single-invocation spelling is safe on both CLIs: `--include a b` is `nargs="*"` on the
+ * old one but two POSITIONAL filenames on the new one, which then warns that it is IGNORING
+ * `--include` and fetches only `b`. One glob per invocation is identical under both grammars, and
+ * the CLI resumes, so the extra invocations cost one repo listing each and re-download nothing.
+ */
+export function hfDownloadArgvs(target, cacheRoot) {
+  if (target.include.length === 0) return [hfDownloadArgv(target, cacheRoot, null)];
+  return target.include.map((glob) => hfDownloadArgv(target, cacheRoot, glob));
 }
 
 /** Files and bytes under one staged snapshot, for the per-anchor log line. */
@@ -2445,18 +2540,24 @@ export async function fetchAnchorSnapshots(row, models, {
       continue;
     }
     let lastError = null;
-    let ran = false;
-    for (const cli of clis) {
-      try {
-        await runCommand(cli, hfDownloadArgv(target, cacheRoot), { env });
-        ran = true;
-        break;
-      } catch (error) {
-        lastError = error;
-        // Only a MISSING cli falls through to the next spelling; a real download failure is the
-        // answer, not a reason to run a second tool.
-        if (error?.code !== "ENOENT") break;
+    let ran = true;
+    // One invocation per glob — see `hfDownloadArgvs`. Every one of them must land: a target whose
+    // second glob failed is exactly as unloadable as one whose first did.
+    for (const argv of hfDownloadArgvs(target, cacheRoot)) {
+      let landed = false;
+      for (const cli of clis) {
+        try {
+          await runCommand(cli, argv, { env });
+          landed = true;
+          break;
+        } catch (error) {
+          lastError = error;
+          // Only a MISSING cli falls through to the next spelling; a real download failure is the
+          // answer, not a reason to run a second tool.
+          if (error?.code !== "ENOENT") break;
+        }
       }
+      if (!landed) { ran = false; break; }
     }
     if (!ran) {
       return {
@@ -3670,7 +3771,12 @@ export async function planRun(args, root = ROOT) {
         continue;
       }
       const missingReason = row.reason;
-      const outcome = await fetchAnchorSnapshots(row, models, { cacheRoot, dryRun: args.dryRun });
+      // The CLI is the one the probe above already answered with (sc-22738). Passing it matters now
+      // that a multi-glob target is several invocations: without it every one of them would re-walk
+      // the candidate list and pay an ENOENT for a spelling this box is already known not to have.
+      const outcome = await fetchAnchorSnapshots(row, models, {
+        cacheRoot, dryRun: args.dryRun, ...(cli ? { clis: [cli] } : {}),
+      });
       if (outcome.failed) {
         row.reason = `${missingReason} (download failed: ${outcome.failed})`;
         continue;
