@@ -1720,6 +1720,63 @@ export async function directoryHasFiles(directory) {
   return false;
 }
 
+/** A sharded safetensors component's index (`model.safetensors.index.json`, or Kolors' upstream
+ *  `model.safetensors.index.fp16.json`): its `weight_map` names every shard the loader opens. */
+export const SAFETENSORS_INDEX_PATTERN = /\.safetensors\.index(?:\.[^.]+)?\.json$/;
+
+/**
+ * The shards a tier root's own safetensors indexes name but the root does not hold, as paths
+ * relative to `tierRoot` (sc-22738).
+ *
+ * A PRESENT tier root is not a complete one, and [`directoryHasFiles`] cannot tell them apart. CUDA
+ * campaign run 34356681566 lost `qwen_image:bf16:candle` to `text encoder contract mismatch …
+ * field architecture_header expected qwen2_5_vl_text` against a `bf16/text_encoder` whose pinned
+ * revision is byte-identical to the q4/q8 one that the same contract accepted for
+ * `qwen_image_edit_2511` on the same box — the only artifact that fails that signature is one with
+ * no `model.layers.0.*` tensors, i.e. a partial shard set. Every sharded component ships the
+ * inventory the engine will open, so an index naming an absent shard is `weights_missing` — named
+ * shard by shard, like every other incomplete mirror this file classifies — and, because the hub CLI
+ * resumes a partial download, `--download-missing` repairs it on the same pass instead of booking a
+ * capture that dies inside the engine's contract. An unreadable index is reported the same way: a
+ * truncated JSON is itself the incomplete mirror. Dot-directories are skipped as the engine's own
+ * walkers skip them (`gen_core::weightsmeta::is_hidden_file`).
+ */
+export async function missingIndexedShards(tierRoot) {
+  const missing = [];
+  const visit = async (dir) => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith(".")) continue;
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await visit(child); continue; }
+      if (!SAFETENSORS_INDEX_PATTERN.test(entry.name)) continue;
+      const relativeIndex = path.relative(tierRoot, child);
+      let weightMap;
+      try {
+        weightMap = JSON.parse(await readFile(child, "utf8")).weight_map;
+      } catch (error) {
+        missing.push(`${relativeIndex} (unreadable: ${String(error?.message ?? error)})`);
+        continue;
+      }
+      if (!weightMap || typeof weightMap !== "object") {
+        missing.push(`${relativeIndex} (no weight_map)`);
+        continue;
+      }
+      for (const shard of [...new Set(Object.values(weightMap))].sort()) {
+        if (typeof shard !== "string") continue;
+        const candidate = path.join(dir, shard);
+        try {
+          if ((await stat(candidate)).isFile()) continue;
+        } catch { /* absent or a dangling blob symlink: named below */ }
+        missing.push(path.relative(tierRoot, candidate));
+      }
+    }
+  };
+  await visit(tierRoot);
+  return missing;
+}
+
 /**
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
@@ -1886,6 +1943,15 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     return {
       ...row, status: "weights_missing",
       reason: `tier root ${resolved.root} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+    };
+  }
+  // sc-22738: a sharded component whose own index names a shard the root does not hold is a partial
+  // mirror the engine's contract will refuse hours later (see `missingIndexedShards`).
+  const missingShards = await missingIndexedShards(tierRoot);
+  if (missingShards.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${tierRoot} is missing ${missingShards.join(", ")}, which its own safetensors shard index names beside it; the mirror is partial and --download-missing resumes it`,
     };
   }
   if (family.bundle) {
