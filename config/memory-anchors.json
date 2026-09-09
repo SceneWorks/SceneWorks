@@ -2189,6 +2189,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "lens:candle:q8:base:base:lens-base-q8-candle-cuda-shared-ladder-v1:imc-655115630dbc30f5e5d4",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "provider": "lens",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-q8-candle-evidence.json",
+        "sha256": "9849edfe4077e9361c77311d4800735e35258a944affe389b0c7a5e59edbd978",
+        "recordId": "imc-655115630dbc30f5e5d4",
+        "calibrationFingerprint": "lens-base-q8-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "6cb7e2495825a645e51092ea22b4d6c4342126f2c4efa74e4ffca917e666b7fb"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6646923264,
+        "denoise": 11984175104,
+        "decode": 26479689728
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6646923264,
+        "denoise": 11984175104,
+        "decode": 26479689728
+      },
+      "overallAllocatorEnvelopeBytes": 26479689728
+    },
+    {
       "id": "lens:mlx:bf16:base:base:lens-bf16-mlx-shared-ladder-v1:imc-940e03ee82a79f7547e2",
       "modelId": "lens",
       "modelFamily": "lens",
@@ -7408,17 +7453,6 @@
       "route": "lens",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens:candle:q8",
-      "modelId": "lens",
-      "modelFamily": "lens",
-      "route": "lens",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
