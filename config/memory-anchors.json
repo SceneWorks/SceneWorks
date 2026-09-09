@@ -1907,6 +1907,51 @@
       "overallAllocatorEnvelopeBytes": 27566097584
     },
     {
+      "id": "krea_2_turbo:candle:bf16:base:base:krea-2-turbo-bf16-cuda-phase-curves-v1:imc-c9323d73137e799fdfc7",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-bf16-candle-evidence.json",
+        "sha256": "b53216e1b2ffd9f6219a0e79fce435c470abf662e3ff1de400e26560cdfb0d7e",
+        "recordId": "imc-c9323d73137e799fdfc7",
+        "calibrationFingerprint": "krea-2-turbo-bf16-cuda-phase-curves-v1",
+        "loaderClosureDigest": "3e5eb1737f71c79e529451971c972d44232bc385782508d1ebcd4200f72c358b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28524412928,
+        "decode": 34633416704
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28524412928,
+        "decode": 34633416704
+      },
+      "overallAllocatorEnvelopeBytes": 34633416704
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -7264,31 +7309,6 @@
         "envelopeBytes": null,
         "values": {
           "vramGbByTier": "30.4"
-        }
-      }
-    },
-    {
-      "id": "analytic:krea_2_turbo:candle:bf16",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "staged_residency",
-          "sequentialPeakGb": "39.4",
-          "provider": "krea_2_turbo_edit",
-          "abi": "1",
-          "vramGbByTier": "47.2"
         }
       }
     },
