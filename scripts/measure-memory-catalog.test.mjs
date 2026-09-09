@@ -5865,4 +5865,130 @@ test("the campaign's GPU preflight step runs before the walk and only ever reaps
   // Ours BY NAME. Never an arbitrary pid: this box serves other self-hosted lanes.
   assert.match(script, /\*memory-candle-adapter\* \| \*memory-mlx-adapter\*/);
   assert.match(script, /::error title=Profiled GPU is not idle/);
+  // The classification the engine makes: type C is contamination, C+G and G are desktop contexts.
+  assert.match(script, /nvidia-smi pmon "\$\{device_args\[@\]\}" -c 1 -s um/);
+});
+
+// A fake `nvidia-smi` on PATH, plus the two externals the reap path shells out to. `sleep` and
+// `powershell` are real executables (not builtins), so PATH shadowing reaches them; that is what
+// lets a reap be observed here without waiting out the driver-settle sleep or killing anything.
+async function fakeGpuHost({ pmon, apps, pmonAfterReap, appsAfterReap }) {
+  const bin = await mkdtemp(path.join(tmpdir(), "catalog-gpu-preflight-"));
+  const reaped = path.join(bin, "reaped");
+  const emit = (text) => `cat <<'CENSUS'\n${text}\nCENSUS\nexit 0\n`;
+  // `before` until the fake `powershell` records a kill, `after` from then on — that is how a reap
+  // becomes observable without signalling any real process.
+  const stage = (before, after) =>
+    after === undefined ? emit(before) : `if [ -e ${JSON.stringify(reaped)} ]; then\n${emit(after)}fi\n${emit(before)}`;
+  await writeFile(
+    path.join(bin, "nvidia-smi"),
+    `#!/usr/bin/env bash\nif [ "$1" = "pmon" ]; then\n${stage(pmon, pmonAfterReap)}fi\n${stage(apps, appsAfterReap)}`,
+    { mode: 0o755 },
+  );
+  await writeFile(path.join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  await writeFile(
+    path.join(bin, "powershell"),
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(path.join(bin, "killed"))}\ntouch ${JSON.stringify(reaped)}\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  return { bin, killedLog: path.join(bin, "killed") };
+}
+
+async function runGpuPreflight(host) {
+  const env = { ...process.env, PATH: `${host.bin}:${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
+  try {
+    const { stdout } = await execFileAsync("bash", ["scripts/ci/memory-catalog/gpu-preflight.sh"], { cwd: ROOT, env });
+    return { code: 0, stdout };
+  } catch (error) {
+    return { code: error.code ?? 1, stdout: error.stdout ?? "" };
+  }
+}
+
+const PMON_HEADER = [
+  "# gpu        pid  type     fb   ccpm    sm   mem   enc   dec   command",
+  "# Idx          #   C/G     MB     MB     %     %     %     %   name",
+].join("\n");
+
+// The literal desktop census run 34297841666 refused: WDDM reports explorer and friends as C+G
+// with `[N/A]` memory, and `--query-compute-apps` lists every one of them.
+const WDDM_DESKTOP_PMON = [
+  PMON_HEADER,
+  "    1      13116   C+G      -      -     -     -     -     -   explorer.exe",
+  "    1      13608   C+G      -      -     -     -     -     -   WindowsTerminal",
+  "    1      24484     G      -      -     -     -     -     -   ShellExperienceH",
+].join("\n");
+const WDDM_DESKTOP_APPS = [
+  "13116, C:\\Windows\\explorer.exe, [N/A]",
+  "13608, C:\\Program Files\\WindowsApps\\WindowsTerminal.exe, [N/A]",
+  "24484, C:\\Windows\\SystemApps\\ShellExperienceHost.exe, [N/A]",
+].join("\n");
+
+test("the GPU preflight passes a WDDM desktop census: graphics contexts are not compute", async () => {
+  const host = await fakeGpuHost({ pmon: WDDM_DESKTOP_PMON, apps: WDDM_DESKTOP_APPS });
+  const { code, stdout } = await runGpuPreflight(host);
+  assert.equal(code, 0, stdout);
+  // Every row is still printed, so a refusal that DOES happen is diagnosable from the log.
+  assert.match(stdout, /pid 13116, type C\+G, C:\\Windows\\explorer\.exe/);
+  assert.match(stdout, /pid 24484, type G, /);
+  assert.doesNotMatch(stdout, /::error/);
+  assert.match(stdout, /no foreign compute process/);
+});
+
+test("the GPU preflight refuses a foreign PURE-COMPUTE process, naming only that one", async () => {
+  const host = await fakeGpuHost({
+    pmon: [WDDM_DESKTOP_PMON, "    1       6308     C   1024      -     0     0     -     -   sceneworks-api."].join("\n"),
+    apps: [WDDM_DESKTOP_APPS, "6308, C:\\Users\\Michael\\AppData\\Local\\Programs\\SceneWorks\\sceneworks-api.exe, [N/A]"].join("\n"),
+  });
+  const { code, stdout } = await runGpuPreflight(host);
+  assert.equal(code, 1);
+  assert.match(stdout, /::error title=Profiled GPU is not idle::pid 6308 \(C:\\Users\\Michael.*sceneworks-api\.exe, 1024 MiB\)/);
+  // The twenty desktop contexts beside it are NOT errors — that was the false positive.
+  assert.equal(stdout.match(/::error/g).length, 1);
+});
+
+test("the GPU preflight reaps OUR orphaned adapter and then starts the walk", async () => {
+  const orphan = "D:\\actions-runner\\_work\\SceneWorks\\SceneWorks\\target\\release\\memory-candle-adapter.exe";
+  const host = await fakeGpuHost({
+    pmon: [WDDM_DESKTOP_PMON, "    1       6308     C  12345      -    97    41     -     -   memory-candle-a"].join("\n"),
+    apps: [WDDM_DESKTOP_APPS, `6308, ${orphan}, 12345 MiB`].join("\n"),
+    pmonAfterReap: WDDM_DESKTOP_PMON,
+    appsAfterReap: WDDM_DESKTOP_APPS,
+  });
+  const { code, stdout } = await runGpuPreflight(host);
+  assert.equal(code, 0, stdout);
+  assert.match(stdout, /::warning title=Reaping an orphaned adapter::pid 6308 \(type C, .*memory-candle-adapter\.exe, 12345 MiB\)/);
+  assert.match(await readFile(host.killedLog, "utf8"), /Stop-Process -Id 6308 -Force/);
+  assert.match(stdout, /no foreign compute process/);
+});
+
+test("the GPU preflight classifies [Insufficient Permissions] rows by TYPE, never by name", async () => {
+  // Three of the pids run 34297841666 refused had no readable name. Two are desktop contexts and
+  // one is compute; only the compute one is contamination.
+  const host = await fakeGpuHost({
+    pmon: [
+      PMON_HEADER,
+      "    1       3168   C+G      -      -     -     -     -     -   -",
+      "    1       3160     G      -      -     -     -     -     -   -",
+      "    1       6732     C    512      -     3     1     -     -   -",
+    ].join("\n"),
+    apps: [
+      "3168, [Insufficient Permissions], [N/A]",
+      "3160, [Insufficient Permissions], [N/A]",
+      "6732, [Insufficient Permissions], [N/A]",
+    ].join("\n"),
+  });
+  const { code, stdout } = await runGpuPreflight(host);
+  assert.equal(code, 1);
+  assert.match(stdout, /pid 3168, type C\+G, \[Insufficient Permissions\]/);
+  assert.match(stdout, /::error title=Profiled GPU is not idle::pid 6732 \(\[Insufficient Permissions\], 512 MiB\)/);
+  assert.equal(stdout.match(/::error/g).length, 1);
+
+  // The same three rows with NO compute row among them pass, unreadable names and all.
+  const graphicsOnly = await fakeGpuHost({
+    pmon: [PMON_HEADER, "    1       3168   C+G      -      -     -     -     -     -   -", "    1       3160     G      -      -     -     -     -     -   -"].join("\n"),
+    apps: ["3168, [Insufficient Permissions], [N/A]", "3160, [Insufficient Permissions], [N/A]"].join("\n"),
+  });
+  const pass = await runGpuPreflight(graphicsOnly);
+  assert.equal(pass.code, 0, pass.stdout);
+  assert.doesNotMatch(pass.stdout, /::error/);
 });
