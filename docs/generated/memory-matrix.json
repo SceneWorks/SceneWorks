@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:aab037502adf020efd5102a47bb3f827480a6997c26eff8026d76955c1a7a31e",
+    "sceneWorksRevision": "source-tree:98d14dd63657a695b084b679ecad9f62c564ff71dd23b3dfe397037883c8baec",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "15d7fd98439583145dd98c2bc2c0c27996ddde2f46a48939a92686f8a712e609"
+        "sha256": "4001b8c59a065804189b4cddb0e6ccad9b5b9997d342ee803aa5dbe09f44b27d"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "4aa99c396222de355b53007713db8ed46f2d4b2425a15ab70ef6ca84b58a9e48"
+        "sha256": "ac060b38256d84f87cc5762971ca52f81cddfa791d23ade935359b258b0260ca"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1950,
-    "elidedCells": 7315,
+    "publishedCells": 1953,
+    "elidedCells": 7312,
     "elidedByState": {
-      "Implemented": 2941,
+      "Implemented": 2938,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 126,
-    "analyticOnlyCells": 211,
-    "anchoredCells": 1703,
+    "anchors": 127,
+    "analyticOnlyCells": 210,
+    "anchoredCells": 1706,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5327,6 +5327,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/krea-2-raw-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 3
+    },
+    {
+      "id": "krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+      "modelId": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/krea-2-raw-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 3
@@ -11027,12 +11045,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 12,
-      "published": 3,
-      "elided": 9,
+      "published": 6,
+      "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored": 3,
-        "Implemented": 6,
+        "Anchored": 6,
+        "Implemented": 3,
         "Missing": 3
       },
       "implementedBy": {
@@ -44399,6 +44417,66 @@
       }
     },
     {
+      "id": "krea_2_raw:krea_2_edit:candle:q4:edit_image:lora:staged_residency",
+      "modelId": "krea_2_raw",
+      "resolvedRoute": "krea_2_edit",
+      "provider": "krea_2_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15916,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b"
+          }
+        ]
+      }
+    },
+    {
       "id": "krea_2_raw:krea_2_edit:mlx:bf16:edit_image:lora:bounded_attention",
       "modelId": "krea_2_raw",
       "resolvedRoute": "krea_2_edit",
@@ -45567,6 +45645,126 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#krea_2_raw:candle:bf16:base:base:krea-2-raw-bf16-cuda-staged-residency-v1:imc-53a4bb4226f6d5cf35ff"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_raw:krea_2_raw:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "krea_2_raw",
+      "resolvedRoute": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15916,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_raw:krea_2_raw:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "krea_2_raw",
+      "resolvedRoute": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15916,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b"
           }
         ]
       }
@@ -129096,6 +129294,7 @@
     ],
     "krea_2_raw": [
       "krea_2_raw:krea_2_edit:candle:bf16:edit_image:lora:staged_residency",
+      "krea_2_raw:krea_2_edit:candle:q4:edit_image:lora:staged_residency",
       "krea_2_raw:krea_2_edit:mlx:bf16:edit_image:lora:bounded_attention",
       "krea_2_raw:krea_2_edit:mlx:bf16:edit_image:lora:bounded_decode",
       "krea_2_raw:krea_2_edit:mlx:bf16:edit_image:lora:bounded_transformer_residency",
@@ -129113,6 +129312,8 @@
       "krea_2_raw:krea_2_edit:mlx:q8:edit_image:lora:staged_residency",
       "krea_2_raw:krea_2_raw:candle:bf16:text_to_image:lora:staged_residency",
       "krea_2_raw:krea_2_raw:candle:bf16:text_to_image:none:staged_residency",
+      "krea_2_raw:krea_2_raw:candle:q4:text_to_image:lora:staged_residency",
+      "krea_2_raw:krea_2_raw:candle:q4:text_to_image:none:staged_residency",
       "krea_2_raw:krea_2_raw:mlx:bf16:edit_image:none:bounded_transformer_residency",
       "krea_2_raw:krea_2_raw:mlx:bf16:edit_image:none:resident",
       "krea_2_raw:krea_2_raw:mlx:bf16:edit_image:none:staged_residency",
