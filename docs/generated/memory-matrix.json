@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9e0b97488d7f62346b1f4349fe0b133c41b7e4fbda9b0a0d61da58f7c7742f4b",
+    "sceneWorksRevision": "source-tree:1db5e12ba7761a5f59ea4c2ed7dbca08103298cd3a7e36ef41b29e06f72489b2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "b9aadf684623d36c911635c72af4ea992c4ca54b4fa01ba269ad891fa15f7e30"
+        "sha256": "79f66276e5a50cdc6486e49592d8f07a277d977c89690f126c3519fe9cade6ec"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "a6176a292bc88980c1589bb67d6c32077610a4102d4deacab920c79f5d36ddf0"
+        "sha256": "ab705bf9d094ad4a4e5cf84bf2bafe2b4be30d7ccaad41b15c4d1b2e3127e1c3"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1964,
-    "elidedCells": 7301,
+    "publishedCells": 1972,
+    "elidedCells": 7293,
     "elidedByState": {
-      "Implemented": 2927,
+      "Implemented": 2919,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 129,
-    "analyticOnlyCells": 208,
-    "anchoredCells": 1719,
+    "anchors": 130,
+    "analyticOnlyCells": 207,
+    "anchoredCells": 1729,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5463,6 +5463,24 @@
         "why": "3cd86ba2..c6d6a4db DOES touch the Krea loader path (candle-gen-krea loader.rs / pipeline.rs / transformer/mod.rs / control*.rs, candle-gen quant/mod.rs + quant/adapt.rs, candle-gen-boogu, candle-gen-qwen-image and candle-gen-pid files the closure reaches), so the diff alone cannot classify this anchor. It is attested on a MEASURED witness instead: the E6 falsification fixture re-measured krea_2_turbo q4 at a5f643ae (22 first-parent merges after 3cd86ba2) on the same GPU and the cold staged control reproduces the packaged anchor per phase. The remaining a5f643ae..c6d6a4db range is accounting-only: gen-core lib.rs (re-export), memory_strategy.rs (contract types), weightsmeta.rs (walker hidden-cache skip) and candle-gen quant/sidecar.rs (CACHE_DIR constant re-homed, same value). Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-krea lib.rs (the per-(route, proven tier) identity table and weights-free surfaces; the q4 turbo identity this anchor is keyed to is unchanged, and the new provable-tier read consults the marker the loader already validated). loader.rs, pipeline.rs, transformer/, control*.rs, candle-gen quant/ and every device path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed. Extended to 3b922bac (sc-22738, inference main = the merge of PR #962 over 563c44e1, its first parent): 563c44e1..3b922bac changes fourteen inference files, all under crates/media/mlx-gen/mlx-gen-krea and crates/media/mlx-gen/mlx-gen-krea-realtime (the harness-authorized calibration_fault hooks at every phase exit of the MLX krea base and realtime generators, their memory_strategy.rs helpers and tests), and the intersection with this closure's closureFiles is EMPTY - this is the CANDLE krea closure (candle-gen-krea and candle-gen), which never links mlx-gen-krea or mlx-gen-krea-realtime. The closure digest is byte-identical across the range (config/anchor-loader-closures.json records the same digest for this model at 563c44e1 and 3b922bac; only krea_2_raw:mlx and krea_2_turbo:mlx moved), so this is the trivial extension the bump script's remediation names: nothing this anchor loads or executes changed, and no file is added to filesChangedSinceMeasurement. Extended to e16c6a55 (sc-22738 fourth terminal pin, 2026-09-07; inference main = the merge of PR #965 fix/sc-22738-wan-rehost-tolerance over #964 fix/sc-22738-wan-t2v-memory-contract over #963 fix/sc-22738-mlx-progress-boundaries over 3b922bac): 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test) and the intersection with this closure's closureFiles is exactly ONE file, crates/contracts/gen-core/src/residency.rs. That diff is instrumentation-only (+195/-8, of which 147 lines are new unit tests): ensure_warm_locked drops its on_progress parameter and no longer emits Loading(TextEncoder)/Loading(Renderer) itself; the two warm (!stage_residency) arms of run_request_scoped and run_staged_request_scoped emit Loading(TextEncoder) before the warm load and Loading(Renderer) AFTER the prompt encode, both gated on the new warm_needs_load; the staged arms, run_two_phase, the components loaded, their order, their devices and the offload policy are byte-identical. This anchor was measured on the STAGED arm (measuredRegime.staged = true: the 3cd86ba2 capture drove candle-gen-krea's run_request_scoped with stage_residency), which the diff does not touch, so neither what it loads nor where the phase boundaries it was cut on fall changed. No file is added to filesChangedSinceMeasurement. EXTENDED to e34d7b46 (sc-22738, fifth terminal pin; inference main = PR #966 fix/sc-22738-sensenova-measurable over e16c6a55): the e16c6a55..e34d7b46 range changes five inference files, all under crates/media/mlx-gen/mlx-gen-sensenova (src/memory_strategy.rs, src/model.rs, src/t2i.rs and the two parity tests), and the intersection with this closure's closureFiles (143 files) is EMPTY - the closure is byte-identical across the range and derives the same currency key at e34d7b46 as at e16c6a55. The trivial extension the doctrine names; no file is added to filesChangedSinceMeasurement and no re-measure was taken.",
         "witness": "docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json krea_2_turbo q4 coldStagedControl at a5f643ae against the packaged anchor: conditioning 3.694 GB vs 3.828 (-3.5%, under), denoise 15.099 vs 15.103 (-0.02%), decode 22.349 vs 22.352 (-0.01%). The batch's resident rung (12.73 GB conditioning) also brackets the contract's 11.73 GB component total, as the E6 test asserts. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
       },
+      "cells": 10
+    },
+    {
+      "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+      "modelId": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "krea_2_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/krea-2-turbo-q8-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
       "cells": 10
     },
     {
@@ -11201,12 +11219,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 18,
-      "published": 2,
-      "elided": 16,
+      "published": 3,
+      "elided": 15,
       "implemented": 3,
       "states": {
-        "Anchored": 2,
-        "Implemented": 1,
+        "Anchored": 3,
         "Missing": 15
       },
       "implementedBy": {
@@ -11231,12 +11248,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 18,
-      "published": 2,
-      "elided": 16,
+      "published": 3,
+      "elided": 15,
       "implemented": 3,
       "states": {
-        "Anchored": 2,
-        "Implemented": 1,
+        "Anchored": 3,
         "Missing": 15
       },
       "implementedBy": {
@@ -11261,12 +11277,11 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 18,
-      "published": 8,
-      "elided": 10,
+      "published": 9,
+      "elided": 9,
       "implemented": 3,
       "states": {
-        "Anchored": 2,
-        "Implemented": 1,
+        "Anchored": 3,
         "Missing": 9,
         "Structurally N/A": 6
       },
@@ -11292,12 +11307,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 18,
-      "published": 6,
-      "elided": 12,
+      "published": 9,
+      "elided": 9,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3,
+        "Anchored": 9,
         "Missing": 9
       },
       "implementedBy": {
@@ -11322,12 +11336,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 18,
-      "published": 4,
-      "elided": 14,
+      "published": 6,
+      "elided": 12,
       "implemented": 6,
       "states": {
-        "Anchored": 4,
-        "Implemented": 2,
+        "Anchored": 6,
         "Missing": 12
       },
       "implementedBy": {
@@ -49601,6 +49614,68 @@
       }
     },
     {
+      "id": "krea_2_turbo:krea_2_turbo_edit:candle:q8:edit_image:lora:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo_edit",
+      "provider": "krea_2_turbo_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
       "id": "krea_2_turbo:krea_2_turbo_edit:mlx:bf16:edit_image:lora:bounded_attention",
       "modelId": "krea_2_turbo",
       "resolvedRoute": "krea_2_turbo_edit",
@@ -51935,6 +52010,126 @@
       }
     },
     {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:edit_image:control:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:edit_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
       "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:control:bounded_transformer_residency",
       "modelId": "krea_2_turbo",
       "resolvedRoute": "krea_2_turbo",
@@ -51968,7 +52163,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15829,
@@ -51989,7 +52191,11 @@
             "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
       }
     },
     {
@@ -52026,7 +52232,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15829,
@@ -52047,7 +52260,335 @@
             "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_attention",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "chunkedAttention",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 134217728
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_decode",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "tiledVae",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "streamedBlocks",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 134217728,
+        "transformerWindowSize": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "resident",
+        "formula": "vramGbByTier+cudaHeadroom"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "threeStage",
+        "formula": "max(text,denoise,decode)+cudaHeadroom"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091"
+          }
+        ]
       }
     },
     {
@@ -130116,6 +130657,7 @@
       "krea_2_turbo:krea_2_turbo_control:mlx:q8:text_to_image:control:staged_residency",
       "krea_2_turbo:krea_2_turbo_edit:candle:bf16:edit_image:lora:staged_residency",
       "krea_2_turbo:krea_2_turbo_edit:candle:q4:edit_image:lora:staged_residency",
+      "krea_2_turbo:krea_2_turbo_edit:candle:q8:edit_image:lora:staged_residency",
       "krea_2_turbo:krea_2_turbo_edit:mlx:bf16:edit_image:lora:bounded_attention",
       "krea_2_turbo:krea_2_turbo_edit:mlx:bf16:edit_image:lora:bounded_decode",
       "krea_2_turbo:krea_2_turbo_edit:mlx:bf16:edit_image:lora:bounded_transformer_residency",
@@ -130149,8 +130691,15 @@
       "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:resident",
       "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:staged_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q8:edit_image:control:resident",
+      "krea_2_turbo:krea_2_turbo:candle:q8:edit_image:none:resident",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:control:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_attention",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_decode",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:resident",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency",
       "krea_2_turbo:krea_2_turbo:mlx:bf16:edit_image:none:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:mlx:bf16:edit_image:none:resident",
       "krea_2_turbo:krea_2_turbo:mlx:bf16:edit_image:none:staged_residency",
