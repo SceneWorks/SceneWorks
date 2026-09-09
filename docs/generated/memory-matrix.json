@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4bc20a1eb02515fab9d158afe72853beaf83e7f502a6cbc136e961f97efd77f0",
+    "sceneWorksRevision": "source-tree:8b85b9529614cf83176c00c2bce284e8d955af96b8401fe8f8886684a0cadd9d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "85b3f45d0af7434b78f78f122cd51855e6da35ccf98b866e094c23b2473b4650"
+        "sha256": "dc159b5b5927931b099abfc7504596f197c747cfdd0792206a995ec7e710ae42"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "387d1352dea10a4bbe6879b4e5e3e6927ca7f6cdc7c741e516b2e2bce64b4125"
+        "sha256": "862b82de305d022e9371c4b9f2e172c5685fa891fd7b2d64687d5644aa963255"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 2034,
-    "elidedCells": 7231,
+    "publishedCells": 2076,
+    "elidedCells": 7189,
     "elidedByState": {
-      "Implemented": 2857,
+      "Implemented": 2815,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 134,
-    "analyticOnlyCells": 203,
-    "anchoredCells": 1791,
+    "anchors": 135,
+    "analyticOnlyCells": 202,
+    "anchoredCells": 1833,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5767,6 +5767,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/ltx-2-5-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 42
+    },
+    {
+      "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+      "modelId": "ltx_2_5",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "ltx_2_5_distilled",
+      "mode": "text_to_video",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 42
@@ -12233,12 +12251,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -12246,12 +12264,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -12259,12 +12277,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 36,
-      "published": 6,
-      "elided": 30,
+      "published": 12,
+      "elided": 24,
       "implemented": 18,
       "states": {
-        "Anchored": 6,
-        "Implemented": 12,
+        "Anchored": 12,
+        "Implemented": 6,
         "Missing": 18
       },
       "implementedBy": {
@@ -12292,12 +12310,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -65872,6 +65890,2772 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "extend_clip",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "first_last_frame",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_decode",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 192,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:resident",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "video_bridge",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c"
           }
         ]
       }
@@ -134991,6 +137775,48 @@
       "ltx_2_5:ltx_2_5_distilled:candle:bf16:video_bridge:none:bounded_decode",
       "ltx_2_5:ltx_2_5_distilled:candle:bf16:video_bridge:none:bounded_transformer_residency",
       "ltx_2_5:ltx_2_5_distilled:candle:bf16:video_bridge:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:extend_clip:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:first_last_frame:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:image_to_video:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:replace_person:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:lora:resident",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_attention",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_decode",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5_distilled:candle:q4:video_bridge:none:resident",
       "ltx_2_5:ltx_2_5:mlx:bf16:extend_clip:lora:bounded_attention",
       "ltx_2_5:ltx_2_5:mlx:bf16:extend_clip:lora:bounded_decode",
       "ltx_2_5:ltx_2_5:mlx:bf16:extend_clip:lora:resident",

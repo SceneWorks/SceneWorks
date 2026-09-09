@@ -2777,6 +2777,51 @@
       "overallAllocatorEnvelopeBytes": 92212822016
     },
     {
+      "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json",
+        "sha256": "0c87a7c97dddbed7ff4bbe2643e3aab0d399982f92beb69da7b4737b5ba8a773",
+        "recordId": "imc-2f73f2bd662aad9ddd8c",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+        "loaderClosureDigest": "4ed7a1f0a83c848bd5df40ea97cfc59f87259a54246022863344168e52a9dd41"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 49428824064,
+        "denoise": 57685311488,
+        "decode": 63154683904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 49428824064,
+        "denoise": 57685311488,
+        "decode": 63154683904
+      },
+      "overallAllocatorEnvelopeBytes": 63154683904
+    },
+    {
       "id": "ltx_2_5:mlx:bf16:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-39340b8e9208d6cca309",
       "modelId": "ltx_2_5",
       "modelFamily": "ltx-video",
@@ -7643,17 +7688,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_5:candle:q4",
-      "modelId": "ltx_2_5",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_5_distilled",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
