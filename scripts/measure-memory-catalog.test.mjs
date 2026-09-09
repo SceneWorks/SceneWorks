@@ -1750,11 +1750,38 @@ test("the committed exceeded bound keeps its own cell out of the runnable set of
 // for, while every campaign run — all of which pass `--skip-current` — correctly skipped it as
 // current. The RUN path is deliberately unchanged: omitting `--skip-current` still schedules a
 // current cell, because forcing a re-measurement is exactly what omitting the flag means.
+//
+// The fixture is SYNTHETIC on purpose. The first version of this test asked the shipped catalog and
+// the host's hub roots for a cell in the `current` shape; that made the assertion machine-dependent
+// (it held on the capture Mac, where `z_image_turbo:q4:mlx` fits, and failed on a CI runner with no
+// hub roots staged) and it would also have gone green-by-vacuum the day a campaign captured the last
+// such cell. A plan root with one current and one stale cell states the rule itself.
 test("--list reports a current anchor as `current` whether or not --skip-current is passed", async () => {
-  const opts = { backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], models: [] };
-  const listed = (await planRun({ ...opts, list: true, skipCurrent: false })).rows;
-  const listedSkipping = (await planRun({ ...opts, list: true, skipCurrent: true })).rows;
-  const scheduled = (await planRun({ ...opts, list: false, skipCurrent: false })).rows;
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // The currency map is the matrix's, so the fixture declares it: one anchor minted under the
+  // loader closure the pin loads, one that is not. Neither is in this campaign's captured set —
+  // the plan root has no `docs/calibration/<campaign>` at all — so both reach the currency branch.
+  await mkdir(path.join(root, "docs", "generated"), { recursive: true });
+  await writeFile(path.join(root, MATRIX_PATH), JSON.stringify({
+    anchors: [
+      { modelId: "z_image_turbo", tier: "q4", backend: "mlx", current: true },
+      { modelId: "qwen_image", tier: "q4", backend: "mlx", current: false },
+    ],
+  }));
+  const hub = await fakeHub([
+    [PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"],
+    [PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4"],
+  ]);
+  const opts = { backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [hub], models: [] };
+  const current = "z_image_turbo:q4:mlx";
+  const stale = "qwen_image:q4:mlx";
+
+  const listed = (await planRun({ ...opts, list: true, skipCurrent: false }, root)).rows;
+  const listedSkipping = (await planRun({ ...opts, list: true, skipCurrent: true }, root)).rows;
+  const scheduled = (await planRun({ ...opts, list: false, skipCurrent: false }, root)).rows;
+  const scheduledSkipping = (await planRun({ ...opts, list: false, skipCurrent: true }, root)).rows;
+  const at = (rows, key) => rows.find((row) => row.key === key);
 
   // The two listings agree cell for cell: the flag changes what a RUN does, never what a listing says.
   assert.deepEqual(
@@ -1762,28 +1789,30 @@ test("--list reports a current anchor as `current` whether or not --skip-current
     listedSkipping.map((row) => `${row.key}=${row.status}`),
     "a listing's statuses do not depend on --skip-current",
   );
+  assert.deepEqual(listed.map((row) => row.key).sort(), [stale, current].sort());
 
-  const scheduledByKey = new Map(scheduled.map((row) => [row.key, row]));
-  let promoted = 0;
-  for (const row of listed) {
-    const runRow = scheduledByKey.get(row.key);
-    assert.ok(runRow, `${row.key}: the run path classifies the same cells`);
-    if (row.status !== "current") {
-      assert.equal(runRow.status, row.status, `${row.key}: only a current cell reads differently in a listing`);
-      continue;
-    }
-    promoted += 1;
-    assert.equal(row.current, true, `${row.key}: promoted only on the currency the classifier reported`);
-    assert.match(row.reason, /current at the pinned inference revision/);
-    assert.match(row.reason, /--skip-current would not schedule it/);
-    assert.equal(runRow.status, "runnable", `${row.key}: a run without --skip-current still captures it`);
-    assert.equal(scheduledByKey.get(row.key).current, true);
+  // The current cell reads `current` in BOTH listings — the defect was that it read `runnable`
+  // without the flag — and the classifier's own currency is what promoted it.
+  for (const rows of [listed, listedSkipping]) {
+    assert.equal(at(rows, current).status, "current");
+    assert.equal(at(rows, current).current, true);
   }
-  assert.ok(
-    promoted > 0,
-    "the shipped catalog carries at least one MLX anchor that is current and not captured in this campaign; "
-      + "if a later campaign captures the last one, re-point this test at whatever cell then holds that shape",
-  );
+  assert.match(at(listed, current).reason, /current at the pinned inference revision/);
+  assert.match(at(listed, current).reason, /--skip-current would not schedule it/);
+  assert.match(at(listedSkipping, current).reason, /\(--skip-current\)/);
+
+  // The RUN path is untouched: without `--skip-current` the same cell is still scheduled, carrying
+  // the currency the classifier reported; with the flag it is skipped.
+  assert.equal(at(scheduled, current).status, "runnable", "a run without --skip-current still captures a current cell");
+  assert.equal(at(scheduled, current).current, true);
+  assert.equal(at(scheduledSkipping, current).status, "current");
+
+  // A cell the matrix does not call current is `runnable` on every one of the four paths, so the
+  // promotion above is keyed on currency and not on the listing flag.
+  for (const rows of [listed, listedSkipping, scheduled, scheduledSkipping]) {
+    assert.equal(at(rows, stale).status, "runnable", at(rows, stale).reason);
+    assert.notEqual(at(rows, stale).current, true);
+  }
 });
 
 test("every provider the committed plan declares is either served by a family row or refused by name", async () => {
