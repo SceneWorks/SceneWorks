@@ -4238,6 +4238,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-candle-evidence.json",
+        "sha256": "2952e7f2cbcafa5af6a4636e89074af26f039eb6c797693f0ab4353fe168f41c",
+        "recordId": "imc-5478897bb3fa0e0761d4",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "e9372e3b358bc392075c21613a99cc46f938e2396b0cdd5417499b24ebc50480"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32216449024,
+        "denoise": 45170556928,
+        "decode": 56042192896
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 32216449024,
+        "denoise": 45170556928,
+        "decode": 56042192896
+      },
+      "overallAllocatorEnvelopeBytes": 56042192896
+    },
+    {
       "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
       "modelId": "qwen_image_edit_2511",
       "modelFamily": "qwen-image",
@@ -8048,31 +8093,6 @@
           "provider": "qwen_image",
           "abi": "1",
           "vramGbByTier": "65.3"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image_edit_2511:candle:bf16",
-      "modelId": "qwen_image_edit_2511",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image_edit",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
-          "sequentialPeakGb": "52.2",
-          "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "81.7"
         }
       }
     },
