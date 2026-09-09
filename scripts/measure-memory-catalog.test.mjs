@@ -874,6 +874,112 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
   }
 });
 
+/**
+ * sc-22738. One SDXL-family model in the fixture manifest's shape: a tiered rehost plus the three
+ * caller-staged components as co-requisites, exactly as the shipped manifest declares them.
+ */
+const SDXL_FIXTURE_MODEL = {
+  id: "sdxl",
+  downloads: [
+    { repo: "SceneWorks/sdxl-base-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+    ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
+  ],
+};
+
+// sc-22738: a co-requisite is a co-requisite of the ENGINE that opens it, not of the model id. The
+// two upstream SDXL components were bound on BOTH lanes, so an MLX `sdxl`/`realvisxl`/`illustrious`
+// cell was booked `weights_missing` for a `laion/CLIP-ViT-bigG-14…` (or fp16-fix VAE) snapshot that
+// `mlx-gen-sdxl` never opens: it declares `required_components: &[]` (mlx-gen-sdxl/src/model.rs:167)
+// and loads `tokenizer/`, `tokenizer_2/` and `vae/` out of its own tier root
+// (mlx-gen-sdxl/src/loader.rs:29-30,277,293). Only `candle-gen-sdxl` declares them
+// (candle-gen-sdxl/src/lib.rs:593 → pipeline.rs:186-190), and only the candle adapter binary binds
+// their env vars. The row must reflect what THIS lane's engine requires.
+test("an SDXL co-requisite is required only on the lane whose engine opens it", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  // Everything staged EXCEPT the CLIP-bigG tokenizer — the snapshot the MLX cells were blocked on.
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  const context = (backend) => ({ models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  const mlx = await classifyAnchor("sdxl:q4:mlx", { provider: "sdxl" }, context("mlx"));
+  assert.equal(mlx.status, "runnable", `the MLX engine never opens ${bigG}: ${mlx.reason}`);
+  // Not merely "not the reason" — the lane binds no component env at all, because it reads none.
+  for (const component of SDXL_COMPONENTS) {
+    assert.equal(mlx.env[component.env], undefined, `${component.env} must not be bound on the MLX lane`);
+  }
+  assert.ok(
+    !mlx.roots.some((root) => root.label.startsWith("component ")),
+    "an MLX SDXL row must not even report a component root it will never read",
+  );
+  // …and it is not a fetch either: `--download-missing` must never book the component snapshots for
+  // a lane that does not need them. `anchorDownloadTargets` names exactly what `classifyAnchor` probes.
+  const mlxTargets = anchorDownloadTargets(mlx, models, { platform: "macos" });
+  assert.deepEqual(
+    mlxTargets.targets.map((target) => target.repo),
+    ["SceneWorks/sdxl-base-mlx"],
+    "the MLX SDXL cell fetches its tier root and nothing else",
+  );
+
+  // The same cell on candle is unchanged: the engine requires all three, so an absent one is
+  // `weights_missing`, named.
+  const candle = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, context("candle"));
+  assert.equal(candle.status, "weights_missing", "candle-gen-sdxl require_components all three");
+  assert.match(candle.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  const candleTargets = anchorDownloadTargets(candle, models, { platform: "macos" });
+  assert.deepEqual(
+    candleTargets.targets.map((target) => target.repo).sort(),
+    ["SceneWorks/sdxl-base-mlx", ...SDXL_COMPONENTS.map(({ repo }) => repo)].sort(),
+    "the candle SDXL cell fetches its tier root AND all three co-requisites",
+  );
+});
+
+// The lane split is DATA, not a hard-coded `backend === "candle"`: widen a component's `arms` and
+// the requirement comes back on that lane. This is the test that reds if the MLX engine ever
+// declares a required component and the table is not widened to match — and the mutation guard on
+// the gate itself: drop the `arms` filter in `requiredComponentsFor` and the case above goes red
+// while this one stays green, so the two together pin the behaviour in both directions.
+test("a component the MLX engine declares is still required of the MLX lane", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  // A fixture engine that DOES open the components on both lanes.
+  const families = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map((component) => ({ ...component, arms: ["mlx", "candle"] })),
+    },
+  };
+  const row = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families },
+  );
+  assert.equal(row.status, "weights_missing", "a component the lane's engine opens is still a hard requirement");
+  assert.match(row.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  // And a component with no `arms` at all stays lane-blind — the default is unchanged for every
+  // other family, which is why nothing but SDXL moves.
+  const laneBlind = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map(({ env, repo }) => ({ env, repo })),
+    },
+  };
+  const blind = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families: laneBlind },
+  );
+  assert.equal(blind.status, "weights_missing", "an undeclared `arms` requires the component on every lane");
+});
+
 // The three declarations above are the ADAPTER's own constants, not this script's opinion of them.
 // A drift on either side would send a capture at an artifact the arm does not open (or refuse one it
 // does), so each is read out of the Rust source and compared.
@@ -2702,13 +2808,33 @@ pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
 // validates all three at exact upstream revisions. A rename on one side would leave a capture
 // binding a component the engine never sees, so the two lists are proven equal here.
 test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
-  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
-  const declared = [...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]);
+  const adapterEnvs = async (binary) => {
+    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`), "utf8");
+    return [...new Set([...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]))];
+  };
+  const declared = await adapterEnvs("candle");
   assert.deepEqual(
-    [...new Set(declared)].sort(),
+    [...declared].sort(),
     SDXL_COMPONENTS.map((component) => component.env).sort(),
     "candle.rs SDXL_COMPONENTS and the catalog's SDXL_COMPONENTS must name the same env vars",
   );
+  // sc-22738: and the LANE split is derived from the same source rather than asserted. A component
+  // is bound for the arm whose adapter binary reads its env var — `candle.rs` reads all three,
+  // `mlx.rs` reads none, because `mlx-gen-sdxl` declares `required_components: &[]`
+  // (mlx-gen-sdxl/src/model.rs:167) and opens `tokenizer/`/`tokenizer_2/`/`vae/` inside its own
+  // tier root instead. If an MLX arm ever starts binding one, this reds and `SDXL_COMPONENTS`
+  // must widen its `arms` — the requirement can never silently come back on a lane, nor silently
+  // vanish from one.
+  const mlxDeclared = await adapterEnvs("mlx");
+  for (const component of SDXL_COMPONENTS) {
+    const arms = ["candle", "mlx"].filter((backend) =>
+      (backend === "candle" ? declared : mlxDeclared).includes(component.env));
+    assert.deepEqual(
+      [...(component.arms ?? [])].sort(),
+      arms.sort(),
+      `${component.env} must declare arms exactly matching the adapter binaries that bind it`,
+    );
+  }
   // Every component repo is a real corequisite of every SDXL-family model, so `tierDownload`
   // resolves a revision for it rather than falling back to an unrelated download.
   const models = await readManifestModels();
