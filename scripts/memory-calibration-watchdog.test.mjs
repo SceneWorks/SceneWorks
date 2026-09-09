@@ -25,6 +25,21 @@ const MIN_MAX_RUNTIME_SECONDS = 2;
 // so every harness that drives a fault to its escalation passes an explicit short window; the
 // property under test is the WINDOW, never its production length.
 const TEST_TELEMETRY_FAULT_WINDOW = "0.25";
+// Every guard this suite drives reads its POLICY timing — sample cadence, telemetry fault window,
+// runtime ceiling, child-attestation window — from a quantized clock. The waits stay real, so the
+// guarded process group, the sentinel and the SIGTERM->SIGKILL escalation are the production ones;
+// what stops being real is the READING. A tick advances the guard's clock by exactly the interval
+// it asked for rather than by the interval a loaded host actually delivered, so "how many faults
+// fit in a 0.25 s window" is a property of the watchdog rather than of the runner's scheduler.
+// Before this, one 0.15 s hiccup on a shared runner burned a whole window in two ticks (sc-22738).
+const VIRTUAL_CLOCK = "SCENEWORKS_WATCHDOG_TEST_CLOCK";
+const SAMPLE_INTERVAL = 0.02;
+// Fault window for the timeline tests. Short enough that a run reaches its end in ten ticks, and
+// a round multiple of the sample interval so "the tick that filled the window" is one exact tick.
+const TIMELINE_FAULT_WINDOW = 0.2;
+function withVirtualClock(environment = process.env) {
+  return { ...environment, [VIRTUAL_CLOCK]: "quantized" };
+}
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "sc19642-watchdog-"));
@@ -77,7 +92,6 @@ async function run(
 ) {
   const files = await fixture();
   await writeFile(files.telemetry, `${telemetry}\n`);
-  const started = Date.now();
   let status = 0;
   try {
     const args = [
@@ -95,13 +109,18 @@ async function run(
     if (maxRuntimeSeconds !== null) {
       args.splice(3, 0, "--max-runtime-seconds", `${maxRuntimeSeconds}`);
     }
-    await execFileAsync("python3", args, { timeout: 10_000 });
+    // Harness backstop only, sized for a cold runner rather than for this laptop: see the floor
+    // note in runWithMockedProductionTelemetry. Every assertion below is on exit status and
+    // receipt content, never on how long this took.
+    await execFileAsync("python3", args, { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
-  return { status, events, pids, elapsed: Date.now() - started };
+  // No elapsed figure is returned on purpose: nothing in this suite may assert on how long a
+  // run took. Every timing claim is read out of the guard's own event log instead.
+  return { status, events, pids };
 }
 
 async function waitForJsonEvent(file, predicate) {
@@ -137,7 +156,7 @@ async function controlled(mode, action) {
     "--telemetry-file", files.telemetry,
     "--allow-synthetic-telemetry",
     "--", "python3", files.program, mode, files.pids, files.telemetry, files.events,
-  ], { stdio: "ignore" });
+  ], { stdio: "ignore", env: withVirtualClock() });
   const started = await waitForJsonEvent(files.events, (event) => event.event === "started");
   await waitForJsonEvent(files.events, (event) => event.event === "sample");
   await waitForFile(files.pids);
@@ -180,7 +199,14 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
   // Harness backstop only: it must stay clear of the watchdog's own derived deadline so a
   // real hard stop, not this timeout, is always what a test observes. The longest phase
   // profile today is ten phases; the bound is deliberately looser than that.
-  const harnessTimeoutMs = Math.max(10_000, Math.round(1_000 * (6 + (maxRuntimeSeconds
+  // The FLOOR is what a slow runner tests. Under the quantized clock the guard's deadlines are
+  // counted in ticks, and a tick costs real seconds — a census subprocess plus a socket poll —
+  // so a 75-tick startup window that takes four seconds on an idle laptop takes multiples of
+  // that on a cold hosted runner, with the guard having been exactly as patient in its own time
+  // base. A ten-second floor turned that into a SIGTERM the assertions read as the wrong exit
+  // status (sc-22738). The floor is now an order of magnitude past the local timing; nothing
+  // asserts on it, so its only cost is how long a genuine hang takes to surface.
+  const harnessTimeoutMs = Math.max(60_000, Math.round(1_000 * (6 + (maxRuntimeSeconds
     ?? Math.max(MIN_MAX_RUNTIME_SECONDS, childAttestationTimeout
       + (16 + ATTESTATION_HANDSHAKE_BARRIERS) * telemetryTimeout)))));
   const launcher = `${files.program}.production-watchdog.py`;
@@ -218,16 +244,21 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
-  return execFileAsync("python3", [launcher], { timeout: harnessTimeoutMs, env: environment });
+  return execFileAsync("python3", [launcher],
+    { timeout: harnessTimeoutMs, env: withVirtualClock(environment) });
 }
 
 test("physical-footprint hard stop terminates the responsive owned group with no residue", async () => {
   const result = await run("high", 100);
   assert.equal(result.status, 97);
-  assert.ok(result.elapsed < 5_000, `termination took ${result.elapsed}ms`);
   assert.ok(result.events.some((event) =>
     event.event === "hard_stop" && event.reason.includes("physical_footprint")));
   assert.equal(result.events.at(-1).event, "terminated");
+  // "The group came down promptly" is a claim about the guard's own record, not about the
+  // seconds a loaded runner spent scheduling it: nothing is sampled, tolerated or re-observed
+  // between the stop and the escalation. A wall-clock bound here said less and flaked more.
+  const names = result.events.map((event) => event.event);
+  assert.equal(names.indexOf("terminated") - names.indexOf("hard_stop"), 1);
   result.pids.forEach(assertGone);
 });
 
@@ -294,7 +325,14 @@ test("a probe stopped by its wall-clock budget takes the ceiling stop's exact pa
 test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", async () => {
   const files = await fixture();
   const launcher = `${files.program}.predeadline-failure.py`;
-  await writeFile(launcher, String.raw`import importlib.util, sys, time
+  // The cleanup that crosses the deadline is charged to the guard's OWN clock, not to a real
+  // sleep. The guard reads every policy deadline through CLOCK, so a real sleep never actually
+  // moved the runtime deadline under this suite's quantized clock — it only made the run long
+  // enough for the tick accumulation to reach it, which is a property of the runner's scheduler
+  // and cost a hosted runner ten seconds of `ps` spawns (sc-22738). Advancing the clock inside
+  // the delayed refresh states the timeline exactly: the deadline is crossed DURING the cleanup
+  // that follows the telemetry failure, in the only time base the guard can observe.
+  await writeFile(launcher, String.raw`import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 state = {"samples": 0, "failed": False, "delayed": False}
@@ -308,7 +346,7 @@ original_refresh = module.OwnedGroup.refresh
 def delayed_refresh(self):
     if state["failed"] and not state["delayed"]:
         state["delayed"] = True
-        time.sleep(1.1)
+        module.CLOCK.advance(1.1)
     return original_refresh(self)
 module.DarwinFootprintSampler = Footprint
 module.OwnedGroup.refresh = delayed_refresh
@@ -323,7 +361,12 @@ raise SystemExit(module.guard(module.parse_args()))
 `);
   let status = 0;
   try {
-    await execFileAsync("python3", [launcher], { timeout: 10_000 });
+    // Harness backstop only, never the property under test: the guard's own virtual deadline
+    // ends this run inside a handful of ticks, so this bound is an order of magnitude past the
+    // local timing purely so a cold hosted interpreter cannot turn a slow start into a SIGTERM
+    // that the assertion below would read as the wrong exit status.
+    await execFileAsync("python3", [launcher],
+      { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -355,7 +398,7 @@ test("host memory and swap floors are enforced inside the owned-group watchdog",
       "--event-file", files.events, "--telemetry-file", files.telemetry,
       "--host-pressure-file", pressure, "--allow-synthetic-telemetry",
       "--", "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000 });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -797,20 +840,29 @@ time.sleep(60)
 
 test("a child that cannot attest is terminated with no owned residue", async () => {
   const files = await fixture();
-  const started = Date.now();
+  // A round multiple of the sample interval, so "the startup window, and not one tick past it"
+  // is an exact tick count rather than a rounding.
+  const childAttestationTimeout = 0.24;
   let status = 0;
   try {
     await runWithMockedProductionTelemetry(files, [
       "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { telemetryTimeout: 0.2, childAttestationTimeout: 0.25 });
+    ], { telemetryTimeout: 0.2, childAttestationTimeout });
   } catch (error) {
     status = error.code;
   }
   assert.equal(status, 97);
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) =>
-    event.reason === "child_attestation_timeout_at_or_above_0.25s"));
-  assert.ok(Date.now() - started < 1_500, "startup timeout drifted toward the runtime deadline");
+    event.reason === `child_attestation_timeout_at_or_above_${childAttestationTimeout}s`));
+  // The startup window did not drift toward the far larger runtime deadline. A real-elapsed
+  // bound was the flake: a cold hosted runner made the same ticks take longer in seconds without
+  // the guard having been one tick more patient (sc-22738). The guard's own clock fixes the
+  // count exactly — the startup window divided by the sample interval — so the assertion is on
+  // the ticks the guard spent waiting, which is the quantity the claim is actually about.
+  const startupSamples = events.filter((event) => event.event === "sample"
+    && event.phase === "awaiting_child_attestation");
+  assert.equal(startupSamples.length, Math.round(childAttestationTimeout / SAMPLE_INTERVAL));
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
 });
@@ -826,12 +878,12 @@ sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
 while not sock.recv(4096).endswith(b"\n"): pass
 time.sleep(60)
 `);
-  const started = Date.now();
+  const childAttestationTimeout = 1.5;
   let status = 0;
   try {
     await runWithMockedProductionTelemetry(files, ["python3", staller, files.pids], {
       telemetryTimeout: 0.1,
-      childAttestationTimeout: 1.5,
+      childAttestationTimeout,
     });
   } catch (error) {
     status = error.code;
@@ -840,8 +892,15 @@ time.sleep(60)
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) => event.phase === "awaiting_child_ack"));
   assert.ok(events.some((event) =>
-    event.reason === "child_attestation_timeout_at_or_above_1.5s"));
-  assert.ok(Date.now() - started < 2_800, "ACK stall exceeded the startup bound");
+    event.reason === `child_attestation_timeout_at_or_above_${childAttestationTimeout}s`));
+  // The stalled child is monitored to the deadline and not one tick past it. Which of the startup
+  // ticks fall before the connection and which after it is a real-process race, so the assertion
+  // is on the TOTAL, which the guard's own clock fixes exactly: the startup window divided by the
+  // sample interval. A real-elapsed bound here was the flake — a loaded runner made the same 75
+  // ticks take longer in seconds without the guard having been one tick less patient.
+  const startupSamples = events.filter((event) => event.event === "sample"
+    && ["awaiting_child_attestation", "awaiting_child_ack"].includes(event.phase));
+  assert.equal(startupSamples.length, Math.round(childAttestationTimeout / SAMPLE_INTERVAL));
   assertGone(Number((await readFile(files.pids, "utf8")).trim()));
 });
 
@@ -931,7 +990,7 @@ test("child attestation categorically rejects every synthetic telemetry surface"
       "--min-swap-free-bytes", "100", "--telemetry-file", files.telemetry,
       "--allow-synthetic-telemetry", "--require-child-attestation", "--",
       "python3", files.program, "hold", files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000 });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
     assert.match(error.stderr, /requires production Darwin telemetry and launch controls/);
@@ -1030,32 +1089,39 @@ import importlib.util, os, sys, time
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 identity = module.process_identity(os.getpid())
+# Each probe CHARGES the guard's clock for the time it claims to have spent instead of sleeping
+# through it, so the staleness arithmetic below is an exact quantity rather than whatever the
+# host's scheduler delivered around three real sleeps.
+module.CLOCK = module.QuantizedClock()
 budgets = []
 class SlowCensusGroup:
-    def refresh(self): time.sleep(0.06); return [identity]
+    def refresh(self): module.CLOCK.advance(0.06); return [identity]
     def root_pids(self, live): return [identity.pid]
 class Footprint:
     def sample(self, pids, timeout, required=()):
-        budgets.append(timeout); time.sleep(0.06); return 1
+        budgets.append(timeout); module.CLOCK.advance(0.06); return 1
 class Pressure:
     def sample(self, timeout):
-        budgets.append(timeout); time.sleep(0.06); return module.HostPressure(90, 900, 900)
+        budgets.append(timeout); module.CLOCK.advance(0.06)
+        return module.HostPressure(90, 900, 900)
 # Three probes at 0.06s each cross a 0.1s per-probe budget in aggregate, and each still received
 # the WHOLE budget: a slow census never shortens the probes that follow it.
 live, footprint, pressure, elapsed = module.observe_group(
     SlowCensusGroup(), Footprint(), Pressure(), 0.1)
 assert footprint == 1, footprint
 assert budgets == [0.1, 0.1], budgets
-assert elapsed > 0.1, elapsed
+assert elapsed == 0.18, elapsed
 # The aggregate remains a real staleness deadline: it is exactly TELEMETRY_PROBE_BUDGETS full
 # budgets, so it can never be shorter than one full sample.
 assert module.TELEMETRY_PROBE_BUDGETS == 3
 class Stalled:
-    def sample(self, pids, timeout, required=()): time.sleep(0.2); return 1
+    def sample(self, pids, timeout, required=()): module.CLOCK.advance(0.2); return 1
 class StalledPressure:
-    def sample(self, timeout): time.sleep(0.2); return module.HostPressure(90, 900, 900)
+    def sample(self, timeout):
+        module.CLOCK.advance(0.2); return module.HostPressure(90, 900, 900)
+# 0.06 + 0.2 + 0.2 = 0.46s against a 0.3s aggregate: over by a margin no jitter can close.
 try: module.observe_group(SlowCensusGroup(), Stalled(), StalledPressure(), 0.1)
-except TimeoutError: pass
+except TimeoutError as error: assert "0.460s of a 0.300s deadline" in str(error), error
 else: raise AssertionError("the aggregate staleness deadline was not enforced")
 print("independent probe budgets under one staleness deadline")
 `]);
@@ -1081,7 +1147,7 @@ test("a signal delivered in the blocked spawn window is cleaned after the sentin
     "--synthetic-launch-ready-file", launchReady, "--synthetic-spawn-delay", "0.2",
     "--", "python3", files.program, "hold",
     files.pids, files.telemetry, files.events,
-  ], { stdio: "ignore" });
+  ], { stdio: "ignore", env: withVirtualClock() });
   await waitForFile(launchReady);
   watchdog.kill("SIGTERM");
   const status = await new Promise((resolve) => watchdog.once("close", resolve));
@@ -1114,7 +1180,7 @@ test("immediate sentinel loss cannot hide a descendant spawned after the last ce
     "--event-file", files.events, "--telemetry-file", files.telemetry,
     "--allow-synthetic-telemetry", "--", "python3", files.program, "delayed-child",
     files.pids, files.telemetry, files.events,
-  ], { stdio: "ignore" });
+  ], { stdio: "ignore", env: withVirtualClock() });
   const started = await waitForJsonEvent(files.events, (event) => event.event === "started");
   await waitForFile(files.pids);
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1142,7 +1208,7 @@ test("event-log failure is a monitor failure and still leaves no owned residue",
       "--event-file", files.events, "--telemetry-file", files.telemetry,
       "--allow-synthetic-telemetry", "--", "python3", files.program, "event-failure",
       files.pids, files.telemetry, files.events,
-    ], { timeout: 10_000 });
+    ], { timeout: 60_000, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -1298,7 +1364,7 @@ raise SystemExit(module.guard(module.parse_args()))
 `);
   let status = 0;
   try {
-    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -1311,26 +1377,48 @@ raise SystemExit(module.guard(module.parse_args()))
   };
 }
 
+/**
+ * The guard's virtual timeline, which every scripted-sampler test below asserts against exactly.
+ *
+ * The pre-release observation is footprint sample #1 and is taken at virtual t = 0; the runtime
+ * deadline is armed there. Every runtime iteration then advances the clock by exactly one
+ * `--sample-interval`, whether its sample was good or faulted, so runtime sample #k (k >= 2) is
+ * taken at exactly `(k - 2) * SAMPLE_INTERVAL` and a `--max-runtime-seconds` of R produces exactly
+ * `R / SAMPLE_INTERVAL` runtime observations. Both quantities used to be host-load lotteries.
+ *
+ * `ticks(n)` is n sample intervals, rounded the way the guard rounds `faultElapsedSeconds`.
+ */
+const ticks = (n) => Number((n * SAMPLE_INTERVAL).toFixed(3));
+const sampleAt = (k) => ticks(k - 2);
+const runtimeSampleCount = (maxRuntimeSeconds) =>
+  Math.round(Number(maxRuntimeSeconds) / SAMPLE_INTERVAL);
+
 test("a footprint timeout followed by a good sample is never telemetry loss", async () => {
   // sc-22738, measured 2026-09-06: `bernini:q4:mlx` rendered 56.8 minutes at a steady 38 GB
   // against a 94.8 GB ceiling and was SIGKILLed by a `/usr/bin/footprint` timeout. One failed
   // probe is not a reading, and a false process-group SIGKILL through a live Metal command buffer
   // is strictly worse for this host than a late stop.
   const files = await fixture();
+  const maxRuntimeSeconds = "0.2";
   const result = await runWithScriptedFootprint(files, "single-footprint-timeout", String.raw`
 def outcome(n):
     if n == 2: raise footprint_timeout()
     return 1
-`, { maxRuntimeSeconds: "1.5" });
+`, { maxRuntimeSeconds });
   // The guard runs to its own wall-time ceiling: the tolerated fault left no mark on the stop.
   assert.equal(result.status, 97);
-  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.stopped.reason, `runtime_at_or_above_${maxRuntimeSeconds}s`);
   assert.equal(result.faults.length, 1);
   assert.equal(result.faults[0].consecutiveFaults, 1);
+  // The first runtime tick is the fault, so the run opens at virtual zero and is one tick long.
+  assert.equal(result.faults[0].faultElapsedSeconds, sampleAt(2));
   assert.match(result.faults[0].reason, /^TimeoutExpired:/);
-  const samplesAfter = result.events.filter((event) =>
-    event.event === "sample" && event.eventSequence > result.faults[0].eventSequence);
-  assert.ok(samplesAfter.length > 0, "the guard stopped sampling after the tolerated fault");
+  // Exactly the ticks the ceiling buys, minus the one that faulted: the guard neither stopped
+  // sampling after the tolerated fault nor sampled a tick more than its budget allowed.
+  const runtimeSamples = result.events.filter((event) =>
+    event.event === "sample" && event.phase === "runtime");
+  assert.equal(runtimeSamples.length, runtimeSampleCount(maxRuntimeSeconds) - 1);
+  assert.ok(runtimeSamples.at(-1).eventSequence > result.faults[0].eventSequence);
 });
 
 test("heterogeneous sampler faults in one run share the window; none escalates on its own", async () => {
@@ -1338,17 +1426,22 @@ test("heterogeneous sampler faults in one run share the window; none escalates o
   // host-pressure deadline inside the same fault run exhausted a three-TICK tolerance in 1.2 s.
   // Five alternating faults well inside the window must all be tolerated, whatever their kind.
   const files = await fixture();
+  const maxRuntimeSeconds = "0.2";
   const result = await runWithScriptedFootprint(files, "mixed-fault-run", String.raw`
 def outcome(n):
     if n in (2, 4, 6): raise footprint_timeout()
     if n in (3, 5): raise aggregate_deadline()
     return 1
-`, { maxRuntimeSeconds: "1.5" });
+`, { maxRuntimeSeconds });
   assert.equal(result.status, 97);
-  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s",
+  assert.equal(result.stopped.reason, `runtime_at_or_above_${maxRuntimeSeconds}s`,
     "a tolerated fault run must not become the stop reason");
   assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2, 3, 4, 5],
     "one unbroken fault run of five, tolerated on wall clock rather than tick count");
+  // The whole point of the fix is that this run is measured in SECONDS, so the elapsed figures are
+  // asserted exactly: five consecutive ticks, one sample interval apart, all inside the window.
+  assert.deepEqual(result.faults.map((event) => event.faultElapsedSeconds),
+    [2, 3, 4, 5, 6].map((n) => sampleAt(n) - sampleAt(2)));
   assert.deepEqual(
     [...new Set(result.faults.map((event) => event.reason.split(":")[0]))],
     ["TimeoutExpired", "TimeoutError"],
@@ -1365,22 +1458,25 @@ test("a transient sampling fault is re-enumerated; one past the wall-clock windo
 def outcome(n):
     if n in (2, 3) or n >= 5: raise RuntimeError("transient_source_failure")
     return 1
-`, { telemetryFaultWindow: 1 });
+`, { telemetryFaultWindow: TIMELINE_FAULT_WINDOW, maxRuntimeSeconds: "1.0" });
   assert.equal(result.status, 97);
   const runs = result.faults.map((event) => event.consecutiveFaults);
-  assert.deepEqual(runs.slice(0, 3), [1, 2, 1],
-    "two tolerated ticks, a recovery that resets the run, then a fresh run");
-  // A tick COUNT cannot be what stopped it: the surviving run had to occupy a full second of wall
-  // clock, which is many more ticks than any fixed tolerance would have allowed.
+  // The surviving run opens at sample #5 and is tolerated tick by tick until it has occupied the
+  // WHOLE window, so its length is exactly the window divided by the sample interval.
+  const toleratedTicks = Math.round(TIMELINE_FAULT_WINDOW / SAMPLE_INTERVAL);
+  assert.deepEqual(runs, [1, 2, ...Array.from({ length: toleratedTicks }, (_, i) => i + 1)],
+    "two tolerated ticks, a recovery that resets the run, then a fresh run to the window's end");
+  // A tick COUNT cannot be what stopped it: the surviving run rode out every tick the window
+  // buys, which is many more than the three-tick tolerance that SIGKILLed a healthy render in 1.2 s.
   assert.ok(runs.at(-1) > 3, `the final fault run was only ${runs.at(-1)} ticks`);
   assert.ok(result.faults.every((event) =>
     event.reason === "RuntimeError:transient_source_failure"));
   assert.ok(result.faults.every((event) => event.lastGoodPhysicalFootprintBytes === 1),
     "a tolerated fault must keep the previous good sample as the current reading");
   assert.match(result.stopped.reason, /^telemetry_lost:RuntimeError:transient_source_failure$/);
-  assert.equal(result.stopped.telemetryFaultHistory.windowSeconds, 1);
-  assert.ok(result.stopped.telemetryFaultHistory.elapsedSeconds >= 1,
-    `stopped after ${result.stopped.telemetryFaultHistory.elapsedSeconds}s`);
+  assert.equal(result.stopped.telemetryFaultHistory.windowSeconds, TIMELINE_FAULT_WINDOW);
+  assert.equal(result.stopped.telemetryFaultHistory.elapsedSeconds, TIMELINE_FAULT_WINDOW,
+    "the run escalated on the exact tick that filled the window, neither early nor late");
   assert.equal(result.stopped.telemetryFaultHistory.faults, runs.at(-1) + 1);
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
@@ -1390,19 +1486,34 @@ test("a good sample re-anchors the window, so a later fault gets the whole windo
   // The window is measured from the first fault of the CURRENT run, never from an ancient one: a
   // capture that sampled cleanly for minutes must not be one unlucky probe away from a SIGKILL.
   const files = await fixture();
+  // Both bursts are placed on the guard's OWN clock, so their positions are timestamps rather
+  // than a race with the host's scheduler: burst A occupies four ticks well inside the window,
+  // a healthy stretch follows, and burst B opens a full window's worth of seconds after burst A
+  // began. Without the re-anchor, burst B's first fault reads 0.28 s of elapsed fault time
+  // against a 0.2 s window and SIGKILLs the group on its first unlucky probe.
+  const maxRuntimeSeconds = "0.5";
   const result = await runWithScriptedFootprint(files, "window-reanchored", String.raw`
-start = time.monotonic()
+start = module.CLOCK.monotonic()
 def outcome(n):
-    elapsed = time.monotonic() - start
-    if 0.05 < elapsed < 0.20: raise footprint_timeout()
-    if 1.00 < elapsed < 1.15: raise footprint_timeout()
+    elapsed = module.CLOCK.monotonic() - start
+    if 0.01 <= elapsed < 0.09: raise footprint_timeout()
+    if 0.30 <= elapsed < 0.38: raise footprint_timeout()
     return 1
-`, { telemetryFaultWindow: 0.3, maxRuntimeSeconds: "2.0" });
+`, { telemetryFaultWindow: TIMELINE_FAULT_WINDOW, maxRuntimeSeconds });
   assert.equal(result.status, 97);
-  assert.equal(result.stopped.reason, "runtime_at_or_above_2.0s",
+  assert.equal(result.stopped.reason, `runtime_at_or_above_${maxRuntimeSeconds}s`,
     "the second fault burst inherited the first burst's window anchor");
-  assert.equal(result.faults.filter((event) => event.consecutiveFaults === 1).length, 2,
+  // Two bursts of exactly four ticks each, each burst re-numbered from one, each fault's elapsed
+  // time measured from ITS OWN burst rather than from the first fault the guard ever saw.
+  assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2, 3, 4, 1, 2, 3, 4],
     "the healthy stretch between the bursts did not close the first fault run");
+  const burstElapsed = [0, 1, 2, 3].map(ticks);
+  assert.deepEqual(result.faults.map((event) => event.faultElapsedSeconds),
+    [...burstElapsed, ...burstElapsed],
+    "the second burst was measured from its own first fault, not from the ancient one");
+  assert.equal(result.events.filter((event) =>
+    event.event === "sample" && event.phase === "runtime").length,
+  runtimeSampleCount(maxRuntimeSeconds) - result.faults.length);
 });
 
 test("the pre-release observation takes the same tolerance as every other sampler path", async () => {
@@ -1411,19 +1522,83 @@ test("the pre-release observation takes the same tolerance as every other sample
 def outcome(n):
     if n == 1: raise footprint_timeout()
     return 1
-`, { maxRuntimeSeconds: "1.5" });
-  assert.equal(tolerated.stopped.reason, "runtime_at_or_above_1.5s",
+`, { maxRuntimeSeconds: "0.2" });
+  assert.equal(tolerated.stopped.reason, "runtime_at_or_above_0.2s",
     "a single failed pre-release probe must not refuse the capture");
   assert.deepEqual(tolerated.faults.map((event) => event.phase), ["before_child_release"]);
+  // The pre-release retry costs exactly one sample interval, and the fault run it opened is one
+  // tick old when the good sample that follows closes it.
+  assert.equal(tolerated.faults[0].faultElapsedSeconds, 0);
 
   const lost = await fixture();
   const stopped = await runWithScriptedFootprint(lost, "initial-fault-persistent", String.raw`
 def outcome(n): raise footprint_timeout()
-`, { telemetryFaultWindow: 0.3 });
+`, { telemetryFaultWindow: TIMELINE_FAULT_WINDOW });
   assert.equal(stopped.status, 97);
   assert.match(stopped.stopped.reason, /^initial_telemetry_lost:TimeoutExpired:/);
-  assert.ok(stopped.faults.length >= 1, "the tolerated pre-release faults were never recorded");
-  assert.ok(stopped.stopped.telemetryFaultHistory.elapsedSeconds >= 0.3);
+  // A capture is refused before it starts only after the window is FULL, tick by tick: exactly
+  // one tolerated pre-release fault per sample interval, then the escalation on the tick that
+  // fills the window.
+  assert.deepEqual(stopped.faults.map((event) => event.faultElapsedSeconds),
+    Array.from({ length: Math.round(TIMELINE_FAULT_WINDOW / SAMPLE_INTERVAL) }, (_, i) => ticks(i)));
+  assert.ok(stopped.faults.every((event) => event.phase === "before_child_release"));
+  assert.equal(stopped.stopped.telemetryFaultHistory.elapsedSeconds, TIMELINE_FAULT_WINDOW);
+  assert.equal(stopped.stopped.telemetryFaultHistory.faults, stopped.faults.length + 1);
+});
+
+test("the virtual clock is a test seam the production path cannot reach", async () => {
+  // The seam is OFF unless a caller asks for it by name, and the only caller that spawns this
+  // guard in production is `watchdogGuard` — which builds neither a flag nor an environment entry
+  // for it. A deterministic test clock that a measurement run could inherit would be a behaviour
+  // change wearing a test's clothes.
+  const { watchdogGuard } = await import("./measure-memory-catalog.mjs");
+  const guard = watchdogGuard({
+    hardware: { memoryBytes: 137_438_953_472, wiredLimitBytes: 87_044_670_532 },
+    eventFile: "/tmp/events.jsonl",
+    budgetMinutes: 60,
+  });
+  assert.ok(guard.every((argument) => !/clock/i.test(argument)),
+    `the production guard argv names a clock: ${guard.join(" ")}`);
+  const catalog = await readFile(path.join(ROOT, "scripts/measure-memory-catalog.mjs"), "utf8");
+  assert.equal(catalog.includes(VIRTUAL_CLOCK), false,
+    `${VIRTUAL_CLOCK} is reachable from the production capture path`);
+
+  // With the variable unset the module holds the real clock; a value it does not understand is
+  // refused outright rather than silently falling back to one.
+  const inspect = String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+print(type(module.CLOCK).__name__, module.CLOCK.virtual)
+`;
+  const bare = { ...process.env };
+  delete bare[VIRTUAL_CLOCK];
+  const production = await execFileAsync("python3", ["-c", inspect], { env: bare });
+  assert.equal(production.stdout.trim(), "SystemClock False");
+  const virtual = await execFileAsync("python3", ["-c", inspect], { env: withVirtualClock() });
+  assert.equal(virtual.stdout.trim(), "QuantizedClock True");
+  await assert.rejects(
+    () => execFileAsync("python3", ["-c", inspect],
+      { env: { ...bare, [VIRTUAL_CLOCK]: "fast-forward" } }),
+    (error) => /is not a supported test clock/.test(error.stderr),
+    "an unrecognised clock setting must be refused, not ignored",
+  );
+
+  // Real time never runs BEHIND the guard's reading: every quantized wait is a real wait, so a
+  // virtual deadline can arrive late on a loaded host but never early.
+  const paced = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+clock = module.QuantizedClock()
+started = time.monotonic()
+for _ in range(10):
+    clock.sleep(0.02)
+assert clock.monotonic() == 0.2, clock.monotonic()
+assert time.monotonic() - started >= 0.2, time.monotonic() - started
+print("quantized reading, real wait")
+`], { env: bare });
+  assert.match(paced.stdout, /quantized reading, real wait/);
 });
 
 test("the guard's production cadence and telemetry budgets are the documented ones", async () => {
@@ -1476,7 +1651,7 @@ def outcome(n):
  */
 async function runWithScriptedCensus(files, name, censusOutcome, options = {}) {
   const {
-    mode = "hold", ceiling = 100, maxRuntimeSeconds = "1.5", timeoutMs = 20_000,
+    mode = "hold", ceiling = 100, maxRuntimeSeconds = "0.3", timeoutMs = 20_000,
     footprintOutcome = "def footprint_outcome(n, state): return 1",
   } = options;
   const launcher = `${files.program}.${name}.py`;
@@ -1522,7 +1697,7 @@ raise SystemExit(module.guard(module.parse_args()))
 `);
   let status = 0;
   try {
-    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs, env: withVirtualClock() });
   } catch (error) {
     status = error.code;
   }
@@ -1552,7 +1727,7 @@ def census_outcome(n, state):
   assert.equal(result.status, 97);
   // The guard rode the census outage out to its own wall-time ceiling — it neither failed as a
   // monitor bug nor read the unknown view as a finished render.
-  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.stopped.reason, "runtime_at_or_above_0.3s");
   assert.equal(result.faults.length, 3);
   assert.ok(result.faults.every((event) => event.phase === "runtime"));
   assert.ok(result.faults.every((event) => event.reason.startsWith("TimeoutExpired:/bin/ps")
@@ -1589,7 +1764,7 @@ def footprint_outcome(n, state):
 `,
   });
   assert.equal(result.status, 97);
-  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.stopped.reason, "runtime_at_or_above_0.3s");
   assert.equal(result.faults.length, 2, "one census fault and one footprint fault, both tolerated");
   // The census fault is recorded FIRST even though the footprint failed first: it can only have
   // come from the census the sampler-fault handler itself runs.
@@ -1621,12 +1796,29 @@ test("a census outage across the sentinel's exit defers instead of declaring a l
   // guard defers until a census succeeds. The outage here spans the sentinel's exit and then
   // clears.
   const files = await fixture();
+  // The outage is anchored to the sentinel's ACTUAL exit rather than to a wall-clock window
+  // guessed around it: it opens once the run is inside the runtime loop and closes only four
+  // censuses after the owned group has genuinely emptied, so on any host at any speed the guard
+  // meets a non-None `child.poll()` while its view of the group is still unknown — the one tick
+  // this test exists for. A real-elapsed window either missed that tick or outlived the whole
+  // run, depending on how loaded the host happened to be.
   const result = await runWithScriptedCensus(files, "census-outage-over-exit", String.raw`
-start = time.monotonic()
+import json
+def owned_group_empty():
+    try:
+        events = [json.loads(line) for line in open(${JSON.stringify(files.events)}) if line.strip()]
+        started = next(event for event in events if event["event"] == "started")
+    except Exception:
+        return False
+    return not real_group_identities(started["pgid"])
 def census_outcome(n, state):
-    if 0.15 < time.monotonic() - start < 1.2:
-        state["censusFaults"] += 1
-        raise census_timeout()
+    state.setdefault("afterExit", 0)
+    if state["samples"] < 2 or state["afterExit"] >= 4:
+        return
+    if owned_group_empty():
+        state["afterExit"] += 1
+    state["censusFaults"] += 1
+    raise census_timeout()
 `, { mode: "complete", maxRuntimeSeconds: "10" });
   assert.equal(result.status, 0, "the completed group was reported through the child's own status");
   assert.equal(result.stopped, null,
@@ -1642,7 +1834,7 @@ test("an exception that is not a telemetry source stays a monitor failure", asyn
 def outcome(n):
     if n == 2: raise AttributeError("monitor bug")
     return 1
-`, { maxRuntimeSeconds: "1.5" });
+`, { maxRuntimeSeconds: "0.2" });
   assert.equal(result.status, 97);
   assert.equal(result.stopped.reason, "monitor_failure:AttributeError:monitor bug");
   assert.equal(result.faults.length, 0, "a monitor bug must not be recorded as a telemetry fault");
