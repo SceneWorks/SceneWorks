@@ -47,6 +47,93 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
+
+
+class SystemClock:
+    """The production monotonic source: real elapsed time and real waits.
+
+    Every deadline the guard POLICY owns — the sample cadence, the telemetry fault window, the
+    runtime ceiling and the child-attestation window — is read through this object. The real
+    process lifecycle is deliberately NOT: spawning the sentinel, waiting for it to establish its
+    process group, and the SIGTERM->SIGKILL escalation still call `time` directly, because those
+    wait on a real kernel process whose progress no clock of ours controls.
+    """
+
+    virtual = False
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def advance(self, seconds: float) -> None:
+        """No-op: real time advances by itself. Present so callers need not branch on the clock."""
+
+
+class QuantizedClock(SystemClock):
+    """TEST-ONLY monotonic source: real waits, but EXACT timestamps.
+
+    Installed only when `SCENEWORKS_WATCHDOG_TEST_CLOCK` is set, which nothing on the production
+    path does — `watchdogGuard` builds neither a flag nor an environment entry for it.
+
+    Every `sleep` still waits for real wall clock, because the guarded thing is a real process
+    group: a virtual clock that returned instantly would let the guard reach its child-attestation
+    deadline before a cold interpreter had finished importing. What is virtual is the READING: the
+    clock advances by exactly the interval that was requested, never by the interval the host
+    actually took. Scheduling jitter therefore moves WHEN a tick happens and never how many seconds
+    the guard believes have elapsed, so a fault window, a re-anchor and a runtime ceiling land on
+    exact tick counts on an idle laptop and on a saturated CI runner alike. Real elapsed time is
+    always >= virtual elapsed time, so a virtual deadline never arrives early in real terms.
+
+    `advance` lets a scripted probe charge the clock for time it claims to have spent, which is how
+    a test exercises the aggregate staleness deadline without sleeping through it.
+    """
+
+    virtual = True
+
+    # Time is accumulated in whole nanoseconds, never by repeated float addition: a hundred
+    # `+= 0.02` steps land at 1.9999999999999998, which puts a deadline test one tick either side
+    # of where a test says it is. Integers make a tick count an exact quantity again.
+    NANOS = 1_000_000_000
+
+    def __init__(self, start: float = 0.0):
+        self._nanos = round(float(start) * self.NANOS)
+
+    def monotonic(self) -> float:
+        return self._nanos / self.NANOS
+
+    def advance(self, seconds: float) -> None:
+        self._nanos += max(0, round(float(seconds) * self.NANOS))
+
+    def sleep(self, seconds: float) -> None:
+        seconds = max(0.0, float(seconds))
+        self.advance(seconds)
+        if seconds > 0:
+            time.sleep(seconds)
+
+
+TEST_CLOCK_ENVIRONMENT_VARIABLE = "SCENEWORKS_WATCHDOG_TEST_CLOCK"
+
+
+def clock_from_environment() -> SystemClock:
+    """Resolve the guard's clock once, at import. Absent variable -> the production clock.
+
+    A value that is not understood is refused rather than silently ignored: this seam may only
+    ever be OFF or exactly what the caller asked for.
+    """
+    setting = os.environ.get(TEST_CLOCK_ENVIRONMENT_VARIABLE)
+    if setting is None or setting == "":
+        return SystemClock()
+    kind, _, start = setting.partition(":")
+    if kind != "quantized":
+        raise RuntimeError(
+            f"{TEST_CLOCK_ENVIRONMENT_VARIABLE}={setting!r} is not a supported test clock")
+    return QuantizedClock(float(start) if start else 0.0)
+
+
+CLOCK: SystemClock = clock_from_environment()
 # WALL-CLOCK window a run of sampler faults may occupy before the guard declares telemetry lost.
 # WHY wall clock and not a tick count: a tick count is a duration only if the cadence is known, and
 # under load the cadence collapses — the sc-22738 false positive burned a three-tick tolerance in
@@ -681,13 +768,13 @@ def observe_group(
     starve the host-pressure probe to zero. The aggregate is a staleness assertion applied after
     the fact — `TELEMETRY_PROBE_BUDGETS` full budgets, so it is never shorter than one full sample.
     """
-    started = time.monotonic()
+    started = CLOCK.monotonic()
     live = group.refresh()
     if not live:
         raise RuntimeError("owned group has no live identities")
     footprint = sampler.sample([item.pid for item in live], timeout, group.root_pids(live))
     pressure = host_sampler.sample(timeout) if host_sampler is not None else None
-    elapsed = time.monotonic() - started
+    elapsed = CLOCK.monotonic() - started
     aggregate = timeout * TELEMETRY_PROBE_BUDGETS
     if elapsed > aggregate:
         raise TimeoutError(
@@ -956,7 +1043,7 @@ def guard(args: argparse.Namespace) -> int:
             return False
         if not isinstance(error, TELEMETRY_SOURCE_ERRORS):
             raise error
-        now = time.monotonic()
+        now = CLOCK.monotonic()
         telemetry_faults += 1
         if telemetry_fault_since is None:
             telemetry_fault_since = now
@@ -1020,14 +1107,14 @@ def guard(args: argparse.Namespace) -> int:
     def pause_runtime() -> None:
         sleep_seconds = args.sample_interval
         if runtime_deadline is not None:
-            sleep_seconds = min(sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
+            sleep_seconds = min(sleep_seconds, max(0.0, runtime_deadline - CLOCK.monotonic()))
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+            CLOCK.sleep(sleep_seconds)
 
     def bounded_telemetry_timeout() -> float:
         if runtime_deadline is None:
             return args.telemetry_timeout
-        remaining = runtime_deadline - time.monotonic()
+        remaining = runtime_deadline - CLOCK.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"runtime reached {args.max_runtime_seconds}s")
         return min(args.telemetry_timeout, remaining)
@@ -1055,7 +1142,7 @@ def guard(args: argparse.Namespace) -> int:
                 raise
             except Exception as error:
                 if tolerate_telemetry_fault(error, "before_child_release"):
-                    time.sleep(args.sample_interval)
+                    CLOCK.sleep(args.sample_interval)
                     continue
                 hard_stop = f"initial_telemetry_lost:{type(error).__name__}:{error}"
                 break
@@ -1066,7 +1153,7 @@ def guard(args: argparse.Namespace) -> int:
             emit_sample(footprint, pressure, "before_child_release")
             group.release()
             runtime_deadline = (
-                time.monotonic() + args.max_runtime_seconds
+                CLOCK.monotonic() + args.max_runtime_seconds
                 if args.max_runtime_seconds is not None
                 else None
             )
@@ -1092,12 +1179,12 @@ def guard(args: argparse.Namespace) -> int:
                 attestation["minSwapFreeBytes"] = args.min_swap_free_bytes
             try:
                 child_attestation_deadline = (
-                    time.monotonic() + args.child_attestation_timeout
+                    CLOCK.monotonic() + args.child_attestation_timeout
                 )
                 startup_deadline = min(runtime_deadline, child_attestation_deadline)
 
                 def startup_deadline_reason() -> str | None:
-                    if time.monotonic() < startup_deadline:
+                    if CLOCK.monotonic() < startup_deadline:
                         return None
                     if runtime_deadline <= child_attestation_deadline:
                         return f"runtime_at_or_above_{args.max_runtime_seconds}s"
@@ -1119,7 +1206,7 @@ def guard(args: argparse.Namespace) -> int:
                             "child_attestation_failed:guarded_child_exited:"
                             f"status_{status}", None, None,
                         )
-                    remaining = startup_deadline - time.monotonic()
+                    remaining = startup_deadline - CLOCK.monotonic()
                     if remaining <= 0:
                         return startup_deadline_reason(), None, None
                     try:
@@ -1134,7 +1221,7 @@ def guard(args: argparse.Namespace) -> int:
                         raise
                     except Exception as error:
                         failed_at_or_after_startup_deadline = (
-                            time.monotonic() >= startup_deadline
+                            CLOCK.monotonic() >= startup_deadline
                         )
                         status = group.child.poll()
                         if status is not None and status < 0:
@@ -1161,9 +1248,9 @@ def guard(args: argparse.Namespace) -> int:
                     return stopped, current_footprint, current_pressure
 
                 def pause_startup() -> None:
-                    remaining = startup_deadline - time.monotonic()
+                    remaining = startup_deadline - CLOCK.monotonic()
                     if remaining > 0:
-                        time.sleep(min(args.sample_interval, remaining))
+                        CLOCK.sleep(min(args.sample_interval, remaining))
 
                 attestation_listener.setblocking(False)
                 while attestation_stream is None and hard_stop is None:
@@ -1178,7 +1265,7 @@ def guard(args: argparse.Namespace) -> int:
                     if hard_stop is None:
                         pause_startup()
                 if hard_stop is None:
-                    remaining = startup_deadline - time.monotonic()
+                    remaining = startup_deadline - CLOCK.monotonic()
                     if remaining <= 0:
                         hard_stop = startup_deadline_reason()
                     else:
@@ -1225,7 +1312,7 @@ def guard(args: argparse.Namespace) -> int:
                         events.emit({
                             "event": "child_attested", "providerPhase": provider_phase,
                         })
-                        remaining = startup_deadline - time.monotonic()
+                        remaining = startup_deadline - CLOCK.monotonic()
                         if remaining <= 0:
                             hard_stop = startup_deadline_reason()
                 if hard_stop is None:
@@ -1244,7 +1331,7 @@ def guard(args: argparse.Namespace) -> int:
         while True:
             if hard_stop is not None:
                 break
-            if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
+            if runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline:
                 # An open fault run predates the deadline: the deadline does not relabel it.
                 hard_stop = (
                     telemetry_fault_reason
@@ -1303,7 +1390,7 @@ def guard(args: argparse.Namespace) -> int:
                 if hard_stop is not None:
                     break
                 if args.require_provider_phases and provider_phase is None:
-                    time.sleep(min(args.sample_interval, bounded_telemetry_timeout()))
+                    CLOCK.sleep(min(args.sample_interval, bounded_telemetry_timeout()))
                     continue
             if attestation_stream is not None and child_reported_done and not completion_released:
                 attestation_stream.setblocking(True)
@@ -1322,7 +1409,7 @@ def guard(args: argparse.Namespace) -> int:
                 raise
             except Exception as error:  # fail closed on timeout, parse failure, or source loss
                 failed_at_or_after_deadline = (
-                    runtime_deadline is not None and time.monotonic() >= runtime_deadline
+                    runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline
                 )
                 # The exit check needs its own census, and that census is telemetry too: a failed one
                 # is an unknown view, never proof the group is gone — and never `monitor_failure`,
@@ -1345,7 +1432,7 @@ def guard(args: argparse.Namespace) -> int:
                 hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
                 break
             record_good_sample(footprint, pressure)
-            if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
+            if runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline:
                 hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
                 break
             hard_stop = check_observation(footprint, pressure)
