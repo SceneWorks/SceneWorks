@@ -1,0 +1,62 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "e559b6af33a5102ef00bbc3d452955d7d0d8b58e6a4d7b91e364e8f45138a078",
+        "repository": "SceneWorks/wan2.2-ti2v-5b-mlx",
+        "resolvedRevision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-dense-v1",
+      "capturedAt": "2026-09-08T23:27:35.709Z",
+      "ceilingBytes": 94822600832,
+      "eventFileSha256": "0f33126b481a0d4916d7725d766412d79d5770d0bad2ccb0ba812fa6e8052075",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-f38f26d4174a26acd347",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-6fbfc003deff2604d941",
+      "observedFootprintBytes": 95946527336,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_95946527336",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "c56028ffd65657e12929b92bce5320e4f17aedbb2bd3f558309532212fb6ce65",
+          "dirty": false,
+          "revision": "e34d7b46a301376676bd8a60419190c7be9aa4f0"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f8e812539169fb2d51336a2a16c9e081d76f589d6e30614454417a5f73e844b2",
+          "revision": "92a46326599b4ac4d0812c49ab03faa79a18b63d"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}

@@ -21,6 +21,10 @@ const WATCHDOG = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
 // stays as a floor so runs configured with a tight telemetry timeout keep their slack.
 const ATTESTATION_HANDSHAKE_BARRIERS = 6;
 const MIN_MAX_RUNTIME_SECONDS = 2;
+// The production tolerance window is 60 s of wall clock (sc-22738). A suite cannot wait that out,
+// so every harness that drives a fault to its escalation passes an explicit short window; the
+// property under test is the WINDOW, never its production length.
+const TEST_TELEMETRY_FAULT_WINDOW = "0.25";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "sc19642-watchdog-"));
@@ -81,6 +85,7 @@ async function run(
       "--max-footprint-bytes", `${ceiling}`,
       "--sample-interval", sampleInterval,
       "--telemetry-timeout", "0.2",
+      "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
       "--term-grace", "0.1",
       "--event-file", files.events,
       "--telemetry-file", files.telemetry,
@@ -126,6 +131,7 @@ async function controlled(mode, action) {
     "--max-footprint-bytes", "100",
     "--sample-interval", "0.02",
     "--telemetry-timeout", "0.2",
+    "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
     "--term-grace", "0.1",
     "--event-file", files.events,
     "--telemetry-file", files.telemetry,
@@ -151,6 +157,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
     childAttestationTimeout = 1, maxRuntimeSeconds = null,
+    telemetryFaultWindow = TEST_TELEMETRY_FAULT_WINDOW,
     requireProviderPhases = false,
     providerPhaseProfile = "campaign-entry",
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
@@ -181,7 +188,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 class Footprint:
-    def sample(self, pids, timeout): return 1
+    def sample(self, pids, timeout, required=()): return 1
 class Pressure:
     def __init__(self, host_memory_bytes): self.index = 0
     def sample(self, timeout):
@@ -202,6 +209,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--min-memory-free-bytes", "100",
     "--sample-interval", "0.02",
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
+    "--telemetry-fault-window", ${JSON.stringify(String(telemetryFaultWindow))},
     "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
     "--require-child-attestation", ${requireProviderPhases
@@ -251,6 +259,38 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   result.pids.forEach(assertGone);
 });
 
+test("a probe stopped by its wall-clock budget takes the ceiling stop's exact path, and says so in the runner's spelling", async () => {
+  // sc-22738: this is the trigger `scripts/measure-memory-catalog.mjs` now arms on every guarded
+  // probe (`--max-runtime-seconds`, from `--probe-budget-minutes`). Two properties are asserted
+  // together because the runner depends on both:
+  //
+  //   1. the SPELLING. The runner classifies the stop by parsing this reason
+  //      (`RUNTIME_BUDGET_STOP_PATTERN`); the two scripts agree on a string and nothing else would
+  //      notice it drifting. Note the FLOAT: argparse types the budget as a float, so a 3-second
+  //      budget spells `runtime_at_or_above_3.0s`, not `_3s`.
+  //   2. the PATH. A runtime stop is not a second kill path bolted on beside the ceiling's: the
+  //      hard stop is emitted, the group takes the same SIGTERM→SIGKILL escalation, the same
+  //      `terminated` event closes the log, and the same 97 leaves the shell. A wedged probe is
+  //      being killed through a live Metal command buffer, and there is exactly one way to do that.
+  const budget = await run("hold", 100, 1, 0.2, "2");
+  const ceilingStop = await run("high", 99, 98);
+  assert.equal(budget.status, 97);
+  assert.equal(budget.status, ceilingStop.status, "both stops leave the same status");
+  const stopped = budget.events.find((event) => event.event === "hard_stop");
+  assert.equal(stopped.reason, "runtime_at_or_above_0.2s");
+  // The runner's own parser, spelled here so a change to either side reds this test.
+  assert.match(`watchdog hard stop: ${stopped.reason}`, /^watchdog hard stop: runtime_at_or_above_(\d+(?:\.\d+)?)s$/);
+  for (const result of [budget, ceilingStop]) {
+    const events = result.events.map((event) => event.event);
+    assert.equal(events.at(-1), "terminated", "the same terminal event closes both logs");
+    assert.equal(
+      events.indexOf("terminated") - events.indexOf("hard_stop"), 1,
+      "the stop is followed immediately by the escalation, on both",
+    );
+    result.pids.forEach(assertGone);
+  }
+});
+
 test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", async () => {
   const files = await fixture();
   const launcher = `${files.program}.predeadline-failure.py`;
@@ -259,7 +299,7 @@ spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCH
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 state = {"samples": 0, "failed": False, "delayed": False}
 class Footprint:
-    def sample(self, pids, timeout):
+    def sample(self, pids, timeout, required=()):
         state["samples"] += 1
         if state["samples"] == 1: return 1
         state["failed"] = True
@@ -980,24 +1020,46 @@ print("host pressure parsers fail closed")
   assert.match(probe.stdout, /host pressure parsers fail closed/);
 });
 
-test("footprint plus host pressure share one aggregate telemetry deadline", async () => {
+test("every telemetry probe gets its own full budget under an aggregate staleness deadline", async () => {
+  // sc-22738, measured 2026-09-06: the census, the footprint sample and the host-pressure sample
+  // drew from ONE `--telemetry-timeout`, so a slow census handed `/usr/bin/footprint` an arbitrary
+  // residue of it — 0.31 s of a 1 s budget on a 38 GB process — and starved the host-pressure
+  // probe to zero, manufacturing both fault kinds that then hard-stopped a 57-minute render.
   const probe = await execFileAsync("python3", ["-c", String.raw`
 import importlib.util, os, sys, time
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 identity = module.process_identity(os.getpid())
-class Group:
-    def refresh(self): return [identity]
+budgets = []
+class SlowCensusGroup:
+    def refresh(self): time.sleep(0.06); return [identity]
+    def root_pids(self, live): return [identity.pid]
 class Footprint:
-    def sample(self, pids, timeout): time.sleep(0.06); return 1
+    def sample(self, pids, timeout, required=()):
+        budgets.append(timeout); time.sleep(0.06); return 1
 class Pressure:
-    def sample(self, timeout): time.sleep(0.06); return module.HostPressure(90, 900, 900)
-try: module.observe_group(Group(), Footprint(), Pressure(), 0.1)
+    def sample(self, timeout):
+        budgets.append(timeout); time.sleep(0.06); return module.HostPressure(90, 900, 900)
+# Three probes at 0.06s each cross a 0.1s per-probe budget in aggregate, and each still received
+# the WHOLE budget: a slow census never shortens the probes that follow it.
+live, footprint, pressure, elapsed = module.observe_group(
+    SlowCensusGroup(), Footprint(), Pressure(), 0.1)
+assert footprint == 1, footprint
+assert budgets == [0.1, 0.1], budgets
+assert elapsed > 0.1, elapsed
+# The aggregate remains a real staleness deadline: it is exactly TELEMETRY_PROBE_BUDGETS full
+# budgets, so it can never be shorter than one full sample.
+assert module.TELEMETRY_PROBE_BUDGETS == 3
+class Stalled:
+    def sample(self, pids, timeout, required=()): time.sleep(0.2); return 1
+class StalledPressure:
+    def sample(self, timeout): time.sleep(0.2); return module.HostPressure(90, 900, 900)
+try: module.observe_group(SlowCensusGroup(), Stalled(), StalledPressure(), 0.1)
 except TimeoutError: pass
-else: raise AssertionError("sequential samplers received independent deadlines")
-print("aggregate telemetry deadline enforced")
+else: raise AssertionError("the aggregate staleness deadline was not enforced")
+print("independent probe budgets under one staleness deadline")
 `]);
-  assert.match(probe.stdout, /aggregate telemetry deadline enforced/);
+  assert.match(probe.stdout, /independent probe budgets under one staleness deadline/);
 });
 
 test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned group", async () => {
@@ -1114,28 +1176,569 @@ print("stale identity refused")
   assert.match(probe.stdout, /stale identity refused/);
 });
 
-test("footprint parser requires exact PID parity and sums a complete multi-PID sample", async () => {
+test("footprint parser sums the survivors and refuses only foreign, duplicate or empty telemetry", async () => {
+  // sc-22738, measured 2026-09-06: a real MLX capture spawns and reaps compiler/`xcrun` helpers
+  // constantly, so PIDs enumerated by the group census routinely exit before `footprint` reads
+  // them. Treating that as a PID-set mismatch SIGKILLed live renders (`krea_2_raw:bf16` at 274 s
+  // with missing=[16262, 39495], `krea_2_raw:q4` at 167 s with missing=[40001]).
   const probe = await execFileAsync("python3", ["-c", String.raw`
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+parse = module.DarwinFootprintSampler.parse_processes
 payload = {"processes": [
     {"pid": 11, "auxiliary": {"phys_footprint": 40}},
     {"pid": 22, "auxiliary": {"phys_footprint": 60}},
 ]}
-assert module.DarwinFootprintSampler.parse_processes([11, 22], payload) == 100
-for mutated in [
-    {"processes": payload["processes"][:1]},
-    {"processes": [payload["processes"][0], payload["processes"][0]]},
-    {"processes": [*payload["processes"], {"pid": 33, "auxiliary": {"phys_footprint": 1}}]},
+assert parse([11, 22], payload) == 100
+assert parse([11, 22], payload, [11, 22]) == 100
+# A tracked PID that vanished between the census and the sample is DROPPED, and the survivors are
+# summed: the sample proceeds, the next tick re-enumerates the group.
+assert parse([11, 22], {"processes": payload["processes"][:1]}) == 40
+assert parse([11, 22, 33], payload, [22]) == 100
+for mutated, required in [
+    ({"processes": [payload["processes"][0], payload["processes"][0]]}, ()),
+    ({"processes": [*payload["processes"], {"pid": 33, "auxiliary": {"phys_footprint": 1}}]}, ()),
+    ({"processes": []}, ()),
 ]:
     try:
-        module.DarwinFootprintSampler.parse_processes([11, 22], mutated)
+        parse([11, 22], mutated, required)
     except RuntimeError:
         pass
     else:
-        raise AssertionError("partial, duplicate, or extra PID telemetry was accepted")
-print("exact footprint PID set required")
+        raise AssertionError("duplicate, foreign, or empty PID telemetry was accepted")
+# Losing the guarded ROOT is telemetry loss, and it is its own category so the tolerance cannot
+# swallow it.
+try:
+    parse([11, 22], {"processes": payload["processes"][1:]}, [11])
+except module.RootTelemetryLost:
+    pass
+else:
+    raise AssertionError("the guarded root vanishing from its own sample was accepted")
+assert issubclass(module.RootTelemetryLost, RuntimeError)
+print("survivor sum with root parity required")
 `]);
-  assert.match(probe.stdout, /exact footprint PID set required/);
+  assert.match(probe.stdout, /survivor sum with root parity required/);
+});
+
+test("a transient child exiting mid-sample is tolerated; the guarded root vanishing is not", async () => {
+  // The end-to-end shape of the same defect, through `observe_group` and the guard loop: the
+  // census enumerates a helper that exits before the sampler reads it. `required` carries only the
+  // guarded root, so the tick proceeds on the survivors.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+root = module.Identity(101, 100, "S", "root")
+helper = module.Identity(202, 100, "S", "helper")
+class Group:
+    def refresh(self): return [root, helper]
+    def root_pids(self, live): return [root.pid]
+class Footprint:
+    """The transient helper exits between the census and the sample."""
+    def sample(self, pids, timeout, required=()):
+        assert list(required) == [root.pid], required
+        payload = {"processes": [{"pid": root.pid, "auxiliary": {"phys_footprint": 7}}]}
+        return module.DarwinFootprintSampler.parse_processes(pids, payload, required)
+live, footprint, pressure, _ = module.observe_group(Group(), Footprint(), None, 1.0)
+assert footprint == 7, footprint
+assert [item.pid for item in live] == [root.pid, helper.pid]
+class RootGone:
+    def sample(self, pids, timeout, required=()):
+        payload = {"processes": [{"pid": helper.pid, "auxiliary": {"phys_footprint": 7}}]}
+        return module.DarwinFootprintSampler.parse_processes(pids, payload, required)
+try:
+    module.observe_group(Group(), RootGone(), None, 1.0)
+except module.RootTelemetryLost:
+    pass
+else:
+    raise AssertionError("the guarded root vanishing from its sample did not stop the guard")
+print("transient child tolerated, root loss stops")
+`]);
+  assert.match(probe.stdout, /transient child tolerated, root loss stops/);
+});
+
+/**
+ * Drive the guard with a scripted footprint sampler. `outcome` is the body of a Python
+ * `def outcome(n)` called with the 1-based sample number: it returns a footprint or raises.
+ * Everything else is production code — the real group, the real loop, the real escalation rule.
+ */
+async function runWithScriptedFootprint(files, name, outcome, options = {}) {
+  const {
+    mode = "hold", ceiling = 100, maxRuntimeSeconds = "30",
+    telemetryFaultWindow = null, timeoutMs = 20_000,
+  } = options;
+  const launcher = `${files.program}.${name}.py`;
+  const windowArgument = telemetryFaultWindow === null
+    ? "" : `"--telemetry-fault-window", ${JSON.stringify(String(telemetryFaultWindow))},`;
+  await writeFile(launcher, String.raw`import importlib.util, subprocess, sys, time
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+def footprint_timeout():
+    return subprocess.TimeoutExpired(cmd=["/usr/bin/footprint", "-p", "1"], timeout=10.0)
+def aggregate_deadline():
+    return TimeoutError("aggregate host-pressure telemetry deadline expired")
+${outcome}
+state = {"samples": 0}
+class Footprint:
+    def sample(self, pids, timeout, required=()):
+        state["samples"] += 1
+        return outcome(state["samples"])
+module.DarwinFootprintSampler = Footprint
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", ${JSON.stringify(String(ceiling))},
+    "--max-runtime-seconds", ${JSON.stringify(String(maxRuntimeSeconds))},
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.2",
+    ${windowArgument}
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--", "python3", ${JSON.stringify(files.program)}, ${JSON.stringify(mode)},
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+raise SystemExit(module.guard(module.parse_args()))
+`);
+  let status = 0;
+  try {
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
+  } catch (error) {
+    status = error.code;
+  }
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  return {
+    status,
+    events,
+    faults: events.filter((event) => event.event === "telemetry_fault"),
+    stopped: events.find((event) => event.event === "hard_stop") ?? null,
+  };
+}
+
+test("a footprint timeout followed by a good sample is never telemetry loss", async () => {
+  // sc-22738, measured 2026-09-06: `bernini:q4:mlx` rendered 56.8 minutes at a steady 38 GB
+  // against a 94.8 GB ceiling and was SIGKILLed by a `/usr/bin/footprint` timeout. One failed
+  // probe is not a reading, and a false process-group SIGKILL through a live Metal command buffer
+  // is strictly worse for this host than a late stop.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "single-footprint-timeout", String.raw`
+def outcome(n):
+    if n == 2: raise footprint_timeout()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  // The guard runs to its own wall-time ceiling: the tolerated fault left no mark on the stop.
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 1);
+  assert.equal(result.faults[0].consecutiveFaults, 1);
+  assert.match(result.faults[0].reason, /^TimeoutExpired:/);
+  const samplesAfter = result.events.filter((event) =>
+    event.event === "sample" && event.eventSequence > result.faults[0].eventSequence);
+  assert.ok(samplesAfter.length > 0, "the guard stopped sampling after the tolerated fault");
+});
+
+test("heterogeneous sampler faults in one run share the window; none escalates on its own", async () => {
+  // The measured escalation: ONE `/usr/bin/footprint` timeout plus the SEPARATE aggregate
+  // host-pressure deadline inside the same fault run exhausted a three-TICK tolerance in 1.2 s.
+  // Five alternating faults well inside the window must all be tolerated, whatever their kind.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "mixed-fault-run", String.raw`
+def outcome(n):
+    if n in (2, 4, 6): raise footprint_timeout()
+    if n in (3, 5): raise aggregate_deadline()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s",
+    "a tolerated fault run must not become the stop reason");
+  assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2, 3, 4, 5],
+    "one unbroken fault run of five, tolerated on wall clock rather than tick count");
+  assert.deepEqual(
+    [...new Set(result.faults.map((event) => event.reason.split(":")[0]))],
+    ["TimeoutExpired", "TimeoutError"],
+    "both measured fault kinds went through the one tolerance",
+  );
+  assert.ok(result.faults.every((event) => event.faultElapsedSeconds < event.faultWindowSeconds));
+});
+
+test("a transient sampling fault is re-enumerated; one past the wall-clock window is telemetry loss", async () => {
+  const files = await fixture();
+  // A short run then a recovery that resets the window, followed by a permanent failure: the
+  // guard rides out the first run and stops only once a run occupies the whole window.
+  const result = await runWithScriptedFootprint(files, "transient-fault", String.raw`
+def outcome(n):
+    if n in (2, 3) or n >= 5: raise RuntimeError("transient_source_failure")
+    return 1
+`, { telemetryFaultWindow: 1 });
+  assert.equal(result.status, 97);
+  const runs = result.faults.map((event) => event.consecutiveFaults);
+  assert.deepEqual(runs.slice(0, 3), [1, 2, 1],
+    "two tolerated ticks, a recovery that resets the run, then a fresh run");
+  // A tick COUNT cannot be what stopped it: the surviving run had to occupy a full second of wall
+  // clock, which is many more ticks than any fixed tolerance would have allowed.
+  assert.ok(runs.at(-1) > 3, `the final fault run was only ${runs.at(-1)} ticks`);
+  assert.ok(result.faults.every((event) =>
+    event.reason === "RuntimeError:transient_source_failure"));
+  assert.ok(result.faults.every((event) => event.lastGoodPhysicalFootprintBytes === 1),
+    "a tolerated fault must keep the previous good sample as the current reading");
+  assert.match(result.stopped.reason, /^telemetry_lost:RuntimeError:transient_source_failure$/);
+  assert.equal(result.stopped.telemetryFaultHistory.windowSeconds, 1);
+  assert.ok(result.stopped.telemetryFaultHistory.elapsedSeconds >= 1,
+    `stopped after ${result.stopped.telemetryFaultHistory.elapsedSeconds}s`);
+  assert.equal(result.stopped.telemetryFaultHistory.faults, runs.at(-1) + 1);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("a good sample re-anchors the window, so a later fault gets the whole window again", async () => {
+  // The window is measured from the first fault of the CURRENT run, never from an ancient one: a
+  // capture that sampled cleanly for minutes must not be one unlucky probe away from a SIGKILL.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "window-reanchored", String.raw`
+start = time.monotonic()
+def outcome(n):
+    elapsed = time.monotonic() - start
+    if 0.05 < elapsed < 0.20: raise footprint_timeout()
+    if 1.00 < elapsed < 1.15: raise footprint_timeout()
+    return 1
+`, { telemetryFaultWindow: 0.3, maxRuntimeSeconds: "2.0" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_2.0s",
+    "the second fault burst inherited the first burst's window anchor");
+  assert.equal(result.faults.filter((event) => event.consecutiveFaults === 1).length, 2,
+    "the healthy stretch between the bursts did not close the first fault run");
+});
+
+test("the pre-release observation takes the same tolerance as every other sampler path", async () => {
+  const files = await fixture();
+  const tolerated = await runWithScriptedFootprint(files, "initial-fault-tolerated", String.raw`
+def outcome(n):
+    if n == 1: raise footprint_timeout()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(tolerated.stopped.reason, "runtime_at_or_above_1.5s",
+    "a single failed pre-release probe must not refuse the capture");
+  assert.deepEqual(tolerated.faults.map((event) => event.phase), ["before_child_release"]);
+
+  const lost = await fixture();
+  const stopped = await runWithScriptedFootprint(lost, "initial-fault-persistent", String.raw`
+def outcome(n): raise footprint_timeout()
+`, { telemetryFaultWindow: 0.3 });
+  assert.equal(stopped.status, 97);
+  assert.match(stopped.stopped.reason, /^initial_telemetry_lost:TimeoutExpired:/);
+  assert.ok(stopped.faults.length >= 1, "the tolerated pre-release faults were never recorded");
+  assert.ok(stopped.stopped.telemetryFaultHistory.elapsedSeconds >= 0.3);
+});
+
+test("the guard's production cadence and telemetry budgets are the documented ones", async () => {
+  // sc-22738: the measured false positive ran `/usr/bin/footprint` over a 38 GB process ~2.5x a
+  // second on a 1 s budget it did not even get to keep. These constants are the fix's other half.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+assert module.SAMPLE_INTERVAL_SECONDS == 2.0, module.SAMPLE_INTERVAL_SECONDS
+assert module.TELEMETRY_TIMEOUT_SECONDS >= 10.0, module.TELEMETRY_TIMEOUT_SECONDS
+assert module.TELEMETRY_FAULT_WINDOW_SECONDS == 60.0, module.TELEMETRY_FAULT_WINDOW_SECONDS
+# The aggregate deadline is derived from the per-probe budget and is never shorter than one sample.
+assert module.TELEMETRY_PROBE_BUDGETS >= 1, module.TELEMETRY_PROBE_BUDGETS
+# A cold child must be allowed to import its framework, and its window must clear a whole tick.
+assert module.CHILD_ATTESTATION_TIMEOUT_SECONDS > (
+    module.TELEMETRY_TIMEOUT_SECONDS * module.TELEMETRY_PROBE_BUDGETS)
+sys.argv = [${JSON.stringify(WATCHDOG)}, "--max-footprint-bytes", "1", "--", "true"]
+args = module.parse_args()
+assert args.sample_interval == module.SAMPLE_INTERVAL_SECONDS
+assert args.telemetry_timeout == module.TELEMETRY_TIMEOUT_SECONDS
+assert args.telemetry_fault_window == module.TELEMETRY_FAULT_WINDOW_SECONDS
+assert args.child_attestation_timeout == module.CHILD_ATTESTATION_TIMEOUT_SECONDS
+print("production cadence and budgets asserted")
+`]);
+  assert.match(probe.stdout, /production cadence and budgets asserted/);
+});
+
+test("losing the guarded root stops immediately, even inside a tolerated fault run", async () => {
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "root-loss-mid-run", String.raw`
+def outcome(n):
+    if n == 2: raise footprint_timeout()
+    if n == 3: raise module.RootTelemetryLost("footprint lost the guarded root PIDs: missing=[1]")
+    return 1
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.faults.length, 1, "root loss must not be absorbed by the open fault run");
+  assert.match(result.stopped.reason, /^telemetry_lost:RootTelemetryLost:/);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+/**
+ * Drive the guard with a scripted `/bin/ps` process-group census. `censusOutcome` is the body of a
+ * Python `def census_outcome(n, state)` called with the 1-based census number: it returns to let the
+ * REAL census run, or raises. `footprintOutcome` is the same contract as `runWithScriptedFootprint`
+ * plus the shared `state`, so a test can make the census fail only at a chosen point in the tick.
+ * Everything else is production code — the real group, the real loop, the real escalation rule.
+ */
+async function runWithScriptedCensus(files, name, censusOutcome, options = {}) {
+  const {
+    mode = "hold", ceiling = 100, maxRuntimeSeconds = "1.5", timeoutMs = 20_000,
+    footprintOutcome = "def footprint_outcome(n, state): return 1",
+  } = options;
+  const launcher = `${files.program}.${name}.py`;
+  await writeFile(launcher, String.raw`import importlib.util, subprocess, sys, time
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+def census_timeout():
+    return subprocess.TimeoutExpired(
+        cmd=["/bin/ps", "-ww", "-axo", "pid=,pgid=,state=,lstart="], timeout=10.0)
+def footprint_timeout():
+    return subprocess.TimeoutExpired(cmd=["/usr/bin/footprint", "-p", "1"], timeout=10.0)
+state = {"census": 0, "samples": 0, "censusFaults": 0, "inFault": False}
+${censusOutcome}
+${footprintOutcome}
+real_group_identities = module.group_identities
+real_process_identity = module.process_identity
+# A slow or hung /bin/ps fails BOTH census probes: the whole-system group walk and the per-PID
+# identity check that OwnedGroup.refresh runs over its anchors first.
+def scripted_census(pgid, timeout=None):
+    state["census"] += 1
+    census_outcome(state["census"], state)
+    return real_group_identities(pgid, timeout)
+def scripted_identity(pid, timeout=None):
+    state["census"] += 1
+    census_outcome(state["census"], state)
+    return real_process_identity(pid, timeout)
+module.group_identities = scripted_census
+module.process_identity = scripted_identity
+class Footprint:
+    def sample(self, pids, timeout, required=()):
+        state["samples"] += 1
+        return footprint_outcome(state["samples"], state)
+module.DarwinFootprintSampler = Footprint
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", ${JSON.stringify(String(ceiling))},
+    "--max-runtime-seconds", ${JSON.stringify(String(maxRuntimeSeconds))},
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.2",
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--", "python3", ${JSON.stringify(files.program)}, ${JSON.stringify(mode)},
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+raise SystemExit(module.guard(module.parse_args()))
+`);
+  let status = 0;
+  try {
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
+  } catch (error) {
+    status = error.code;
+  }
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  return {
+    status,
+    events,
+    faults: events.filter((event) => event.event === "telemetry_fault"),
+    stopped: events.find((event) => event.event === "hard_stop") ?? null,
+  };
+}
+
+test("a census timeout during the runtime tick is a tolerated telemetry fault", async () => {
+  // sc-22738, measured 2026-09-06: `bernini:q8:mlx` rendered 85 minutes at a steady 52 GB against a
+  // 94.8 GB ceiling and was SIGKILLed by `monitor_failure:TimeoutExpired` from the whole-system
+  // `/bin/ps` census on a hard-coded 1 s budget. `ps` is a telemetry SOURCE like `/usr/bin/
+  // footprint`: a census that fails is an unknown view, never a monitor bug and never an empty
+  // group.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-timeout-tolerated", String.raw`
+def census_outcome(n, state):
+    # Well inside the runtime loop: the pre-release observation takes only the first sample.
+    if state["samples"] >= 3 and state["censusFaults"] < 3:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`);
+  assert.equal(result.status, 97);
+  // The guard rode the census outage out to its own wall-time ceiling — it neither failed as a
+  // monitor bug nor read the unknown view as a finished render.
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 3);
+  assert.ok(result.faults.every((event) => event.phase === "runtime"));
+  assert.ok(result.faults.every((event) => event.reason.startsWith("TimeoutExpired:/bin/ps")
+    || event.reason.startsWith("TimeoutExpired:Command '['/bin/ps'")),
+  `census fault reason was ${result.faults[0].reason}`);
+  assert.ok(result.faults.every((event) => event.lastGoodPhysicalFootprintBytes === 1),
+    "a tolerated census must keep the previous good sample as the current reading");
+  const samplesAfter = result.events.filter((event) =>
+    event.event === "sample" && event.eventSequence > result.faults.at(-1).eventSequence);
+  assert.ok(samplesAfter.length > 0, "the guard stopped sampling after the tolerated census fault");
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("a census timeout raised from the post-tick refresh paths is tolerated", async () => {
+  // The census inside `observe_group` was already covered by the tolerance; the `refresh()` calls
+  // around it were not — and the one inside the sampler-fault handler raised THROUGH that handler
+  // straight to `monitor_failure`. Fail the census only while a footprint fault is being handled,
+  // which is exactly that call.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-timeout-post-tick", String.raw`
+def census_outcome(n, state):
+    if state["inFault"]:
+        state["inFault"] = False
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, {
+    footprintOutcome: String.raw`
+def footprint_outcome(n, state):
+    if n == 4:
+        state["inFault"] = True
+        raise footprint_timeout()
+    return 1
+`,
+  });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 2, "one census fault and one footprint fault, both tolerated");
+  // The census fault is recorded FIRST even though the footprint failed first: it can only have
+  // come from the census the sampler-fault handler itself runs.
+  assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2]);
+  assert.match(result.faults[0].reason, /^TimeoutExpired:.*\/bin\/ps/);
+  assert.match(result.faults[1].reason, /^TimeoutExpired:.*footprint/);
+});
+
+test("a successful census that lacks the root stops at once, after tolerated census faults", async () => {
+  // Root-loss detection must survive the tolerance: a census that FAILS is unknown, but the first
+  // SUCCESSFUL one that no longer enumerates the group ends the guard immediately with the child's
+  // own status rather than riding the wall-time ceiling out.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-fault-then-root-gone", String.raw`
+def census_outcome(n, state):
+    if state["samples"] >= 2 and state["censusFaults"] < 2:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, { mode: "complete", maxRuntimeSeconds: "10" });
+  assert.equal(result.status, 0, "the completed group was reported through the child's own status");
+  assert.equal(result.stopped, null, "a completed group is not a hard stop");
+  assert.equal(result.faults.length, 2, "the census faults were tolerated, not escalated");
+});
+
+test("a census outage across the sentinel's exit defers instead of declaring a live group", async () => {
+  // The other half of "a failed census is unknown": once the sentinel reports a status, the guard
+  // re-censuses to tell normal cleanup from a failure. Reading a FAILED census there as the
+  // previous view would call the group live and hard-stop a run that simply finished — so the
+  // guard defers until a census succeeds. The outage here spans the sentinel's exit and then
+  // clears.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-outage-over-exit", String.raw`
+start = time.monotonic()
+def census_outcome(n, state):
+    if 0.15 < time.monotonic() - start < 1.2:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`, { mode: "complete", maxRuntimeSeconds: "10" });
+  assert.equal(result.status, 0, "the completed group was reported through the child's own status");
+  assert.equal(result.stopped, null,
+    "an unknown census while the sentinel exits must not become launch_sentinel_failed_with_live_group");
+  assert.ok(result.faults.length > 0, "the census outage was never recorded");
+});
+
+test("an exception that is not a telemetry source stays a monitor failure", async () => {
+  // The tolerance absorbs telemetry SOURCES, enumerated in TELEMETRY_SOURCE_ERRORS. A bug in the
+  // monitor itself must still fail closed as `monitor_failure`, never be ridden out as a fault.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "monitor-bug", String.raw`
+def outcome(n):
+    if n == 2: raise AttributeError("monitor bug")
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "monitor_failure:AttributeError:monitor bug");
+  assert.equal(result.faults.length, 0, "a monitor bug must not be recorded as a telemetry fault");
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("the process-group census carries the per-probe telemetry budget, not a hard-coded second", async () => {
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+# The census is a telemetry probe: it takes the telemetry budget, never the 1 s that SIGKILLed a
+# healthy 85-minute render.
+assert module.CENSUS_TIMEOUT_SECONDS == module.TELEMETRY_TIMEOUT_SECONDS, module.CENSUS_TIMEOUT_SECONDS
+assert module.CENSUS_TIMEOUT_SECONDS >= 10.0, module.CENSUS_TIMEOUT_SECONDS
+budgets = []
+class Recorder:
+    TimeoutExpired = subprocess.TimeoutExpired
+    SubprocessError = subprocess.SubprocessError
+    PIPE = subprocess.PIPE
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    @staticmethod
+    def run(command, **kwargs):
+        budgets.append(kwargs["timeout"])
+        return Recorder.Completed()
+    class Popen:
+        pid = -1
+        returncode = 0
+        def __init__(self, command, **kwargs): pass
+        def communicate(self, timeout=None):
+            budgets.append(timeout)
+            return ("", "")
+module.subprocess = Recorder
+def census_budgets():
+    budgets.clear()
+    module.process_identity(1)
+    module.group_identities(1)
+    module.parent_pids()
+    return list(budgets)
+assert census_budgets() == [10.0, 10.0, 10.0], budgets
+# Every census reads the run's adopted budget, so --telemetry-timeout reaches identity_is_live,
+# OwnedGroup.refresh and root_pids without a per-call argument.
+module.set_census_timeout(0.75)
+assert census_budgets() == [0.75, 0.75, 0.75], budgets
+# The enumerated telemetry sources are the ones the probes actually raise.
+for error in [subprocess.TimeoutExpired(cmd=["/bin/ps"], timeout=1.0), OSError("ps"),
+              TimeoutError("aggregate"), RuntimeError("ps group census failed"),
+              ValueError("malformed")]:
+    assert isinstance(error, module.TELEMETRY_SOURCE_ERRORS), error
+for error in [AttributeError("bug"), TypeError("bug"), NameError("bug"), KeyError("bug")]:
+    assert not isinstance(error, module.TELEMETRY_SOURCE_ERRORS), error
+print("census budget is the telemetry budget")
+`]);
+  assert.match(probe.stdout, /census budget is the telemetry budget/);
+});
+
+test("a guard run adopts its --telemetry-timeout as the census budget", async () => {
+  const files = await fixture();
+  await writeFile(files.telemetry, "1\n");
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+assert module.CENSUS_TIMEOUT_SECONDS == 10.0, module.CENSUS_TIMEOUT_SECONDS
+sys.argv = [${JSON.stringify(WATCHDOG)},
+    "--max-footprint-bytes", "100", "--max-runtime-seconds", "0.5",
+    "--sample-interval", "0.02", "--telemetry-timeout", "0.37",
+    "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
+    "--telemetry-file", ${JSON.stringify(files.telemetry)}, "--allow-synthetic-telemetry",
+    "--", "python3", ${JSON.stringify(files.program)}, "hold",
+    ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
+    ${JSON.stringify(files.events)}]
+module.guard(module.parse_args())
+assert module.CENSUS_TIMEOUT_SECONDS == 0.37, module.CENSUS_TIMEOUT_SECONDS
+print("census budget adopted from the run")
+`], { timeout: 20_000 });
+  assert.match(probe.stdout, /census budget adopted from the run/);
+});
+
+test("the ceiling still stops on the first good sample that breaches it after tolerated faults", async () => {
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "breach-after-faults", String.raw`
+def outcome(n):
+    if n in (2, 3): raise footprint_timeout()
+    if n >= 4: return 150
+    return 1
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.faults.length, 2);
+  assert.equal(result.stopped.reason,
+    "physical_footprint_at_or_above_100:observed_150",
+    "the stop must carry the good sample's value, never a tolerated fault");
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
 });

@@ -90,6 +90,7 @@
 // are separately bound to the anchor by the store's source handshake in `memory_anchor.rs`, which
 // validates every anchor against the retained record's `strategy.engagedRungs` and geometry.
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,6 +111,20 @@ import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs"
 export const ANCHOR_LOADER_CLOSURE_VERSION = "anchor-loader-closure v2";
 
 export const ANCHOR_LOADER_CONFIG_PATH = "config/anchor-loader-closures.json";
+
+/** The anchor plan: ground truth for which provider a declared `(model, lane)` actually measures. */
+export const CALIBRATION_PLAN_PATH = "config/memory-calibration-plan.json";
+
+const SCENEWORKS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+let planAnchorsCache;
+
+/** `config/memory-calibration-plan.json`'s `anchors`, read once per process. */
+export function calibrationPlanAnchors() {
+  planAnchorsCache ??=
+    JSON.parse(readFileSync(path.join(SCENEWORKS_ROOT, CALIBRATION_PLAN_PATH), "utf8")).anchors ?? {};
+  return planAnchorsCache;
+}
 
 /** Directories under a crate that are never compiled into the shipped loader. */
 const NON_SHIPPED_DIRS = ["tests/", "benches/", "examples/", "testdata/", "fixtures/"];
@@ -578,10 +593,12 @@ export function loaderClosureFiles({ tree, entryPoints, crates }) {
  * The REVISION IS ABSENT BY CONSTRUCTION — it is provenance, not content, and hashing it would make
  * every anchor stale on every pin bump, which is precisely the coupling E9 forbids.
  */
-export function loaderClosureText({ model, entryPoints, files }) {
+export function loaderClosureText({ model, engineId, entryPoints, files }) {
   return `${[
     `# ${ANCHOR_LOADER_CLOSURE_VERSION}`,
     `# model: ${model}`,
+    // Present only for a catalog alias, so every declaration without one hashes exactly as before.
+    ...(engineId ? [`# engine: ${engineId}`] : []),
     "[entry-points]",
     ...[...entryPoints].sort(),
     "[source]",
@@ -603,15 +620,15 @@ export function loaderFileHash(file, contentId, body) {
 }
 
 /** Compute one `(model, backend lane)`'s loader closure digest over a tree. */
-export function loaderClosureDigest({ model, entryPoints, tree, crates }) {
+export function loaderClosureDigest({ model, engineId, entryPoints, tree, crates }) {
   const files = loaderClosureFiles({ tree, entryPoints, crates });
   const bodies = tree.read(files);
   const hashed = files.map((file) => [
     file,
     loaderFileHash(file, tree.contentId(file), bodies.get(file)),
   ]);
-  const text = loaderClosureText({ model, entryPoints, files: hashed });
-  return { model, entryPoints, files, digest: sha256(text), text };
+  const text = loaderClosureText({ model, engineId, entryPoints, files: hashed });
+  return { model, engineId, entryPoints, files, digest: sha256(text), text };
 }
 
 /**
@@ -619,9 +636,26 @@ export function loaderClosureDigest({ model, entryPoints, tree, crates }) {
  * appear as a string literal in the declared entry points' own source. An entry point that never
  * names the model digests some other model's code path and reports currency for a loader it never
  * looked at — a false green, and the expensive kind.
+ *
+ * A CATALOG ALIAS names the engine id it resolves to instead (`engineId`, sc-22724): `z_image_edit`
+ * is a SceneWorks-side id for the `z_image_turbo` provider driven in `edit_image` mode
+ * (`crates/sceneworks-worker/src/engines.rs`), and the inference tree carries no such literal. The
+ * alias is EXPLICIT in the declaration — the literal rule is then asked of the engine id, and the
+ * engine id becomes part of the hashed closure text — so an alias can never be a silent way around
+ * the check: a declaration that names neither its own id nor a real engine id is still refused.
  */
-export function assertModelIsNamedByEntryPoints({ model, entryPoints, tree }) {
-  const id = model.split(":")[0];
+export function assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree }) {
+  const modelId = model.split(":")[0];
+  if (engineId !== undefined && (typeof engineId !== "string" || !/^[a-z][a-z0-9_]*$/.test(engineId))) {
+    throw new Error(`anchor loader declaration "${model}" carries a malformed engineId ${JSON.stringify(engineId)}`);
+  }
+  if (engineId === modelId) {
+    throw new Error(
+      `anchor loader declaration "${model}" declares engineId "${engineId}", which is its own model id — ` +
+        "engineId is for a catalog alias only; drop it",
+    );
+  }
+  const id = engineId ?? modelId;
   const bodies = tree.read(entryPoints);
   const named = entryPoints.some((file) => (bodies.get(file) ?? "").includes(`"${id}"`));
   if (!named) {
@@ -633,14 +667,107 @@ export function assertModelIsNamedByEntryPoints({ model, entryPoints, tree }) {
   }
 }
 
-/** Every declared model's digest at one revision, sharing the per-revision tree read. */
-export function anchorLoaderDigests({ repo, revision, declared, tree }) {
+/**
+ * The declared entry points a HISTORICAL tree can still key this model by, and why the rest were
+ * dropped (sc-22738).
+ *
+ * The literal rule above is a statement about the CURRENT declaration against the CURRENT pin: it
+ * catches an entry point that would digest the wrong loader today. It is NOT a statement about the
+ * past. Walking back to an anchor's own measurement revision reaches trees that predate the
+ * declaration — a file the declaration names may not exist yet, and a file that does exist may not
+ * name the model yet, because the id it now carries was introduced later. `z_image_edit:mlx`
+ * resolves to engine id `z_image_turbo`, which both Z-Image entry points spell at the pin and
+ * neither spells at `bb2bc989`, where the files do not exist at all.
+ *
+ * Neither of those is a broken declaration, so neither may throw. Both are the same fact — the
+ * historical tree does not carry this model's loader as the declaration describes it — and the key
+ * already knows how to say that: the entry-point list is part of the hashed text, so a unit derived
+ * over a narrower list cannot equal the pin's digest and the anchor reads NOT CURRENT. That is the
+ * truth about it.
+ *
+ * THE LITERAL RULE NARROWS AT THE GRANULARITY IT IS ASKED AT, which is the WHOLE LIST. It has
+ * always been `some()` — one entry point naming the id vouches for the list — and per-file
+ * narrowing would therefore be a different rule, not the same rule applied historically: at the pin
+ * itself five declared units (`flux2_dev:mlx`, `krea_2_raw:mlx`, `z_image:mlx`,
+ * `z_image_turbo:candle`, `bernini:mlx`) keep an entry point that does not itself carry the literal,
+ * and dropping those would silently re-key anchors that are not stale. So the surviving list is
+ * narrowed only when NO survivor names the id, and an unchanged rule leaves every current digest
+ * exactly where it was.
+ */
+export function narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree }) {
+  const id = engineId ?? model.split(":")[0];
+  const present = entryPoints.filter((file) => tree.has(file));
+  const narrowed = entryPoints
+    .filter((file) => !present.includes(file))
+    .map((file) => ({ file, reason: "absent" }));
+  const bodies = tree.read(present);
+  const named = present.some((file) => (bodies.get(file) ?? "").includes(`"${id}"`));
+  if (named) return { entryPoints: present, narrowed };
+  return {
+    entryPoints: [],
+    narrowed: [
+      ...narrowed,
+      ...present.map((file) => ({ file, reason: `does not carry the literal "${id}"` })),
+    ],
+  };
+}
+
+/**
+ * `engineId` redirects the literal rule above at a DIFFERENT model's loader, so it cannot be taken
+ * on the declaration's own word: `krea_2_turbo:mlx` declaring `engineId: "z_image_turbo"` with the
+ * Z-Image entry points would otherwise pass every shape check and key Krea's currency to the
+ * Z-Image loader — the sc-22511 false green, reached through one word.
+ *
+ * The anchor plan already carries the ground truth (each `<modelId>:<tier>:<lane>` row names the
+ * `provider` the adapter actually loads), so the alias is cross-checked against it: the providers
+ * the plan declares for this `(modelId, lane)` must be exactly `{engineId ?? modelId}`. That
+ * refuses a mis-pointed alias, an alias on a model the plan measures under its own id, and a
+ * MISSING alias on a model the plan measures under someone else's. A declared lane the plan carries
+ * no row for (`ltx_2_3:mlx`) has no ground truth to check against and is left alone.
+ */
+export function assertEngineIdMatchesPlan({ model, engineId, planAnchors }) {
+  const [modelId, lane] = model.split(":");
+  const providers = new Set(
+    Object.entries(planAnchors)
+      .filter(([key]) => {
+        const parts = key.split(":");
+        return parts[0] === modelId && parts[2] === lane;
+      })
+      .map(([, anchor]) => anchor.provider),
+  );
+  if (providers.size === 0) return;
+  const expected = engineId ?? modelId;
+  const wrong = [...providers].filter((provider) => provider !== expected).sort();
+  if (wrong.length === 0) return;
+  throw new Error(
+    `anchor loader declaration "${model}" ${engineId ? `declares engineId "${engineId}"` : "declares no engineId"}, ` +
+      `but ${CALIBRATION_PLAN_PATH} measures ${modelId} on ${lane} with provider(s) ` +
+      `${wrong.map((provider) => `"${provider}"`).join(", ")}. The declaration must name the provider the ` +
+      "plan loads, or the closure digests the wrong model's loader.",
+  );
+}
+
+/**
+ * Every declared model's digest at one revision, sharing the per-revision tree read.
+ *
+ * `assertNamed` is the literal rule, and it is on by default because the default caller is the
+ * CURRENT pin, where a declaration that names no loader is a bug to be shouted about. A caller
+ * walking HISTORICAL revisions has already applied the same rule as a narrowing
+ * (`narrowEntryPointsAtRevision`) and passes `false`, so a past tree that does not yet name the
+ * model narrows the unit instead of aborting the walk (sc-22738). `assertEngineIdMatchesPlan` is
+ * asked in both: it checks the declaration against the anchor plan, not against any tree, so it is
+ * as true of a historical walk as of the pin.
+ */
+export function anchorLoaderDigests({ repo, revision, declared, tree, planAnchors, assertNamed = true }) {
   const resolved = tree ?? gitTree(repo, revision);
+  const plan = planAnchors ?? calibrationPlanAnchors();
   const crates = firstPartyCrates(resolved, resolved.paths());
   const out = new Map();
   for (const [model, entry] of Object.entries(declared)) {
-    assertModelIsNamedByEntryPoints({ model, entryPoints: entry.entryPoints, tree: resolved });
-    out.set(model, loaderClosureDigest({ model, entryPoints: entry.entryPoints, tree: resolved, crates }));
+    const { entryPoints, engineId } = entry;
+    if (assertNamed) assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree: resolved });
+    assertEngineIdMatchesPlan({ model, engineId, planAnchors: plan });
+    out.set(model, loaderClosureDigest({ model, engineId, entryPoints, tree: resolved, crates }));
   }
   return out;
 }
@@ -652,6 +779,7 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
   for (const model of Object.keys(declared).sort()) {
     const entry = digests.get(model);
     models[model] = {
+      ...(entry.engineId ? { engineId: entry.engineId } : {}),
       entryPoints: [...entry.entryPoints].sort(),
       digest: entry.digest,
       closureFileCount: entry.files.length,
@@ -665,7 +793,9 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
       "lane). The unit is the source files the model's loader reaches, and nothing else — not the " +
       "pin, not sibling models, not shared crates the loader never reaches. Regenerate when the " +
       "pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo " +
-      "<inference> --write. A regeneration that leaves the digests unchanged is the expected case.",
+      "<inference> --write. A regeneration that leaves the digests unchanged is the expected case. " +
+      "A catalog alias (a model id the inference tree never names, such as z_image_edit) declares " +
+      "the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
     digestVersion: ANCHOR_LOADER_CLOSURE_VERSION,
     inferenceRevision: revision,
     models,
@@ -689,7 +819,13 @@ export const ANCHOR_STORE_PATH = "config/memory-anchors.json";
  * today; a clone must carry all of them.
  */
 export function anchorMeasurementRevision(anchor, corpus) {
-  const record = (corpus.records ?? []).find((entry) => entry.id === anchor.source?.recordId);
+  // sc-22738: a store row's cited entry is a `records` member for an anchor and an `exceededBounds`
+  // member for a measured lower bound. Both carry `id` and `repositories.inference.revision`, which
+  // is the whole of what this needs, so the two arrays are searched as one rather than the caller
+  // being made to say which kind of row it holds.
+  const record = [...(corpus.records ?? []), ...(corpus.exceededBounds ?? [])].find(
+    (entry) => entry.id === anchor.source?.recordId,
+  );
   const revision = record?.repositories?.inference?.revision;
   if (typeof revision !== "string" || !/^[0-9a-f]{40}$/.test(revision)) {
     throw new Error(
@@ -815,8 +951,12 @@ function storeAttestation(attestation) {
  * anchor no longer attested). Returns the new store and a per-anchor report.
  */
 export function stampAnchorStore({ repo, store, declared, corpora, attestations = new Map() }) {
+  // sc-22738: bounds are stamped by the SAME walk as anchors. A measured lower bound goes stale
+  // exactly as a measured point does, and a second stamping pass would be a second place for the
+  // two to disagree about what "current" means.
+  const stampable = [...store.anchors, ...(store.exceededBounds ?? [])];
   const byRevision = new Map();
-  for (const anchor of store.anchors) {
+  for (const anchor of stampable) {
     const corpus = corpora.get(anchor.source?.path);
     if (!corpus) {
       throw new Error(`anchor ${anchor.id} cites ${anchor.source?.path}, which was not read`);
@@ -835,32 +975,45 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
   }
   // One tree read per revision, shared by every model measured at it.
   const digests = new Map();
+  /** `revision|model` -> the declared entry points that revision could not be keyed by, and why. */
+  const narrowedAt = new Map();
   for (const [revision, models] of byRevision) {
     const tree = gitTree(repo, revision);
-    // AN ENTRY POINT THAT DID NOT EXIST YET IS DROPPED, NOT AN ERROR. A historical revision can
-    // predate a file today's declaration names — `mlx-gen-ltx/src/memory_strategy.rs` postdates the
-    // LTX-2.3 capture — and that IS the difference the key should report: the entry-point list is
-    // part of the hashed text, so a closure derived over a smaller list cannot equal the pin's, and
-    // the anchor reads not-current. Which is the truth about it.
-    const historical = Object.fromEntries(
-      [...models].map((model) => [
-        model,
-        { entryPoints: declared[model].entryPoints.filter((file) => tree.has(file)) },
-      ]),
-    );
-    for (const [model, entry] of Object.entries(historical)) {
-      if (entry.entryPoints.length === 0) {
-        throw new Error(
-          `no declared entry point of ${model} exists at ${revision.slice(0, 8)} — its anchors ` +
-            "cannot be keyed to that measurement at all",
-        );
-      }
+    // AN ENTRY POINT THE HISTORICAL TREE CANNOT KEY THIS MODEL BY IS DROPPED, NOT AN ERROR. A
+    // historical revision can predate a file today's declaration names
+    // (`mlx-gen-ltx/src/memory_strategy.rs` postdates the LTX-2.3 capture), and it can carry files
+    // that do not yet name the model — the same fact, reached two ways, and that IS the difference
+    // the key should report: the entry-point list is part of the hashed text, so a closure derived
+    // over a narrower list cannot equal the pin's, and the anchor reads not-current. Which is the
+    // truth about it. The narrowing and its reason are carried into the report, so a key derived
+    // over less than the declaration says never has to be guessed at.
+    const historical = {};
+    for (const model of models) {
+      const { engineId, entryPoints } = declared[model];
+      const narrowing = narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree });
+      narrowedAt.set(`${revision}|${model}`, narrowing.narrowed);
+      historical[model] = {
+        ...(engineId ? { engineId } : {}),
+        entryPoints: narrowing.entryPoints,
+      };
     }
-    const perModel = anchorLoaderDigests({ repo, revision, declared: historical, tree });
+    // The literal rule was just applied AS THE NARROWING, so it is not asked again as an assertion:
+    // a tree that names the model keeps its full surviving list, and one that does not has already
+    // narrowed to nothing. An empty unit is a legal derivation, not an error — it hashes the model
+    // and an empty file list, which is reproducible, distinct per model, and can never equal a pin
+    // digest derived over at least one entry point. So the anchor reads NOT CURRENT, which is
+    // exactly what a measurement the current declaration cannot describe should say.
+    const perModel = anchorLoaderDigests({
+      repo,
+      revision,
+      declared: historical,
+      tree,
+      assertNamed: false,
+    });
     for (const [model, entry] of perModel) digests.set(`${revision}|${model}`, entry.digest);
   }
   const report = [];
-  const anchors = store.anchors.map((anchor) => {
+  const stamp = (anchor) => {
     const { revision, attestation } = anchorCurrencyRevision(
       anchor,
       corpora.get(anchor.source.path),
@@ -876,11 +1029,25 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
       revision,
       digest,
       attested: Boolean(attestation),
+      // Every declared entry point this revision could not be keyed by, with its reason. Empty for
+      // the ordinary anchor whose measurement revision carries the whole declaration.
+      narrowed: narrowedAt.get(`${revision}|${anchor.modelId}:${anchor.backend}`) ?? [],
       changed: JSON.stringify(stamped) !== JSON.stringify(anchor.source),
     });
     return { ...anchor, source: stamped };
-  });
-  return { store: { ...store, anchors }, report };
+  };
+  const anchors = store.anchors.map(stamp);
+  const exceededBounds = (store.exceededBounds ?? []).map(stamp);
+  return {
+    store: {
+      ...store,
+      anchors,
+      // Absent stays absent: a store written before the migration must round-trip byte-identically
+      // through a stamp, or `--check` would red on every checkout that has not regenerated yet.
+      ...(store.exceededBounds === undefined ? {} : { exceededBounds }),
+    },
+    report,
+  };
 }
 
 function usage() {
@@ -924,7 +1091,7 @@ export async function main(argv = process.argv.slice(2)) {
     );
     const corpora = new Map();
     const revisions = new Set();
-    for (const anchor of store.anchors) {
+    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
@@ -949,7 +1116,10 @@ export async function main(argv = process.argv.slice(2)) {
   const declared = Object.fromEntries(
     Object.entries(existing.models).map(([model, entry]) => [
       model,
-      { entryPoints: entry.entryPoints },
+      {
+        ...(entry.engineId ? { engineId: entry.engineId } : {}),
+        entryPoints: entry.entryPoints,
+      },
     ]),
   );
   const pinned = inferencePinFromCargo(await readFile(path.join(root, "Cargo.toml"), "utf8"));
@@ -971,7 +1141,7 @@ export async function main(argv = process.argv.slice(2)) {
     const storePath = path.join(root, ANCHOR_STORE_PATH);
     const store = JSON.parse(await readFile(storePath, "utf8"));
     const corpora = new Map();
-    for (const anchor of store.anchors) {
+    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
@@ -992,6 +1162,11 @@ export async function main(argv = process.argv.slice(2)) {
         `${row.changed ? "*" : " "} ${row.revision.slice(0, 8)} ${row.digest.slice(0, 16)} ` +
           `${row.attested ? "attested " : ""}${row.id}`,
       );
+      // A key derived over less than the declaration names says so, rather than leaving a
+      // not-current anchor looking like an unexplained digest mismatch.
+      for (const { file, reason } of row.narrowed) {
+        console.log(`    narrowed: ${file} (${reason})`);
+      }
     }
     const body = `${JSON.stringify(stamped, null, 2)}\n`;
     if (argv.includes("--check")) {
@@ -1006,7 +1181,7 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     }
     await writeFile(storePath, body);
-    console.log(`stamped ${report.length} anchors in ${ANCHOR_STORE_PATH}`);
+    console.log(`stamped ${report.length} anchors and bounds in ${ANCHOR_STORE_PATH}`);
     return 0;
   }
 

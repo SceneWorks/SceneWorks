@@ -182,8 +182,15 @@ An `ltx_2_5` anchor additionally requires `--ltx25-snapshot-root`, the canonical
 repository/revision snapshot path. The harness checks the snapshot suffix, the shared enhancer, the
 dev refinement adapter and the anchor's own `<transformerVariant>/<tier>` layout, hashes each once,
 and re-hashes them around every provider invocation so a mutation during the render is caught. It
-then injects the tier and shared-component inventory variables the MLX adapter requires, preserving
-the capture-directory and raw-provenance environment.
+then injects the tier and shared-component inventory variables the adapter requires, preserving the
+capture-directory and raw-provenance environment.
+
+The binding serves **both lanes** (sc-22725). One public snapshot reaches two engine ids — MLX loads
+it as `ltx_2_5`, Candle as `ltx_2_5_distilled` (candle.rs `LTX25_ID`) — so the plan's `provider` for
+an `ltx_2_5` anchor must be its lane's engine id, and `--ltx25-snapshot-root` is refused for
+anything else. A `dev`-variant anchor additionally binds `SCENEWORKS_LTX25_DISTILL_LORA_ROOT` (the
+snapshot root), which is how the Candle arm resolves the official stage-two refinement LoRA where
+the MLX arm takes its bytes and digest.
 
 Validate a captured bundle, and normalize an externally captured session file. Pass `--source-root`
 alongside `--input` whenever the capture wrote raw logs, or the physical source-session derivation
@@ -238,11 +245,19 @@ the MiniMax upstream root, `--ltx25-snapshot-root` for `ltx_2_5`, and the raw-lo
 `SCENEWORKS_MEMORY_CAPTURE_DIR` for the arms whose authoritative record needs the physical receipt
 session (the Qwen MLX arm, the only one that emits a `sourceCapture`). `--list` / `--dry-run`
 classify every anchor as `runnable`, `weights_missing` (no snapshot at the manifest revision under
-any hub root), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
+any hub root — or, for a family whose weights are not all manifest downloads, an unstaged or
+incomplete operator bundle: `pulid_flux_dev` needs the five loose identity-stack files under
+`SCENEWORKS_PULID_WEIGHTS`, sc-22726), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
 (`<model>:<backend>` has no entry in `config/anchor-loader-closures.json`, so `--stamp-anchors`
-would refuse the anchor after the render — runbook §7c declares a lane) or `already_captured` (an
-evidence bundle for the key is already under `docs/calibration/<campaign>/`), and print the roots
-and env a run would use.
+would refuse the anchor after the render — runbook §7c declares a lane), `provider_undeclared`
+(`<backend>:<provider>` has no entry in `config/inference-provider-closures.json`, so the record
+would carry no closure digest — runbook §7c) or `already_captured` (an evidence bundle for the key
+is already under `docs/calibration/<campaign>/`), and print the roots and env a run would use.
+
+`--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle kept in
+`<work-dir>/captures`): the harness refuses complete evidence from a dirty checkout, so ingesting the
+first anchor would leave every later anchor in the same run uncapturable. Ingest a retained bundle by
+hand with the harness, or run without the flag to land it.
 
 A freshly captured record always produces a NEW anchor id, and `extract-memory-anchors.mjs` refuses
 an id it has never carried (a new anchor must not borrow the pin's digest). The script seeds the new
@@ -336,7 +351,9 @@ uploads the evidence JSON together with a repository-relative receipt tree conta
 request, raw provider response, and selected/reference RGB outputs. The three session outputs are a
 closed typed set (`request`, `selected_rgb`, `reference_rgb`) with unique paths; RGB filenames include
 their logical case, role, dimensions, and content SHA-256, and receipt creation never overwrites
-different existing bytes. The adapter independently emits each RGB digest and byte count; capture
+different existing bytes. The rendered outputs are verified against those receipts at capture and at
+`ingest --source-root`, and are never committed (sc-22738): the receipt is the evidence, and
+`validateSourceSessionFiles` accepts a bundle whose renders are absent from the tree. The adapter independently emits each RGB digest and byte count; capture
 fails if the post-provider bytes, the attestation, and the content-addressed filename disagree. The
 request must be canonical JSON matching the one evidence record bound to the session. Every newly planned q4/bf16
 record carries `sourceProvenance: physical_mlx_v1`. Receipt validation reconstructs the complete

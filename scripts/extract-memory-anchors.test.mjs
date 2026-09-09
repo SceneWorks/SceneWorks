@@ -12,6 +12,7 @@ import {
   ANCHOR_LOADER_CLOSURES_PATH,
   CONTRACT_LADDER_BACKENDS,
   MANIFEST_PATH,
+  stagedResidencyExemptLanes,
   MEMORY_ANCHOR_SCHEMA_VERSION,
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
@@ -37,6 +38,7 @@ import {
   manifestTierEvidence,
   manifestSequentialRow,
   isReceiptPricedRoute,
+  retainExceededBounds,
   RECEIPT_PRICED_ROUTES,
   packagedAnchorSources,
   providerByteConstants,
@@ -472,6 +474,143 @@ const record = (overrides = {}) => ({
   ...overrides,
 });
 
+// ---------------------------------------------------------------------------------------------
+// Measured lower bounds are retired by re-measurement, and only by re-measurement (sc-22738).
+// ---------------------------------------------------------------------------------------------
+
+/** One retained `exceededBounds` entry: the bernini bf16 stop, at `capturedAt`, on `hostBytes`. */
+const stop = (id, capturedAt, overrides = {}) => ({
+  entry: {
+    id,
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    calibrationFingerprint: "bernini-v1",
+    capturedAt,
+    referenceCount: 0,
+    observedFootprintBytes: 97_147_294_328,
+    ceilingBytes: 94_822_600_832,
+    hardware: { memoryBytes: 137_438_953_472 },
+    reason: "physical_footprint_at_or_above_94822600832:observed_97147294328",
+    target: {
+      modelId: "bernini",
+      tier: "bf16",
+      mode: "text_to_video",
+      provider: "bernini",
+      overlay: "none",
+      geometry: { width: 848, height: 480, frames: 49 },
+    },
+    ...overrides,
+  },
+  corpus: { path: `docs/calibration/sc-1/${id}.json`, sha256: "a".repeat(64) },
+  cell: { modelId: "bernini", modelFamily: "bernini" },
+});
+
+/** A COMPLETED render of the same cell, as `anchorCandidate` reports it. */
+const completion = (capturedAt, overrides = {}) =>
+  anchorCandidate(
+    record({
+      id: `imc-${capturedAt}`,
+      capturedAt,
+      hardware: { memoryBytes: 137_438_953_472 },
+      target: {
+        modelId: "bernini",
+        tier: "bf16",
+        mode: "text_to_video",
+        provider: "bernini",
+        geometry: { width: 848, height: 480, frames: 49 },
+      },
+      ...overrides,
+    }),
+    corpus,
+  );
+
+test("a later completed render of the cell retires the bound; an earlier one does not", () => {
+  const bound = stop("exc-1", "2026-09-06T10:00:00.000Z");
+  assert.deepEqual(retainExceededBounds([bound], []), [bound], "no completion, the bound stands");
+  assert.deepEqual(
+    retainExceededBounds([bound], [completion("2026-09-07T10:00:00.000Z")]),
+    [],
+    "a completion AFTER the stop proves the cell completes: the bound is retired",
+  );
+  assert.deepEqual(
+    retainExceededBounds([bound], [completion("2026-09-05T10:00:00.000Z")]),
+    [bound],
+    "a completion BEFORE the stop is what the stop superseded, not the other way round",
+  );
+  // The candidate carries the two terms the rule needs, read from the record.
+  const later = completion("2026-09-07T10:00:00.000Z");
+  assert.equal(later.capturedAt, "2026-09-07T10:00:00.000Z");
+  assert.equal(later.hostMemoryBytes, 137_438_953_472);
+});
+
+test("a completion supersedes only on a host no larger, at covering geometry, of the same identity", () => {
+  const bound = stop("exc-1", "2026-09-06T10:00:00.000Z");
+  const later = "2026-09-07T10:00:00.000Z";
+  for (const [label, candidate] of [
+    ["a 512 GiB host says nothing about the 128 GiB host that was stopped",
+      completion(later, { hardware: { memoryBytes: 549_755_813_888 } })],
+    ["a shorter clip is below the bound's geometry",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", geometry: { width: 848, height: 480, frames: 25 } } })],
+    ["another tier of the same model",
+      completion(later, { target: { modelId: "bernini", tier: "q4", mode: "text_to_video", provider: "bernini", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["another mode of the same model",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_image", provider: "bernini", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["an overlay render does not answer for the base cell",
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } } })],
+    ["a record with no timestamp cannot be ordered and supersedes nothing",
+      completion(later, { capturedAt: undefined })],
+    ["a record with no host size cannot be graded against the stopped host",
+      completion(later, { hardware: {} })],
+  ]) {
+    assert.deepEqual(retainExceededBounds([bound], [candidate]), [bound], label);
+  }
+  // A smaller host and a larger geometry both still supersede: the inequality only gets stronger.
+  assert.deepEqual(
+    retainExceededBounds([bound], [
+      completion(later, { hardware: { memoryBytes: 68_719_476_736 }, target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", geometry: { width: 1280, height: 720, frames: 81 } } }),
+    ]),
+    [],
+  );
+  // An overlay BOUND is retired by an overlay completion of the same overlay, and only that.
+  const overlayBound = stop("exc-o", "2026-09-06T10:00:00.000Z", {
+    target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } },
+  });
+  assert.deepEqual(retainExceededBounds([overlayBound], [completion(later)]), [overlayBound]);
+  assert.deepEqual(
+    retainExceededBounds([overlayBound], [
+      completion(later, { target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "control:1", geometry: { width: 848, height: 480, frames: 49 } } }),
+    ]),
+    [],
+  );
+});
+
+test("a later stop at the same geometry replaces the earlier one; other geometries all stay", () => {
+  const earlier = stop("exc-1", "2026-09-06T10:00:00.000Z", { observedFootprintBytes: 99_000_000_000 });
+  const later = stop("exc-2", "2026-09-07T10:00:00.000Z", { observedFootprintBytes: 95_000_000_000 });
+  assert.deepEqual(
+    retainExceededBounds([earlier, later], []),
+    [later],
+    "the later measurement stands even though the earlier footprint was larger: it was taken under a loader the later run re-measured",
+  );
+  assert.deepEqual(retainExceededBounds([later, earlier], []), [later], "order-independent");
+  const wider = stop("exc-3", "2026-09-05T10:00:00.000Z", {
+    target: { modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "none", geometry: { width: 1280, height: 720, frames: 81 } },
+  });
+  assert.deepEqual(
+    retainExceededBounds([earlier, later, wider], []),
+    [later, wider],
+    "a stop at another geometry is another inequality and stays",
+  );
+  const undated = stop("exc-4", undefined);
+  assert.deepEqual(
+    retainExceededBounds([undated, later], []),
+    [undated, later],
+    "an entry with no timestamp is neither replaced nor a replacement",
+  );
+  // A completion after the later stop retires it, and the earlier one is already gone.
+  assert.deepEqual(retainExceededBounds([earlier, later], [completion("2026-09-08T10:00:00.000Z")]), []);
+});
+
 test("a record missing any phase peak cannot anchor", () => {
   assert.ok(anchorCandidate(record(), corpus) !== null);
   const partial = record();
@@ -623,6 +762,286 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
   // The MLX video law rejects no composition outright — its regime guards are anchor-vs-request —
   // so this rule must not silently withdraw MLX rows.
   assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
+});
+
+test("a candle lane whose engine has no staged composition is anchored by its resident render", async () => {
+  // sc-22734. `staged_residency` is a STRUCTURAL exemption for SenseNova on both lanes: one fused
+  // dual-path checkpoint with no separable conditioning component, so no staged render exists to
+  // anchor from and the resident one is the only composition the cell can ever be captured in.
+  // Before this the extractor discarded those captures and the cells fell to analytic-only, which
+  // would have spent a real GPU campaign producing renders nothing could use.
+  const manifest = {
+    models: [
+      {
+        id: "sensenova_u1_8b",
+        candle: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+        mlx: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+      },
+      { id: "qwen_image", candle: {} },
+    ],
+  };
+  const lanes = stagedResidencyExemptLanes(manifest);
+  assert.deepEqual(
+    [...lanes].sort(),
+    ["sensenova_u1_8b:candle", "sensenova_u1_8b:mlx"],
+    "the exempt lanes are derived from the manifest, never hand-kept",
+  );
+
+  const candle = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The exempt cell: resident derives, and the staged shape it can never actually be measured in
+  // is refused rather than silently preferred.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {}), lanes), true);
+  assert.equal(
+    isDerivable(candle("sensenova_u1_8b", { staged: true }), lanes),
+    false,
+    "a staged anchor on a cell that declares staging impossible is not a record the law can price",
+  );
+  // Deeper rungs stay refused on the exempt lane too.
+  for (const deeper of ["decodeTiled", "attentionChunked", "transformerWindowed"]) {
+    assert.equal(
+      isDerivable(candle("sensenova_u1_8b", { [deeper]: true }), lanes),
+      false,
+      `${deeper} is deeper than the law prices, exemption or not`,
+    );
+  }
+  // And NOTHING moves for an ordinary cell — the exemption is per (model, lane), not a mode.
+  assert.equal(isDerivable(candle("qwen_image", {}), lanes), false);
+  assert.equal(isDerivable(candle("qwen_image", { staged: true }), lanes), true);
+  // The default argument is what every existing caller and every packaged row still takes.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {})), false);
+  assert.equal(isDerivable(candle("sensenova_u1_8b", { staged: true })), true);
+
+  // Representative selection follows the same rule, so an exempt cell's resident capture wins.
+  assert.equal(
+    selectRepresentative(
+      [candle("sensenova_u1_8b", { staged: true }), candle("sensenova_u1_8b", {})],
+      lanes,
+    ).measuredRegime.staged,
+    false,
+  );
+
+  // The real manifest declares the exemption for all six SenseNova ids on both lanes, and for
+  // nothing that already has a packaged candle anchor.
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const realLanes = stagedResidencyExemptLanes(realManifest);
+  for (const modelId of realManifest.models
+    .filter((model) => model.id.startsWith("sensenova_u1_8b"))
+    .map((model) => model.id)) {
+    for (const backend of ["mlx", "candle"]) {
+      assert.ok(
+        realLanes.has(`${modelId}:${backend}`),
+        `${modelId}:${backend} must carry the structural exemption the arm relies on`,
+      );
+    }
+  }
+  // sc-22738: the exemption is no longer hypothetical. When sc-22734 landed it, no packaged anchor
+  // sat on an exempt lane, and this asserted that "before" state — which the wave-3 MLX campaign
+  // was built to end: it captured all eighteen SenseNova MLX cells, every one in the resident
+  // composition the exemption exists to admit. So the snapshot is replaced by the invariant it was
+  // standing in for, which holds on both sides of that campaign.
+  const store = await buildAnchorStore({ matrix });
+  const onExemptLane = store.anchors.filter((anchor) => realLanes.has(`${anchor.modelId}:${anchor.backend}`));
+  for (const anchor of store.anchors) {
+    if (realLanes.has(`${anchor.modelId}:${anchor.backend}`)) {
+      // The only composition such a cell can be captured in, and the flag that says so.
+      assert.equal(anchor.measuredRegime.staged, false, `${anchor.id}: an exempt lane anchors resident`);
+      assert.equal(
+        anchor.stagedResidencyStructurallyNotApplicable,
+        true,
+        `${anchor.id}: an exempt lane's packaged row states the exemption`,
+      );
+      continue;
+    }
+    assert.equal(
+      anchor.stagedResidencyStructurallyNotApplicable,
+      undefined,
+      `${anchor.id}: the field is emitted only when true, so every other packaged row is byte-identical`,
+    );
+  }
+  // Every exempt-lane anchor the store holds is a SenseNova MLX one; the candle half of each
+  // exempt lane is still uncaptured, which is what keeps the `default argument` assertions above
+  // meaningful rather than vacuous.
+  assert.deepEqual(
+    [...new Set(onExemptLane.map((anchor) => `${anchor.modelId}:${anchor.backend}`))].sort(),
+    [
+      "sensenova_u1_8b:mlx",
+      "sensenova_u1_8b_fast:mlx",
+      "sensenova_u1_8b_infographic_v2:mlx",
+      "sensenova_u1_8b_infographic_v2_fast:mlx",
+      "sensenova_u1_8b_infographic_v3:mlx",
+      "sensenova_u1_8b_infographic_v3_fast:mlx",
+    ],
+    "the wave-3 campaign's six SenseNova MLX lanes are the exempt lanes the store carries",
+  );
+  assert.equal(onExemptLane.length, 18, "three tiers on each of those six lanes");
+});
+
+// sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a
+// SenseNova rule: it governs every candle lane whose manifest declares a `staged_residency`
+// structural exemption, and the shipped manifest declares six such lanes that have nothing to do
+// with SenseNova (the Boogu trio and the Anima trio). The case above only ever drove SenseNova ids,
+// so a change that scoped the inversion to the SenseNova family — or an exemption silently
+// appearing on, or vanishing from, one of these six — stayed green. This one names them.
+test("the staged-residency inversion governs every exempt candle lane, not only the SenseNova family", async () => {
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const lanes = stagedResidencyExemptLanes(realManifest);
+
+  // The expected set is DERIVED from the manifest — no frozen count, no hand-kept list — so a
+  // model that gains or loses the declaration moves this with no second edit here.
+  const expectedCandle = realManifest.models
+    .filter(
+      (model) => model.candle?.memoryStrategyStructuralExemptions?.staged_residency,
+    )
+    .map((model) => `${model.id}:candle`)
+    .sort();
+  assert.deepEqual(
+    [...lanes].filter((lane) => lane.endsWith(":candle")).sort(),
+    expectedCandle,
+  );
+
+  // The six lanes the review named: they carry the exemption today and are the ones the
+  // SenseNova-only coverage left unspoken.
+  const NON_SENSENOVA_EXEMPT = [
+    "boogu_image",
+    "boogu_image_turbo",
+    "boogu_image_edit",
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
+  ];
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.ok(
+      lanes.has(`${modelId}:candle`),
+      `${modelId}:candle declares staged_residency structurally not applicable`,
+    );
+  }
+  assert.deepEqual(
+    expectedCandle.filter((lane) => !lane.startsWith("sensenova_u1_8b")).sort(),
+    NON_SENSENOVA_EXEMPT.map((modelId) => `${modelId}:candle`).sort(),
+    "the exempt candle lanes outside the SenseNova family are exactly these six",
+  );
+
+  const candidate = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The inversion, on each of the six: the RESIDENT render is the admissible anchor, and a staged
+  // corpus on a lane that declares staging structurally impossible is refused rather than
+  // preferred — which is the same claim the SenseNova case makes, on lanes it never drove.
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.equal(
+      isDerivable(candidate(modelId, {}), lanes),
+      true,
+      `${modelId}: the resident render is the exempt lane's admissible anchor`,
+    );
+    assert.equal(
+      isDerivable(candidate(modelId, { staged: true }), lanes),
+      false,
+      `${modelId}: a staged corpus on a structurally-exempt lane is not a record the law can price`,
+    );
+  }
+});
+
+/**
+ * sc-22736. The candle branch of `isDerivable` mirrors `derive_image_phase_peaks`, which is a STILL
+ * law: it demands `frames == 1` and a pipeline-axis-free record. A candle VIDEO cell is priced by
+ * the video law instead — `video_admission.rs::anchor_derived_phase_peaks` maps the request's own
+ * lane onto `AnchorBackend` and calls `derive_video_phase_peaks_for_cell` for BOTH lanes, and
+ * `MemoryAnchor::derive_video_phase_peaks` carries no backend gate — so applying the still law to a
+ * video row refuses records the law would happily price, and leaves the cell unanchored.
+ *
+ * Mutations this kills:
+ * - deleting the `frames > 1` branch (every candle video row becomes underivable again);
+ * - widening it to `frames >= 1` (a still would stop being held to the shallow-staged rule);
+ * - reading `frames` without the still-defaulting `?? 1` (an axis-free record would flip lanes).
+ */
+test("a candle VIDEO record is derivable under the video law, not the still image law", () => {
+  const candleVideo = (frames, regime = {}, axes = {}) => ({
+    backend: "candle",
+    // The LTX-2.5 candle rows the plan has declared since sc-22725 state both pipeline axes; the
+    // Wan and SCAIL-2 rows sc-22736 adds state neither (`axisFree` below). Both must be derivable.
+    transformerVariant: "distilled",
+    decoder: "conv",
+    ...axes,
+    geometry: { width: 768, height: 512, frames, fps: 24 },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: true,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: `candle-video-f${frames}`,
+    sourcePath: "docs/generated/example.json",
+  });
+  const axisFree = { transformerVariant: null, decoder: null };
+  assert.equal(isDerivable(candleVideo(145)), true, "the shipped LTX-2.5 candle geometry");
+  assert.equal(isDerivable(candleVideo(81)), true, "an axis-keyed row at the Wan geometry");
+  // The Wan 2.2 / SCAIL-2 candle rows: multi-frame and AXIS-FREE. Explicit, because the helper's
+  // default axes would otherwise leave the axis-free shape unexercised (sc-22736 review).
+  assert.equal(
+    isDerivable(candleVideo(81, {}, axisFree)),
+    true,
+    "the Wan / SCAIL-2 candle geometry with no pipeline axes",
+  );
+  assert.equal(isDerivable(candleVideo(77, { staged: false }, axisFree)), true, "resident SCAIL-2");
+  assert.equal(isDerivable(candleVideo(121, { decodeTiled: true }, axisFree)), true);
+  // The video law's regime guards are all anchor-vs-request, so a bounded video capture is still a
+  // usable row — exactly as it is on MLX.
+  assert.equal(isDerivable(candleVideo(81, { decodeTiled: true })), true);
+  assert.equal(isDerivable(candleVideo(81, { staged: false })), true);
+  // A STILL keeps the image law, pipeline axes and all.
+  assert.equal(isDerivable({ ...candleVideo(1) }), false, "a still with pipeline axes");
+  // A record that states no frames axis at all is classified as the still it is, not promoted.
+  assert.equal(
+    isDerivable({ ...candleVideo(145), geometry: { width: 1024, height: 1024, fps: null } }),
+    false,
+    "an axis-free candle record stays under the still law",
+  );
 });
 
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
@@ -1252,9 +1671,37 @@ test("an underived reason names the measured REGIME, never a missing geometry sp
     ),
     null,
   );
-  // A candle anchor takes no reason at all: `isDerivable` already refused the compositions the
-  // candle law rejects, so every candle anchor that exists derives.
+  // A candle STILL anchor takes no reason at all: `isDerivable` already refused the compositions
+  // the candle image law rejects, so every candle image anchor that exists derives.
   assert.equal(underivedReasonFor(candidate({ backend: "candle" })), null);
+  // A candle VIDEO anchor is held to the same axis rule as MLX (sc-22736): the video law refuses
+  // an axis-free row on both lanes, so the twelve Wan 2.2 / SCAIL-2 candle anchors carry the same
+  // reason the MLX twelve do. Mutation this kills: the old `backend !== "mlx"` early return ahead
+  // of the video branch, which emitted `null` for every candle video row.
+  const candleWan = candidate({
+    backend: "candle",
+    geometry: { width: 1280, height: 720, frames: 81, fps: 16 },
+    transformerVariant: null,
+    decoder: null,
+  });
+  assert.match(underivedReasonFor(candleWan), /pipeline axes/);
+  assert.equal(
+    underivedReasonFor(candleWan),
+    underivedReasonFor(candidate({ geometry: { frames: 81 } })),
+    "one reason text on both lanes",
+  );
+  // ...and a candle video row WITH stated axes (the LTX-2.5 candle cells) still takes none.
+  assert.equal(
+    underivedReasonFor(
+      candidate({
+        backend: "candle",
+        geometry: { frames: 145 },
+        transformerVariant: "distilled",
+        decoder: "conv",
+      }),
+    ),
+    null,
+  );
 });
 
 test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {
@@ -1310,4 +1757,66 @@ test("the LTX-2.5 component deltas are priced from the committed weights invento
   // And the packaged store carries exactly these rows — the extractor and the artifact agree.
   const packagedStore = JSON.parse(await readFile(path.join(ROOT, STORE_PATH), "utf8"));
   assert.deepEqual(packagedStore.componentDeltas, rows);
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a single-render VIDEO record carries no warm-pass figure, and anchors all the same.
+// ---------------------------------------------------------------------------------------------
+
+test("a video record with quality not_run, warmPasses 0 and no lifecycleWarm*/lifecycleClean* measurement anchors exactly like one that ran its warm passes", () => {
+  const video = (overrides = {}) => record({
+    id: "imc-single-render-video",
+    target: {
+      modelId: "minimax_h3", tier: "q4", mode: "text_to_video", provider: "minimax_h3",
+      geometry: { width: 1024, height: 576, frames: 124 },
+    },
+    status: "runtime_complete",
+    quality: {
+      contract: "identical inputs; NOT MEASURED: no warm pass",
+      result: "not_run", warmPasses: 0,
+      maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+    },
+    scenarios: [{ name: "warm_repeat", result: "not_run", reason: "sc-22738: one measured render" }],
+    diagnostics: {
+      measurements: [
+        { name: "conditioningActivePeak", value: 1 },
+        { name: "denoiseActivePeak", value: 2 },
+        { name: "decodeActivePeak", value: 3 },
+        { name: "overallAllocatorEnvelope", value: 10 },
+        { name: "warmPasses", value: 0 },
+        { name: "outputFps", value: 24 },
+      ],
+    },
+    ...overrides,
+  });
+  const single = anchorCandidate(video(), corpus);
+  assert.ok(single !== null, "one measured render is an anchor");
+  assert.deepEqual(single.phaseActivePeakBytes, { conditioning: 1, denoise: 2, decode: 3 });
+  assert.equal(single.overallAllocatorEnvelopeBytes, 10);
+  // The same cell captured under the previous three-render contract prices identically: the
+  // warm-pass figures were never an input to the anchor.
+  const threeRender = anchorCandidate(video({
+    quality: {
+      contract: "identical inputs", identicalInputs: true, result: "passed",
+      maximumError: 0, meanError: 0, rootMeanSquareError: 0,
+      maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+    },
+    scenarios: [{ name: "warm_repeat", result: "passed", reason: "two warm repeats reproduced the clip" }],
+    diagnostics: {
+      measurements: [
+        { name: "conditioningActivePeak", value: 1 },
+        { name: "denoiseActivePeak", value: 2 },
+        { name: "decodeActivePeak", value: 3 },
+        { name: "overallAllocatorEnvelope", value: 10 },
+        { name: "lifecycleCleanWarmPeak", value: 9 },
+        { name: "lifecycleWarmRepeatPeak", value: 9 },
+        { name: "lifecycleWarmRepeatPostCleanupActive", value: 1 },
+        { name: "outputFps", value: 24 },
+      ],
+    },
+  }), corpus);
+  assert.ok(threeRender !== null);
+  const priced = ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes }) =>
+    ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes });
+  assert.deepEqual(priced(single), priced(threeRender), "the extractor reads no warm-pass figure");
 });

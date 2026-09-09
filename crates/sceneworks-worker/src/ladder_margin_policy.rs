@@ -1,7 +1,7 @@
 //! Per-term admission allowances (sc-22508, epic 22505).
 //!
-//! Epic 18093 shipped ONE multiplicative margin per backend per currency — `peak * 1.5041` on the
-//! MLX estimate path, `peak * 1.2520` on the MLX stale path — applied to the whole predicted peak
+//! Epic 18093 shipped ONE multiplicative margin per backend per basis — `peak * 1.5041` on the
+//! MLX estimate path, `peak * 1.2520` on the since-retired MLX stale path — applied to the whole predicted peak
 //! regardless of which part of that peak was actually uncertain. On a 60 GB derived peak the MLX
 //! estimate margin alone added 30 GB of pad, which is what kept a request that truly fits a 128 GB
 //! host out of rungs it fits on. Epic 22505 E3 retires that shape: **an allowance is priced against
@@ -11,7 +11,9 @@
 //! There are exactly three terms, and each names the uncertainty it covers:
 //!
 //! * [`AdmissionTerm::FullyPriced`] — nothing is left for the selector to add. Two bases reach it.
-//!   A MEASURED cell under the live closure is the measurement. A VIDEO-lane
+//!   A MEASURED cell is the measurement — whether or not its provider's closure has moved since
+//!   capture (sc-22738: currency is a re-capture signal for the tooling, never a widening). A
+//!   VIDEO-lane
 //!   [`CandidateBasis::EstimateAnchorDerived`] peak (`MemoryAnchor::derive_video_phase_peaks`)
 //!   already carries its uncertainties inside the derivation: its per-token/per-voxel
 //!   coefficients each sit at or above the highest measured within-cell slope, and every phase
@@ -242,8 +244,6 @@ impl AdmissionAllowance {
 pub struct AdmissionSubject {
     pub backend: MemoryBackend,
     pub basis: CandidateBasis,
-    /// The candidate's evidence was measured under a closure digest that has since moved.
-    pub closure_is_stale: bool,
     /// The portion of the peak that is a flat, phase-blind activation ALLOWANCE rather than counted
     /// weights, declared by the site that built the floor. `None` where the basis does not
     /// decompose its peak.
@@ -282,15 +282,11 @@ pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
         fraction: recapture_spread(subject.backend),
     };
     match subject.basis {
-        // A measurement under the live closure is the measurement. A moved closure leaves exactly
-        // the same-cell recapture question open — the cell being admitted IS the cell measured.
-        CandidateBasis::Measured => {
-            if subject.closure_is_stale {
-                spread
-            } else {
-                AdmissionAllowance::NONE
-            }
-        }
+        // A measurement is the measurement. There is no stale arm (sc-22738): the recapture
+        // spread used to be charged to a measured cell whose provider closure had moved, which
+        // made a shared-engine fix silently widen — and on a tight host refuse — a request the
+        // measurement admitted the day before.
+        CandidateBasis::Measured => AdmissionAllowance::NONE,
         // The fitted per-phase laws already carry each phase's max fit/held-out residual, so what
         // remains is the recapture spread of the cell the curve was fitted through.
         CandidateBasis::EstimateFittedCurve => spread,
@@ -406,7 +402,6 @@ mod tests {
         AdmissionSubject {
             backend: MemoryBackend::Mlx,
             basis,
-            closure_is_stale: false,
             unmodeled_activation_bytes: headroom,
         }
     }
@@ -441,11 +436,7 @@ mod tests {
     /// spread alone — not the retired x2/x4 widenings.
     #[test]
     fn the_recapture_allowance_is_the_measured_spread_with_no_blanket_widening() {
-        let stale = AdmissionSubject {
-            closure_is_stale: true,
-            ..subject(CandidateBasis::Measured, None)
-        };
-        let allowance = admission_allowance(stale);
+        let allowance = admission_allowance(subject(CandidateBasis::EstimateFittedCurve, None));
         assert_eq!(allowance.term, AdmissionTerm::SameCellRecaptureSpread);
         assert_eq!(allowance.fraction, MLX_RECAPTURE_SPREAD);
         assert_eq!(
@@ -499,13 +490,26 @@ mod tests {
         }
     }
 
-    /// A current measurement is the measurement; an undeclared floor states its approximation by
-    /// falling back to the whole-peak accounting residual rather than to a wider invented number.
+    /// A measurement is the measurement; an undeclared floor states its approximation by falling
+    /// back to the whole-peak accounting residual rather than to a wider invented number.
+    ///
+    /// sc-22738: the policy cannot even be told a measurement is stale — `AdmissionSubject` has no
+    /// such field — so a measured cell is fully priced under every closure. MUTATION: re-adding a
+    /// `closure_is_stale` arm that charges the spread turns the first assertion red only if the
+    /// field comes back; the structural guard (`scripts/runtime-admission-currency.test.mjs`)
+    /// keeps the field out.
     #[test]
-    fn current_measurements_and_undeclared_floors_take_their_documented_arms() {
+    fn measurements_and_undeclared_floors_take_their_documented_arms() {
         assert_eq!(
-            admission_allowance(subject(CandidateBasis::Measured, None)).term,
-            AdmissionTerm::FullyPriced
+            admission_allowance(subject(CandidateBasis::Measured, None)),
+            AdmissionAllowance::NONE
+        );
+        assert_eq!(
+            admission_allowance(AdmissionSubject {
+                backend: MemoryBackend::Candle,
+                ..subject(CandidateBasis::Measured, None)
+            }),
+            AdmissionAllowance::NONE
         );
         let undeclared = admission_allowance(subject(CandidateBasis::EstimateFloor, None));
         assert_eq!(undeclared.term, AdmissionTerm::SameCellRecaptureSpread);

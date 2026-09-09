@@ -1,0 +1,213 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/sd3.5-medium-mlx",
+        "resolvedRevision": "5413e962bb326db248be2026a93b147c323392b6",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-07T09:10:32Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:sd3-5-medium-shared-ladder",
+        "blockers": [
+          "sc-22730 anchor capture measures exact per-phase memory, strategy identity and admission for the SD3.5 base routes; the formal warm/cancel/error lifecycle scenarios remain not_run because this run does not repeat the full promotion-quality and lifecycle certification suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 662112
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 10937912268
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 24534365536
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 30648094704
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 74
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 81
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "sd3-5-medium-mlx-q8-1024-seed22730-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-6be8c9aa799061a0d3e3",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/sd3.5-medium-mlx@5413e962bb326db248be2026a93b147c323392b6:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-812b0200525b9d56e185",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 662112,
+          "allocatorBytes": 663136,
+          "reclaimableBytes": 1024
+        },
+        "decode": {
+          "activeBytes": 24534365536,
+          "allocatorBytes": 24534365536,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 10937912268,
+          "allocatorBytes": 17051641436,
+          "reclaimableBytes": 6113729168
+        },
+        "overall": {
+          "activeBytes": 24534365536,
+          "allocatorBytes": 30648094704,
+          "reclaimableBytes": 6113729168
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 25769803776,
+        "denoise": 17918066688,
+        "overall": 32212254720
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SD3.5 rung versus unselected request",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.03,
+        "meanError": 0,
+        "meanErrorThreshold": 0.003,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.03
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "61afdfff2d83deaaa9dac46d38d6f07f71ef80a285dc09a22df086da07fb4982",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:46d699504f6a7e3e16fa604f90082ca1790b65c340327f3eee4865cb29256f33",
+          "revision": "37dd24cb288f94aae836e65ac88213aea9f2531a"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 32212254720,
+          "name": "exact_fit",
+          "predictedBytes": 32212254720,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory, strategy identity and admission for the SD3.5 base routes; the formal warm/cancel/error lifecycle scenarios remain not_run because this run does not repeat the full promotion-quality and lifecycle certification suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory, strategy identity and admission for the SD3.5 base routes; the formal warm/cancel/error lifecycle scenarios remain not_run because this run does not repeat the full promotion-quality and lifecycle certification suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory, strategy identity and admission for the SD3.5 base routes; the formal warm/cancel/error lifecycle scenarios remain not_run because this run does not repeat the full promotion-quality and lifecycle certification suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX SD3.5 Medium base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "sd3_5_medium",
+        "overlay": "none",
+        "provider": "sd3_5_medium",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

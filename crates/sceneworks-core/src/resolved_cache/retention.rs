@@ -439,16 +439,16 @@ impl ResolvedCacheStore {
         now: u64,
     ) -> Result<ManualRemovalOutcome, ResolvedCacheError> {
         let digest = cache_key_digest(cache_key)?;
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-        match FileExt::try_lock_exclusive(&artifact_lock) {
-            Ok(()) => {}
-            Err(error) if is_lock_contended(&error) => {
-                return Err(ResolvedCacheError::request(
-                    "cannot remove a resolved-cache entry with an active lease or reservation",
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        }
+        let _artifact_lock =
+            match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
+                Ok(lock) => lock,
+                Err(error) if is_lock_contended(&error) => {
+                    return Err(ResolvedCacheError::request(
+                        "cannot remove a resolved-cache entry with an active lease or reservation",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
         let _metadata_lock = self.lock_metadata(&digest)?;
         let entry = self.inner.root.join("entries").join(&digest);
         if std::fs::symlink_metadata(&entry).is_err() {
@@ -555,20 +555,20 @@ impl ResolvedCacheStore {
                 continue;
             }
             let entry = self.inner.root.join("entries").join(&digest);
-            let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-            match FileExt::try_lock_exclusive(&artifact_lock) {
-                Ok(()) => {}
-                Err(error) if is_lock_contended(&error) => {
-                    report.deferred.push(RetainedRecord {
-                        cache_key: metadata.cache_key.clone(),
-                        bytes: entry_bytes(&entry, &metadata),
-                        hold: RetentionHold::ActiveUse,
-                        detail: None,
-                    });
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            }
+            let _artifact_lock =
+                match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
+                    Ok(lock) => lock,
+                    Err(error) if is_lock_contended(&error) => {
+                        report.deferred.push(RetainedRecord {
+                            cache_key: metadata.cache_key.clone(),
+                            bytes: entry_bytes(&entry, &metadata),
+                            hold: RetentionHold::ActiveUse,
+                            detail: None,
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
             let _metadata_lock = self.lock_metadata(&digest)?;
             let metadata = match self.read_metadata_unlocked(&digest) {
                 Ok(JournalRead::Valid { metadata, .. })
@@ -848,14 +848,14 @@ impl ResolvedCacheStore {
         };
 
         // Phase two: exclusive artifact lock, then re-verify everything cheaply.
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
-        match FileExt::try_lock_exclusive(&artifact_lock) {
-            Ok(()) => {}
-            Err(error) if is_lock_contended(&error) => {
-                return retained(RetentionHold::ActiveUse, None);
-            }
-            Err(error) => return Err(error.into()),
-        }
+        let _artifact_lock =
+            match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
+                Ok(lock) => lock,
+                Err(error) if is_lock_contended(&error) => {
+                    return retained(RetentionHold::ActiveUse, None);
+                }
+                Err(error) => return Err(error.into()),
+            };
         let _metadata_lock = self.lock_metadata(&digest)?;
         let entry = self.inner.root.join("entries").join(&digest);
         let metadata = match self.read_metadata_unlocked(&digest) {
@@ -966,12 +966,12 @@ impl ResolvedCacheStore {
         &self,
         digest: &str,
     ) -> Result<Option<EvictionMarker>, ResolvedCacheError> {
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(digest))?;
-        match FileExt::try_lock_exclusive(&artifact_lock) {
-            Ok(()) => {}
-            Err(error) if is_lock_contended(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        }
+        let _artifact_lock =
+            match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(digest))?) {
+                Ok(lock) => lock,
+                Err(error) if is_lock_contended(&error) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
         let _metadata_lock = self.lock_metadata(digest)?;
         match self.read_metadata_unlocked(digest)? {
             JournalRead::Evicted { .. } => Ok(Some(self.finish_pending_eviction(digest)?)),
@@ -980,9 +980,8 @@ impl ResolvedCacheStore {
     }
 
     fn artifact_lock_is_contended(&self, digest: &str) -> Result<bool, ResolvedCacheError> {
-        let artifact_lock = open_lock_file(&self.artifact_lock_path(digest))?;
-        match FileExt::try_lock_exclusive(&artifact_lock) {
-            Ok(()) => Ok(false),
+        match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(digest))?) {
+            Ok(_probe) => Ok(false),
             Err(error) if is_lock_contended(&error) => Ok(true),
             Err(error) => Err(error.into()),
         }

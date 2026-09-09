@@ -37,6 +37,7 @@ use crate::checkpoint_inspector::{
     discover_library_root, inspect_checkpoint, CheckpointCandidateV1, CheckpointDiagnosticCodeV1,
     CheckpointDiagnosticSeverityV1, CheckpointDiagnosticV1, CheckpointInspectionRequestV1,
 };
+use crate::file_lock::FileLock;
 
 /// Directory under the application data dir that holds every file this store owns.
 pub const CHECKPOINTS_DIR: &str = "checkpoints";
@@ -46,6 +47,28 @@ pub const PLANS_DIR: &str = "plans";
 /// The prefix every inspector-emitted `plan_id` carries; see [`validate_plan_id`].
 pub const PLAN_ID_PREFIX: &str = "checkpoint-plan-";
 pub const BINDINGS_DIR: &str = "bindings";
+/// Schema version of the per-plan `bindings/<planId>.json` document.
+///
+/// Versioned independently of [`CHECKPOINT_IMPORT_CONTRACT_VERSION`], which is the *wire* version
+/// shared by the plan, record and inventory contracts: bindings are a private store cache whose
+/// shape may move without moving anything a UI or an export reads. v1 stamps carry no observation
+/// time and therefore cannot be dated against [`SOURCE_STAMP_GRANULARITY_NANOS`]; v2 adds
+/// `observedNanos`. Bindings at any other version are read but never trusted — every stamp in them
+/// is re-hashed once and rewritten at the current version.
+pub const SOURCE_BINDINGS_SCHEMA_VERSION: u32 = 2;
+/// The coarsest timestamp granularity this store may be asked to reason about, in nanoseconds.
+///
+/// Windows FILETIME as observed through `last_write_time` advances on the ~15.625 ms system clock
+/// tick, so two writes inside one tick are indistinguishable in every field a stamp carries. The
+/// bound is applied on EVERY platform rather than per-`cfg`: a bindings document is portable (a
+/// library on a shared or synced volume is stamped by whichever host resolved it last), so a
+/// Unix-only relaxation would trust a Windows-written stamp on exactly the platform that cannot
+/// discriminate. 20 ms is that tick rounded up, and it also clears exFAT's 10 ms mtime
+/// quantization, so it holds on every filesystem an approved library root is supported on (NTFS,
+/// APFS, ext4, exFAT). It does NOT cover FAT/FAT32, whose mtime quantizes to 2 s: a root on one of
+/// those cannot date its own stamps finely enough for any fixed bound short of 2 s, and FAT32's
+/// 4 GiB file cap keeps checkpoint weights off it in practice.
+pub const SOURCE_STAMP_GRANULARITY_NANOS: i64 = 20_000_000;
 /// The advisory file every read-modify-write of the store's SHARED documents serialises on.
 ///
 /// `approved-roots.json` and `inventory.json` are each written atomically, but atomic write is not
@@ -199,11 +222,49 @@ fn validate_root_label(label: &str) -> Result<(), CheckpointPlanError> {
     Ok(())
 }
 
+/// The store's clock, read once per stamp capture.
+///
+/// Production always reads the system clock. The skewed constructor exists so a test can place a
+/// stamp's observation outside [`SOURCE_STAMP_GRANULARITY_NANOS`] of the file it names — the
+/// window is otherwise only reachable by sleeping through it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreClockV1 {
+    skew_nanos: i64,
+}
+
+impl StoreClockV1 {
+    /// The real clock: what [`CheckpointPlanStore::open`] installs.
+    pub const SYSTEM: Self = Self { skew_nanos: 0 };
+
+    /// Test-only clock offset from the system clock by `skew_nanos`.
+    #[doc(hidden)]
+    pub const fn skewed(skew_nanos: i64) -> Self {
+        Self { skew_nanos }
+    }
+
+    /// Nanoseconds since the Unix epoch, in the same unit and on the same timeline as a stamp's
+    /// `modified_nanos`. `None` only if the clock is before the epoch or beyond `i64`, in which
+    /// case no stamp can be dated and every stamp stays untrusted.
+    fn now_nanos(self) -> Option<i64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
+            .map(|now| now.saturating_add(self.skew_nanos))
+    }
+}
+
 /// Filesystem stamp of one layer's source entry, captured at compile time. Cheap to re-take; any
 /// difference forces a full re-hash before the source may be used.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceStampV1 {
+    /// The store's clock reading at the instant this stamp was sampled, on the same timeline as
+    /// `modified_nanos`. Not part of the file's identity — it dates the OBSERVATION, and is what
+    /// [`Self::is_racy`] measures the file's mtime against. `None` on a v1 stamp read back from
+    /// disk, which is therefore never trustworthy.
+    #[serde(default)]
+    pub observed_nanos: Option<i64>,
     pub size_bytes: u64,
     pub modified_nanos: Option<i64>,
     #[cfg(unix)]
@@ -219,13 +280,17 @@ pub struct SourceStampV1 {
 }
 
 impl SourceStampV1 {
-    fn of(path: &Path) -> std::io::Result<Self> {
+    fn of(path: &Path, clock: StoreClockV1) -> std::io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt as _;
         #[cfg(windows)]
         use std::os::windows::fs::MetadataExt as _;
+        // Read the clock BEFORE the metadata: an observation must never be later than the state it
+        // claims to describe, or a write racing this call could look older than it is.
+        let observed_nanos = clock.now_nanos();
         let metadata = fs::metadata(path)?;
         Ok(Self {
+            observed_nanos,
             size_bytes: metadata.len(),
             modified_nanos: metadata.modified().ok().and_then(|modified| {
                 modified
@@ -248,9 +313,44 @@ impl SourceStampV1 {
             last_write_time: metadata.last_write_time(),
         })
     }
+
+    /// Whether `other` describes the same filesystem entry as this stamp — every field except
+    /// `observed_nanos`, which dates the observation rather than the file.
+    fn identifies_same_entry(&self, other: &Self) -> bool {
+        let mut compared = self.clone();
+        compared.observed_nanos = other.observed_nanos;
+        compared == *other
+    }
+
+    /// Git's racy-index rule. A stamp may stand in for a hash only when the file it names was last
+    /// modified at least one timestamp tick BEFORE the stamp was taken.
+    ///
+    /// Without this, a same-size in-place rewrite landing within the tick after a stamp was
+    /// captured leaves every field of the stamp unchanged on a platform whose change key is no
+    /// finer than the clock (Windows: `size_bytes`, `creation_time`, `last_write_time` and
+    /// `modified_nanos` are all identical across such a rewrite). The next resolve would match the
+    /// stamp, skip the hash, and hand a loader bytes nothing verified. A younger stamp is simply
+    /// not evidence, so it is re-hashed and re-observed instead; the fresh observation is dated
+    /// later, so one tick later the same file takes the fast path again.
+    ///
+    /// An undated stamp (v1 bindings) and an undated mtime are both untrusted for the same reason:
+    /// there is nothing to measure.
+    fn is_racy(&self) -> bool {
+        match (self.observed_nanos, self.modified_nanos) {
+            (Some(observed), Some(modified)) => {
+                observed.saturating_sub(modified) < SOURCE_STAMP_GRANULARITY_NANOS
+            }
+            _ => true,
+        }
+    }
 }
 
 /// The persisted per-plan binding: one stamp per layer id.
+///
+/// `schema_version` is [`SOURCE_BINDINGS_SCHEMA_VERSION`], not the shared wire version: it moves
+/// when the stamp shape moves. A document at any other version is read, treated as untrusted for
+/// every layer (one re-hash each), and rewritten at the current version — a bindings file is a
+/// cache, so the only cost of not understanding one is the hash it would have saved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceBindingsV1 {
@@ -262,12 +362,12 @@ pub struct SourceBindingsV1 {
 /// Deterministic fault-injection boundary for the verification-to-publication seam.
 ///
 /// This is not an execution hook. It exists so the plan-store regression fixture can replace a
-/// same-size source after its bytes have been hashed but before the stamp that could be persisted
-/// is sampled.
+/// same-size source inside the verification window: after the stamp that could be persisted has
+/// been sampled, and before the bytes that stamp will stand for are hashed.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointPlanVerificationEventV1 {
-    LayerHashComplete,
+    LayerStampCaptured,
 }
 
 /// A freshly compiled and persisted checkpoint.
@@ -1051,37 +1151,42 @@ fn layer_relative_path(layer: &ImportLayerV1) -> &str {
 
 /// Hash one source while pinning the stamp that can later skip a hash to those bytes.
 ///
-/// A source replaced after hashing but before the final stamp sample must be rejected: persisting
-/// the replacement's stamp would make a later resolve trust bytes never checked against the plan.
-/// The pre-hash stamp is safe to persist only when the post-hash stamp is identical.
+/// `stamp` must have been sampled from `path` *before* this call, and the bytes are hashed after
+/// it. That ordering is what binds the two: any replacement landing before the hash completes is
+/// read by the hash itself and refused on the digest, so the surviving stamp always describes a
+/// file whose contents were verified no earlier than the stamp.
+///
+/// The stamp is deliberately not re-sampled and compared afterwards. A second stamp only detects a
+/// replacement on filesystems whose change key has finer resolution than the replacement is fast:
+/// on Unix `changed_nanos` carries `ctime`'s nanoseconds and discriminates, while every Windows
+/// field (`size_bytes`, `creation_time`, `last_write_time`, `modified_nanos`) is unchanged by a
+/// same-size in-place rewrite inside one ~15.6 ms system clock tick. Hashing after the stamp needs
+/// no such discrimination and therefore holds identically on every platform.
+///
+/// That ordering closes the BINDING window only. The stamp is also a cache key a later resolve may
+/// skip a hash on, and a replacement landing inside the tick AFTER this call still leaves it
+/// matching. Nothing here can see that; [`SourceStampV1::is_racy`] is what refuses to trust the
+/// stamp until it is old enough to be evidence.
 fn verify_source_and_capture_stamp(
     checkpoint_id: &str,
     relative_path: &str,
     path: &Path,
     expected_sha256: &str,
-    before: SourceStampV1,
-    after_hash: impl FnOnce(),
+    stamp: SourceStampV1,
+    before_hash: impl FnOnce(),
 ) -> Result<SourceStampV1, CheckpointPlanError> {
+    before_hash();
     let hashed = sha256_file(path).map_err(|error| io_error(path, error))?;
-    after_hash();
-    let after = SourceStampV1::of(path).map_err(|error| io_error(path, error))?;
-    if before == after && hashed == expected_sha256 {
-        return Ok(before);
+    if hashed == expected_sha256 {
+        return Ok(stamp);
     }
 
-    // If the stamp changed after an otherwise matching hash, report the bytes now named by the
-    // path. This second hash is diagnostic only; no observation from a rejected verification is
-    // ever persisted or refreshed.
-    let actual_sha256 = if hashed == expected_sha256 {
-        sha256_file(path).map_err(|error| io_error(path, error))?
-    } else {
-        hashed
-    };
+    // No observation from a rejected verification is ever persisted or refreshed.
     Err(CheckpointPlanError::SourceDrifted {
         checkpoint_id: checkpoint_id.to_owned(),
         relative_path: relative_path.to_owned(),
         expected_sha256: expected_sha256.to_owned(),
-        actual_sha256,
+        actual_sha256: hashed,
     })
 }
 
@@ -1107,6 +1212,8 @@ pub struct CheckpointPlanStore {
     /// `remove_managed` may delete from cannot be steered by any argument.
     installs_root: PathBuf,
     staging_root: PathBuf,
+    /// Dates every stamp this store captures. Always [`StoreClockV1::SYSTEM`] outside tests.
+    clock: StoreClockV1,
 }
 
 impl CheckpointPlanStore {
@@ -1115,7 +1222,50 @@ impl CheckpointPlanStore {
             root: data_dir.join(CHECKPOINTS_DIR),
             installs_root: data_dir.join(MANAGED_INSTALLS_RELATIVE_DIR),
             staging_root: data_dir.join(MANAGED_STAGING_RELATIVE_DIR),
+            clock: StoreClockV1::SYSTEM,
         }
+    }
+
+    /// The same store, reading a clock offset by `skew_nanos`. Test-only: it is how a fixture
+    /// captures a stamp outside the racy window, or observes one from beyond it, without sleeping.
+    #[doc(hidden)]
+    pub fn with_clock_skew_nanos(&self, skew_nanos: i64) -> Self {
+        Self {
+            clock: StoreClockV1::skewed(skew_nanos),
+            ..self.clone()
+        }
+    }
+
+    /// Test-only: rebind the persisted stamp for `layer_id` under `plan_id` to `path` as it stands
+    /// on disk right now, dating the observation `observed_after_mtime_nanos` after the file's own
+    /// mtime.
+    ///
+    /// It exists to reproduce, on any platform, the state only a coarse-timestamp platform reaches
+    /// on its own: a persisted stamp that MATCHES a file whose bytes were replaced after the stamp
+    /// was captured. Every field of a Unix stamp discriminates such a replacement through `ctime`,
+    /// so without this seam the racy-index rule could never be shown to be the thing standing
+    /// between that replacement and a loader.
+    #[doc(hidden)]
+    pub fn rebind_stamp_for_tests(
+        &self,
+        plan_id: &str,
+        layer_id: &str,
+        path: &Path,
+        observed_after_mtime_nanos: i64,
+    ) -> Result<(), CheckpointPlanError> {
+        let mut bindings = self
+            .read_json::<SourceBindingsV1>(&self.bindings_path(plan_id)?, "source bindings")?
+            .ok_or_else(|| CheckpointPlanError::Corrupt {
+                what: "source bindings".to_owned(),
+                message: format!("no bindings persisted for plan {plan_id:?}"),
+            })?;
+        let mut stamp =
+            SourceStampV1::of(path, StoreClockV1::SYSTEM).map_err(|error| io_error(path, error))?;
+        stamp.observed_nanos = stamp
+            .modified_nanos
+            .map(|modified| modified.saturating_add(observed_after_mtime_nanos));
+        bindings.stamps.insert(layer_id.to_owned(), stamp);
+        self.persist_bindings(&bindings)
     }
 
     /// The document root: `<data_dir>/checkpoints`.
@@ -1160,14 +1310,16 @@ impl CheckpointPlanStore {
 
     /// Take the store's exclusive cross-process lock for one read-modify-write.
     ///
-    /// The returned handle IS the lock: dropping the file releases it.
+    /// The returned handle IS the lock: dropping it releases the lock with `LOCK_UN` (see
+    /// [`FileLock`] — a close-only release stays visibly held while any forked child still
+    /// references the same open file description).
     ///
     /// The lock is NOT reentrant — `fs2` locks an open file description, so a second acquisition on
     /// a fresh descriptor blocks even inside one process. Every mutator therefore takes it exactly
     /// once and never calls another locking mutator underneath it: `remove_root` does its own
     /// inventory rewrite rather than calling `invalidate` in a loop, which is also what collapses
     /// its N document writes into one.
-    fn lock_store(&self) -> Result<fs::File, CheckpointPlanError> {
+    fn lock_store(&self) -> Result<FileLock, CheckpointPlanError> {
         fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
         let path = self.store_lock_path();
         // A lock file that is a symlink would let a planted link move the lock (and the writes it
@@ -1187,8 +1339,7 @@ impl CheckpointPlanStore {
             .truncate(false)
             .open(&path)
             .map_err(|error| io_error(&path, error))?;
-        fs2::FileExt::lock_exclusive(&file).map_err(|error| io_error(&path, error))?;
-        Ok(file)
+        FileLock::exclusive(file).map_err(|error| io_error(&path, error))
     }
 
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
@@ -1712,7 +1863,7 @@ impl CheckpointPlanStore {
     }
 
     /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
-    /// layer has been hashed and before its persisted source stamp is sampled.
+    /// layer's persisted source stamp has been sampled and before its bytes are hashed.
     #[doc(hidden)]
     pub fn compile_linked_with_hook(
         &self,
@@ -1838,9 +1989,9 @@ impl CheckpointPlanStore {
         record.validate_loaded_plan(&plan)?;
 
         // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
-        // the plan names. Sampling a new stamp after inspection would let a same-size replacement
-        // between those operations bypass the next resolve's hash. Re-hash under a stable
-        // before/after stamp and persist that stable stamp instead.
+        // the plan names. Sampling a stamp and trusting the inspector's earlier hash would let a
+        // same-size replacement between those operations bypass the next resolve's hash. Sample
+        // the stamp first, then re-hash under it, and persist the stamp only if that hash matched.
         let mut stamps = BTreeMap::new();
         for layer in &plan.layers {
             if locator_kind(&layer.source) != expected_kind {
@@ -1851,7 +2002,8 @@ impl CheckpointPlanStore {
                 });
             }
             let path = self.layer_path(&checkpoint_id, root_path, layer)?;
-            let before = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
+            let sampled =
+                SourceStampV1::of(&path, self.clock).map_err(|error| io_error(&path, error))?;
             let fingerprint = layer_fingerprint(layer);
             let relative_path = layer_relative_path(layer);
             let stamp = verify_source_and_capture_stamp(
@@ -1859,13 +2011,13 @@ impl CheckpointPlanStore {
                 relative_path,
                 &path,
                 fingerprint,
-                before,
-                || hook(CheckpointPlanVerificationEventV1::LayerHashComplete),
+                sampled,
+                || hook(CheckpointPlanVerificationEventV1::LayerStampCaptured),
             )?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
         let bindings = SourceBindingsV1 {
-            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+            schema_version: SOURCE_BINDINGS_SCHEMA_VERSION,
             plan_id: plan.plan_id.clone(),
             stamps,
         };
@@ -2048,7 +2200,7 @@ impl CheckpointPlanStore {
         let mut bindings = self
             .read_json::<SourceBindingsV1>(&self.bindings_path(&plan.plan_id)?, "source bindings")?
             .unwrap_or_else(|| SourceBindingsV1 {
-                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                schema_version: SOURCE_BINDINGS_SCHEMA_VERSION,
                 plan_id: plan.plan_id.clone(),
                 stamps: BTreeMap::new(),
             });
@@ -2062,8 +2214,13 @@ impl CheckpointPlanStore {
             });
         }
 
+        // A bindings document written by a different stamp shape cannot be reasoned about: v1
+        // stamps carry no observation time at all, so nothing in them can be dated against the
+        // racy-index rule. Read it, trust none of it, and rewrite it at the current version.
+        let bindings_are_current = bindings.schema_version == SOURCE_BINDINGS_SCHEMA_VERSION;
         let mut layers = Vec::with_capacity(plan.layers.len());
-        let mut refreshed = false;
+        let mut refreshed = !bindings_are_current;
+        bindings.schema_version = SOURCE_BINDINGS_SCHEMA_VERSION;
         for layer in &plan.layers {
             // The root a layer's relative path is joined onto is chosen by the LOCATOR, never by
             // the caller: a linked layer resolves under its approved library root, a managed layer
@@ -2094,7 +2251,7 @@ impl CheckpointPlanStore {
                 }
             };
             let path = confined_root_join(checkpoint_id, &root_path, relative_path)?;
-            let current = match SourceStampV1::of(&path) {
+            let current = match SourceStampV1::of(&path, self.clock) {
                 Ok(stamp) => stamp,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     return Err(CheckpointPlanError::SourceMissing {
@@ -2112,13 +2269,24 @@ impl CheckpointPlanStore {
                     path,
                 });
             }
-            let stamp_matches = bindings.stamps.get(&layer.layer_id) == Some(&current);
-            let rehashed = !stamp_matches;
+            // A persisted stamp skips the hash only when it names this same entry AND is old
+            // enough to be evidence about it. A stamp captured within one timestamp tick of the
+            // file's mtime is not: on a platform whose change key is no finer than the clock, a
+            // same-size rewrite inside that tick leaves the stamp identical, and trusting it here
+            // would hand a loader bytes nothing ever hashed.
+            let trusted = bindings_are_current
+                && bindings
+                    .stamps
+                    .get(&layer.layer_id)
+                    .is_some_and(|stamp| stamp.identifies_same_entry(&current) && !stamp.is_racy());
+            let rehashed = !trusted;
             if rehashed {
-                // Same bytes, new entry (touched, re-copied, relinked): refresh the stamp so the
-                // next resolve is cheap again. The refreshed stamp is retained only if it stayed
-                // stable around the exact-byte verification; otherwise it could bless a source
-                // replacement that happened between the hash and stamp sampling.
+                // A new entry (touched, re-copied, relinked) or a stamp still inside its racy
+                // window: hash the bytes and re-observe. `current` was sampled above, before the
+                // hash below reads the bytes, so the refreshed stamp cannot bless a replacement
+                // that landed between the two — the hash reads the replacement and refuses on the
+                // digest. The refreshed observation is later than the one it replaces, so a file
+                // that stops changing leaves the racy window after one tick and stays cheap.
                 let verified_stamp = verify_source_and_capture_stamp(
                     checkpoint_id,
                     relative_path,
@@ -2147,5 +2315,38 @@ impl CheckpointPlanStore {
             plan,
             layers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A released store lock must be free IMMEDIATELY, even while a descriptor this process handed
+    /// to a child still references the same open file description. `flock(2)` locks live on the
+    /// open file description, so a close-only release only takes effect once every such reference
+    /// is gone; `inherited_descriptor` reproduces that sharing without a child process, so the
+    /// interleaving is injected rather than waited for. Before sc-22738 the next mutator blocked
+    /// behind an already-released lock for as long as an unrelated `Command` sat between `fork`
+    /// and `exec`.
+    #[test]
+    fn a_released_store_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let store = CheckpointPlanStore::open(temporary.path());
+
+        let guard = store.lock_store().expect("store lock acquires");
+        let inherited = guard.inherited_descriptor().expect("descriptor duplicates");
+        drop(guard);
+
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.store_lock_path())
+            .expect("store lock file opens");
+        assert!(
+            FileLock::try_exclusive(lock_file).is_ok(),
+            "a store lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
     }
 }
