@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:bde591fcf2267cd22a4535cb89aa7e95402234df27052612caec90abf6b7ff1f",
+    "sceneWorksRevision": "source-tree:8d32ebf52a111626e0cf4efd96a053046353a6e524537d98a87455c41482812a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "d27976827b39ff503614e7e7ecc9d84de8fdeeea527485fe8c6270219caa6f32"
+        "sha256": "53196459cca62f2006b20504fd40141554ce20f355071bc128264c7df016b23f"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "80bac8069df34ad1d9f0561a8028a77ca82d2e15d983324959ce787a0eb45902"
+        "sha256": "0c8a7be4ad71d32a59ce5112401409681b820b0a3782243e451817dfe8f750ca"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1985,
-    "elidedCells": 7280,
+    "publishedCells": 1992,
+    "elidedCells": 7273,
     "elidedByState": {
-      "Implemented": 2906,
+      "Implemented": 2899,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 132,
-    "analyticOnlyCells": 205,
-    "anchoredCells": 1742,
+    "anchors": 133,
+    "analyticOnlyCells": 204,
+    "anchoredCells": 1749,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5551,6 +5551,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 7
+    },
+    {
+      "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+      "modelId": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 7
@@ -11572,12 +11590,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 6,
-      "published": 1,
-      "elided": 5,
+      "published": 2,
+      "elided": 4,
       "implemented": 3,
       "states": {
-        "Anchored": 1,
-        "Implemented": 2,
+        "Anchored": 2,
+        "Implemented": 1,
         "Missing": 3
       },
       "implementedBy": {
@@ -11600,12 +11618,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 6,
-      "published": 1,
-      "elided": 5,
+      "published": 2,
+      "elided": 4,
       "implemented": 3,
       "states": {
-        "Anchored": 1,
-        "Implemented": 2,
+        "Anchored": 2,
+        "Implemented": 1,
         "Missing": 3
       },
       "implementedBy": {
@@ -11628,12 +11646,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 6,
-      "published": 1,
-      "elided": 5,
+      "published": 2,
+      "elided": 4,
       "implemented": 3,
       "states": {
-        "Anchored": 1,
-        "Implemented": 2,
+        "Anchored": 2,
+        "Implemented": 1,
         "Missing": 3
       },
       "implementedBy": {
@@ -11656,12 +11674,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -11669,12 +11687,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -55829,6 +55847,433 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#lens_turbo:candle:bf16:base:base:lens-turbo-bf16-candle-cuda-shared-ladder-v1:imc-6870ecc9389ed4bc03f3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:lora:resident",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/lens_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 16777216,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            16777216
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 16777216,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            16777216
+          ],
+          "transformerWindowSizes": [
+            1,
+            2,
+            4,
+            8,
+            12,
+            24
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:none:resident",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lens_turbo:lens_turbo:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "lens_turbo",
+      "resolvedRoute": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x864",
+          "864x1152",
+          "1376x768",
+          "768x1376"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15819,
+      "owningModelStory": 15874,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/lens_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6"
           }
         ]
       }
@@ -131617,6 +132062,13 @@
       "lens_turbo:lens_turbo:candle:bf16:text_to_image:none:bounded_transformer_residency",
       "lens_turbo:lens_turbo:candle:bf16:text_to_image:none:resident",
       "lens_turbo:lens_turbo:candle:bf16:text_to_image:none:staged_residency",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:lora:resident",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:lora:staged_residency",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:none:resident",
+      "lens_turbo:lens_turbo:candle:q4:text_to_image:none:staged_residency",
       "lens_turbo:lens_turbo:mlx:bf16:text_to_image:lora:resident",
       "lens_turbo:lens_turbo:mlx:bf16:text_to_image:lora:staged_residency",
       "lens_turbo:lens_turbo:mlx:bf16:text_to_image:none:bounded_attention",

@@ -2414,6 +2414,51 @@
       "overallAllocatorEnvelopeBytes": 42550165504
     },
     {
+      "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json",
+        "sha256": "92c42d5f6c570b7863d4288ef7b158a983e460edc78b69814b6602416547ed3e",
+        "recordId": "imc-9014371f60d73507e0f6",
+        "calibrationFingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+        "loaderClosureDigest": "beb6a10994052580052d69b9788f63285fa57ff8c5135aa1ba655456d478a607"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5338300416,
+        "denoise": 7991197696,
+        "decode": 22486712320
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5338300416,
+        "denoise": 7991197696,
+        "decode": 22486712320
+      },
+      "overallAllocatorEnvelopeBytes": 22486712320
+    },
+    {
       "id": "lens_turbo:mlx:bf16:base:base:lens-turbo-bf16-mlx-shared-ladder-v1:imc-9faaaa1095d39acaba6f",
       "modelId": "lens_turbo",
       "modelFamily": "lens",
@@ -7496,17 +7541,6 @@
       "modelId": "lens",
       "modelFamily": "lens",
       "route": "lens",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:candle:q4",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
       "backend": "candle",
       "tier": "q4",
       "basis": "no_retained_evidence",
