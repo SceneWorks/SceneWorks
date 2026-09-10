@@ -1,14 +1,14 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "e34d7b46a301376676bd8a60419190c7be9aa4f0",
+  "inferenceRevision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
   "models": {
     "bernini:candle": {
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "8e69de0595c7754f75a42cdf71f0bd75a5c5ff75d539b40eca1f4d966fbbe3e4",
+      "digest": "7b561b439a74797f1d0940b8d371ec3c4df61fa833ef13903daffdbf5a220364",
       "closureFileCount": 125,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
@@ -271,7 +271,7 @@
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "011c5bfae6303d3d4e1713e41c37ade3bb825b0fb8f22dcc8ee032d442fcde74",
+      "digest": "e511817a01243327c1c70eee5575e98161534df109e276ce8e529b75f676a410",
       "closureFileCount": 125,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
@@ -3190,7 +3190,7 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "9cd1a276b76792066a9ad8ebeac83666f97be56cc61aa97286bc9adedac6e56b",
+      "digest": "079dd79ff08c35aa9f364423f6a6febad350c1090b1e577b10b88605c41df665",
       "closureFileCount": 101,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
@@ -3467,7 +3467,7 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "025d129dd069297d363da0e42dd5cd444dad09943d3c2c25e9290eb3c6a3ac1d",
+      "digest": "be3a7a75fabbd48cc6e0ae91cd7b9583829278217aa52d502a4a2baabd4334ea",
       "closureFileCount": 101,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
@@ -4564,7 +4564,7 @@
         "crates/media/candle-gen/candle-gen-kolors/src/lib.rs",
         "crates/media/candle-gen/candle-gen-kolors/src/memory_strategy.rs"
       ],
-      "digest": "04040257415c8e029523da61d7b6c6f1c6a4afa7fbdadbc5895156915e5d74b4",
+      "digest": "64b469aad186144394eabd77ee96e38c018bb7d502c23159d7483c9a270aa0ca",
       "closureFileCount": 135,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
