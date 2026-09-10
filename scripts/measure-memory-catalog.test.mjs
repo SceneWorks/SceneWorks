@@ -5565,7 +5565,9 @@ test("every probe carries a wall-clock budget: per lane by default, derived from
     parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", "video=240", "--probe-budget-minutes", "image=90"]).probeBudgetMinutes,
     { video: 240, image: 90 },
   );
-  for (const bad of ["0", "-3", "abc", "video=0", "video=abc", ""]) {
+  // `video=240=99` is a typo, not a budget of 240: everything after the FIRST `=` is the value, so
+  // it reaches `Number` and is refused rather than quietly booking the leading figure.
+  for (const bad of ["0", "-3", "abc", "video=0", "video=abc", "", "video=240=99", "video="]) {
     assert.throws(() => parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", bad]), /positive number of minutes/, bad);
   }
   // A typo is REFUSED by name rather than silently leaving the budget at its default — the whole

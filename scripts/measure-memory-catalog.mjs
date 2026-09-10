@@ -1473,7 +1473,11 @@ export function parseProbeBudgetMinutes(raw, current = null) {
   const entries = String(raw).split(",").map((entry) => entry.trim()).filter(Boolean);
   if (entries.length === 0) fail("--probe-budget-minutes must be a positive number of minutes");
   for (const entry of entries) {
-    const [name, minutes] = entry.includes("=") ? entry.split("=", 2) : [null, entry];
+    // Split at the FIRST `=` and keep the whole remainder: `split("=", 2)` would drop everything
+    // after the second one, so `video=240=99` would quietly book 240 — the silent acceptance this
+    // flag exists to rule out. The remainder goes to `Number`, which refuses it.
+    const equals = entry.indexOf("=");
+    const [name, minutes] = equals === -1 ? [null, entry] : [entry.slice(0, equals), entry.slice(equals + 1)];
     if (name === null) {
       const both = positive(minutes, "");
       for (const lane of PROBE_BUDGET_LANES) budget[lane] = both;
