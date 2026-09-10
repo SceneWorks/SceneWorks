@@ -5906,6 +5906,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "realvisxl:candle:bf16:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d9140dd24bd6d78372b4",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-bf16-candle-evidence.json",
+        "sha256": "bfd22dff9fc9b695105f0186e9ac653cfcd233f2b2bf87945e1771df5f4e8b5f",
+        "recordId": "imc-d9140dd24bd6d78372b4",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "2bb264f768f90b84fac735df6954ae879016c11f76cc152f6f26da856ad071d0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "overallAllocatorEnvelopeBytes": 17923309568
+    },
+    {
       "id": "sana_1600m:mlx:bf16:base:base:sana-base-bf16-mlx-full-ladder-v1-resident:imc-a4e0c62f15d4334a8a35",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -9208,30 +9253,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:realvisxl:candle:bf16",
-      "modelId": "realvisxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:realvisxl:candle:q4",
