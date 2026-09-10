@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2ea16da17f8ad438d5c3f9349cd96077427e13635e53a09e251fd5ad2151afa6",
+    "sceneWorksRevision": "source-tree:f035eb19d0c2bed04a4d74b74e7de794b00b7dd1560498912115c88de8eb9214",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "59b3affad4f99fadb140a3fc291d7999c09939d799e87254e1a164aaa6794f9d"
+        "sha256": "b80473d5962edd28896874a4658632f01cfcb5df27d13945c917955e778c0807"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
