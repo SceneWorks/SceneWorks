@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:75e394f0b396487bd8c2e7c4027518597acc4aacdd371a16c4800a9ceec5c266",
+    "sceneWorksRevision": "source-tree:5d8c65a1fb0106426874e456065aa7f69d020aeb221d04d04bd0568fc0ca073c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "52c493c5395f77e79f3c589a5a9b4c7798ee0755b2f0e9aeafa04b83d691038b"
+        "sha256": "e98855940502b96b3f15b46e4a129b62db1798f41a2f40a551158d8028578f3d"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "6b7aace6f7020c4b1dc4c1633300efdea12179d8715a422a84819456e7228a1c"
+        "sha256": "1860509b659b35f3fe83a6497b10fe24a839c6cd6feb00773c746302ebf18dfa"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 2707,
-    "elidedCells": 6683,
+    "publishedCells": 2762,
+    "elidedCells": 6628,
     "elidedByState": {
-      "Implemented": 2267,
+      "Implemented": 2212,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 161,
-    "analyticOnlyCells": 182,
-    "anchoredCells": 2464,
+    "anchors": 162,
+    "analyticOnlyCells": 181,
+    "anchoredCells": 2519,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5662,6 +5662,24 @@
       "cells": 55
     },
     {
+      "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+      "modelId": "illustrious_xl_v2",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/illustrious-xl-v2-q8-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 55
+    },
+    {
       "id": "kolors:mlx:bf16:base:base:kolors-bf16-mlx-shared-ladder-v1:imc-95a91671619b4e40f246",
       "modelId": "kolors",
       "backend": "mlx",
@@ -11110,12 +11128,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 45,
-      "published": 30,
-      "elided": 15,
+      "published": 45,
+      "elided": 0,
       "implemented": 45,
       "states": {
-        "Anchored": 30,
-        "Implemented": 15
+        "Anchored": 45
       }
     },
     {
@@ -11123,12 +11140,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 45,
-      "published": 30,
-      "elided": 15,
+      "published": 45,
+      "elided": 0,
       "implemented": 45,
       "states": {
-        "Anchored": 30,
-        "Implemented": 15
+        "Anchored": 45
       }
     },
     {
@@ -11148,12 +11164,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 45,
-      "published": 30,
-      "elided": 15,
+      "published": 45,
+      "elided": 0,
       "implemented": 45,
       "states": {
-        "Anchored": 30,
-        "Implemented": 15
+        "Anchored": 45
       }
     },
     {
@@ -11161,12 +11176,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 45,
-      "published": 20,
-      "elided": 25,
+      "published": 30,
+      "elided": 15,
       "implemented": 30,
       "states": {
-        "Anchored": 20,
-        "Implemented": 10,
+        "Anchored": 30,
         "Missing": 15
       },
       "implementedBy": {
@@ -70190,6 +70204,3173 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q4:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-c2031094222aeded7e8d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:none:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:none:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:none:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:character_image:none:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:bounded_attention",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:bounded_decode",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:resident",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "illustrious_xl_v2",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17488,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f"
           }
         ]
       }
@@ -175008,7 +178189,62 @@
       "illustrious_xl_v2:sdxl:candle:q4:text_to_image:none:bounded_attention",
       "illustrious_xl_v2:sdxl:candle:q4:text_to_image:none:bounded_decode",
       "illustrious_xl_v2:sdxl:candle:q4:text_to_image:none:resident",
-      "illustrious_xl_v2:sdxl:candle:q4:text_to_image:none:staged_residency"
+      "illustrious_xl_v2:sdxl:candle:q4:text_to_image:none:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:identity:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:lora:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:none:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:none:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:none:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:character_image:none:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:identity:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:lora:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:edit_image:none:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:identity:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:lora:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_detail:none:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:identity:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:lora:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:image_inpaint:none:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:identity:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:lora:staged_residency",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:bounded_attention",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:bounded_decode",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:resident",
+      "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:staged_residency"
     ],
     "instantid_realvisxl": [],
     "kolors": [
