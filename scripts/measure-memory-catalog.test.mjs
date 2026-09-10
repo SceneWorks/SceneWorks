@@ -7226,7 +7226,12 @@ test("the GPU preflight classifies [Insufficient Permissions] rows by TYPE, neve
 // `gh` and `git` faked on PATH, the same way `fakeGpuHost` fakes `nvidia-smi`: `pr.sh` must be
 // driven as the shell script the runner really executes, and neither of the two commands it shells
 // out to may reach the real GitHub or the real remote.
-async function runResultsPr({ createStdout = "", createStderr = "", createStatus = 0, existingUrl = "", branchOnRemote = true } = {}) {
+// `baseSha`/`refSha`/`resumedFrom` are exactly what branch.sh exports: on a fresh cut BASE_SHA is
+// the ref tip and the other two are absent/empty, and on a resumed re-run BASE_SHA is the tip the
+// remote already has while REF_SHA still names the dispatched ref (sc-22738).
+const CAMPAIGN_REF_TIP = "afa67a3d86333436089938c1252a6ef7f35bcacd";
+
+async function runResultsPr({ createStdout = "", createStderr = "", createStatus = 0, existingUrl = "", branchOnRemote = true, baseSha = CAMPAIGN_REF_TIP, refSha = "", resumedFrom = "" } = {}) {
   const bin = await mkdtemp(path.join(tmpdir(), "catalog-pr-"));
   const ghLog = path.join(bin, "gh-argv");
   await writeFile(
@@ -7258,7 +7263,7 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
     CAMPAIGN: "sc-22738",
     BACKEND: "candle",
     BASE_REF: "feature/sc-22723-memory-anchor-measurability",
-    BASE_SHA: "afa67a3d86333436089938c1252a6ef7f35bcacd",
+    BASE_SHA: baseSha,
     CAMPAIGN_BRANCH: "story/sc-22738-candle-campaign-34356681566",
     WORK_DIR: workDir,
     INFERENCE_PIN: REVISION,
@@ -7266,7 +7271,12 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
     GITHUB_SERVER_URL: "https://github.com",
     GITHUB_REPOSITORY: "SceneWorks/SceneWorks",
     GITHUB_RUN_ID: "34356681566",
+    GITHUB_RUN_ATTEMPT: "2",
     GITHUB_STEP_SUMMARY: summary,
+    // Empty is the fresh-cut shape branch.sh exports, and pr.sh must read that as "no resume"
+    // rather than as an unset-variable failure under `set -u`.
+    REF_SHA: refSha,
+    RESUMED_FROM: resumedFrom,
   };
   let code = 0;
   let stdout = "";
@@ -7279,7 +7289,14 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
     stdout = error.stdout ?? "";
     stderr = error.stderr ?? "";
   }
-  return { code, stdout, stderr, summary: await readFile(summary, "utf8"), ghArgv: await readFile(ghLog, "utf8").catch(() => "") };
+  return {
+    code,
+    stdout,
+    stderr,
+    summary: await readFile(summary, "utf8"),
+    body: await readFile(path.join(workDir, "pr-body.md"), "utf8").catch(() => ""),
+    ghArgv: await readFile(ghLog, "utf8").catch(() => ""),
+  };
 }
 
 const PR_POLICY_REFUSAL =
@@ -7331,4 +7348,279 @@ test("every OTHER `gh pr create` failure still fails the step, and a created PR 
   assert.equal(nothingPushed.code, 0, nothingPushed.stderr);
   assert.match(nothingPushed.stdout, /was never pushed \(no anchor landed\); no PR to open/);
   assert.doesNotMatch(nothingPushed.stdout, /::warning/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738 (run 34490358777): `gh run rerun --failed` must not be a SECOND, different failure.
+//
+// The campaign branch is named after the RUN ID and a re-run reuses it, so `git switch -c` died 12
+// seconds in with `fatal: a branch named 'story/sc-22738-candle-campaign-34490358777' already
+// exists` -- the documented recovery for a transient infra fault turned into a failure that looked
+// like the one it was recovering from.
+//
+// Everything below drives `branch.sh` as the shell script the runner really executes, against a
+// REAL bare remote and a REAL workspace. Nothing is faked, because the entire question is what git
+// does with refs that outlive a job -- and `file://` rather than a bare path, because the local
+// transport ignores `--depth` and the shallow resume fetch is part of what is under test.
+// ---------------------------------------------------------------------------------------------
+
+const CAMPAIGN_RUN_ID = "34490358777";
+const CAMPAIGN_REF = "feature/sc-22723-memory-anchor-measurability";
+const CAMPAIGN_BRANCH_NAME = `story/sc-22738-candle-campaign-${CAMPAIGN_RUN_ID}`;
+
+const GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: "campaign harness",
+  GIT_AUTHOR_EMAIL: "harness@example.invalid",
+  GIT_COMMITTER_NAME: "campaign harness",
+  GIT_COMMITTER_EMAIL: "harness@example.invalid",
+};
+
+async function gitAt(cwd, args) {
+  return execFileAsync("git", args, { cwd, env: { ...process.env, ...GIT_IDENTITY } });
+}
+
+async function anchorCommit(repo, name) {
+  await writeFile(path.join(repo, name), `{"anchor":${JSON.stringify(name)}}\n`);
+  await gitAt(repo, ["add", name]);
+  await gitAt(repo, ["commit", "-m", `measure(${name})`]);
+  return (await gitAt(repo, ["rev-parse", "HEAD"])).stdout.trim();
+}
+
+// `pushedAnchors` land on the remote (an attempt that got its measurements off the box);
+// `strandedAnchors` are committed on top and never pushed (an attempt that did not).
+// `dropLocalBranch` deletes the local ref afterwards, which is what a re-run served by a DIFFERENT
+// runner listener sees. `emptyLocalBranch` is the observed failure: a branch left behind by an
+// attempt that died at the build step with nothing measured at all.
+async function campaignWorkspace({
+  pushedAnchors = 0,
+  strandedAnchors = 0,
+  dropLocalBranch = true,
+  emptyLocalBranch = false,
+} = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-branch-"));
+  const remote = path.join(root, "origin.git");
+  const work = path.join(root, "work");
+  await gitAt(root, ["init", "--bare", "-b", "main", remote]);
+  await gitAt(root, ["init", "-b", CAMPAIGN_REF, work]);
+  const refSha = await anchorCommit(work, "ref.txt");
+  await gitAt(work, ["remote", "add", "origin", `file://${remote}`]);
+  await gitAt(work, ["push", "-u", "origin", CAMPAIGN_REF]);
+
+  let pushedTip = null;
+  let strandedTip = null;
+  let anchor = 0;
+  if (pushedAnchors > 0 || strandedAnchors > 0) {
+    await gitAt(work, ["switch", "-c", CAMPAIGN_BRANCH_NAME]);
+    for (let i = 0; i < pushedAnchors; i += 1) {
+      anchor += 1;
+      pushedTip = await anchorCommit(work, `anchor-${anchor}.json`);
+    }
+    if (pushedAnchors > 0) await gitAt(work, ["push", "origin", CAMPAIGN_BRANCH_NAME]);
+    for (let i = 0; i < strandedAnchors; i += 1) {
+      anchor += 1;
+      strandedTip = await anchorCommit(work, `anchor-${anchor}.json`);
+    }
+    await gitAt(work, ["switch", CAMPAIGN_REF]);
+    if (dropLocalBranch) await gitAt(work, ["branch", "-D", CAMPAIGN_BRANCH_NAME]);
+  } else if (emptyLocalBranch) {
+    await gitAt(work, ["branch", CAMPAIGN_BRANCH_NAME]);
+  }
+  return { root, remote, work, refSha, pushedTip, strandedTip };
+}
+
+async function runCampaignBranchScript(workspace, { runAttempt = "2" } = {}) {
+  const envFile = path.join(workspace.root, "github-env");
+  const summaryFile = path.join(workspace.root, "step-summary.md");
+  const runnerTemp = path.join(workspace.root, "runner-temp");
+  await mkdir(runnerTemp, { recursive: true });
+  await writeFile(envFile, "");
+  await writeFile(summaryFile, "");
+  const env = {
+    ...process.env,
+    ...GIT_IDENTITY,
+    CAMPAIGN: "sc-22738",
+    BACKEND: "candle",
+    BASE_REF: CAMPAIGN_REF,
+    RUNNER_NAME: "cuda-windows-2",
+    GITHUB_RUN_ID: CAMPAIGN_RUN_ID,
+    GITHUB_RUN_ATTEMPT: runAttempt,
+    RUNNER_TEMP: runnerTemp,
+    GITHUB_ENV: envFile,
+    GITHUB_STEP_SUMMARY: summaryFile,
+  };
+  let code = 0;
+  let stdout = "";
+  let stderr = "";
+  try {
+    ({ stdout, stderr } = await execFileAsync(
+      "bash",
+      [path.join(ROOT, "scripts/ci/memory-catalog/branch.sh")],
+      { cwd: workspace.work, env },
+    ));
+  } catch (error) {
+    code = error.code ?? 1;
+    stdout = error.stdout ?? "";
+    stderr = error.stderr ?? "";
+  }
+  const exported = {};
+  for (const line of (await readFile(envFile, "utf8")).split("\n")) {
+    const at = line.indexOf("=");
+    if (at > 0) exported[line.slice(0, at)] = line.slice(at + 1);
+  }
+  const read = async (args) => (await gitAt(workspace.work, args)).stdout.trim();
+  return {
+    code,
+    stdout,
+    stderr,
+    exported,
+    env,
+    head: await read(["rev-parse", "HEAD"]),
+    branch: await read(["rev-parse", "--abbrev-ref", "HEAD"]),
+    files: (await read(["ls-files"])).split("\n").filter(Boolean),
+    summary: await readFile(summaryFile, "utf8"),
+  };
+}
+
+test("the campaign branch is cut from the dispatched ref when nothing of it exists yet", async () => {
+  const workspace = await campaignWorkspace();
+  const run = await runCampaignBranchScript(workspace, { runAttempt: "1" });
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.branch, CAMPAIGN_BRANCH_NAME);
+  assert.equal(run.head, workspace.refSha, "a fresh cut starts at the ref tip");
+  assert.equal(run.exported.CAMPAIGN_BRANCH, CAMPAIGN_BRANCH_NAME);
+  assert.equal(run.exported.BASE_SHA, workspace.refSha);
+  assert.equal(run.exported.REF_SHA, workspace.refSha);
+  assert.equal(run.exported.RESUMED_FROM, "", "nothing was resumed, so the PR body says nothing");
+  assert.doesNotMatch(run.summary, /resumed/);
+  assert.ok(run.summary.includes(`| cut from | \`${CAMPAIGN_REF}\` at \`${workspace.refSha}\` |`));
+});
+
+test("a re-run whose earlier attempt left the branch behind is not a second failure", async () => {
+  // THE DEFECT, exactly: run 34490358777 died in the build step, and `gh run rerun --failed` then
+  // died in 12 seconds at `git switch -c` because the branch name is keyed on the run id and the
+  // local ref outlived the job.
+  const workspace = await campaignWorkspace({ emptyLocalBranch: true });
+  const run = await runCampaignBranchScript(workspace);
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+  assert.doesNotMatch(run.stderr, /already exists/);
+  assert.equal(run.branch, CAMPAIGN_BRANCH_NAME);
+  assert.equal(run.head, workspace.refSha, "the leftover branch carried no measurements");
+  assert.equal(run.exported.BASE_SHA, workspace.refSha);
+  assert.equal(run.exported.RESUMED_FROM, "", "an empty leftover is not a resume");
+});
+
+test("a re-run resumes the anchors an earlier attempt pushed instead of re-cutting the branch", async () => {
+  const workspace = await campaignWorkspace({ pushedAnchors: 3 });
+  const run = await runCampaignBranchScript(workspace);
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.branch, CAMPAIGN_BRANCH_NAME);
+  assert.equal(run.head, workspace.pushedTip, "the re-run continues the pushed branch");
+  assert.equal(run.exported.RESUMED_FROM, workspace.pushedTip);
+  // BASE_SHA is what the remote already has, so push.sh counts only what this attempt adds and the
+  // three pushed anchors are neither re-counted nor re-pushed.
+  assert.equal(run.exported.BASE_SHA, workspace.pushedTip);
+  assert.equal(run.exported.REF_SHA, workspace.refSha);
+  // The measurements are IN THE TREE, which is what `--skip-current` reads to classify them as
+  // already captured -- a shallow tip still carries a complete tree.
+  for (const anchor of ["anchor-1.json", "anchor-2.json", "anchor-3.json"]) {
+    assert.ok(run.files.includes(anchor), `${anchor} survived the re-run: ${run.files.join(", ")}`);
+  }
+  assert.match(run.summary, /run attempt `2` continues the existing branch/);
+});
+
+test("a resumed re-run appends to the pushed branch without duplicating its history", async () => {
+  const workspace = await campaignWorkspace({ pushedAnchors: 3 });
+  const run = await runCampaignBranchScript(workspace);
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+
+  // One more anchor, then the real push step, driven with the environment branch.sh exported.
+  await anchorCommit(workspace.work, "anchor-4.json");
+  const pushed = await execFileAsync(
+    "bash",
+    [path.join(ROOT, "scripts/ci/memory-catalog/push.sh")],
+    { cwd: workspace.work, env: { ...run.env, ...run.exported } },
+  );
+  assert.match(pushed.stdout, /^1 anchor commit\(s\) not yet on the remote/m, pushed.stdout);
+
+  const log = (await gitAt(workspace.remote, ["log", "--format=%s", CAMPAIGN_BRANCH_NAME])).stdout
+    .trim()
+    .split("\n");
+  assert.deepEqual(
+    log,
+    [
+      "measure(anchor-4.json)",
+      "measure(anchor-3.json)",
+      "measure(anchor-2.json)",
+      "measure(anchor-1.json)",
+      "measure(ref.txt)",
+    ],
+    "one commit per anchor, in order, with nothing from the earlier attempt repeated",
+  );
+});
+
+test("a local branch an earlier attempt never managed to push is kept, not reset away", async () => {
+  // The commits are measurements even though no push carried them off the box, and the branch name
+  // holds the run id, so a local ref under it can only be this run's own earlier attempt.
+  const workspace = await campaignWorkspace({ strandedAnchors: 2, dropLocalBranch: false });
+  const run = await runCampaignBranchScript(workspace);
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.head, workspace.strandedTip, "the stranded anchors are still on HEAD");
+  assert.equal(run.exported.RESUMED_FROM, workspace.strandedTip);
+  // The remote has NONE of them, so they count as unpushed and go up with this attempt's push.
+  assert.equal(run.exported.BASE_SHA, workspace.refSha);
+  assert.ok(run.files.includes("anchor-1.json") && run.files.includes("anchor-2.json"));
+});
+
+test("when a branch exists both on the remote and locally, the remote copy is authoritative", async () => {
+  // A deliberate, stated tradeoff. The remote is the only durable record and a re-run may be served
+  // by any of the box's listeners, so a local ref that runs AHEAD of it loses those commits and
+  // their anchors are measured again -- GPU time, never data, and never a divergent branch.
+  const workspace = await campaignWorkspace({
+    pushedAnchors: 2,
+    strandedAnchors: 1,
+    dropLocalBranch: false,
+  });
+  const run = await runCampaignBranchScript(workspace);
+  assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.head, workspace.pushedTip);
+  assert.equal(run.exported.BASE_SHA, workspace.pushedTip);
+  assert.ok(run.files.includes("anchor-2.json"));
+  assert.ok(!run.files.includes("anchor-3.json"), "the ahead-of-remote local commit is not carried");
+});
+
+test("the results PR body reports a resume rather than claiming the branch was cut there", async () => {
+  const RESUMED_TIP = "b1c2d3e4f50617283940516273849506a7b8c9d0";
+  const resumed = await runResultsPr({
+    createStdout: "https://github.com/SceneWorks/SceneWorks/pull/2811\n",
+    // The resume shape branch.sh really exports: BASE_SHA has moved to the resumed tip, so a body
+    // that reached for it would name the wrong commit as the base.
+    baseSha: RESUMED_TIP,
+    refSha: CAMPAIGN_REF_TIP,
+    resumedFrom: RESUMED_TIP,
+  });
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.ok(
+    resumed.body.includes(
+      `- cut from \`feature/sc-22723-memory-anchor-measurability\` at \`${CAMPAIGN_REF_TIP}\``,
+    ),
+    resumed.body,
+  );
+  assert.match(
+    resumed.body,
+    new RegExp(`run attempt \`2\` RESUMED this branch at \`${RESUMED_TIP}\``),
+    resumed.body,
+  );
+
+  // A fresh cut says nothing about attempts, and with REF_SHA absent the base is still named
+  // correctly, because on a fresh cut BASE_SHA IS the ref tip.
+  const fresh = await runResultsPr({
+    createStdout: "https://github.com/SceneWorks/SceneWorks/pull/2810\n",
+  });
+  assert.ok(
+    fresh.body.includes(
+      `- cut from \`feature/sc-22723-memory-anchor-measurability\` at \`${CAMPAIGN_REF_TIP}\``,
+    ),
+    fresh.body,
+  );
+  assert.doesNotMatch(fresh.body, /RESUMED/);
 });
