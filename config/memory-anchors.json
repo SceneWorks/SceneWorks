@@ -2357,6 +2357,51 @@
       "overallAllocatorEnvelopeBytes": 8964276224
     },
     {
+      "id": "illustrious_xl_v1:candle:q8:base:base:sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1:imc-a7fd72a2b1a51734974d",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v1-q8-candle-evidence.json",
+        "sha256": "0b1fab18c80b3bdd75d717e895009790d5a3bbb48e7e725efe5518ce3a72516b",
+        "recordId": "imc-a7fd72a2b1a51734974d",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+        "loaderClosureDigest": "4f95b6c78d17d9e94bedea9fe29a03a2b84a6672dc9d75f9de200a262b6cdfe8"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 19701694464
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 19701694464
+      },
+      "overallAllocatorEnvelopeBytes": 19701694464
+    },
+    {
       "id": "kolors:mlx:bf16:base:base:kolors-bf16-mlx-shared-ladder-v1:imc-95a91671619b4e40f246",
       "modelId": "kolors",
       "modelFamily": "kolors",
@@ -8079,30 +8124,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:illustrious_xl_v1:candle:q8",
-      "modelId": "illustrious_xl_v1",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:illustrious_xl_v1:mlx:bf16",
