@@ -14,6 +14,7 @@ import {
 } from "./generate-memory-matrix.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
 import { adapterCapturableProviders } from "./stale-lane-report.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -22,6 +23,7 @@ import {
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
   SDXL_COMPONENTS,
+  SDXL_TIER_MAIN_TENSORS,
   MAGE_COMPONENTS,
   MAGE_COMPONENT_IDS,
   providerFamily,
@@ -107,12 +109,16 @@ import {
   readExceededBounds,
   anchorDownloadTargets,
   hfDownloadArgv,
+  hfDownloadArgvs,
+  HF_DOTFILE_EXCLUDES,
   fetchAnchorSnapshots,
   tierDownloadRows,
   manifestPlatform,
   HF_CLI_CANDIDATES,
   EMPTY_SNAPSHOT_PREFIX,
   directoryHasFiles,
+  missingIndexedShards,
+  SAFETENSORS_INDEX_PATTERN,
   inventoryUnusableReason,
   firstAvailableHfCli,
   DOWNLOAD_UNAVAILABLE_REASON,
@@ -201,6 +207,16 @@ function fakeModels() {
       id: "instantid_realvisxl",
       downloads: [
         { repo: "SceneWorks/realvisxl-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
+      ],
+    },
+    // sc-22738: a plain SDXL-family member, for the half-staged tier-root case. Two tiers, because
+    // the engine's packed and dense legs open DIFFERENT main tensor names.
+    {
+      id: "illustrious_xl_v1",
+      downloads: [
+        { repo: "SceneWorks/illustrious-xl-v1-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        { repo: "SceneWorks/illustrious-xl-v1-mlx", revision: REVISION, variant: "bf16", files: ["bf16/*"] },
         ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
       ],
     },
@@ -463,6 +479,56 @@ test("classification: runnable anchors carry the adapter env family and the cano
   const missingTier = await classifyAnchor("qwen_image:q8:mlx", { provider: "qwen_image" }, context);
   assert.equal(missingTier.status, "weights_missing");
   assert.match(missingTier.reason, /q8 on this host/);
+});
+
+// sc-22738. CUDA campaign run 34356681566 lost `qwen_image:bf16:candle` to `text encoder contract
+// mismatch … field architecture_header expected qwen2_5_vl_text` against a `bf16/text_encoder`
+// whose pinned revision is byte-identical to the one the same contract accepted for
+// `qwen_image_edit_2511` on the same box: a partial shard set (no `model-00001-of-00004`, so no
+// `model.layers.0.*`) is the only artifact that fails that signature, and `--list` had called the
+// cell runnable because the tier-root probe asks only whether the directory holds a file. A sharded
+// component's own index names the shards the engine will open, so an index naming an absent shard
+// is `weights_missing` — named shard by shard — and eligible for the resuming `--download-missing`.
+test("classification: a tier root whose safetensors index names an absent shard is weights_missing, not runnable", async () => {
+  const hub = await fakeHub([["SceneWorks/qwen-image-mlx", REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, "SceneWorks/qwen-image-mlx", REVISION, "q4");
+  const textEncoder = path.join(tierRoot, "text_encoder");
+  await mkdir(textEncoder, { recursive: true });
+  await writeFile(path.join(textEncoder, "model.safetensors.index.json"), JSON.stringify({
+    metadata: { total_size: 2 },
+    weight_map: {
+      "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+      "model.layers.0.self_attn.q_proj.bias": "model-00001-of-00002.safetensors",
+      "model.norm.weight": "model-00002-of-00002.safetensors",
+    },
+  }));
+  await writeFile(path.join(textEncoder, "model-00002-of-00002.safetensors"), "w");
+  // Kolors' upstream index spelling is a shard index too; a derived dot-directory is not walked.
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), "");
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors.index.fp16.json"), true);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("model.safetensors"), false);
+  assert.equal(SAFETENSORS_INDEX_PATTERN.test("config.json"), false);
+  const cache = path.join(textEncoder, ".candle-device-format-v1");
+  await mkdir(cache, { recursive: true });
+  await writeFile(path.join(cache, "model.safetensors.index.json"), JSON.stringify({ weight_map: { x: "gone.safetensors" } }));
+
+  assert.deepEqual(await missingIndexedShards(tierRoot), [
+    "model.safetensors.index.fp16.json (unreadable: Unexpected end of JSON input)",
+    path.join("text_encoder", "model-00001-of-00002.safetensors"),
+  ]);
+
+  const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const partial = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /is missing model\.safetensors\.index\.fp16\.json \(unreadable: .*\), text_encoder[\\/]model-00001-of-00002\.safetensors, which its own safetensors shard index names beside it; the mirror is partial and --download-missing resumes it$/);
+
+  // Complete the mirror and the same root is runnable again: the probe is derived from the
+  // artifact's own inventory, not a per-family declaration.
+  await writeFile(path.join(textEncoder, "model-00001-of-00002.safetensors"), "w");
+  await writeFile(path.join(tierRoot, "model.safetensors.index.fp16.json"), JSON.stringify({ weight_map: {} }));
+  assert.deepEqual(await missingIndexedShards(tierRoot), []);
+  const complete = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
+  assert.equal(complete.status, "runnable", complete.reason);
 });
 
 // sc-22738. The campaign lost a booked `minimax_h3:bf16:mlx` capture to
@@ -790,11 +856,21 @@ test("an LTX-2.5 snapshot missing what the arm opens beside the load root is wei
   assert.equal(candle.status, "runnable", "the Candle arm never opens the enhancer, so it must not be required of it");
 });
 
+/** Stage the three main tensors `candle-gen-sdxl` opens in one SDXL tier root (sc-22738). */
+async function stageSdxlTierMainTensors(hub, repo, revision, tier) {
+  for (const file of SDXL_TIER_MAIN_TENSORS[tier]) {
+    const target = snapshotPath(hub, repo, revision, tier, ...file.split("/"));
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "w");
+  }
+}
+
 test("an InstantID cell whose staged identity stack is missing a file is weights_missing, by name", async () => {
   const hub = await fakeHub([
     ["SceneWorks/realvisxl-mlx", REVISION, "q4"],
     ...SDXL_COMPONENTS.map(({ repo }) => [repo, UPSTREAM]),
   ]);
+  await stageSdxlTierMainTensors(hub, "SceneWorks/realvisxl-mlx", REVISION, "q4");
   const weights = await mkdtemp(path.join(tmpdir(), "instantid-weights-"));
   const controlnet = await mkdtemp(path.join(tmpdir(), "instantid-controlnet-"));
   const previous = { ...process.env };
@@ -820,6 +896,173 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
   } finally {
     process.env = previous;
   }
+});
+
+// sc-22738 — the SDXL family's own half-staged case, and the one that cost four cells. An SDXL tier
+// root ALWAYS holds a `config.json` per component, so `directoryHasFiles` said yes to a root with
+// no weights in it at all: the cell classified `runnable`, `--download-missing` skipped it (a
+// runnable anchor is never re-fetched), and the load died four seconds in with a bare
+// `The system cannot find the path specified. (os error 3)` — no path, no `unsupported:` prefix,
+// because the engine's header reader falls through to `read_dir` on the absent file.
+test("an SDXL tier root holding its JSONs but not its weights is weights_missing, and NAMES the tensor", async () => {
+  const context = (hub) => ({
+    models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map(),
+    sdxlRoutes: null,
+  });
+  for (const [tier, tensor] of [
+    ["q4", "unet/diffusion_pytorch_model.safetensors"],
+    ["bf16", "unet/diffusion_pytorch_model.fp16.safetensors"],
+  ]) {
+    // `fakeHub` stages a file in the tier root, which is exactly the shape that used to pass.
+    const hub = await fakeHub([
+      ["SceneWorks/illustrious-xl-v1-mlx", REVISION, tier],
+      ...SDXL_COMPONENTS.map(({ repo }) => [repo, UPSTREAM]),
+    ]);
+    const key = `illustrious_xl_v1:${tier}:candle`;
+    const bare = await classifyAnchor(key, { provider: "sdxl" }, context(hub));
+    assert.equal(bare.status, "weights_missing", `${key}: ${bare.reason}`);
+    assert.match(bare.reason, new RegExp(tensor.replaceAll(".", "\\.")));
+
+    // Stage what the engine opens and the same host is runnable — this is a host condition the
+    // fetch can clear, never a permanent refusal.
+    await stageSdxlTierMainTensors(hub, "SceneWorks/illustrious-xl-v1-mlx", REVISION, tier);
+    const staged = await classifyAnchor(key, { provider: "sdxl" }, context(hub));
+    assert.equal(staged.status, "runnable", `${key}: ${staged.reason}`);
+  }
+});
+
+// sc-22738 — and a snapshot carrying the repository's own `.gitattributes` is STILL runnable. The
+// dotfile is not the host's problem to declare: the fetch excludes it (`HF_DOTFILE_EXCLUDES`) and
+// the inventory hash ignores it, so a cell is never demoted for holding one.
+test("a staged snapshot carrying a .gitattributes is runnable, and the dotfile is not inventoried", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/illustrious-xl-v1-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  await stageSdxlTierMainTensors(hub, "SceneWorks/illustrious-xl-v1-mlx", REVISION, "q4");
+  const tierRoot = snapshotPath(hub, "SceneWorks/illustrious-xl-v1-mlx", REVISION, "q4");
+  const clean = await hashArtifactInventory(tierRoot);
+  await writeFile(path.join(snapshotPath(hub, "SceneWorks/illustrious-xl-v1-mlx", REVISION), ".gitattributes"), "lfs\n");
+  await writeFile(path.join(tierRoot, ".gitattributes"), "lfs\n");
+
+  const row = await classifyAnchor("illustrious_xl_v1:q4:candle", { provider: "sdxl" }, {
+    models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map(),
+    sdxlRoutes: null,
+  });
+  assert.equal(row.status, "runnable", row.reason);
+  assert.deepEqual(await hashArtifactInventory(tierRoot), clean, "a dotfile does not move the receipt");
+});
+
+/**
+ * sc-22738. One SDXL-family model in the fixture manifest's shape: a tiered rehost plus the three
+ * caller-staged components as co-requisites, exactly as the shipped manifest declares them.
+ */
+const SDXL_FIXTURE_MODEL = {
+  id: "sdxl",
+  downloads: [
+    { repo: "SceneWorks/sdxl-base-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+    ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
+  ],
+};
+
+// sc-22738: a co-requisite is a co-requisite of the ENGINE that opens it, not of the model id. The
+// two upstream SDXL components were bound on BOTH lanes, so an MLX `sdxl`/`realvisxl`/`illustrious`
+// cell was booked `weights_missing` for a `laion/CLIP-ViT-bigG-14…` (or fp16-fix VAE) snapshot that
+// `mlx-gen-sdxl` never opens: it declares `required_components: &[]` (mlx-gen-sdxl/src/model.rs:167)
+// and loads `tokenizer/`, `tokenizer_2/` and `vae/` out of its own tier root
+// (mlx-gen-sdxl/src/loader.rs:29-30,277,293). Only `candle-gen-sdxl` declares them
+// (candle-gen-sdxl/src/lib.rs:593 → pipeline.rs:186-190), and only the candle adapter binary binds
+// their env vars. The row must reflect what THIS lane's engine requires.
+test("an SDXL co-requisite is required only on the lane whose engine opens it", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  // Everything staged EXCEPT the CLIP-bigG tokenizer — the snapshot the MLX cells were blocked on.
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  // The tier root is FULLY staged (sc-22738 `requiredTierFiles`), so the only thing either lane can
+  // still be missing is the co-requisite — which is the whole question this case asks.
+  await stageSdxlTierMainTensors(hub, "SceneWorks/sdxl-base-mlx", REVISION, "q4");
+  const context = (backend) => ({ models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  const mlx = await classifyAnchor("sdxl:q4:mlx", { provider: "sdxl" }, context("mlx"));
+  assert.equal(mlx.status, "runnable", `the MLX engine never opens ${bigG}: ${mlx.reason}`);
+  // Not merely "not the reason" — the lane binds no component env at all, because it reads none.
+  for (const component of SDXL_COMPONENTS) {
+    assert.equal(mlx.env[component.env], undefined, `${component.env} must not be bound on the MLX lane`);
+  }
+  assert.ok(
+    !mlx.roots.some((root) => root.label.startsWith("component ")),
+    "an MLX SDXL row must not even report a component root it will never read",
+  );
+  // …and it is not a fetch either: `--download-missing` must never book the component snapshots for
+  // a lane that does not need them. `anchorDownloadTargets` names exactly what `classifyAnchor` probes.
+  const mlxTargets = anchorDownloadTargets(mlx, models, { platform: "macos" });
+  assert.deepEqual(
+    mlxTargets.targets.map((target) => target.repo),
+    ["SceneWorks/sdxl-base-mlx"],
+    "the MLX SDXL cell fetches its tier root and nothing else",
+  );
+
+  // The same cell on candle is unchanged: the engine requires all three, so an absent one is
+  // `weights_missing`, named.
+  const candle = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, context("candle"));
+  assert.equal(candle.status, "weights_missing", "candle-gen-sdxl require_components all three");
+  assert.match(candle.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  const candleTargets = anchorDownloadTargets(candle, models, { platform: "macos" });
+  assert.deepEqual(
+    candleTargets.targets.map((target) => target.repo).sort(),
+    ["SceneWorks/sdxl-base-mlx", ...SDXL_COMPONENTS.map(({ repo }) => repo)].sort(),
+    "the candle SDXL cell fetches its tier root AND all three co-requisites",
+  );
+});
+
+// The lane split is DATA, not a hard-coded `backend === "candle"`: widen a component's `arms` and
+// the requirement comes back on that lane. This is the test that reds if the MLX engine ever
+// declares a required component and the table is not widened to match — and the mutation guard on
+// the gate itself: drop the `arms` filter in `requiredComponentsFor` and the case above goes red
+// while this one stays green, so the two together pin the behaviour in both directions.
+test("a component the MLX engine declares is still required of the MLX lane", async () => {
+  const models = [...fakeModels(), SDXL_FIXTURE_MODEL];
+  const bigG = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
+  const hub = await fakeHub([
+    ["SceneWorks/sdxl-base-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.filter(({ repo }) => repo !== bigG).map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  // Fully staged tier root again, so `requiredTierFiles` is satisfied and the component is the only
+  // thing left that can hold this cell back.
+  await stageSdxlTierMainTensors(hub, "SceneWorks/sdxl-base-mlx", REVISION, "q4");
+  // A fixture engine that DOES open the components on both lanes.
+  const families = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map((component) => ({ ...component, arms: ["mlx", "candle"] })),
+    },
+  };
+  const row = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families },
+  );
+  assert.equal(row.status, "weights_missing", "a component the lane's engine opens is still a hard requirement");
+  assert.match(row.reason, new RegExp(bigG.replaceAll(".", "\\.")));
+  // And a component with no `arms` at all stays lane-blind — the default is unchanged for every
+  // other family, which is why nothing but SDXL moves.
+  const laneBlind = {
+    ...PROVIDER_FAMILIES,
+    sdxl: {
+      ...PROVIDER_FAMILIES.sdxl,
+      components: SDXL_COMPONENTS.map(({ env, repo }) => ({ env, repo })),
+    },
+  };
+  const blind = await classifyAnchor(
+    "sdxl:q4:mlx",
+    { provider: "sdxl" },
+    { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map(), families: laneBlind },
+  );
+  assert.equal(blind.status, "weights_missing", "an undeclared `arms` requires the component on every lane");
 });
 
 // The three declarations above are the ADAPTER's own constants, not this script's opinion of them.
@@ -2650,13 +2893,33 @@ pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
 // validates all three at exact upstream revisions. A rename on one side would leave a capture
 // binding a component the engine never sees, so the two lists are proven equal here.
 test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
-  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
-  const declared = [...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]);
+  const adapterEnvs = async (binary) => {
+    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`), "utf8");
+    return [...new Set([...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]))];
+  };
+  const declared = await adapterEnvs("candle");
   assert.deepEqual(
-    [...new Set(declared)].sort(),
+    [...declared].sort(),
     SDXL_COMPONENTS.map((component) => component.env).sort(),
     "candle.rs SDXL_COMPONENTS and the catalog's SDXL_COMPONENTS must name the same env vars",
   );
+  // sc-22738: and the LANE split is derived from the same source rather than asserted. A component
+  // is bound for the arm whose adapter binary reads its env var — `candle.rs` reads all three,
+  // `mlx.rs` reads none, because `mlx-gen-sdxl` declares `required_components: &[]`
+  // (mlx-gen-sdxl/src/model.rs:167) and opens `tokenizer/`/`tokenizer_2/`/`vae/` inside its own
+  // tier root instead. If an MLX arm ever starts binding one, this reds and `SDXL_COMPONENTS`
+  // must widen its `arms` — the requirement can never silently come back on a lane, nor silently
+  // vanish from one.
+  const mlxDeclared = await adapterEnvs("mlx");
+  for (const component of SDXL_COMPONENTS) {
+    const arms = ["candle", "mlx"].filter((backend) =>
+      (backend === "candle" ? declared : mlxDeclared).includes(component.env));
+    assert.deepEqual(
+      [...(component.arms ?? [])].sort(),
+      arms.sort(),
+      `${component.env} must declare arms exactly matching the adapter binaries that bind it`,
+    );
+  }
   // Every component repo is a real corequisite of every SDXL-family model, so `tierDownload`
   // resolves a revision for it rather than falling back to an unrelated download.
   const models = await readManifestModels();
@@ -3691,6 +3954,77 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
     "a reference-carrying request must probe on any mode, so a new reference surface cannot "
       + "inherit the skip silently",
   );
+});
+
+// sc-22738 — THE DEFECT THIS TEST EXISTS FOR. The plan's three `qwen_image:*:candle` rows named
+// `qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1` long after
+// `candle-gen-qwen-image` had moved its `CALIBRATION_FINGERPRINT` to `-v2`, and nothing red: the
+// suite bound candle identities either to a JS template literal or to the in-repo manifest, and the
+// drift was left to be discovered by a real load on the CUDA box. Run 34356681566 discovered it
+// exactly that way, after paying for the weights:
+//
+//   qwen_image q4/q8: plan/provider calibration mismatch: plan=…-v1, pinned provider=…-v2
+//
+// THE CLAIM, and why it is not "every candle row equals an engine const". Most candle identities are
+// COMPOSED at runtime (`format!` inside a `production_calibration_fingerprint`), so no literal for
+// them exists anywhere in the engine and demanding one would red 68 of the 105 shipped values. What
+// the engine DOES publish as a literal is the versioned families, and those are exactly the ones a
+// version bump can strand. So: for every distinct identity the pinned engine declares as a const,
+// no candle plan row may name a SUPERSEDED sibling of it — same stem, different `vN`. That is
+// weights-free, reads the pin rather than a mirror, and reds on the qwen `-v1` row.
+test("no candle plan row names a superseded version of an identity the pinned engine publishes", { skip: skipWithoutRoutes }, async () => {
+  const engineRoot = path.join(process.env.INFERENCE_REPO, "crates/media/candle-gen");
+  const sources = [];
+  const walk = async (directory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "target") await walk(child);
+      } else if (entry.name.endsWith(".rs")) sources.push(child);
+    }
+  };
+  await walk(engineRoot);
+  assert.ok(sources.length > 0, `${engineRoot} supplies no candle-gen sources`);
+
+  // Every `const … : &str = "<kebab identity ending in -vN>"` the candle engines declare, mapped
+  // from its stem to the versions published for that stem.
+  const published = new Map();
+  for (const source of sources) {
+    const text = await readFile(source, "utf8");
+    const declaration = /const\s+\w+\s*:\s*&(?:'static\s+)?str\s*=\s*\s*"([a-z0-9]+(?:-[a-z0-9]+)*-v\d+)"/g;
+    for (const match of text.matchAll(declaration)) {
+      const identity = match[1];
+      const stem = identity.slice(0, identity.lastIndexOf("-v"));
+      if (!published.has(stem)) published.set(stem, new Map());
+      published.get(stem).set(identity, path.relative(process.env.INFERENCE_REPO, source));
+    }
+  }
+  assert.ok(published.size >= 5, `the const scan found only ${published.size} identity stems`);
+  // The stem this story moved must be one of them, or the scan has stopped seeing the engine.
+  assert.ok(
+    published.has("qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks"),
+    "candle-gen-qwen-image no longer declares a parsable CALIBRATION_FINGERPRINT",
+  );
+
+  const plan = await readPlan();
+  let checked = 0;
+  for (const [key, entry] of Object.entries(plan.anchors)) {
+    if (anchorParts(key).backend !== "candle") continue;
+    const planned = entry.calibrationFingerprint;
+    if (typeof planned !== "string" || !/-v\d+$/.test(planned)) continue;
+    const stem = planned.slice(0, planned.lastIndexOf("-v"));
+    const versions = published.get(stem);
+    // A stem the engine publishes no literal for is a composed identity — not this test's business.
+    if (!versions) continue;
+    checked += 1;
+    assert.ok(
+      versions.has(planned),
+      `${key}: the plan names ${planned}, but the pinned engine publishes `
+      + `${[...versions.keys()].join(", ")} for this identity (${[...versions.values()][0]}). `
+      + "A capture would load the weights and THEN refuse on the mismatch.",
+    );
+  }
+  assert.ok(checked > 0, "no candle plan row is bound to a published engine identity at all");
 });
 
 // sc-22738. `mlx_wan_scail2.rs#probes_admission` decides whether the Wan 2.2 / SCAIL-2 capture asks
@@ -5632,13 +5966,118 @@ test("a download target names the family's repository, the PINNED revision and t
   // THE MUTATION TARGET. `--revision` is the pinned revision, always: a fetch that resolved `main`
   // would land whatever the branch points at rather than the artifact the anchor prices — and
   // pinning a manifest download removes `refs/main` from the mirror in the first place.
-  const argv = hfDownloadArgv(targets[0], "/hub");
+  const argvs = hfDownloadArgvs(targets[0], "/hub");
+  assert.equal(argvs.length, 1, "one glob, one invocation");
+  const argv = argvs[0];
   assert.deepEqual(argv, [
     "download", PROVIDER_FAMILIES.qwen_image.repo, "--revision", DOWNLOAD_REVISION,
-    "--include", "q4/*", "--cache-dir", "/hub",
+    "--include", "q4/*", "--exclude", "*/.*", "--exclude", ".*", "--cache-dir", "/hub",
   ]);
   assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION, "the pinned revision is passed, never main");
   assert.ok(!argv.includes("main"));
+  // The single-glob builder is the same argv, and `null` is "the whole snapshot".
+  assert.deepEqual(hfDownloadArgv(targets[0], "/hub", "q4/*"), argv);
+  assert.ok(!hfDownloadArgv(targets[0], "/hub").includes("--include"));
+});
+
+// sc-22738 — THE DEFECT THAT COST 19 CELLS ON RUN 34356681566, and the reason it survived a green
+// suite: the stub CLI below parses a repeated `--include` the way the MODERN `hf` does (append),
+// while the `huggingface-cli` spelling it superseded parses it with argparse `nargs="*"` and keeps
+// only the LAST occurrence. Every multi-glob target therefore fetched exactly one glob on a runner
+// carrying the older spelling, and the stub could never see it. The invariant is now a property of
+// the ARGV rather than of the CLI's grammar: no invocation carries more than one `--include`, so
+// both grammars read the same thing.
+test("a multi-glob target is one invocation PER GLOB: no argv ever carries two --include flags", () => {
+  const target = {
+    label: "components snapshot", repo: "SceneWorks/Mage-Flow-Components-mlx", revision: DOWNLOAD_REVISION,
+    include: ["bf16/text_encoder/*", "bf16/vae/*"], estimatedBytes: 9,
+  };
+  const argvs = hfDownloadArgvs(target, "/hub");
+  assert.equal(argvs.length, 2, "one invocation per glob");
+  for (const argv of argvs) {
+    assert.equal(
+      argv.filter((token) => token === "--include").length, 1,
+      `a second --include is silently dropped by argparse nargs="*": ${JSON.stringify(argv)}`,
+    );
+    assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION);
+    assert.equal(argv[argv.indexOf("--cache-dir") + 1], "/hub");
+  }
+  // The union is still the whole declared inventory — nothing was dropped to get there.
+  assert.deepEqual(
+    argvs.map((argv) => argv[argv.indexOf("--include") + 1]),
+    target.include,
+  );
+  // A whole-snapshot target keeps its single invocation and simply names no glob.
+  assert.equal(hfDownloadArgvs({ ...target, include: [] }, "/hub").length, 1);
+});
+
+// sc-22738 — every dotfile is excluded from every fetch. `candle-gen-sdxl`'s `collect_files`
+// refuses any dot-prefixed file anywhere under a sealed source, which is how the two Illustrious
+// bf16 cells died on a snapshot's own `.gitattributes`.
+test("every fetch excludes dotfiles, with the top-level pattern LAST so the older CLI keeps it", () => {
+  assert.deepEqual(HF_DOTFILE_EXCLUDES, ["*/.*", ".*"]);
+  const target = {
+    repo: "openai/clip-vit-large-patch14", revision: DOWNLOAD_REVISION,
+    include: ["tokenizer.json"], estimatedBytes: 1,
+  };
+  for (const argv of hfDownloadArgvs(target, "/hub").concat(hfDownloadArgvs({ ...target, include: [] }, "/hub"))) {
+    const excludes = argv.flatMap((token, index) => (token === "--exclude" ? [argv[index + 1]] : []));
+    assert.deepEqual(excludes, ["*/.*", ".*"], JSON.stringify(argv));
+    // argparse `nargs="*"` keeps the LAST occurrence, and top-level is where `.gitattributes` and
+    // `.gitignore` actually live — so the top-level pattern must be the one that survives.
+    assert.equal(excludes.at(-1), ".*");
+  }
+});
+
+// The four Group-B classes, read off the SHIPPED manifest at the CUDA lane's own platform. Each
+// case names the file the run 34356681566 log said was missing, and asserts the fetch's include set
+// now covers it. Weights-free: this reads declarations, never a snapshot.
+test("--download-missing resolves the FULL inventory each failing CUDA cell needed", async () => {
+  const models = await readManifestModels();
+  const includesFor = (key, provider) => {
+    const parts = anchorParts(key);
+    const { targets } = anchorDownloadTargets(
+      { key, ...parts, provider }, models, { platform: "windows" },
+    );
+    return targets.flatMap((target) => target.include);
+  };
+
+  for (const tier of ["bf16", "q8"]) {
+    for (const model of ["mage_flow", "mage_flow_base", "mage_flow_turbo", "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo"]) {
+      const globs = includesFor(`${model}:${tier}:candle`, model);
+      assert.ok(globs.includes(`${tier}/text_encoder/*`), `${model}:${tier}: the components text encoder is not fetched (${globs.join(" ")})`);
+      assert.ok(globs.includes(`${tier}/vae/*`), `${model}:${tier}: the components VAE is not fetched`);
+    }
+  }
+
+  for (const tier of ["q4", "q8"]) {
+    for (const model of ["minimax_h3", "minimax_h3_ref"]) {
+      const globs = includesFor(`${model}:${tier}:candle`, "minimax_h3");
+      assert.ok(
+        globs.includes(`${tier}/transformer_ref/*`),
+        `${model}:${tier}: the sibling DiT partition is not fetched off-Mac, and the loader probes `
+        + `transformer_ref/config.json on every load (${globs.join(" ")})`,
+      );
+      assert.ok(globs.includes(`${tier}/transformer/*`), `${model}:${tier}: the base DiT is not fetched`);
+    }
+    const ltx = includesFor(`ltx_2_3:${tier}:candle`, "ltx_2_3");
+    assert.ok(ltx.includes("gemma/*"), `ltx_2_3:${tier}: the gemma sibling root is not fetched (${ltx.join(" ")})`);
+    assert.ok(ltx.includes(`${tier}/*`), `ltx_2_3:${tier}: the tier root is not fetched`);
+  }
+
+  // And every one of those is reachable only because no invocation drops a glob.
+  for (const key of ["mage_flow:bf16:candle", "minimax_h3_ref:q4:candle", "ltx_2_3:q4:candle"]) {
+    const parts = anchorParts(key);
+    const { targets } = anchorDownloadTargets(
+      { key, ...parts, provider: parts.modelId === "minimax_h3_ref" ? "minimax_h3" : parts.modelId },
+      models, { platform: "windows" },
+    );
+    const multi = targets.filter((target) => target.include.length > 1);
+    assert.ok(multi.length > 0, `${key} is a multi-glob fetch, which is what the defect ate`);
+    for (const target of multi) {
+      assert.equal(hfDownloadArgvs(target, "/hub").length, target.include.length);
+    }
+  }
 });
 
 test("no anchor can be fetched off a branch: every target the shipped plan produces carries a 40-hex revision", async () => {
@@ -5733,6 +6172,43 @@ test("--dry-run --download-missing prints what it would fetch and fetches nothin
   const { rows } = await withStubCli(stub, () => planRun(args, root));
   assert.equal(rows.find((entry) => entry.key === "qwen_image:q4:mlx").status, "weights_missing");
   assert.deepEqual(await stub.invocations(), []);
+});
+
+// sc-22738 — the same four classes, driven end to end through the stub CLI so the assertion is on
+// the argv the runner would actually hand `hf`, not only on the resolved include set.
+test("through the CLI, every glob a failing CUDA cell needed is passed to a fetch of its own", { skip: skipWithoutShebang }, async () => {
+  const models = await readManifestModels();
+  const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-classes-"));
+  const cases = [
+    ["mage_flow:bf16:candle", "mage_flow", ["bf16/text_encoder/*", "bf16/vae/*"]],
+    ["ltx_2_3:q4:candle", "ltx_2_3", ["gemma/*", "q4/*"]],
+    ["minimax_h3_ref:q8:candle", "minimax_h3", ["q8/transformer_ref/*", "q8/transformer/*"]],
+    ["minimax_h3:q4:candle", "minimax_h3", ["q4/transformer/*", "q4/transformer_ref/*"]],
+  ];
+  for (const [key, provider, required] of cases) {
+    const stub = await stubHuggingFaceCli();
+    const parts = anchorParts(key);
+    const outcome = await withStubCli(stub, () => fetchAnchorSnapshots(
+      { key, ...parts, provider }, models,
+      { cacheRoot: hub, platform: "windows", log: () => {} },
+    ));
+    assert.equal(outcome.failed, null, `${key}: ${outcome.failed}`);
+    const invocations = await stub.invocations();
+    const includes = new Set();
+    for (const argv of invocations) {
+      assert.equal(
+        argv.filter((token) => token === "--include").length <= 1, true,
+        `${key}: an argv carries two --include flags, which the older CLI reads as one: ${JSON.stringify(argv)}`,
+      );
+      const at = argv.indexOf("--include");
+      if (at !== -1) includes.add(argv[at + 1]);
+      // And no fetch anywhere ever pulls a dotfile.
+      assert.ok(argv.includes("--exclude"), `${key}: a fetch with no dotfile exclusion: ${JSON.stringify(argv)}`);
+    }
+    for (const glob of required) {
+      assert.ok(includes.has(glob), `${key}: ${glob} was never passed to the CLI (saw ${[...includes].join(" ")})`);
+    }
+  }
 });
 
 test("download rows are narrowed to this host's platform, and fall back rather than resolving to no globs", async () => {

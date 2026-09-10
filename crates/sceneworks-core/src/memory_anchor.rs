@@ -4055,12 +4055,21 @@ mod tests {
         );
         // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
         // asks that every LTX-2.5 row still comes from a packaged corpus that carries a completed
-        // LTX-2.5 MLX record — the seed corpus or a sc-22738 campaign corpus — and nothing more.
+        // LTX-2.5 record ON THAT ROW'S OWN LANE — the seed corpus or a sc-22738 campaign corpus —
+        // and nothing more.
+        //
+        // sc-22738: this loop used to demand an `mlx` record of EVERY LTX-2.5 anchor regardless of
+        // the anchor's backend, which held only while MLX was the sole lane carrying LTX-2.5
+        // anchors. The candle campaign landed ltx_2_5:candle bf16/q4/q8, each citing a candle
+        // corpus, and the MLX-keyed literal reddened on them. Keying the required record on
+        // `anchor.backend` keeps the guard on both lanes instead of exempting the new one: a
+        // candle anchor citing an MLX-only corpus (or the reverse) still fails.
         for anchor in store()
             .anchors
             .iter()
             .filter(|anchor| anchor.model_id == "ltx_2_5")
         {
+            let lane = anchor.backend.as_key();
             let cites_ltx25_corpus = PACKAGED_MEMORY_ANCHOR_SOURCES
                 .iter()
                 .find(|(path, _)| *path == anchor.source.path)
@@ -4070,14 +4079,14 @@ mod tests {
                     source["records"].as_array().is_some_and(|records| {
                         records.iter().any(|record| {
                             record["target"]["modelId"].as_str() == Some("ltx_2_5")
-                                && record["backend"].as_str() == Some("mlx")
+                                && record["backend"].as_str() == Some(lane)
                         })
                     })
                 })
                 .unwrap_or(false);
             assert!(
                 cites_ltx25_corpus,
-                "{}: an LTX-2.5 anchor must cite a packaged corpus carrying LTX-2.5 MLX records",
+                "{}: an LTX-2.5 anchor must cite a packaged corpus carrying LTX-2.5 {lane} records",
                 anchor.id
             );
         }

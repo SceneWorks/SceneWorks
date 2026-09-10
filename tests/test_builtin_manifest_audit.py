@@ -414,6 +414,51 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         _assert_mage_tier_layout(model, model_id, repo, revision)
 
 
+def test_minimax_h3_sibling_dit_partition_ships_wherever_its_tier_does():
+    """sc-22738: `transformer_ref/` is part of the MINIMUM LOADABLE SET, not a Ref2VA extra.
+
+    Both engines open `transformer/config.json` AND `transformer_ref/config.json` on every load
+    regardless of task, so a platform that gets the tier's base DiT and not its sibling gets an
+    install that cannot render at all. The `transformer_ref` co-requisites were scoped
+    ``["macos"]`` while the packed q4/q8 primaries shipped to all three platforms, which made the
+    off-Mac q4/q8 install a hard load failure by construction: CUDA campaign run 34356681566
+    fetched both tier roots on the Windows box and every ``minimax_h3``/``minimax_h3_ref`` q4/q8
+    cell still planned ``weights_missing`` naming ``transformer_ref/config.json``.
+
+    The rule asserted here is the parity, not a literal platform list: whatever platforms a tier's
+    primary rehost row ships to, that tier's sibling partition ships to the same ones. bf16 is
+    therefore free to stay macOS-only on ``minimax_h3`` — its primary is — because the off-Mac
+    dense leg loads from the ``MiniMaxAI/MiniMax-H3`` snapshot root instead.
+    """
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    rehost = "SceneWorks/minimax-h3-mlx"
+    for model_id, primary_partition, sibling_partition in [
+        ("minimax_h3", "transformer", "transformer_ref"),
+        ("minimax_h3_ref", "transformer_ref", "transformer"),
+    ]:
+        rows = [d for d in models[model_id]["downloads"] if d["repo"] == rehost]
+        for tier in TIERS:
+            primary = [
+                d for d in rows
+                if d.get("variant") == tier
+                and d.get("files") == [f"{tier}/{primary_partition}/*"]
+            ]
+            sibling = [
+                d for d in rows
+                if d.get("variant") == tier
+                and d.get("files") == [f"{tier}/{sibling_partition}/*"]
+            ]
+            assert len(primary) == 1, (model_id, tier, primary_partition)
+            assert len(sibling) == 1, (model_id, tier, sibling_partition)
+            assert sibling[0]["platforms"] == primary[0]["platforms"], (
+                f"{model_id}:{tier}: {sibling_partition} ships to "
+                f"{sibling[0]['platforms']} but {primary_partition} ships to "
+                f"{primary[0]['platforms']}; both engines probe "
+                f"{sibling_partition}/config.json on EVERY load, so the narrower row makes that "
+                "platform's install unloadable"
+            )
+
+
 def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
     """sc-14050 + sc-14980: every edit variant ships physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
