@@ -6455,9 +6455,12 @@ fn install_state_for(
         // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
+        let mut tier_dependencies_missing = false;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
+                tier_dependencies_missing =
+                    variants.iter().any(|variant| variant.dependencies_missing);
                 let any_installed = variants.iter().any(|variant| variant.installed);
                 // A TORN tier — some of its files present but not all — is a genuine repair candidate:
                 // it will fail to load, and re-downloading that tier fixes it. A never-fetched tier is
@@ -6562,7 +6565,10 @@ fn install_state_for(
                             .and_then(Value::as_bool)
                             .unwrap_or(false)
                 });
-        let usable_stale = stale_files_present && !breaking_update;
+        // A receipt proves the primary files exist, not that their dependencies still do.
+        // Do not let it override missing dependencies. A partial nonbreaking primary update
+        // may still use its complete older receipt.
+        let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
@@ -6586,8 +6592,11 @@ fn install_state_for(
         let tier_scoped: Vec<Value> = model_co_requisite_downloads(model)
             .into_iter()
             .filter(|download| co_requisite_variant(download).is_some())
+            .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
             .collect();
-        if !tier_scoped.is_empty() {
+        // Current matrix variants already check their matching dependency sets with the primary.
+        // Retain the dependency floor when a receipt is supplying an older primary instead.
+        if (!model_has_variant_matrix(model) || usable_stale) && !tier_scoped.is_empty() {
             let tiers: std::collections::BTreeSet<String> = tier_scoped
                 .iter()
                 .filter_map(co_requisite_variant)
@@ -6789,6 +6798,8 @@ struct ModelVariantState {
     installed_path: Option<String>,
     /// This tier's incomplete-cache signal (some but not all `files` present).
     cache_incomplete: bool,
+    /// A present primary is missing required companions; primary-only receipts cannot repair this.
+    dependencies_missing: bool,
     /// Files this tier is missing from the cache (empty when complete or absent).
     missing_required_files: Vec<String>,
     /// This tier's estimated download size (from `downloads[].estimatedSizeBytes` /
@@ -6847,13 +6858,11 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
-        // sc-19078: the MiniMax-H3 tiers ship two DiT partition dirs (`{tier}/transformer` and
-        // `{tier}/transformer_ref`) and NO `model_index.json` at either level, so the coarse
-        // `q4/transformer/*` glob is satisfied by a single landed file out of fourteen shards. Like
-        // SenseNova the id — not the family — picks the predicate: the two catalog entries share the
-        // `minimax-h3` family but own DIFFERENT partitions of one repo, so a family-only predicate
-        // would have to demand both and report a reference-only install as torn forever.
-        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
+        // Both MiniMax-H3 entries load both DiT partitions. Each partition's glob can match
+        // an interrupted download, so require both indexed shard sets before advertising a tier.
+        "minimax-h3" if tc::minimax_h3_tier_predicate(model_id).is_some() => {
+            Some(|dir| tc::minimax_h3_tier_complete(dir) && tc::minimax_h3_ref_tier_complete(dir))
+        }
         _ => None,
     }
 }
@@ -6989,6 +6998,42 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // A tier is usable only with its own required companions. Checking these only at
+            // model level let a complete q4 encoder certify bf16 and hid its repair action.
+            // An absent primary remains absent even if shared files from another tier exist.
+            let mut dependencies_missing = false;
+            if installed || cache_incomplete {
+                for download in model_co_requisite_downloads_for_variant(
+                    model,
+                    entry.get("variant").and_then(Value::as_str),
+                )
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+                {
+                    let health = co_requisite_cache_health(data_dir, &download);
+                    if health.as_ref().is_some_and(|health| health.installed) {
+                        continue;
+                    }
+                    installed = false;
+                    cache_incomplete = true;
+                    dependencies_missing = true;
+                    let repo = download
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let missing = health
+                        .map(|health| health.missing_files)
+                        .filter(|files| !files.is_empty())
+                        .unwrap_or_else(|| string_array_field(&download, "files"));
+                    if missing.is_empty() {
+                        missing_required_files.push(repo.to_owned());
+                    } else {
+                        missing_required_files
+                            .extend(missing.iter().map(|file| format!("{repo}/{file}")));
+                    }
+                }
+            }
+
             let installed_path = if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -7006,6 +7051,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
                 cache_incomplete,
+                dependencies_missing,
                 missing_required_files,
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
@@ -10362,6 +10408,78 @@ mod variant_install_tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn tier_dependencies_cannot_be_borrowed_from_a_sibling_or_a_receipt() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let components = "SceneWorks/encoders";
+        let mut model = quant_matrix_model(repo);
+        for tier in ["q4", "q8", "bf16"] {
+            model["downloads"].as_array_mut().unwrap().push(json!({
+                "provider": "huggingface", "repo": components, "coRequisite": true,
+                "variant": tier, "files": [format!("{tier}/encoder.bin")]
+            }));
+        }
+        seed_cache(data.path(), repo, &["bf16/model.safetensors"]);
+        seed_cache(
+            data.path(),
+            components,
+            &["q4/encoder.bin", "bf16/encoder.bin"],
+        );
+        let state =
+            || install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state().installed); // Also backfills the primary receipt.
+        let receipt = data.path().join("models").join(safe_download_dir(repo));
+        assert!(!receipt_file_sets(&receipt, repo, Some("matrix_model")).is_empty());
+
+        std::fs::remove_file(
+            huggingface_repo_cache_path(data.path(), components)
+                .unwrap()
+                .join("snapshots/abc123/bf16/encoder.bin"),
+        )
+        .unwrap();
+        let broken = state();
+        assert!(
+            !broken.installed,
+            "q4's encoder and the bf16 primary receipt cannot certify bf16"
+        );
+        assert!(broken.cache_incomplete);
+        assert!(broken
+            .missing_required_files
+            .contains(&format!("{components}/bf16/encoder.bin")));
+        let variants = model_variant_states(&model, data.path());
+        for tier in ["q4", "q8"] {
+            let variant = variants.iter().find(|v| v.variant == tier).unwrap();
+            assert!(
+                !variant.installed && !variant.cache_incomplete,
+                "absent primary {tier}"
+            );
+        }
+
+        seed_cache(data.path(), components, &["bf16/encoder.bin"]);
+        assert!(state().installed);
+        assert!(!state().cache_incomplete);
+    }
+
+    #[test]
+    fn optional_tier_dependencies_do_not_block_an_installed_primary() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let mut model = quant_matrix_model(repo);
+        model["downloads"].as_array_mut().unwrap().push(json!({
+            "provider": "huggingface", "repo": "SceneWorks/optional", "coRequisite": true,
+            "variant": "q4", "required": "soft", "files": ["optional.bin"]
+        }));
+        seed_cache(data.path(), repo, &["q4/model.safetensors"]);
+        let variants = model_variant_states(&model, data.path());
+        let q4 = variants.iter().find(|v| v.variant == "q4").unwrap();
+        assert!(q4.installed && !q4.cache_incomplete);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state.installed && !state.cache_incomplete);
     }
 
     #[test]
