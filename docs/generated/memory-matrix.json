@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:5523cc4baa977b7d2b4bb64a0d05403d498d4043e135b9c34efdff79fbe2dc86",
+    "sceneWorksRevision": "source-tree:b15b0ac3c1d811ed969a41a96fde53007e1b6e2cd75fbd1b183817f33215836e",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -73,11 +73,11 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "59761180eaf117e9813320c57ae19b9c9b9330d5a97a9b0b2ee04f1f34b97771"
+        "sha256": "642b70e3d6df095dc59e8fc9e12d2f508f5fa2f3cf50ae09087d0b6982bb1cf3"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "496bc4f41516070175e2083a8a6ea56d4b7db3bdb21b3b04fdbdb4a0d04c7266"
+        "sha256": "0fe4d4b63a67c9e0ee72960ce25c2c4f10d6f506918bda1ad2a330210807a77c"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -165,7 +165,7 @@
     "anchors": 141,
     "analyticOnlyCells": 202,
     "anchoredCells": 1973,
-    "staleAnchors": 76,
+    "staleAnchors": 79,
     "attestedAnchors": 5,
     "fullModels": 0
   },
@@ -5809,7 +5809,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/ltx-2-5-bf16-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 42
     },
@@ -5827,7 +5827,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 42
     },
@@ -5845,7 +5845,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/ltx-2-5-q8-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 42
     },
@@ -65178,7 +65178,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65245,7 +65245,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65309,7 +65309,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65375,7 +65375,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65442,7 +65442,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65509,7 +65509,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65573,7 +65573,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65639,7 +65639,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65706,7 +65706,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65770,7 +65770,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65836,7 +65836,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65903,7 +65903,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -65970,7 +65970,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66034,7 +66034,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66100,7 +66100,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66167,7 +66167,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66231,7 +66231,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66297,7 +66297,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66364,7 +66364,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66431,7 +66431,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66495,7 +66495,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66561,7 +66561,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66628,7 +66628,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66692,7 +66692,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66758,7 +66758,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66825,7 +66825,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66892,7 +66892,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -66956,7 +66956,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67022,7 +67022,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67089,7 +67089,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67153,7 +67153,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67219,7 +67219,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67286,7 +67286,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67353,7 +67353,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67417,7 +67417,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67483,7 +67483,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67550,7 +67550,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67614,7 +67614,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67680,7 +67680,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67747,7 +67747,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67814,7 +67814,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67878,7 +67878,7 @@
         "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -67944,7 +67944,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68011,7 +68011,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68075,7 +68075,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68141,7 +68141,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68208,7 +68208,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68275,7 +68275,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68339,7 +68339,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68405,7 +68405,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68472,7 +68472,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68536,7 +68536,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68602,7 +68602,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68669,7 +68669,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68736,7 +68736,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68800,7 +68800,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68866,7 +68866,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68933,7 +68933,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -68997,7 +68997,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69063,7 +69063,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69130,7 +69130,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69197,7 +69197,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69261,7 +69261,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69327,7 +69327,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69394,7 +69394,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69458,7 +69458,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69524,7 +69524,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69591,7 +69591,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69658,7 +69658,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69722,7 +69722,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69788,7 +69788,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69855,7 +69855,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69919,7 +69919,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -69985,7 +69985,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70052,7 +70052,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70119,7 +70119,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70183,7 +70183,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70249,7 +70249,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70316,7 +70316,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70380,7 +70380,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70446,7 +70446,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70513,7 +70513,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70580,7 +70580,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70644,7 +70644,7 @@
         "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70710,7 +70710,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70777,7 +70777,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70841,7 +70841,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70907,7 +70907,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -70974,7 +70974,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71041,7 +71041,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71105,7 +71105,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71171,7 +71171,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71238,7 +71238,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71302,7 +71302,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71368,7 +71368,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71435,7 +71435,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71502,7 +71502,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71566,7 +71566,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71632,7 +71632,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71699,7 +71699,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71763,7 +71763,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71829,7 +71829,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71896,7 +71896,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -71963,7 +71963,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72027,7 +72027,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72093,7 +72093,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72160,7 +72160,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72224,7 +72224,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72290,7 +72290,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72357,7 +72357,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72424,7 +72424,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72488,7 +72488,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72554,7 +72554,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72621,7 +72621,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72685,7 +72685,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72751,7 +72751,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72818,7 +72818,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72885,7 +72885,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -72949,7 +72949,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73015,7 +73015,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73082,7 +73082,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73146,7 +73146,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73212,7 +73212,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73279,7 +73279,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73346,7 +73346,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -73410,7 +73410,7 @@
         "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },

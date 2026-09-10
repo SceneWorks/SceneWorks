@@ -1781,7 +1781,8 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
-  // `not_run`. Two arms build their fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // `not_run`. Bespoke arms build their fragment by hand for a real reason — InstantID's measured
+  // identity ladder, sc-22726's bespoke PuLID
   // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
   // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
   // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
@@ -1793,7 +1794,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     .map(([name]) => name);
   assert.deepEqual(
     handRolled.sort(),
-    ["run_pulid_flux_capture", "run_sensenova_capture"],
+    ["instantid_measured_fragment", "run_pulid_flux_capture", "run_sensenova_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
   for (const name of handRolled) {
@@ -1804,6 +1805,11 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
     );
   }
+  assert.match(candleFunctions.get("validate_instantid_candle_target"),
+    /validate_exact_overlay_target\(request, "identity", INSTANTID_EXECUTION_PATH\)/);
+  const instantid = candleFunctions.get("run_instantid_candle");
+  assert.ok(instantid.indexOf("validate_instantid_candle_target(request)?") <
+    instantid.indexOf("instantid_candle_binding(tier)?"));
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,

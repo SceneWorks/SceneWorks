@@ -6372,11 +6372,11 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     // sc-22738 sweep: a bare equality is correct for all four members of this table, and each for a
     // reason read off the pinned engines rather than assumed.
     //
-    //  - **Bernini (49 frames)**: the CANDLE z16 is causal — `candle_gen_wan::vae16::WanVae16`
+    //  - **Bernini (45 frames)**: the CANDLE z16 is causal — `candle_gen_wan::vae16::WanVae16`
     //    declares `causal_temporal: true` as its own literal
     //    (`candle-gen-wan/src/vae16.rs:344-349`), deliberately distinct from the shared
     //    `VaeTiling::WAN` the MLX z16 binds, and `candle-gen-bernini/src/lib.rs:73` inherits it. So
-    //    `out_f = 1 + (f_lat−1)·4 = 49` for a `1 mod 4` count. This is the one place the two lanes
+    //    `out_f = 1 + (f_lat−1)·4 = 45` for a `1 mod 4` count. This is the one place the two lanes
     //    genuinely disagree about the same VAE: the MLX Bernini arm had to stop using an equality
     //    for exactly this reason, and this arm must not copy that change.
     //  - **LTX-2.3 (97 frames)**: `VaeTiling::LTX` is causal at ×8 and the engine refuses any

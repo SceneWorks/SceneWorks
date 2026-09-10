@@ -2347,10 +2347,8 @@ export async function recordExceededBound({
     hardware: probe.hardware,
     artifact,
     target: planned.target,
-    // The anchor plan has no reference axis at all (packages/schemas/memory-anchor-plan.schema.json
-    // states geometry as width/height/batch/frames), so every anchor capture — and therefore every
-    // bound one can produce — is reference-free. Stated as a field rather than assumed because the
-    // store keys on it: a reference-carrying request must not inherit a reference-free bound.
+    // Preserve the declared conditioning cardinality, including when the capture stops early.
+    // Older plans omit it; new reference probes must not produce reference-free bounds.
     referenceCount: planned.target.referenceCount ?? 0,
     observedFootprintBytes: measured.observedFootprintBytes,
     ceilingBytes: measured.ceilingBytes,

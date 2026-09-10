@@ -31,8 +31,11 @@ retained as backups.
   header; the shared q8 text encoder was 90,319,125 versus 4,719,576,437 bytes.
   Replacements were fetched at the exact same revisions into a separate staging
   directory and checked against the publisher's SHA-256 and safetensors length.
-  Installation requires exclusive access to each original blob and preserves
+  Installation acquired exclusive access to each original blob and preserved
   `.corrupt-sc23026` backups; snapshot symlinks keep the same content address.
+  Both installed files passed SHA-256 readback through those symlinks, and a
+  subsequent header/length audit passed for all eight safetensors files in the
+  two affected snapshots.
   The preflight change detects absent weights, not arbitrary corruption or
   checksum mismatches in present files.
 - The Lens q4 and Lens-Turbo q8 transformer directories contain only
@@ -41,14 +44,16 @@ retained as backups.
 - The corrected Bernini/LTX probes measure reference-conditioned video. Their
   changed modes, reference counts and fixture names keep the new workload
   distinct from the old rejected T2V requests. They still need real captures.
+- The shared LTX loader change makes three older LTX-2.5 Candle anchors stale
+  in the regenerated matrix; this patch does not extend those measurements.
 - The campaign is still running. This is an interim failure inventory, not the
   story's final residue enumeration or evidence closeout.
 
 ## Integration order
 
-The inference fixes are prepared on `codex/sc-23026-capture-repairs` in the
-inference repository. Land those first, then update SceneWorks' inference pin
-to their merged main revision together with these adapter fixes. No local-only
-inference revision is pinned here. Resume measurements using the successful
-evidence already collected, after repairing the truncated artifacts. These
-patches do not themselves establish new GPU measurements or close sc-23026.
+The inference fixes landed in [inference PR #968](https://github.com/SceneWorks/inference/pull/968).
+SceneWorks pins their merged main revision
+`81fda3bd5a9d5920ad9cdc62796df3305be96742` together with these adapter fixes.
+The two truncated Mage artifacts are repaired and verified. Resume measurements
+using the successful evidence already collected. These patches do not themselves
+establish new GPU measurements or close sc-23026.

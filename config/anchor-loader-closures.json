@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
+  "inferenceRevision": "81fda3bd5a9d5920ad9cdc62796df3305be96742",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -1498,7 +1498,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "e9d661c2b8da3396932ab0777ab6e2fa218bcf60ca6b03208ae378505ce86ecb",
+      "digest": "48e4c090def2c20e97cc1d878bdc90129236791c767aabeced568fe8a28358d2",
       "closureFileCount": 170,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -1827,7 +1827,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "d424153ace4021c04900e00d26a675d8b559b73d7ff2d0044465388bdad7b180",
+      "digest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d",
       "closureFileCount": 170,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -2158,7 +2158,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "89344fa3cb5db6f066c8ca4003647cbb78367cca999dfd5f52d2c401eb9816e2",
+      "digest": "a0a7abc22eddf0a4189389e3417461c145398187a219dd37dde15d2e792dff65",
       "closureFileCount": 170,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6373,7 +6373,7 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy.rs"
       ],
-      "digest": "aff1762e0df7a87d929c5e1256c8f648fcdeafe0580593a9280c87f647d9ad50",
+      "digest": "cca2c0922a4311657494dc3c4f2a4d63c0eec0b9b1506ae4d9d9a30f32a8b35e",
       "closureFileCount": 178,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6744,7 +6744,7 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy_2_5.rs"
       ],
-      "digest": "4ed7a1f0a83c848bd5df40ea97cfc59f87259a54246022863344168e52a9dd41",
+      "digest": "c5faf59825e930607b1af77955ffd942e514db7ea87769a869ed98a48bb718d9",
       "closureFileCount": 178,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -8881,7 +8881,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "c1a4017cdbd627143cdf409c917843f08d9dd2485b4107c27b70c5b464cba106",
+      "digest": "fabbf911f6c575b873a8f9d39a538e5ede2bdab57443f6692ebef8e79995aa48",
       "closureFileCount": 280,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -9383,7 +9383,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "dd024f8306c0f29a032fea59f581dbf418026bea70bcad2396107678f77435b1",
+      "digest": "c9b636c12896c16a9997ef316184cb1c4e08242eb5875757cc077dfeafb2742e",
       "closureFileCount": 280,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
