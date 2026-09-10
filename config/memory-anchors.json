@@ -6446,6 +6446,52 @@
       "overallAllocatorEnvelopeBytes": 53746387904
     },
     {
+      "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q4-candle-evidence.json",
+        "sha256": "6842e2e8e5424d6328c661b4758095d66caa208704060c3b49e301ca8bfa7cee",
+        "recordId": "imc-52dbe1e4f3d3466265dc",
+        "calibrationFingerprint": "scail2-14b-q4-candle-resident-eager-v1",
+        "loaderClosureDigest": "9f9cf0723b20193e0d70159454891dcea838d728bca67da719828f87d8353f88"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 59432239104,
+        "denoise": 85531295744,
+        "decode": 58957234176
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 59432239104,
+        "denoise": 85531295744,
+        "decode": 58957234176
+      },
+      "overallAllocatorEnvelopeBytes": 85531295744,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
       "modelId": "sd3_5_large",
       "modelFamily": "sd3",
@@ -9585,27 +9631,6 @@
         "envelopeBytes": null,
         "values": {
           "vramGbByTier": "102.115"
-        }
-      }
-    },
-    {
-      "id": "analytic:scail2_14b:candle:q4",
-      "modelId": "scail2_14b",
-      "modelFamily": "scail2",
-      "route": "scail2_14b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "61.26"
         }
       }
     },

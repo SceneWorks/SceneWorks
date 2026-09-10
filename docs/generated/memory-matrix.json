@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9fcdfcaac56992f875e02887cd65c912c595c32f3ec6aab5c58a2f07fbc1c550",
+    "sceneWorksRevision": "source-tree:40502f2543569b6aadeffd827063c526b0b3b8b5d81965efb29dcfeb3c52b7de",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "212b58845048c4fda1052b104455ade6d39634f778f864c6a6ba645b561c3dae"
+        "sha256": "89fa6be8ba4929402d15b09d6c8dfa9814bfbd58ed9976debd10dc210af64ca6"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "412a8522a31767d713edfc9f68e5bd62ee0c19e1db17870738e7125bf9128f81"
+        "sha256": "aa498c774866658c8d7fdfe1d2e935e7bf298498ae51f1d4bfd4e71ff0a57518"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 2993,
-    "elidedCells": 6397,
+    "publishedCells": 2997,
+    "elidedCells": 6393,
     "elidedByState": {
-      "Implemented": 1981,
+      "Implemented": 1977,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 176,
-    "analyticOnlyCells": 167,
-    "anchoredCells": 2757,
+    "anchors": 177,
+    "analyticOnlyCells": 166,
+    "anchoredCells": 2761,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -7142,6 +7142,24 @@
       },
       "source": "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
       "current": false,
+      "currencyAttestation": null,
+      "cells": 4
+    },
+    {
+      "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+      "modelId": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/scail2-14b-q4-candle-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 4
     },
@@ -15595,11 +15613,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 12,
-      "published": 0,
-      "elided": 12,
+      "published": 4,
+      "elided": 8,
       "implemented": 12,
       "states": {
-        "Implemented": 12
+        "Anchored/underived": 4,
+        "Implemented": 8
       }
     },
     {
@@ -149701,6 +149720,242 @@
       }
     },
     {
+      "id": "scail2_14b:scail2_14b:candle:q4:animate_character:lora:resident",
+      "modelId": "scail2_14b",
+      "resolvedRoute": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "animate_character",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18828,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scail2_14b:scail2_14b:candle:q4:animate_character:none:resident",
+      "modelId": "scail2_14b",
+      "resolvedRoute": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "animate_character",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18828,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scail2_14b:scail2_14b:candle:q4:replace_person:lora:resident",
+      "modelId": "scail2_14b",
+      "resolvedRoute": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18828,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scail2_14b:scail2_14b:candle:q4:replace_person:none:resident",
+      "modelId": "scail2_14b",
+      "resolvedRoute": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18828,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc"
+          }
+        ]
+      }
+    },
+    {
       "id": "sd3_5_large_turbo:sd3_5_large_turbo:mlx:bf16:text_to_image:lora:resident",
       "modelId": "sd3_5_large_turbo",
       "resolvedRoute": "sd3_5_large_turbo",
@@ -193250,7 +193505,12 @@
       "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:resident",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "scail2_14b": [],
+    "scail2_14b": [
+      "scail2_14b:scail2_14b:candle:q4:animate_character:lora:resident",
+      "scail2_14b:scail2_14b:candle:q4:animate_character:none:resident",
+      "scail2_14b:scail2_14b:candle:q4:replace_person:lora:resident",
+      "scail2_14b:scail2_14b:candle:q4:replace_person:none:resident"
+    ],
     "sd3_5_large": [
       "sd3_5_large:sd3_5_large:mlx:bf16:text_to_image:lora:resident",
       "sd3_5_large:sd3_5_large:mlx:bf16:text_to_image:lora:staged_residency",
