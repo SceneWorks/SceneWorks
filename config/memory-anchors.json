@@ -776,6 +776,51 @@
       "overallAllocatorEnvelopeBytes": 66623825544
     },
     {
+      "id": "flux_dev:candle:bf16:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-87f517952e8742223c16",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-bf16-candle-evidence.json",
+        "sha256": "3241d5fb670b9bcf72fa0a15207dc8e8be5bc10b3ddfba8f76a3d5bd31418c0f",
+        "recordId": "imc-87f517952e8742223c16",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "a1fea0f76ceef1c1f354462ca7491e32ef15baa20dd2d49db643405285b353ad"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10606346240,
+        "denoise": 28155314176,
+        "decode": 35405168640
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10606346240,
+        "denoise": 28155314176,
+        "decode": 35405168640
+      },
+      "overallAllocatorEnvelopeBytes": 35405168640
+    },
+    {
       "id": "flux_dev:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-302fb0e31ed545f30400",
       "modelId": "flux_dev",
       "modelFamily": "flux",
@@ -1002,6 +1047,51 @@
       },
       "overallAllocatorEnvelopeBytes": 75405173600,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "flux_schnell:candle:bf16:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-a8923dd83eccb18d8fc4",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-bf16-candle-evidence.json",
+        "sha256": "d549bc35c14cbd1785db9e3c47077b24d135ca6cc87f4fe7e544f2b96b45b546",
+        "recordId": "imc-a8923dd83eccb18d8fc4",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "6ec1516e2324d822b07ee23e9d6b1fbd4f9b72b9312f84343da3d10693983959"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10438574080,
+        "denoise": 27819769856,
+        "decode": 35338059776
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10438574080,
+        "denoise": 27819769856,
+        "decode": 35338059776
+      },
+      "overallAllocatorEnvelopeBytes": 35338059776
     },
     {
       "id": "flux_schnell:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-9bb7a4d7fb80ee5d3f02",
@@ -7125,6 +7215,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux2_dev:candle:bf16",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:flux2_dev:candle:q4",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -8665,6 +8766,17 @@
       }
     },
     {
+      "id": "analytic:sd3_5_large:candle:q8",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:sd3_5_large_turbo:candle:bf16",
       "modelId": "sd3_5_large_turbo",
       "modelFamily": "sd3",
@@ -8687,6 +8799,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:sd3_5_large_turbo:candle:q8",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:sd3_5_medium:candle:bf16",
       "modelId": "sd3_5_medium",
       "modelFamily": "sd3",
@@ -8704,6 +8827,17 @@
       "route": "sd3_5_medium",
       "backend": "candle",
       "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:candle:q8",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

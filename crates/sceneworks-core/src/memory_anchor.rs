@@ -3960,17 +3960,32 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
-    // AC 1 (store half): every LTX-2.5 MLX (tier, transformer variant, decoder) cell the
-    // retained corpus measures carries exactly one anchor, and no cell it does not measure
-    // carries any.
+    // AC 1 (store half): every LTX-2.5 (tier, transformer variant, decoder) cell the retained
+    // corpus measures, ON EITHER LANE, carries exactly one anchor, and no cell it does not
+    // measure carries any.
     // -------------------------------------------------------------------------------------
 
     /// Every `(tier, transformer variant, decoder)` cell that ANY packaged corpus measures for
-    /// LTX-2.5 on MLX as a completed run — the sc-18791 seed corpus and, since the sc-22738
-    /// campaign, the per-cell corpora under `docs/calibration/sc-22738/`. Derived from the
-    /// compiled-in list rather than pinned, so a campaign that lands a new pipeline cell (the
-    /// rerun's dev/conv bf16 and q4) extends the expectation instead of reddening it.
-    fn measured_ltx25_mlx_cells() -> std::collections::BTreeSet<(String, String, String)> {
+    /// LTX-2.5 on `lane` — the sc-18791 seed corpus and, since the sc-22738 campaign, the
+    /// per-cell corpora under `docs/calibration/sc-22738/`. Derived from the compiled-in list
+    /// rather than pinned, so a campaign that lands a new pipeline cell (the rerun's dev/conv
+    /// bf16 and q4) extends the expectation instead of reddening it.
+    ///
+    /// sc-22738: LANE-PARAMETERISED, and `status` is no longer read. Both changes are the same
+    /// correction. This used to hard-code `mlx` and `status == "runtime_complete"`, which held
+    /// only while MLX was the sole lane carrying LTX-2.5 anchors; the candle campaign landed
+    /// `ltx_2_5:candle` bf16/q4/q8, whose records are `status: "gated"`, so a candle lane bolted
+    /// onto the old predicate would have derived ZERO measured cells against three live anchors.
+    ///
+    /// `status` is not a candidacy rule anywhere in the anchor pass — `anchorCandidate` in
+    /// `scripts/extract-memory-anchors.mjs` never reads the field, and all three spellings the
+    /// packaged corpora use (`gated`, `runtime_complete`, `complete`) produce anchors today.
+    /// Filtering on it here was a SECOND, narrower opinion about what anchors, and this is the
+    /// bug that made the candle rows invisible to the guard below. What a record must have to
+    /// anchor is its lane's phase measurements, and re-deriving that rule in Rust would just be
+    /// a third opinion — so the cell set is the population, and the store is what is checked
+    /// against it.
+    fn measured_ltx25_cells(lane: &str) -> std::collections::BTreeSet<(String, String, String)> {
         PACKAGED_MEMORY_ANCHOR_SOURCES
             .iter()
             .flat_map(|(_, raw)| {
@@ -3982,8 +3997,7 @@ mod tests {
             })
             .filter(|record| {
                 record["target"]["modelId"].as_str() == Some("ltx_2_5")
-                    && record["backend"].as_str() == Some("mlx")
-                    && record["status"].as_str() == Some("runtime_complete")
+                    && record["backend"].as_str() == Some(lane)
             })
             .map(|record| {
                 (
@@ -4002,57 +4016,76 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
-        let measured = measured_ltx25_mlx_cells();
-        // Shape, not a frozen count: the corpus spans more than one variant and more than one
-        // decoder, so this test cannot silently degenerate into a single-cell assertion.
+    fn ltx25_carries_exactly_one_anchor_per_measured_pipeline_cell() {
+        // Shape, not a frozen count, and MLX-scoped on purpose: the MLX corpus spans more than
+        // one variant and more than one decoder, so the guard below cannot silently degenerate
+        // into a single-cell assertion on that lane. It is NOT asserted cross-lane — the candle
+        // campaign measured one variant (`distilled`) and one decoder (`conv`), so demanding a
+        // spread there would freeze a population rather than describe a shape.
+        let mlx_measured = measured_ltx25_cells(AnchorBackend::Mlx.as_key());
         assert!(
-            measured
+            mlx_measured
                 .iter()
                 .map(|(_, variant, _)| variant.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
-            "the retained corpus must span more than one transformer variant"
+            "the retained MLX corpus must span more than one transformer variant"
         );
         assert!(
-            measured
+            mlx_measured
                 .iter()
                 .map(|(_, _, decoder)| decoder.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
-            "the retained corpus must span more than one decoder"
+            "the retained MLX corpus must span more than one decoder"
         );
 
-        for (tier, variant_key, decoder_key_str) in &measured {
-            let matching = store()
-                .anchors
-                .iter()
-                .filter(|anchor| {
-                    anchor.model_id == "ltx_2_5"
-                        && anchor.backend == AnchorBackend::Mlx
-                        && anchor.tier == *tier
-                        && variant_key_opt(anchor.transformer_variant) == variant_key.as_str()
-                        && decoder_key_opt(anchor.decoder) == decoder_key_str.as_str()
-                })
-                .count();
+        // sc-22738: BOTH lanes. The uniqueness half used to run on MLX alone while the citation
+        // loop below had already been widened, so the three `ltx_2_5:candle` anchors the candle
+        // campaign landed were checked for provenance but never for one-anchor-per-cell. A second
+        // candle anchor on a cell that already had one was admissible.
+        for lane in [AnchorBackend::Mlx, AnchorBackend::Candle] {
+            let measured = measured_ltx25_cells(lane.as_key());
+            assert!(
+                !measured.is_empty(),
+                "{}: the packaged corpora must measure at least one LTX-2.5 pipeline cell on \
+                 this lane — an empty population makes every assertion below vacuous",
+                lane.as_key()
+            );
+            for (tier, variant_key, decoder_key_str) in &measured {
+                let matching = store()
+                    .anchors
+                    .iter()
+                    .filter(|anchor| {
+                        anchor.model_id == "ltx_2_5"
+                            && anchor.backend == lane
+                            && anchor.tier == *tier
+                            && variant_key_opt(anchor.transformer_variant) == variant_key.as_str()
+                            && decoder_key_opt(anchor.decoder) == decoder_key_str.as_str()
+                    })
+                    .count();
+                assert_eq!(
+                    matching,
+                    1,
+                    "{}: cell ({tier}, {variant_key}, {decoder_key_str}) must carry exactly one \
+                     anchor",
+                    lane.as_key()
+                );
+            }
             assert_eq!(
-                matching, 1,
-                "cell ({tier}, {variant_key}, {decoder_key_str}) must carry exactly one anchor"
+                store()
+                    .anchors
+                    .iter()
+                    .filter(|anchor| anchor.model_id == "ltx_2_5" && anchor.backend == lane)
+                    .count(),
+                measured.len(),
+                "{}: the store must not carry an anchor for a pipeline cell the corpus never \
+                 measured",
+                lane.as_key()
             );
         }
-        assert_eq!(
-            store()
-                .anchors
-                .iter()
-                .filter(
-                    |anchor| anchor.model_id == "ltx_2_5" && anchor.backend == AnchorBackend::Mlx
-                )
-                .count(),
-            measured.len(),
-            "the store must not carry an anchor for a pipeline cell the corpus never measured"
-        );
         // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
         // asks that every LTX-2.5 row still comes from a packaged corpus that carries a completed
         // LTX-2.5 record ON THAT ROW'S OWN LANE — the seed corpus or a sc-22738 campaign corpus —

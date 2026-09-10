@@ -2420,15 +2420,19 @@ test("every tier a route rule declares, and a download ships, survives onto the 
   for (const model of matrix.models) {
     const downloads = models.get(model.id)?.downloads ?? [];
     for (const [backend, axes] of Object.entries(model.axes ?? {})) {
-      // The floor binds only where the axis was DERIVED FROM DOWNLOADS. A lane that declares its
-      // own `vramGbByTier` has stated its tier set directly — `flux2_dev`'s candle block declares
-      // q4/q8 although the registry rule spans bf16 too — and `tiersFor` short-circuits on it
-      // before any download is read, so the registry is not what that axis contradicts.
-      if (Object.keys(models.get(model.id)?.[backend]?.vramGbByTier ?? {}).length) continue;
-      // Keyed on the catalog id, which is the registry provider for every id that has a rule under
-      // its own name; ids whose ENGINE provider differs (`bernini_image` -> `bernini`) are covered
-      // through that engine id's own catalog entry, and a miss here is simply an empty floor.
-      const routed = routeLaneTiers.get(`${backend}:${model.id}`);
+      // sc-22738: keyed on the RESOLVED ENGINE PROVIDER, which is what `RULES` is keyed on and what
+      // `tiersFor` looks the floor up under (`routedLaneTiers` -> `route.engineFor(backend)`). The
+      // matrix publishes that same resolution per backend, so this reads the generator's own answer
+      // rather than forming a second opinion about it.
+      //
+      // It used to key on the CATALOG id, and that alone made this test blind to the regression it
+      // is named for: `candle:flux_dev` and `candle:flux_schnell` are absent from `RULES` — the
+      // rules are `candle:flux1_dev` / `candle:flux1_schnell` — so the loop `continue`d past both
+      // lanes without ever evaluating the assertion. Every id whose provider differs from its
+      // catalog id (`flux_dev`, `flux_schnell`, `bernini_image`, `ltx_2_3` on candle, …) was
+      // exempt by accident.
+      const provider = model.resolvedRoutes?.[backend] ?? model.resolvedRoute;
+      const routed = routeLaneTiers.get(`${backend}:${provider}`);
       if (!routed) continue;
       for (const tier of routed) {
         if (!downloads.some((download) => download.variant === tier)) continue;
@@ -2444,6 +2448,30 @@ test("every tier a route rule declares, and a download ships, survives onto the 
   assert.ok(checked.size > 0, "no (model, backend) joined a route rule; the parse is broken");
   // The regression cell itself, by name.
   assert.ok(checked.has("bernini:candle:q4"), "the bernini candle floor must be exercised");
+  // sc-22738: the cells the two removed exemptions used to hide, asserted BY NAME so neither can
+  // come back as a silent narrowing of scope. A `continue` reinstated anywhere above turns the
+  // whole invariant into a vacuous pass — `checked.size > 0` cannot see that, because the lanes
+  // that still qualify keep it non-empty. `flux_dev` and `flux_schnell` were exempt TWICE (the
+  // catalog-id keying missed them, and so did the `vramGbByTier` skip); `flux2_dev` was exempt
+  // once, by `vramGbByTier`, and the old comment on that skip named it as an accepted case.
+  //
+  // The candle q8 cells the same generator bug also hid — `sd3_5_large`, `sd3_5_large_turbo`,
+  // `sd3_5_medium` — are deliberately NOT here: no `RULES` entry names their provider, so this
+  // test's floor is empty for them and it has nothing to say. They are held by the `tiersFor`
+  // union itself, and re-introducing the short-circuit still reds this test through the three
+  // above.
+  for (const cell of [
+    "flux_dev:candle:bf16",
+    "flux_schnell:candle:bf16",
+    "flux2_dev:candle:bf16",
+  ]) {
+    assert.ok(
+      checked.has(cell),
+      `${cell} is routed (memory_route_registry.rs declares it for this lane's ENGINE provider) ` +
+        "and ships an ungated download, so the invariant must be EVALUATED on it — an exemption " +
+        "that skips it makes this test vacuous rather than green",
+    );
+  }
   assert.deepEqual(
     matrix.models.find((model) => model.id === "bernini_image")?.axes?.candle?.tiers,
     ["bf16", "q4", "q8"],
