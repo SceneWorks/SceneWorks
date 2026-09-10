@@ -1284,7 +1284,7 @@ first five:
 | `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
 | `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
 | `artifact_unsupported` | the pinned engine's production loader refused the shipped artifact (sc-22738) — the row carries the loader's own `unsupported:` sentence verbatim; **no evidence, no bound, no commit** | clean |
-| `runtime_budget_exceeded` | the probe ran out of its WALL-CLOCK budget and was stopped (below). Its own outcome since sc-22738's run 34356681566, not folded in with `capture_failed`: **nothing was measured**, so no bound is recorded and the cell classifies `runnable` again. It is still a walk failure (exit 2) | clean |
+| `runtime_budget_exceeded` | the probe ran out of its WALL-CLOCK budget and was stopped (below), **having measured nothing** — so no bound is recorded and the cell classifies `runnable` again. Its own outcome since sc-22738's run 34356681566, not folded in with `capture_failed`; still a walk failure (exit 2). The reason names the budget in its own seconds, the backstop's later deadline as itself, this backend's longest completed capture and the cell it was read from, and the `--probe-budget-minutes <lane>=N` re-run that raises this lane alone | clean |
 | `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wall-clock stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
@@ -1311,8 +1311,12 @@ guard's ceilings bound a probe that CLIMBS; they say nothing about one that stop
 adapter parked in `mlx::core::eval`. So `measure-memory-catalog.mjs` passes the guard a
 `--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **165
 minutes for a video anchor, 60 for an image one** (the lane is derived from the plan: a video anchor
-renders more than one frame), overridable for a run with `--probe-budget-minutes N`, which
-`--dry-run` prints per row. Each default rests on the longest COMPLETED figure its lane has
+renders more than one frame), overridable for a run with `--probe-budget-minutes N` — or **per
+lane**, `--probe-budget-minutes video=240[,image=90]`, so raising the budget for one wedged 14B
+video cell does not also hand every image cell four hours to hang in (sc-22738 review). The campaign
+workflow carries it as the `probe_budget_minutes` dispatch input, so raising a lane needs no source
+edit; the value is passed verbatim and an unknown lane name is refused by the walk rather than
+ignored. `--dry-run` prints the resulting budget per row. Each default rests on the longest COMPLETED figure its lane has
 witnessed (`WITNESSED_CAPTURE_SECONDS`), cleared by the 1.8× margin policy: 4,470 s PER RENDER
 for video and 847 s per capture cycle for image. That flat 93.5 GB line was a render in progress,
 not a wedge: a video arm USED TO render its clip THREE times per capture (measured, clean warm
@@ -1349,12 +1353,42 @@ WITH warm passes (`docs/calibration/sc-22738/*`, `sc-18791/*`): a record without
 keeps every previous requirement. So the video budget is now per render: 165 minutes = 9,900 s is
 2.2× the 4,470 s witness and 1.83× the 5,400 s packed-tier lower bound.
 
+**The CANDLE lane's own witnesses (sc-22738 review, 2026-09-10).** Every figure above is `:mlx`,
+which cost nothing while the budget reached no candle probe — and everything once the runner's
+backstop made it a hard kill at exactly 9,900 s on the CUDA lane. Run 34356681566's own committed
+anchors supply the missing evidence (branch `story/sc-22738-candle-evidence-34356681566`, the 20 it
+landed before it wedged): the three `ltx_2_5:*:candle` video cells completed in 300 s, 285 s and
+446 s of capture→capture cycle on 2026-09-09, and `qwen_image_edit_2511:q8:candle` in 239 s on the
+image lane — read as consecutive `capturedAt` deltas, the same way the 847 s image witness is, and
+therefore UPPER bounds on the captures inside them. The candle video lane is an order of magnitude
+faster than the MLX one, 165 minutes clears its longest completed cycle by 22×, and the 19h43m
+`scail2_14b:bf16:candle` cell was a WEDGE rather than a slow render. Both lane defaults therefore
+stand where they are, now with a completed capture of each backend behind them
+(`VIDEO_RENDER_WITNESSES_SECONDS`, `IMAGE_CAPTURE_WITNESSES_SECONDS`) — the kill line is set by the
+slower backend, and the faster one runs far inside it. What is still unwitnessed is the heavy end of
+the candle video lane (`scail2_14b`, `wan_2_2_i2v_14b`, `wan_2_2_t2v_14b`: 14B DiTs at 480p/720p),
+which is why a stop names its witness cell and the flag that raises the lane rather than leaving an
+operator to re-run into the same second.
+
 A probe that reaches its budget is stopped and reported on its own outcome,
-`runtime_budget_exceeded`, naming the budget, the peak footprint sampled where one was (so you can
-tell a probe wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed render
-(video) or capture (image); a run
+`runtime_budget_exceeded`, naming the budget in its own seconds, the peak footprint sampled where
+one was (so you can tell a probe wedged at the ceiling from one wedged at 3 GB), the lane's longest
+completed render (video) or capture (image) **and the longest one on this cell's own backend, with
+the cell it was read from**; a run
 launched with `--probe-budget-minutes` below its lane's default is told, in the reason, that the
-stop is a budget shortfall and not evidence of a stall.
+stop is a budget shortfall and not evidence of a stall, and one at or above the default is told the
+exact `--probe-budget-minutes <lane>=N` that would raise it.
+
+**WHY THE ROW NAMES THE WITNESS CELL (sc-22738 review, 2026-09-10).** The budget is a hard kill on
+every lane now, so a cell it stops either wedged or could not finish inside it, and only the
+operator can tell which. The candle video witnesses are all `ltx_2_5` (300 s, 285 s and 446 s per
+cycle in run 34356681566) while the heavy candle video cells are 14B DiTs at 480p/720p that have
+never completed a candle render, so "the candle lane finishes video in five minutes" must never be
+read as evidence about `scail2_14b:bf16:candle`. The row therefore states the figure, the cell it
+belongs to, and the flag — it claims nothing about what else has or has not completed, because
+`VIDEO_RENDER_WITNESSES_SECONDS` / `IMAGE_CAPTURE_WITNESSES_SECONDS` hold each backend's LONGEST
+capture rather than a record of every one. And a re-run at the same budget dies at the same second:
+if the render was still making progress, raise that lane and re-run, rather than re-running into it.
 
 **TWO things impose that budget, and they are not alternatives (sc-22738, run 34356681566).** On a
 Mac the footprint guard does it, via `--max-runtime-seconds`, on its ONE stop path — the same
@@ -1368,14 +1402,24 @@ budget reached NO probe on the Windows CUDA lane: run 34356681566 sat on `scail2
 165-minute budget, and the remaining 47 cells were never reached. On a Mac the runner's bound sits
 two minutes BEHIND the guard's deadline (`RUNNER_BACKSTOP_GRACE_SECONDS`), so the guard keeps owning
 every stop it can make and the runner fires only when the guard did not. A runner stop says so in
-its reason, and claims no ceiling and no sampled peak where no guard ran.
+its reason — naming its own later deadline as itself, never as the budget — and claims no ceiling
+and no sampled peak where no guard ran.
 
-**It is not an exceedance:** the run never
+**A STOPPED PROBE STILL KEEPS WHAT IT MEASURED (sc-22738 review).** The guard writes
+`physical_footprint_at_or_above_<ceiling>:observed_<footprint>` at the instant it fires, and its
+post-stop reap can then wedge past the two-minute grace — so the runner reads the event log BEFORE
+its backstop reports, and a bound already in it is committed as `committed_exceeded` rather than
+thrown away. Narrow on purpose: only a FOOTPRINT stop (or the Metal wired-limit refusal) counts,
+because `stopProcessTree` SIGTERMs the guard and the guard writes `monitor_signal_SIGTERM` on its
+way out — the runner's own kill must never be filed as a fact about the model.
+
+**Otherwise it is not an exceedance:** the run never
 crossed a line, so no bound is written (the harness's `record-exceeded` refuses a wall-clock stop
 outright), the store keeps no trace, the watchdog stream and per-anchor log stay in the work dir,
 and the cell classifies `runnable` again on the next `--list`. Re-run it, or re-run it with a larger
-`--probe-budget-minutes` if you believe the render was still making progress — and never below the
-lane default for a cell whose witnessed capture is longer than the budget you are about to give it.
+`--probe-budget-minutes <lane>=N` if you believe the render was still making progress — and never
+below the lane default for a cell whose witnessed capture is longer than the budget you are about to
+give it.
 
 **`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
 `capture_failed` that stamped nothing at all: the store kept no trace, and production went on

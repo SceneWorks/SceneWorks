@@ -16,7 +16,7 @@
 //   node scripts/measure-memory-catalog.mjs --backend mlx \
 //     --adapter target/release/memory-mlx-adapter --inference-repo ../inference \
 //     --work-dir /abs/OUTSIDE/the/repo/calib --campaign sc-NNNN [--model sdxl ...] [--anchors a,b]
-//     [--skip-current] [--probe-budget-minutes N]
+//     [--skip-current] [--probe-budget-minutes N | video=N[,image=N]]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
 //     [--download-missing]
 //
@@ -30,11 +30,18 @@
 // fetches nothing.
 //
 // EVERY probe carries a WALL-CLOCK budget (`--probe-budget-minutes`, defaulted per lane by
-// `PROBE_BUDGET_MINUTES`) and is stopped when it reaches it, on the terminal status
-// `runtime_budget_exceeded`. It is NOT an exceedance: a run that thrashed below the ceiling
-// measured nothing, so no bound is written, the store keeps no trace, and the cell classifies
-// `runnable` again on the next `--list` (sc-22738). The walk then moves to the NEXT cell — one
-// wedged probe can no longer consume the whole job.
+// `PROBE_BUDGET_MINUTES`, and raisable per lane — `video=240` — for a run) and is stopped when it
+// reaches it, on the terminal status `runtime_budget_exceeded`. It is NOT an exceedance: a run that
+// thrashed below the ceiling measured nothing, so no bound is written, the store keeps no trace,
+// and the cell classifies `runnable` again on the next `--list` (sc-22738). The walk then moves to
+// the NEXT cell — one wedged probe can no longer consume the whole job. A stop names the longest
+// completed capture on the stopped cell's OWN backend, the cell that figure was read from, and the
+// per-lane flag that raises the budget, because a re-run at the same budget dies at the same second
+// and only the operator can tell a wedge from a render that needed longer.
+//
+// A stopped probe that nevertheless MEASURED a bound keeps it: the guard's footprint hard stop is
+// read out of the event log BEFORE the runner's backstop reports, so a bound written at minute 100
+// of a 165-minute budget survives a reap that then wedged past the backstop (sc-22738 review).
 //
 // TWO things can impose that budget, and they are not alternatives:
 //   * the footprint guard, on Darwin, via `--max-runtime-seconds` — one more trigger on its ONE
@@ -1444,6 +1451,43 @@ export function anchorSlug(key) {
   return key.replaceAll(":", "-").replaceAll("_", "-");
 }
 
+/** The lanes `--probe-budget-minutes` can name, one entry per `PROBE_BUDGET_MINUTES` key. */
+export const PROBE_BUDGET_LANES = Object.freeze(["video", "image"]);
+
+/**
+ * One `--probe-budget-minutes` value, merged onto whatever earlier occurrences of the flag set
+ * (sc-22738 review). Returns `{ video, image }` with `null` for a lane the operator did not name,
+ * which `probeBudgetMinutes` reads as "keep that lane's default".
+ *
+ * `240` sets both lanes; `video=240` or `video=240,image=90` sets only what it names. An unknown
+ * lane is refused rather than ignored: a typo that silently left the budget at 165 is exactly the
+ * failure the flag exists to rescue an operator from.
+ */
+export function parseProbeBudgetMinutes(raw, current = null) {
+  const budget = { video: null, image: null, ...(current ?? {}) };
+  const positive = (text, what) => {
+    const minutes = Number(text);
+    if (!Number.isFinite(minutes) || minutes <= 0) fail(`--probe-budget-minutes must be a positive number of minutes${what}`);
+    return minutes;
+  };
+  const entries = String(raw).split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (entries.length === 0) fail("--probe-budget-minutes must be a positive number of minutes");
+  for (const entry of entries) {
+    const [name, minutes] = entry.includes("=") ? entry.split("=", 2) : [null, entry];
+    if (name === null) {
+      const both = positive(minutes, "");
+      for (const lane of PROBE_BUDGET_LANES) budget[lane] = both;
+      continue;
+    }
+    const lane = name.trim();
+    if (!PROBE_BUDGET_LANES.includes(lane)) {
+      fail(`--probe-budget-minutes names lane ${JSON.stringify(lane)}; the lanes are ${PROBE_BUDGET_LANES.join(", ")}`);
+    }
+    budget[lane] = positive(minutes, ` for ${lane}`);
+  }
+  return budget;
+}
+
 export function parseArgs(argv) {
   const args = {
     backend: null, adapter: null, inferenceRepo: null, workDir: null, campaign: null,
@@ -1469,10 +1513,11 @@ export function parseArgs(argv) {
       case "--skip-current": args.skipCurrent = true; break;
       // Minutes, and fractional minutes are accepted: the budget is one number in one unit, and a
       // test (or a deliberately tight re-run) needs to express seconds without a second flag.
+      // PER LANE too (sc-22738 review): `240` sets both lanes, `video=240,image=90` sets each on
+      // its own, and the flag is repeatable — so the operator who has to give one wedged 14B video
+      // cell more room can do it without also handing every image cell four hours to hang in.
       case "--probe-budget-minutes": {
-        const minutes = Number(value(flag, index));
-        if (!Number.isFinite(minutes) || minutes <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
-        args.probeBudgetMinutes = minutes;
+        args.probeBudgetMinutes = parseProbeBudgetMinutes(value(flag, index), args.probeBudgetMinutes);
         index += 1;
         break;
       }
@@ -3051,21 +3096,92 @@ export async function probeAdapter(command, { cwd = ROOT, env = process.env, wir
  *
  * The cost of being wrong is bounded BY DESIGN and asymmetric on purpose: a runtime stop records no
  * bound and leaves the cell `runnable`, so too tight a budget costs a re-run, while too loose a one
- * costs only operator time. `--probe-budget-minutes` overrides both entries for a run and is
- * honored as given; a run launched below its lane's default is told so in the stop reason
- * (`runtimeBudgetExceededReason`), because a stop under such a budget is not evidence of a stall.
+ * costs only operator time. `--probe-budget-minutes` overrides the table for a run — `N` for both
+ * lanes, or `video=N` / `image=N` to raise ONE of them — and is honored as given; a run launched
+ * below its lane's default is told so in the stop reason (`runtimeBudgetExceededReason`), because a
+ * stop under such a budget is not evidence of a stall.
+ *
+ * THE BOUND IS NOW A HARD KILL ON EVERY LANE, AND THE WITNESS SET HAD TO CATCH UP (sc-22738 review,
+ * 2026-09-10). Before the runner's own backstop the budget reached no candle probe at all, so it
+ * cost nothing that all three video witnesses were `:mlx`. It does now: `probeTimeoutMs` kills a
+ * candle video probe at exactly 9,900 s. A kill line extrapolated from one backend onto a lane with
+ * no witness of its own is not a safe default, so the CANDLE video renders run 34356681566 did
+ * complete are recorded below beside the MLX ones (branch
+ * `story/sc-22738-candle-evidence-34356681566`, the 20 anchors that campaign committed before it
+ * wedged): consecutive `capturedAt` deltas of 300 s, 285 s and 446 s for the three
+ * `ltx_2_5:*:candle` cells on 2026-09-09 — the same reading the image witness is taken from, and an
+ * UPPER bound on the render, since a cycle also carries that cell's ingest → extract → stamp →
+ * matrix → commit. The candle video lane is therefore an order of magnitude faster than the MLX
+ * one, 165 minutes clears its longest completed cycle by 22x, and the 19h43m
+ * `scail2_14b:bf16:candle` cell that the backstop was written for was a WEDGE, not a slow render.
+ *
+ * The figures stay at 165/60 for both lanes on that evidence. What is NOT witnessed on the candle
+ * lane is the heavy end — `scail2_14b`, `wan_2_2_i2v_14b`, `wan_2_2_t2v_14b` are 14B DiTs at
+ * 480p/720p and no candle render of one has ever completed. So every stop names the longest
+ * completed capture on the STOPPED CELL'S OWN backend and the cell it was read from — 446 s from an
+ * `ltx_2_5` capture is visibly not evidence about a 14B DiT — and every stop at or above the lane
+ * default names the exact `--probe-budget-minutes <lane>=N` that raises that lane
+ * (`runtimeBudgetExceededReason`). Raising it needs no source edit: the campaign workflow carries a
+ * `probe_budget_minutes` dispatch input straight through to the flag.
  */
 export const WITNESSED_CAPTURE_SECONDS = { video: 4_470, image: 847 };
 /**
- * The per-render witnesses the video figure above is read from (sc-22738, 2026-09-08). Every one
- * was a THREE-render capture; `perRenderSeconds` is the capture's wall clock over three.
- * `completed: false` marks a lower bound — the capture hit its budget with the render unfinished.
+ * The per-render witnesses the video figure above is read from (sc-22738, 2026-09-08; candle cells
+ * added 2026-09-10). `perRenderSeconds` is the capture's wall clock over its renders — three for
+ * the MLX cells, which predate the one-render video contract, one for the candle cells, which
+ * already captured a single render. `completed: false` marks a lower bound: the capture hit its
+ * budget with the render unfinished.
+ *
+ * `basis` says how each figure was read, because they are not the same measurement: `campaign log`
+ * is a capture's own wall clock, `capture→capture cycle` is the delta between consecutive
+ * `capturedAt` stamps and therefore an UPPER bound on the render inside it.
  */
 export const VIDEO_RENDER_WITNESSES_SECONDS = Object.freeze([
-  { cell: "scail2_14b:bf16:mlx", captureSeconds: 8_709, renders: 3, perRenderSeconds: 2_903, completed: true },
-  { cell: "wan_2_2_t2v_14b:bf16:mlx", captureSeconds: 13_411, renders: 3, perRenderSeconds: 4_470, completed: true },
-  { cell: "wan_2_2_t2v_14b:q4:mlx", captureSeconds: 16_200, renders: 3, perRenderSeconds: 5_400, completed: false },
+  { cell: "scail2_14b:bf16:mlx", captureSeconds: 8_709, renders: 3, perRenderSeconds: 2_903, completed: true, basis: "campaign log" },
+  { cell: "wan_2_2_t2v_14b:bf16:mlx", captureSeconds: 13_411, renders: 3, perRenderSeconds: 4_470, completed: true, basis: "campaign log" },
+  { cell: "wan_2_2_t2v_14b:q4:mlx", captureSeconds: 16_200, renders: 3, perRenderSeconds: 5_400, completed: false, basis: "campaign log" },
+  // Run 34356681566, 2026-09-09 (UTC): lens_turbo:q4:candle 14:34:15 → 14:39:15 → 14:44:00 →
+  // 14:51:26. The first delta also covers whatever the walk refused between those two cells; the
+  // other two bracket one cell each.
+  { cell: "ltx_2_5:bf16:candle", captureSeconds: 300, renders: 1, perRenderSeconds: 300, completed: true, basis: "capture→capture cycle" },
+  { cell: "ltx_2_5:q4:candle", captureSeconds: 285, renders: 1, perRenderSeconds: 285, completed: true, basis: "capture→capture cycle" },
+  { cell: "ltx_2_5:q8:candle", captureSeconds: 446, renders: 1, perRenderSeconds: 446, completed: true, basis: "capture→capture cycle" },
 ]);
+/**
+ * The capture→capture cycles the image figure above is read from (sc-22738; candle cell added
+ * 2026-09-10). Same reading as the video candle rows: the delta between two consecutive
+ * `capturedAt` stamps, an UPPER bound on the capture inside it.
+ */
+export const IMAGE_CAPTURE_WITNESSES_SECONDS = Object.freeze([
+  // 06:59:19 → 07:13:26 on 2026-09-07 (`bernini_image:q4:mlx` → `:q8:mlx`).
+  { cell: "bernini_image:q8:mlx", cycleSeconds: 847, completed: true, basis: "capture→capture cycle" },
+  // Run 34356681566: 15:07:06 → 15:11:05 on 2026-09-09 (`qwen_image_edit_2511:q4:candle` → `:q8:`).
+  { cell: "qwen_image_edit_2511:q8:candle", cycleSeconds: 239, completed: true, basis: "capture→capture cycle" },
+]);
+
+/**
+ * The backends that have a COMPLETED capture behind this lane's budget (sc-22738 review), and that
+ * lane's longest completed figure for each of them.
+ *
+ * A backend with no entry here is running under a kill line extrapolated from someone else's
+ * hardware — which is what every candle cell was until run 34356681566's own committed anchors were
+ * read back into the tables above. `runtimeBudgetExceededReason` puts this figure, and the cell it
+ * was read from, on every stop, so an operator can see at a glance whether the budget that killed
+ * their cell has anything behind it that resembles the cell.
+ */
+export function laneWitnessesByBackend(lane) {
+  const witnesses = lane === "video"
+    ? VIDEO_RENDER_WITNESSES_SECONDS.map((witness) => ({ ...witness, seconds: witness.perRenderSeconds }))
+    : IMAGE_CAPTURE_WITNESSES_SECONDS.map((witness) => ({ ...witness, seconds: witness.cycleSeconds }));
+  const longest = new Map();
+  for (const witness of witnesses) {
+    if (!witness.completed) continue;
+    const { backend } = anchorParts(witness.cell);
+    const held = longest.get(backend);
+    if (!held || witness.seconds > held.seconds) longest.set(backend, { cell: witness.cell, seconds: witness.seconds });
+  }
+  return new Map([...longest.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
 /** The packed-tier per-render LOWER BOUND the video budget must clear by the margin policy too. */
 export const VIDEO_RENDER_LOWER_BOUND_SECONDS = 5_400;
 /** The margin every lane default clears its witness by (see the basis above). */
@@ -3077,13 +3193,22 @@ export function probeLane(row) {
   return row.videoLane ? "video" : "image";
 }
 
-/** This row's wall-clock budget in minutes: the runner's `--probe-budget-minutes`, else its lane's. */
+/**
+ * This row's wall-clock budget in minutes: the runner's `--probe-budget-minutes`, else its lane's.
+ *
+ * The override is PER LANE (sc-22738 review). A bare `--probe-budget-minutes 240` still sets both,
+ * because that is what it always meant; `video=240` raises the video lane and leaves the image
+ * lane's tighter backstop where it is. Raising one lane by loosening both is how a knob meant to
+ * rescue one wedged 14B video cell would have given every image cell four hours to hang in.
+ */
 export function probeBudgetMinutes(row, override = null) {
-  if (override !== null && override !== undefined) {
-    if (!Number.isFinite(override) || override <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
-    return override;
+  const lane = probeLane(row);
+  const minutes = override !== null && typeof override === "object" ? override[lane] : override;
+  if (minutes !== null && minutes !== undefined) {
+    if (!Number.isFinite(minutes) || minutes <= 0) fail("--probe-budget-minutes must be a positive number of minutes");
+    return minutes;
   }
-  return PROBE_BUDGET_MINUTES[probeLane(row)];
+  return PROBE_BUDGET_MINUTES[lane];
 }
 
 /**
@@ -3134,26 +3259,73 @@ export function probeTimeoutMs(budgetMinutes, guarded) {
  * ended the probe on its own stop path and `"runner"` when the runner's backstop did
  * (`probeTimeoutMs`); the two are read differently, because a runner stop also means the guard was
  * absent or failed.
+ *
+ * SELF-CONSISTENT SECONDS (sc-22738 review). The `(…s)` beside the budget is DERIVED from
+ * `budgetMinutes` and can no longer be handed a different quantity: the guarded runner arm used to
+ * pass `error.timeoutMs`, its own deadline, and rendered "the 165-minute probe budget (10020s)" —
+ * 165 minutes is 9,900 s. `stoppedAtSeconds` is that other deadline, the one that actually fired,
+ * and it is named as ITSELF rather than as the budget.
+ *
+ * WHAT MAKES IT ACTIONABLE (sc-22738 review). A budget is a kill line, so a cell whose own backend
+ * has no completed capture behind that line — every heavy candle video cell — is told exactly that,
+ * with the per-lane flag that raises it. Otherwise a re-run is just the same kill at the same
+ * point, which is what "permanently unmeasurable at the default budget" means.
  */
-export function runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling, stoppedBy = "guard" }) {
+export function runtimeBudgetExceededReason({
+  row, budgetMinutes, peak, ceiling, stoppedBy = "guard", stoppedAtSeconds = null,
+}) {
   const lane = probeLane(row);
   const laneDefault = PROBE_BUDGET_MINUTES[lane];
   const witnessed = WITNESSED_CAPTURE_SECONDS[lane];
+  const unit = lane === "video" ? "render" : "capture";
+  const { backend } = anchorParts(row.key);
+  const budgetElapsed = Math.round(budgetMinutes * 60);
   const footprint = ceiling === null || ceiling === undefined
     ? "peak physical footprint not sampled: the footprint guard is Darwin-only, so nothing sampled this probe"
     : `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} against the ${ceiling}`;
+  // The deadline that fired, when it is not the budget itself: the runner's backstop sits
+  // `RUNNER_BACKSTOP_GRACE_SECONDS` behind the guard on a guarded lane, and saying so is the whole
+  // difference between "the guard was absent" and "the guard was there and failed to stop it".
+  const fired = stoppedAtSeconds === null || stoppedAtSeconds === undefined ? budgetElapsed : Math.round(stoppedAtSeconds);
+  let stop = "";
+  if (stoppedBy === "runner") {
+    stop = fired > budgetElapsed
+      ? `The runner's own wall-clock backstop stopped the probe's process tree at ${fired}s, `
+        + `${fired - budgetElapsed}s past the guard's own deadline: the guard did not stop the group. `
+      : "The runner's own wall-clock backstop stopped the probe's process tree at that budget. ";
+  } else if (fired !== budgetElapsed) {
+    // The guard's `--max-runtime-seconds` is this same budget, so the two agreeing is the norm and
+    // a disagreement is a defect worth reading on the row rather than swallowing.
+    stop = `The guard's own stop fired at ${fired}s, not at the ${budgetElapsed}s it was given. `;
+  }
+  // sc-22738: the lane figure is PER RENDER on video (a video capture is one render) and a whole
+  // capture cycle on image. sc-22738 review: and THIS BACKEND's own longest completed capture is
+  // named beside it, with the cell it was read from — the candle video witnesses are all `ltx_2_5`,
+  // and reading 446 s as evidence about `scail2_14b:bf16:candle`, a 14B DiT under CFG, is exactly
+  // the extrapolation an operator must not make silently. The row states the figure, whose cell it
+  // belongs to, and the flag; it claims NOTHING about what else has or has not completed, because
+  // this table holds each backend's LONGEST capture rather than a record of every one.
+  const own = laneWitnessesByBackend(lane).get(backend) ?? null;
+  const witness = own === null ? "" : ` (longest on ${backend}: ${own.seconds}s, ${own.cell})`;
   let reason =
-    `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
+    `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetElapsed}s) elapsed; `
     + `${footprint}. `
-    + (stoppedBy === "runner" ? "The runner's own wall-clock backstop stopped the probe's process tree. " : "")
+    + stop
     + `Nothing was measured, so no bound was recorded and this cell stays runnable. `
-    // sc-22738: the video figure is PER RENDER (a video capture is one render); the image figure
-    // is a whole capture cycle.
-    + `The longest completed ${lane} ${lane === "video" ? "render" : "capture"} on record ran ${witnessed}s`;
+    + `The longest completed ${lane} ${unit} on record ran ${witnessed}s`
+    + witness;
   if (budgetMinutes < laneDefault) {
     reason += `, and this run was launched with --probe-budget-minutes ${budgetMinutes}, below the ${lane} `
       + `lane's ${laneDefault}-minute default: this stop is a budget shortfall, not evidence of a stall. `
       + `Re-run it at the default budget or larger before reading anything into the flat footprint`;
+  } else {
+    // sc-22738 review: EVERY stop at or above the lane default poses the same question — a wedge,
+    // or a budget this cell cannot finish inside? — and an operator who cannot raise the budget can
+    // only re-run into the identical kill at the identical second. So the knob is named on the row,
+    // in the exact spelling that raises THIS lane alone, whatever the witnesses say.
+    reason += `. A re-run at this budget would stop at the same second: if the render was still `
+      + `making progress, re-run the cell with --probe-budget-minutes ${lane}=${Math.round(budgetMinutes * 2)} `
+      + `(the campaign's probe_budget_minutes input), which raises the ${lane} lane alone`;
   }
   return `${reason}.`;
 }
@@ -3246,6 +3418,28 @@ export const RUNTIME_BUDGET_STOP_PATTERN = /^watchdog hard stop: runtime_at_or_a
 export function runtimeBudgetStopSeconds(hardStop) {
   const match = RUNTIME_BUDGET_STOP_PATTERN.exec(String(hardStop ?? ""));
   return match ? Number(match[1]) : null;
+}
+
+/**
+ * The guard's spelling of the one hard stop that MEASURED something (sc-22738 review).
+ *
+ * `memory-calibration-watchdog.py` writes `physical_footprint_at_or_above_<ceiling>:observed_<n>`
+ * when the sampled footprint reaches the kill line, and the harness's own `parseWatchdogHardStop`
+ * accepts exactly that spelling and refuses every other reason for the same reason: only a
+ * footprint stop states a lower bound on the render's peak. This predicate is the runner's copy of
+ * that rule, and a test drives the harness's parser with both a matching and a non-matching reason
+ * so the two cannot drift apart silently.
+ *
+ * It exists because the runner's stopped-probe path has to tell "the guard measured a bound and
+ * then the reap wedged" from every other way an event log can carry a `hard_stop` — including
+ * `monitor_signal_SIGTERM`, which the guard writes in response to the runner's OWN kill.
+ */
+export const FOOTPRINT_BOUND_STOP_PATTERN =
+  /^watchdog hard stop: physical_footprint_at_or_above_\d+:observed_\d+$/;
+
+/** Whether this `watchdogHardStop` reading is a footprint stop, i.e. a measured lower bound. */
+export function measuredFootprintBound(hardStop) {
+  return FOOTPRINT_BOUND_STOP_PATTERN.test(String(hardStop ?? ""));
 }
 
 /**
@@ -3705,28 +3899,48 @@ export async function measureAnchor(row, context) {
       await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
   } catch (error) {
-    // sc-22738 (run 34356681566): the RUNNER's own wall-clock backstop fired. Checked FIRST, and
-    // before the guard's event log is even read: on the unguarded lanes there is no event log at
-    // all, and on the guarded one this arm is reached only when the guard did not stop the group
-    // within its own deadline plus the whole escalation — in both cases what the runner knows is
-    // that it killed the tree, not anything about memory. Same claim as the guard's runtime stop,
-    // so it is the SAME terminal status and the same reason sentence: nothing measured, nothing
-    // recorded, cell stays `runnable`, walk continues with the next cell.
-    if (error.timedOut) {
+    // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
+    const hardStop = await watchdogHardStop(watchdogEvents);
+    // sc-22738 review: WHAT THIS STOPPED RUN NEVERTHELESS MEASURED, read BEFORE the runner's own
+    // backstop gets to speak. The guard writes its footprint bound —
+    // `physical_footprint_at_or_above_<ceiling>:observed_<footprint>`, the line that becomes
+    // `committed_exceeded` — the instant it fires, and the reap that follows can then wedge past
+    // `RUNNER_BACKSTOP_GRACE_SECONDS`. Returning on `timedOut` before reading the log threw that
+    // measured bound away and reported a cell that had recorded NOTHING.
+    //
+    // Narrow ON PURPOSE, to a FOOTPRINT stop and to the Metal refusal, the only two things a
+    // stopped run can have measured. Anything else in the log is a stop, not a measurement — and
+    // one of them is the runner's OWN doing: `stopProcessTree` SIGTERMs the guard, which writes
+    // `monitor_signal_SIGTERM` on its way out, so a looser predicate would feed the runner's own
+    // kill into `record-exceeded` as if it were a bound.
+    const measuredBound = measuredFootprintBound(hardStop);
+    // `!hardStop` is the pre-existing rule and stays: a refusal is the terminal event only when the
+    // guard stopped nothing. On a runner stop that means a refusal whose adapter then WEDGED — the
+    // guard's `monitor_signal_SIGTERM` is in the log by then — reports `runtime_budget_exceeded`
+    // and leaves the cell runnable, which costs a re-run and states nothing false. The one witnessed
+    // refusal (`flux2_dev:bf16:mlx`) exited 1 rather than wedging, so this pairing has never
+    // occurred; widening the rule would change the arms below, which are about a guard that fired.
+    const refused = !hardStop && guarded && metalSubmissionsIgnored(error.stderr ?? error.message);
+    // sc-22738 (run 34356681566): the RUNNER's own wall-clock backstop fired, having measured
+    // nothing. On the unguarded lanes there is no event log at all, and on the guarded one this arm
+    // is reached only when the guard did not stop the group within its own deadline plus the whole
+    // escalation — in both cases what the runner knows is that it killed the tree, not anything
+    // about memory. Same claim as the guard's runtime stop, so it is the SAME terminal status and
+    // the same reason sentence: nothing measured, nothing recorded, cell stays `runnable`, walk
+    // continues with the next cell.
+    if (error.timedOut && !measuredBound && !refused) {
       return finish(
         "runtime_budget_exceeded",
         runtimeBudgetExceededReason({
           row,
           budgetMinutes,
-          budgetSeconds: Math.round(error.timeoutMs / 1000),
           peak: guarded ? await watchdogPeakFootprint(watchdogEvents) : null,
           ceiling: probedHardware ? `${watchdogCeilings(probedHardware).maxFootprintBytes}-byte ceiling` : null,
           stoppedBy: "runner",
+          stoppedAtSeconds: Math.round(error.timeoutMs / 1000),
         }),
       );
     }
-    // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
-    const hardStop = await watchdogHardStop(watchdogEvents);
     // sc-22738 (2026-09-07): a WALL-CLOCK stop, and the one hard stop that is NOT a measurement.
     //
     // The guard killed this group on exactly the path a footprint stop takes — same escalation,
@@ -3740,15 +3954,15 @@ export async function measureAnchor(row, context) {
     // bundle means no `records` and no bound for the classifier to read. The peak is reported for
     // the operator's judgment only — a probe that wedged at the ceiling is a different problem from
     // one that wedged at 3 GB — and is deliberately not written anywhere.
-    const budgetSeconds = runtimeBudgetStopSeconds(hardStop);
-    if (budgetSeconds !== null) {
+    const guardStopSeconds = runtimeBudgetStopSeconds(hardStop);
+    if (guardStopSeconds !== null) {
       const peak = await watchdogPeakFootprint(watchdogEvents);
       const ceiling = probedHardware
         ? `${watchdogCeilings(probedHardware).maxFootprintBytes}-byte ceiling`
         : "the guard's ceiling";
       return finish(
         "runtime_budget_exceeded",
-        runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling }),
+        runtimeBudgetExceededReason({ row, budgetMinutes, peak, ceiling, stoppedAtSeconds: guardStopSeconds }),
       );
     }
     // sc-22738 (measured 2026-09-06): the SECOND way a run ends having measured a bound. Metal
@@ -3766,7 +3980,6 @@ export async function measureAnchor(row, context) {
     if (artifact) {
       return finish("artifact_unsupported", `${artifact.provider} ${artifact.tier}: ${artifact.reason}`.slice(0, FAILURE_REASON_LIMIT));
     }
-    const refused = !hardStop && guarded && metalSubmissionsIgnored(error.stderr ?? error.message);
     // Whether the PREVIOUS anchor of this run refused the same way; cleared for every anchor at the
     // top of its own attempt, so the count is over consecutive attempts rather than over the run.
     const refusedBefore = previousMetalRefusal;

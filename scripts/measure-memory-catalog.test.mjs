@@ -80,7 +80,12 @@ import {
   PROBE_BUDGET_MINUTES,
   VIDEO_RENDER_LOWER_BOUND_SECONDS,
   VIDEO_RENDER_WITNESSES_SECONDS,
+  IMAGE_CAPTURE_WITNESSES_SECONDS,
   WITNESSED_CAPTURE_SECONDS,
+  laneWitnessesByBackend,
+  measuredFootprintBound,
+  FOOTPRINT_BOUND_STOP_PATTERN,
+  parseProbeBudgetMinutes,
   probeBudgetMinutes,
   probeLane,
   probeTimeoutMs,
@@ -137,6 +142,7 @@ import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
   LTX25_LANE_PROVIDERS,
+  parseWatchdogHardStop,
   planAnchor,
 } from "./memory-calibration-harness.mjs";
 
@@ -4691,6 +4697,18 @@ async function stubCheckout() {
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-22738 review: the guard MEASURED a bound and wrote it down, and the post-stop reap then
+      // wedged. The runner's backstop is what ends such a probe, minutes later, with the bound
+      // already in the event log — so the stub writes exactly what the guard writes at the instant
+      // it fires (its own \`monitor_signal_SIGTERM\` lands AFTER, when the runner kills the tree).
+      if (process.env.STUB_CAPTURE_WATCHDOG_HARD_STOP) {
+        const { appendFile } = await import("node:fs/promises");
+        await appendFile(process.env.STUB_CAPTURE_WATCHDOG_HARD_STOP, [
+          JSON.stringify({ event: "sample", physicalFootprintBytes: 94822600833 }),
+          JSON.stringify({ event: "hard_stop", reason: "physical_footprint_at_or_above_94822600832:observed_94822600833" }),
+          "",
+        ].join("\\n"));
+      }
       // sc-22738: the wedge. A probe that stops climbing and never finishes — the shape
       // \`scail2_14b:bf16:mlx\` held for 90 minutes at a flat 93.5 GB — so the only thing that can
       // end it is the guard's wall-clock budget.
@@ -5478,30 +5496,82 @@ test("every probe carries a wall-clock budget: per lane by default, derived from
   // margin is the defect this pins, whichever entry drifts.
   assert.deepEqual(WITNESSED_CAPTURE_SECONDS, { video: 4_470, image: 847 });
   assert.equal(PROBE_BUDGET_MARGIN, 1.8);
+  // sc-22738 review (2026-09-10): the CANDLE cells run 34356681566 did complete, added because the
+  // budget became a hard kill on that lane and every witness behind it was `:mlx`. Read from that
+  // campaign's own committed anchors (`story/sc-22738-candle-evidence-34356681566`) as consecutive
+  // `capturedAt` deltas, the same reading the image witness is taken from, and therefore an UPPER
+  // bound on the render inside the cycle. One render each: the candle video arms already captured
+  // one render, where the three MLX cells predate that contract.
   assert.deepEqual(
     VIDEO_RENDER_WITNESSES_SECONDS.map(({ cell, perRenderSeconds, completed }) => [cell, perRenderSeconds, completed]),
-    [["scail2_14b:bf16:mlx", 2_903, true], ["wan_2_2_t2v_14b:bf16:mlx", 4_470, true], ["wan_2_2_t2v_14b:q4:mlx", 5_400, false]],
+    [
+      ["scail2_14b:bf16:mlx", 2_903, true], ["wan_2_2_t2v_14b:bf16:mlx", 4_470, true], ["wan_2_2_t2v_14b:q4:mlx", 5_400, false],
+      ["ltx_2_5:bf16:candle", 300, true], ["ltx_2_5:q4:candle", 285, true], ["ltx_2_5:q8:candle", 446, true],
+    ],
   );
   for (const witness of VIDEO_RENDER_WITNESSES_SECONDS) {
-    assert.equal(witness.renders, 3, `${witness.cell} was a three-render capture`);
+    const { backend } = anchorParts(witness.cell);
+    assert.equal(witness.renders, backend === "mlx" ? 3 : 1, `${witness.cell} render count matches its lane's contract`);
     assert.equal(witness.perRenderSeconds, Math.round(witness.captureSeconds / witness.renders), `${witness.cell} per-render figure is the capture over its renders`);
+    assert.ok(["campaign log", "capture→capture cycle"].includes(witness.basis), `${witness.cell} says how it was read`);
   }
+  assert.deepEqual(
+    IMAGE_CAPTURE_WITNESSES_SECONDS.map(({ cell, cycleSeconds, completed }) => [cell, cycleSeconds, completed]),
+    [["bernini_image:q8:mlx", 847, true], ["qwen_image_edit_2511:q8:candle", 239, true]],
+  );
   const longestCompleted = Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => w.completed).map((w) => w.perRenderSeconds));
   assert.equal(WITNESSED_CAPTURE_SECONDS.video, longestCompleted, "the video witness is the longest COMPLETED per-render figure");
+  assert.equal(
+    WITNESSED_CAPTURE_SECONDS.image,
+    Math.max(...IMAGE_CAPTURE_WITNESSES_SECONDS.filter((w) => w.completed).map((w) => w.cycleSeconds)),
+    "the image witness is the longest COMPLETED cycle",
+  );
   assert.equal(VIDEO_RENDER_LOWER_BOUND_SECONDS, Math.max(...VIDEO_RENDER_WITNESSES_SECONDS.filter((w) => !w.completed).map((w) => w.perRenderSeconds)));
   assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= WITNESSED_CAPTURE_SECONDS.video * PROBE_BUDGET_MARGIN, "video budget clears its witness by 1.8x");
   assert.ok(PROBE_BUDGET_MINUTES.video * 60 >= VIDEO_RENDER_LOWER_BOUND_SECONDS * PROBE_BUDGET_MARGIN, "video budget clears the unfinished packed-tier render's lower bound by 1.8x");
   assert.ok(PROBE_BUDGET_MINUTES.video * 60 < WITNESSED_CAPTURE_SECONDS.video * 3, "the video budget is a per-render figure, not a three-render cycle");
   assert.ok(PROBE_BUDGET_MINUTES.image * 60 >= WITNESSED_CAPTURE_SECONDS.image * 4, "image budget clears its witness by 4x");
+  // EVERY lane the budget is enforced on now has a completed capture of its own behind it — the
+  // gap this closes is a kill line derived from one backend and applied to another. The figures are
+  // per backend so the stop reason can name the one that belongs to the cell it stopped.
+  for (const lane of ["video", "image"]) {
+    const byBackend = laneWitnessesByBackend(lane);
+    assert.deepEqual([...byBackend.keys()], ["candle", "mlx"], `the ${lane} lane has a completed witness on BOTH backends`);
+    for (const [backend, witness] of byBackend) {
+      assert.equal(anchorParts(witness.cell).backend, backend, `${lane}/${backend} names the cell it was read from`);
+      assert.ok(PROBE_BUDGET_MINUTES[lane] * 60 >= witness.seconds * PROBE_BUDGET_MARGIN, `${lane} budget clears its ${backend} witness`);
+    }
+    assert.ok(byBackend.get("mlx").seconds > byBackend.get("candle").seconds, `the ${lane} kill line is set by the slower backend`);
+  }
   assert.equal(probeLane({ videoLane: true }), "video");
   assert.equal(probeLane({ videoLane: false }), "image");
-  assert.equal(probeBudgetMinutes({ videoLane: true }, 12), 12, "the flag overrides both lanes");
+  assert.equal(probeBudgetMinutes({ videoLane: true }, 12), 12, "a bare number overrides both lanes");
   assert.equal(probeBudgetMinutes({ videoLane: false }, 0.5), 0.5);
   assert.throws(() => probeBudgetMinutes({ videoLane: false }, 0), /positive number of minutes/);
+  // sc-22738 review: PER LANE. Raising the video lane for a wedged 14B cell must not also hand
+  // every image cell the same hours to hang in, so the flag names the lane and the lane it does not
+  // name keeps its default.
+  assert.equal(probeBudgetMinutes({ videoLane: true }, { video: 240, image: null }), 240);
+  assert.equal(probeBudgetMinutes({ videoLane: false }, { video: 240, image: null }), 60, "the unnamed lane keeps its default");
+  assert.equal(probeBudgetMinutes({ videoLane: false }, { video: 240, image: 90 }), 90);
+  assert.deepEqual(parseProbeBudgetMinutes("240"), { video: 240, image: 240 });
+  assert.deepEqual(parseProbeBudgetMinutes("video=240"), { video: 240, image: null });
+  assert.deepEqual(parseProbeBudgetMinutes("video=240,image=90"), { video: 240, image: 90 });
+  assert.deepEqual(parseProbeBudgetMinutes(" image = 90 "), { video: null, image: 90 }, "spacing is tolerated");
+  assert.deepEqual(parseProbeBudgetMinutes("image=90", { video: 240, image: null }), { video: 240, image: 90 }, "the flag is repeatable");
   assert.equal(parseArgs(["--backend", "mlx", "--list"]).probeBudgetMinutes, null, "unset means the lane default");
-  assert.equal(parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", "45"]).probeBudgetMinutes, 45);
-  for (const bad of ["0", "-3", "abc"]) {
+  assert.deepEqual(parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", "45"]).probeBudgetMinutes, { video: 45, image: 45 });
+  assert.deepEqual(
+    parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", "video=240", "--probe-budget-minutes", "image=90"]).probeBudgetMinutes,
+    { video: 240, image: 90 },
+  );
+  for (const bad of ["0", "-3", "abc", "video=0", "video=abc", ""]) {
     assert.throws(() => parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", bad]), /positive number of minutes/, bad);
+  }
+  // A typo is REFUSED by name rather than silently leaving the budget at its default — the whole
+  // point of the knob is that an operator can trust the figure they typed reached the walk.
+  for (const bad of ["vidoe=240", "both=240", "=240"]) {
+    assert.throws(() => parseArgs(["--backend", "mlx", "--list", "--probe-budget-minutes", bad]), /the lanes are video, image/, bad);
   }
   // The LANE is derived from the plan, never listed here: a video anchor is one whose planned
   // geometry renders more than one frame. Both video and image rows must exist for the check to
@@ -5520,6 +5590,46 @@ test("every probe carries a wall-clock budget: per lane by default, derived from
   const byKey = new Map(rows.map((row) => [row.key, row]));
   assert.equal(byKey.get("bernini:q8:mlx").videoLane, true);
   assert.equal(byKey.get("bernini_image:q8:mlx").videoLane, false);
+});
+
+test("the campaign can raise one lane's budget from the dispatch, with no source edit", async () => {
+  // sc-22738 review: the budget is a hard kill on every lane now, so an operator who reads
+  // "re-run it with --probe-budget-minutes video=330" on a stopped cell has to be able to DO that.
+  // Before this the flag existed and nothing on the campaign path passed it: raising the budget
+  // meant editing `PROBE_BUDGET_MINUTES` and landing a PR.
+  const argsFor = async (env) => {
+    const { stdout } = await execFileAsync(
+      "bash",
+      ["-c", 'source scripts/ci/memory-catalog/common.sh; build_catalog_args; printf "%s\\n" "${CATALOG_ARGS[@]}"'],
+      { cwd: ROOT, env: { PATH: process.env.PATH, BACKEND: "candle", CAMPAIGN: "sc-22738", INFERENCE_REPO: "/tmp/inf", WORK_DIR_NATIVE: "/tmp/wd", ...env } },
+    );
+    return stdout.trim().split("\n");
+  };
+  const raised = await argsFor({ PROBE_BUDGET_INPUT: "video=240" });
+  assert.equal(raised.at(-2), "--probe-budget-minutes", raised.join(" "));
+  assert.equal(raised.at(-1), "video=240", raised.join(" "));
+  // The spelling the shell passes is the spelling the walk parses — the two agree by string.
+  assert.deepEqual(parseProbeBudgetMinutes(raised.at(-1)), { video: 240, image: null });
+  assert.deepEqual(parseArgs(["--backend", "candle", "--list", raised.at(-2), raised.at(-1)]).probeBudgetMinutes, { video: 240, image: null });
+  // Unset is the lane defaults, and passes NO flag: an empty dispatch input must not become
+  // `--probe-budget-minutes ''`, which the walk refuses outright.
+  for (const env of [{}, { PROBE_BUDGET_INPUT: "" }]) {
+    assert.ok(!(await argsFor(env)).includes("--probe-budget-minutes"), JSON.stringify(env));
+  }
+
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  assert.match(workflow, /^ {6}probe_budget_minutes:$/m, "the dispatch offers the knob");
+  assert.match(workflow, /^ {2}PROBE_BUDGET_INPUT: \$\{\{ inputs\.probe_budget_minutes \}\}$/m, "and carries it to the steps");
+  // Workflow-level env reaches BOTH lanes' walks; the flag is in the shared arg builder, so the
+  // `--dry-run`/`--list` passes print the raised figure per row before a day of GPU is spent on it.
+  const candleAt = workflow.indexOf("\n  candle:");
+  assert.ok(candleAt > workflow.indexOf("\n  mlx:") && workflow.indexOf("\n  mlx:") > -1, "both lane jobs were located");
+  for (const [job, body] of [["mlx", workflow.slice(0, candleAt)], ["candle", workflow.slice(candleAt)]]) {
+    assert.ok(body.includes("scripts/ci/memory-catalog/run.sh"), `the ${job} job walks with run.sh`);
+    assert.ok(body.includes("scripts/ci/memory-catalog/plan.sh"), `the ${job} job plans with plan.sh`);
+  }
+  assert.match(await readFile(path.join(ROOT, "scripts/ci/memory-catalog/plan.sh"), "utf8"), /build_catalog_args/);
+  assert.match(await readFile(path.join(ROOT, "scripts/ci/memory-catalog/run.sh"), "utf8"), /build_catalog_args/);
 });
 
 test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
@@ -5557,46 +5667,104 @@ test("a runtime stop's reason names the lane's longest completed render (video) 
   const ceiling = "94822600832-byte ceiling";
   // The campaign of 2026-09-07: `scail2_14b:q4:mlx` under `--probe-budget-minutes 90`, flat at
   // 68.56 GB for 2,354 samples. This is the sentence that was missing when it was read as a hang.
-  const shortfall = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes: 90, budgetSeconds: 5400, peak, ceiling });
+  const shortfall = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes: 90, peak, ceiling, stoppedAtSeconds: 5400 });
   assert.equal(
     shortfall,
     "runtime_budget_exceeded: the 90-minute probe budget (5400s) elapsed; peak physical footprint 68564154584 bytes "
       + "over 2354 sample(s) against the 94822600832-byte ceiling. Nothing was measured, so no bound was recorded and "
-      + "this cell stays runnable. The longest completed video render on record ran 4470s, and this run was launched "
+      + "this cell stays runnable. The longest completed video render on record ran 4470s (longest on mlx: 4470s, "
+      + "wan_2_2_t2v_14b:bf16:mlx), and this run was launched "
       + "with --probe-budget-minutes 90, below the video lane's 165-minute default: this stop is a budget shortfall, "
       + "not evidence of a stall. Re-run it at the default budget or larger before reading anything into the flat footprint.",
   );
-  // At the lane default (or above it) the stop stands on its own: the witness is still named, the
-  // shortfall sentence is not.
+  // At the lane default (or above it) the shortfall sentence is not said — but the knob still is
+  // (sc-22738 review): a stop at the default poses exactly the question an operator cannot answer
+  // by re-running into the same kill at the same second.
   for (const budgetMinutes of [165, 300]) {
-    const reason = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes, budgetSeconds: budgetMinutes * 60, peak, ceiling });
+    const reason = runtimeBudgetExceededReason({ row: { key: "scail2_14b:q4:mlx", videoLane: true }, budgetMinutes, peak, ceiling, stoppedAtSeconds: budgetMinutes * 60 });
     assert.match(reason, new RegExp(`^runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget \\(${budgetMinutes * 60}s\\) elapsed; `), reason);
-    assert.match(reason, /stays runnable\. The longest completed video render on record ran 4470s\.$/, reason);
+    assert.match(reason, /stays runnable\. The longest completed video render on record ran 4470s \(longest on mlx: 4470s, wan_2_2_t2v_14b:bf16:mlx\)\. A re-run at this budget would stop at the same second/, reason);
+    assert.match(reason, new RegExp(`--probe-budget-minutes video=${budgetMinutes * 2} \\(the campaign's probe_budget_minutes input\\), which raises the video lane alone\\.$`), reason);
     assert.doesNotMatch(reason, /shortfall|not evidence of a stall/, reason);
   }
   // The image lane reads its own witness and its own default, and an unsampled peak is said so.
-  const image = runtimeBudgetExceededReason({ row: { key: "sdxl:q4:mlx", videoLane: false }, budgetMinutes: 30, budgetSeconds: 1800, peak: null, ceiling: "guard's ceiling" });
+  const image = runtimeBudgetExceededReason({ row: { key: "sdxl:q4:mlx", videoLane: false }, budgetMinutes: 30, peak: null, ceiling: "guard's ceiling", stoppedAtSeconds: 1800 });
   assert.match(image, /peak physical footprint not sampled against the guard's ceiling\./, image);
-  assert.match(image, /The longest completed image capture on record ran 847s, and this run was launched with --probe-budget-minutes 30, below the image lane's 60-minute default/, image);
-  const imageAtDefault = runtimeBudgetExceededReason({ row: { key: "sdxl:q4:mlx", videoLane: false }, budgetMinutes: 60, budgetSeconds: 3600, peak: null, ceiling: "guard's ceiling" });
-  assert.match(imageAtDefault, /ran 847s\.$/, imageAtDefault);
+  assert.match(image, /The longest completed image capture on record ran 847s \(longest on mlx: 847s, bernini_image:q8:mlx\), and this run was launched with --probe-budget-minutes 30, below the image lane's 60-minute default/, image);
+  const imageAtDefault = runtimeBudgetExceededReason({ row: { key: "sdxl:q4:mlx", videoLane: false }, budgetMinutes: 60, peak: null, ceiling: "guard's ceiling", stoppedAtSeconds: 3600 });
+  assert.match(imageAtDefault, /ran 847s \(longest on mlx: 847s, bernini_image:q8:mlx\)\./, imageAtDefault);
+  assert.match(imageAtDefault, /--probe-budget-minutes image=120 \(the campaign's probe_budget_minutes input\), which raises the image lane alone\.$/, imageAtDefault);
   assert.doesNotMatch(imageAtDefault, /shortfall/, imageAtDefault);
   // sc-22738 (run 34356681566): on a lane the guard does not run on there is no ceiling and no
   // sampler, and the reason must not borrow the guard's vocabulary to say so — "not sampled
   // against the guard's ceiling" would name a ceiling nothing enforced. It also names WHO stopped
   // the probe, because a runner stop additionally means the guard was absent or failed.
   const unguarded = runtimeBudgetExceededReason({
-    row: { key: "scail2_14b:bf16:candle", videoLane: true }, budgetMinutes: 165, budgetSeconds: 9900,
-    peak: null, ceiling: null, stoppedBy: "runner",
+    row: { key: "scail2_14b:bf16:candle", videoLane: true }, budgetMinutes: 165,
+    peak: null, ceiling: null, stoppedBy: "runner", stoppedAtSeconds: 9900,
   });
   assert.match(unguarded, /^runtime_budget_exceeded: the 165-minute probe budget \(9900s\) elapsed; /, unguarded);
   assert.match(unguarded, /peak physical footprint not sampled: the footprint guard is Darwin-only, so nothing sampled this probe\./, unguarded);
-  assert.match(unguarded, /The runner's own wall-clock backstop stopped the probe's process tree\./, unguarded);
+  assert.match(unguarded, /The runner's own wall-clock backstop stopped the probe's process tree at that budget\./, unguarded);
   assert.match(unguarded, /no bound was recorded and this cell stays runnable/, unguarded);
   assert.doesNotMatch(unguarded, /against the/, "no ceiling is claimed where none was enforced");
   assert.doesNotMatch(unguarded, /shortfall/, "165 is the video lane default, not a shortfall");
   // The guard's own stop keeps the sentence it had: no backstop clause, ceiling named.
   assert.doesNotMatch(imageAtDefault, /wall-clock backstop/, imageAtDefault);
+
+  // sc-22738 review, THE SENTENCE THAT CONTRADICTED ITSELF. On the GUARDED lane the runner's own
+  // deadline is the budget plus `RUNNER_BACKSTOP_GRACE_SECONDS`, and it used to be rendered as the
+  // budget's own elapsed figure: "the 165-minute probe budget (10020s) elapsed" — 165 minutes is
+  // 9,900 s. The budget's seconds are now DERIVED from its minutes on both lanes, and the
+  // backstop's later deadline is named as itself.
+  for (const [budgetMinutes, key, videoLane] of [[165, "scail2_14b:bf16:candle", true], [60, "sdxl:q4:mlx", false]]) {
+    for (const guarded of [false, true]) {
+      const reason = runtimeBudgetExceededReason({
+        row: { key, videoLane }, budgetMinutes, peak: null, ceiling: guarded ? "guard's ceiling" : null,
+        stoppedBy: "runner", stoppedAtSeconds: probeTimeoutMs(budgetMinutes, guarded) / 1000,
+      });
+      assert.match(reason, new RegExp(`^runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget \\(${budgetMinutes * 60}s\\) elapsed; `), reason);
+      // The ONE figure that may be quoted as "the budget" is the budget. A grace-inflated one is
+      // the defect, whichever lane it appears on.
+      assert.doesNotMatch(reason, new RegExp(`budget \\(${budgetMinutes * 60 + RUNNER_BACKSTOP_GRACE_SECONDS}s\\)`), reason);
+      assert.match(
+        reason,
+        guarded
+          ? new RegExp(`backstop stopped the probe's process tree at ${budgetMinutes * 60 + RUNNER_BACKSTOP_GRACE_SECONDS}s, ${RUNNER_BACKSTOP_GRACE_SECONDS}s past the guard's own deadline: the guard did not stop the group\\.`)
+          : /backstop stopped the probe's process tree at that budget\./,
+        reason,
+      );
+    }
+  }
+  // A guard whose own deadline disagrees with the budget it was handed is a defect, and the row
+  // says so rather than quietly reporting the budget as the thing that fired.
+  assert.match(
+    runtimeBudgetExceededReason({ row: { key: "sdxl:q4:mlx", videoLane: false }, budgetMinutes: 60, peak: null, ceiling: "guard's ceiling", stoppedAtSeconds: 4200 }),
+    /The guard's own stop fired at 4200s, not at the 3600s it was given\./,
+  );
+
+  // sc-22738 review, THE EXTRAPOLATION AN OPERATOR MUST NOT MAKE SILENTLY. The budget is a hard
+  // kill on every lane now, and `scail2_14b:bf16:candle` — the 19h43m cell run 34356681566 died on
+  // — is a 14B DiT under CFG whose lane's only completed video witnesses are `ltx_2_5`. So the row
+  // states the CANDLE figure and the cell it belongs to: 446 s from an `ltx_2_5` capture is not
+  // evidence about a 14B DiT, and the difference has to be visible on the line an operator reads.
+  const heavy = runtimeBudgetExceededReason({
+    row: { key: "scail2_14b:bf16:candle", videoLane: true }, budgetMinutes: 165, peak: null, ceiling: null,
+    stoppedBy: "runner", stoppedAtSeconds: 9900,
+  });
+  assert.match(heavy, /The longest completed video render on record ran 4470s \(longest on candle: 446s, ltx_2_5:q8:candle\)\./, heavy);
+  assert.match(heavy, /--probe-budget-minutes video=330 \(the campaign's probe_budget_minutes input\), which raises the video lane alone\.$/, heavy);
+  // The row claims nothing about what else did or did not complete: this table holds each backend's
+  // LONGEST capture, not a record of every one, and `z_image_turbo:q4:mlx` (which has an anchor in
+  // the store) would make any "nothing else completed" phrasing a falsehood.
+  assert.doesNotMatch(heavy, /never|no other|has ever completed/, heavy);
+  // And the mlx lane names its own witness, not the candle one.
+  const witnessed = runtimeBudgetExceededReason({
+    row: { key: "wan_2_2_t2v_14b:q8:mlx", videoLane: true }, budgetMinutes: 165, peak: null, ceiling: null,
+    stoppedBy: "runner", stoppedAtSeconds: 9900,
+  });
+  assert.match(witnessed, /\(longest on mlx: 4470s, wan_2_2_t2v_14b:bf16:mlx\)\./, witnessed);
+  assert.doesNotMatch(witnessed, /candle/, witnessed);
 });
 
 test("a probe that reaches its wall-clock budget is `runtime_budget_exceeded`, never a memory bound, and the cell stays runnable", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
@@ -5630,7 +5798,7 @@ test("a probe that reaches its wall-clock budget is `runtime_budget_exceeded`, n
     assert.match(stopped.reason, /no bound was recorded and this cell stays runnable/);
     // sc-22738 (2026-09-08): 0.05 minutes is below the image lane's default, and the reason says
     // so — a stop under a shortened budget must not read as a wedged engine.
-    assert.match(stopped.reason, /The longest completed image capture on record ran 847s, and this run was launched with --probe-budget-minutes 0\.05, below the image lane's 60-minute default: this stop is a budget shortfall, not evidence of a stall\./);
+    assert.match(stopped.reason, /The longest completed image capture on record ran 847s \(longest on mlx: 847s, bernini_image:q8:mlx\), and this run was launched with --probe-budget-minutes 0\.05, below the image lane's 60-minute default: this stop is a budget shortfall, not evidence of a stall\./);
     assert.equal(context.state.commits.length, 0, "nothing was committed");
     const { stdout: status } = await checkout.git("status", "--porcelain");
     assert.equal(status, "", "the tree is clean for the next anchor");
@@ -5787,7 +5955,10 @@ test(
 
       assert.equal(stopped.status, "runtime_budget_exceeded", stopped.reason);
       assert.match(stopped.reason, /^runtime_budget_exceeded: the 0\.05-minute probe budget \(3s\) elapsed;/);
-      assert.match(stopped.reason, /The runner's own wall-clock backstop stopped the probe's process tree\./);
+      // UNGUARDED: the runner's bound IS the budget, so the tree was stopped at that budget and no
+      // grace-inflated figure appears anywhere in the sentence.
+      assert.match(stopped.reason, /The runner's own wall-clock backstop stopped the probe's process tree at that budget\./);
+      assert.doesNotMatch(stopped.reason, new RegExp(`${3 + RUNNER_BACKSTOP_GRACE_SECONDS}s`), stopped.reason);
       // No guard ran here, so no ceiling and no sampled peak may be claimed.
       assert.match(stopped.reason, /not sampled: the footprint guard is Darwin-only/);
       assert.doesNotMatch(stopped.reason, /-byte ceiling/);
@@ -5828,6 +5999,257 @@ test(
       delete process.env.STUB_CAPTURE_HANGS;
       delete process.env.STUB_CAPTURE_ADAPTER_PID_FILE;
     }
+  },
+);
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738 review: THE GUARDED HALF OF THE SAME BACKSTOP.
+//
+// The test above drives the lane with no guard on it. The Darwin lane HAS one, and there the
+// runner's bound is the budget plus `RUNNER_BACKSTOP_GRACE_SECONDS` — so it can only ever fire when
+// the guard FAILED to stop the group, which no working guard does. Nothing therefore exercised the
+// guarded spawn's own `timeoutMs`: dropping it from that call site left the whole suite green.
+//
+// HOW THIS DRIVES IT WITHOUT WAITING OUT THE GRACE. The node side runs on `t.mock.timers`, the
+// same idea as the watchdog's `QuantizedClock` (#2798): real processes, real signals, real event
+// log, virtual READINGS of the clock the runner schedules against. The guard is real and is given a
+// 60-second deadline it never reaches, so it cannot be what ends this probe — a guard that
+// swallows its own stop — and the runner's 180-second bound is ticked to one millisecond short (it
+// must NOT fire: that pins the grace, since the unguarded value would already have fired) and then
+// over.
+// ---------------------------------------------------------------------------------------------
+
+/** Poll `condition` on the REAL clock — captured before `mock.timers` replaces the global. */
+async function untilReal(condition, { realSetTimeout, timeoutMs = 20_000, what }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return;
+    if (Date.now() > deadline) assert.fail(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    await new Promise((resolve) => { realSetTimeout(resolve, 100); });
+  }
+}
+
+test(
+  "the runner's backstop is wired into the GUARDED spawn too, and stops the tree when the guard does not",
+  { skip: process.platform !== "darwin" && "the footprint guard is Darwin-only", timeout: 90_000 },
+  async (t) => {
+    const checkout = await stubCheckout();
+    const adapterPidFile = path.join(checkout.workDir, "guarded-adapter.pid");
+    const eventFile = path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl");
+    // The REAL setTimeout, captured before the mock replaces the global: every wait below is real
+    // wall clock, and only the runner's own scheduling is virtual.
+    const realSetTimeout = globalThis.setTimeout;
+    process.env.STUB_CAPTURE_HANGS = "1";
+    process.env.STUB_CAPTURE_ADAPTER_PID_FILE = adapterPidFile;
+    // Runs even when the test times out, where a `finally` would not: a broken bound leaves a
+    // 600-second stub and its adapter holding the suite open.
+    t.after(async () => {
+      t.mock.timers.reset();
+      delete process.env.STUB_CAPTURE_HANGS;
+      delete process.env.STUB_CAPTURE_ADAPTER_PID_FILE;
+      for (const line of (await readFile(adapterPidFile, "utf8").catch(() => "")).split("\n")) {
+        const pid = Number(line.trim());
+        if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+        try { process.kill(pid, "SIGKILL"); } catch { /* already reaped */ }
+      }
+    });
+
+    const budgetMinutes = 1;
+    const bound = probeTimeoutMs(budgetMinutes, true);
+    assert.equal(bound, (60 + RUNNER_BACKSTOP_GRACE_SECONDS) * 1000, "the guarded bound is the budget plus the grace");
+    const context = stubContext(checkout, {
+      platform: "darwin",
+      // Through the flag's own parser, so the per-lane spelling reaches a real spawn rather than
+      // only a unit test of the parser.
+      args: { ...stubContext(checkout).args, commit: false, probeBudgetMinutes: parseProbeBudgetMinutes("image=1") },
+    });
+    const row = {
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      // Fully bound, so the "no artifact binding" refusal is not what this test is really watching.
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    };
+
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const pending = measureAnchor(row, context);
+    let settled = null;
+    pending.then((value) => { settled = value; }, (error) => { settled = error; });
+
+    // The guard is REAL and is sampling: this is the Darwin branch, not a stand-in for it.
+    await untilReal(
+      async () => (await readFile(eventFile, "utf8").catch(() => "")).includes('"event": "sample"')
+        || (await readFile(eventFile, "utf8").catch(() => "")).includes('"event":"sample"'),
+      { realSetTimeout, what: "the footprint guard's first sample" },
+    );
+
+    // ONE MILLISECOND SHORT. The unguarded bound (60,000 ms) and the guard's own deadline are both
+    // long past at this point, so anything but the guarded value would have ended the probe here.
+    t.mock.timers.tick(bound - 1);
+    await new Promise((resolve) => { realSetTimeout(resolve, 250); });
+    assert.equal(settled, null, `the guarded bound fired before ${bound}ms: ${JSON.stringify(settled)}`);
+    t.mock.timers.tick(1);
+
+    const stopped = await pending;
+    t.mock.timers.reset();
+
+    assert.equal(stopped.status, "runtime_budget_exceeded", stopped.reason);
+    // sc-22738 review, THE SENTENCE THAT CONTRADICTED ITSELF: the budget's seconds are the budget's,
+    // and the backstop's own later deadline is named as itself.
+    assert.match(stopped.reason, /^runtime_budget_exceeded: the 1-minute probe budget \(60s\) elapsed;/, stopped.reason);
+    assert.match(
+      stopped.reason,
+      new RegExp(`backstop stopped the probe's process tree at ${bound / 1000}s, ${RUNNER_BACKSTOP_GRACE_SECONDS}s past the guard's own deadline: the guard did not stop the group\\.`),
+      stopped.reason,
+    );
+    // The `guarded: true` arm of the stop handler: the guard's sampled peak, and the ceiling its
+    // ceilings were derived from — neither of which the unguarded lane may claim.
+    assert.match(stopped.reason, /peak physical footprint \d+ bytes over \d+ sample\(s\) against the 94822600832-byte ceiling/, stopped.reason);
+    assert.match(stopped.reason, /no bound was recorded and this cell stays runnable/, stopped.reason);
+
+    // The guard really ran, on this probe's own budget: minutes on the runner, seconds on the guard.
+    const log = await readFile(stopped.log, "utf8");
+    assert.match(log, /memory-calibration-watchdog\.py .*--max-runtime-seconds 60 /);
+    assert.match(log, /RUNNER STOP: 180s wall-clock budget elapsed; stopping the probe's process tree/);
+
+    // WHAT THE EVENT LOG SAYS, AND WHAT IT MUST NOT BE TURNED INTO. The guard never reached its own
+    // deadline, so there is no footprint stop and no runtime stop in it — the only `hard_stop` is
+    // the one the RUNNER's own SIGTERM caused, and reading that as a measured bound would file the
+    // runner's kill in the store as a fact about the model.
+    const events = (await readFile(eventFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(events.some((event) => event.event === "sample"), "the guard sampled this probe");
+    const stops = events.filter((event) => event.event === "hard_stop").map((event) => event.reason);
+    assert.deepEqual(stops, ["monitor_signal_SIGTERM"], JSON.stringify(stops));
+    assert.equal(measuredFootprintBound(await watchdogHardStop(eventFile)), false, "the runner's own kill is not a bound");
+    assert.equal(runtimeBudgetStopSeconds(await watchdogHardStop(eventFile)), null, "and it is not the guard's runtime stop either");
+
+    // The TREE, on the guarded lane as well: the adapter the capture spawned is dead.
+    const adapterPid = Number((await readFile(adapterPidFile, "utf8")).trim().split("\n")[1]);
+    assert.ok(Number.isSafeInteger(adapterPid) && adapterPid > 0, "the stub adapter recorded its pid");
+    await untilReal(
+      async () => { try { process.kill(adapterPid, 0); return false; } catch { return true; } },
+      { realSetTimeout, what: `the adapter (pid ${adapterPid}) to be reaped` },
+    );
+
+    assert.equal(context.state.commits.length, 0, "nothing was committed");
+    assert.equal(context.state.halt ?? null, null, "a stopped cell is not a stopped walk");
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "the tree is clean for the next anchor");
+  },
+);
+
+test("the runner's own kill and the guard's measured bound are told apart by the SPELLING the harness accepts", async () => {
+  const stream = (reason) => [
+    JSON.stringify({ event: "sample", physicalFootprintBytes: 94_822_600_833 }),
+    JSON.stringify({ event: "hard_stop", reason }),
+    "",
+  ].join("\n");
+  const footprint = "physical_footprint_at_or_above_94822600832:observed_94822600833";
+  // The runner's predicate and the harness's parser are two copies of one rule — only a footprint
+  // stop states a lower bound — in two files that agree by STRING and nothing else. Drive both.
+  assert.equal(measuredFootprintBound(`watchdog hard stop: ${footprint}`), true);
+  assert.equal(parseWatchdogHardStop(stream(footprint)).ceilingBytes, 94_822_600_832);
+  for (const other of [
+    // The one the runner CAUSES: `stopProcessTree` SIGTERMs the guard, and the guard writes this on
+    // its way out. A looser predicate would feed the runner's own kill to `record-exceeded`.
+    "monitor_signal_SIGTERM",
+    "runtime_at_or_above_9900.0s",
+    "telemetry_lost:TimeoutError:x",
+    "monitor_failure:RuntimeError:x",
+    "memory_free_at_or_below_2147483648",
+  ]) {
+    assert.equal(measuredFootprintBound(`watchdog hard stop: ${other}`), false, other);
+    assert.throws(() => parseWatchdogHardStop(stream(other)), /is not a physical-footprint stop/, other);
+  }
+  for (const nothing of [null, undefined, "", "watchdog hard stop: physical_footprint_at_or_above_1", "physical_footprint_at_or_above_1:observed_2"]) {
+    assert.equal(measuredFootprintBound(nothing), false, String(nothing));
+  }
+  assert.ok(FOOTPRINT_BOUND_STOP_PATTERN.test("watchdog hard stop: physical_footprint_at_or_above_1:observed_2"));
+
+  // The harness's note about what the RUNNER does with a wall-clock stop is a cross-file claim, and
+  // it went stale the moment `runtime_budget_exceeded` replaced `capture_failed` (sc-22738 review).
+  // Bind it to the status this file really returns, so the next rename cannot leave it lying.
+  const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
+  const at = harness.indexOf("the SECOND guard against a false lower bound");
+  assert.ok(at > -1, "the harness's note about the runner was located");
+  const note = harness.slice(at, harness.indexOf("*/", at));
+  assert.match(note, /returns `runtime_budget_exceeded` for a wall-clock stop/, note);
+  assert.doesNotMatch(note, /capture_failed/, "the runner has not reported a wall-clock stop that way since sc-22738");
+});
+
+test(
+  "a bound the guard MEASURED before the reap wedged survives the runner's backstop and is committed",
+  { skip: process.platform !== "darwin" && "the footprint guard is Darwin-only", timeout: 90_000 },
+  async (t) => {
+    // sc-22738 review. The runner used to return on `error.timedOut` BEFORE reading the guard's
+    // event log, so a `physical_footprint_at_or_above_…:observed_…` written at minute 100 of a
+    // 165-minute budget — the line that becomes `committed_exceeded` — was thrown away and the cell
+    // reported `runtime_budget_exceeded`, recording NOTHING. The guard here has written its bound
+    // and then wedged; the runner's backstop is what ends the probe.
+    const checkout = await stubCheckout();
+    const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+    await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+    process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+    process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+    const eventFile = path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl");
+    const adapterPidFile = path.join(checkout.workDir, "wedged-adapter.pid");
+    const realSetTimeout = globalThis.setTimeout;
+    process.env.STUB_CAPTURE_HANGS = "1";
+    process.env.STUB_CAPTURE_ADAPTER_PID_FILE = adapterPidFile;
+    process.env.STUB_CAPTURE_WATCHDOG_HARD_STOP = eventFile;
+    t.after(async () => {
+      t.mock.timers.reset();
+      delete process.env.STUB_CAPTURE_HANGS;
+      delete process.env.STUB_CAPTURE_ADAPTER_PID_FILE;
+      delete process.env.STUB_CAPTURE_WATCHDOG_HARD_STOP;
+      for (const line of (await readFile(adapterPidFile, "utf8").catch(() => "")).split("\n")) {
+        const pid = Number(line.trim());
+        if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+        try { process.kill(pid, "SIGKILL"); } catch { /* already reaped */ }
+      }
+    });
+
+    const context = stubContext(checkout, {
+      platform: "darwin",
+      args: { ...stubContext(checkout).args, probeBudgetMinutes: parseProbeBudgetMinutes("image=1") },
+    });
+    const row = {
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot,
+      env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    };
+
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const pending = measureAnchor(row, context);
+    await untilReal(
+      async () => (await readFile(eventFile, "utf8").catch(() => "")).includes("physical_footprint_at_or_above_94822600832"),
+      { realSetTimeout, what: "the guard's measured bound to reach its event log" },
+    );
+    t.mock.timers.tick(probeTimeoutMs(1, true));
+    const stopped = await pending;
+    t.mock.timers.reset();
+
+    // THE POINT: the bound is recorded, not discarded, and the runner's stop is not what the cell
+    // reports — a `runtime_budget_exceeded` here would leave the cell `runnable` with the store
+    // carrying no trace of a footprint the host could not hold.
+    assert.equal(stopped.status, "committed_exceeded", stopped.reason);
+    assert.equal(stopped.reason, null, stopped.reason);
+    assert.equal(context.state.commits.length, 1, "the measured bound is one commit, like an anchor");
+    assert.equal(context.state.halt ?? null, null);
+    const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s%n%b", "HEAD");
+    assert.match(shown, /chore\(sc-stub\): record the z_image_turbo:q4:mlx footprint hard stop as a measured bound/);
+    assert.match(shown, /watchdog hard stop: physical_footprint_at_or_above_94822600832:observed_94822600833/);
+    const bundle = JSON.parse(await readFile(
+      path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"), "utf8",
+    ));
+    assert.equal(bundle.exceededBounds[0].ceilingBytes, 94_822_600_832);
+    assert.equal(bundle.exceededBounds[0].observedFootprintBytes, 94_822_600_833);
+    assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "the tree is clean for the next anchor");
+
+    // The runner's OWN kill is in the same log, AFTER the bound — and the first hard stop is the one
+    // that speaks, so the SIGTERM the backstop sent can never overwrite the measurement.
+    const stops = (await readFile(eventFile, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line)).filter((event) => event.event === "hard_stop").map((event) => event.reason);
+    assert.equal(stops[0], "physical_footprint_at_or_above_94822600832:observed_94822600833", JSON.stringify(stops));
+    assert.ok(stops.includes("monitor_signal_SIGTERM"), `the runner stopped the tree: ${JSON.stringify(stops)}`);
+    assert.equal(await watchdogHardStop(eventFile), "watchdog hard stop: physical_footprint_at_or_above_94822600832:observed_94822600833");
   },
 );
 
