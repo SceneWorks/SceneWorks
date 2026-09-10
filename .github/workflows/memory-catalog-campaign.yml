@@ -122,6 +122,20 @@ on:
         required: false
         type: string
         default: "1"
+      probe_budget_minutes:
+        description: >-
+          Per-probe wall-clock budget (--probe-budget-minutes). Empty uses the lane defaults, 165
+          minutes for a video anchor and 60 for an image one. `240` sets both lanes;
+          `video=240` (or `video=240,image=90`) raises ONE lane and leaves the other's tighter
+          backstop alone. Raise a lane when a cell reported runtime_budget_exceeded and you believe
+          it was still rendering: the reason names that lane's longest completed capture on the
+          cell's own backend and the cell it was read from, and a re-run at the same budget stops at
+          the same second. The heavy candle video cells (scail2_14b, wan_2_2_i2v_14b,
+          wan_2_2_t2v_14b -- 14B DiTs at 480p/720p) have no completed candle render on file at all,
+          so their 165 minutes is the figure to raise if one of them stops.
+        required: false
+        type: string
+        default: ""
       instantid_weights:
         description: >-
           Absolute path on the runner to the InstantID identity bundle DIRECTORY holding
@@ -168,6 +182,10 @@ env:
   SKIP_CURRENT: ${{ inputs.skip_current }}
   HF_CACHE_INPUT: ${{ inputs.hf_cache_roots }}
   DOWNLOAD_MISSING: ${{ inputs.download_missing }}
+  # The per-lane wall-clock budget, straight through to `--probe-budget-minutes` (sc-22738 review).
+  # It is a dispatch input rather than a constant so a cell that needs longer than its lane's
+  # default can be re-measured without a source edit and a PR.
+  PROBE_BUDGET_INPUT: ${{ inputs.probe_budget_minutes }}
   # The three operator-staged identity stacks (sc-22738). Carried as INPUT_-prefixed names on
   # purpose: `stage-identity-bundles.sh` copies each into $GITHUB_ENV under the name the worker
   # actually reads ONLY when it is non-empty, so an unused input can never blank a runner that
@@ -192,10 +210,10 @@ jobs:
     concurrency:
       group: memory-catalog-campaign-mlx-${{ startsWith(inputs.runner_label, 'nax') && 'nax' || 'rw-krea' }}
       cancel-in-progress: false
-    # The full MLX walk is ~147 anchors of real GPU renders and the harness imposes no per-anchor
-    # timeout, so this is deliberately a two-day ceiling rather than a measured budget: the ceiling
-    # exists to stop a WEDGED job holding the box forever, and every anchor that finished before a
-    # timeout has already been committed and pushed.
+    # The full MLX walk is ~147 anchors of real GPU renders, so this is deliberately a two-day
+    # ceiling rather than a measured budget. Each anchor is bounded on its own by the harness
+    # (`PROBE_BUDGET_MINUTES`, sc-22738), so this ceiling now only catches a wedge OUTSIDE a probe;
+    # every anchor that finished before a timeout has already been committed and pushed.
     timeout-minutes: 2880
     env:
       # Survives actions/checkout's `clean: true` between jobs on this persistent box, and keeps the

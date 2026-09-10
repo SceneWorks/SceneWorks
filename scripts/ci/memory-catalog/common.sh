@@ -98,6 +98,14 @@ build_catalog_args() {
   if [[ -n "${ANCHORS_INPUT:-}" ]]; then
     CATALOG_ARGS+=(--anchors "$ANCHORS_INPUT")
   fi
+  # The per-lane probe budget (sc-22738 review). Passed VERBATIM -- `240`, `video=240` and
+  # `video=240,image=90` are all the walk's own spelling, and it refuses anything else by name, so
+  # a typo reds the dispatch instead of silently leaving the budget at its default. It belongs in
+  # the shared args because `--dry-run`/`--list` print each row's budget: the operator raising one
+  # lane can see the new figure before spending a day of GPU on it.
+  if [[ -n "${PROBE_BUDGET_INPUT:-}" ]]; then
+    CATALOG_ARGS+=(--probe-budget-minutes "$PROBE_BUDGET_INPUT")
+  fi
   # `--model` is repeatable; the input is a space-separated list.
   if [[ -n "${MODELS_INPUT:-}" ]]; then
     local model
