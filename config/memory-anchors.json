@@ -548,6 +548,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "chroma1_hd:candle:bf16:base:base:chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1:imc-7c225de3c2a22a6491a2",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-hd-bf16-candle-evidence.json",
+        "sha256": "bd54ac5ab50a43b18386109fcdfe5ead0c80bda6569735fbceb67a0d5b9dfffe",
+        "recordId": "imc-7c225de3c2a22a6491a2",
+        "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "a4318addc11b0e42102e96aaeaa91988ed7867ae81c851df41b37798a2e9bd89"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "overallAllocatorEnvelopeBytes": 46174044160
+    },
+    {
       "id": "chroma1_hd:mlx:bf16:base:base:chroma1-hd-bf16-mlx-shared-ladder-v1:imc-460e14ea1de207325719",
       "modelId": "chroma1_hd",
       "modelFamily": "chroma",
@@ -7381,17 +7426,6 @@
       "route": "boogu_image_turbo",
       "backend": "mlx",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_hd:candle:bf16",
-      "modelId": "chroma1_hd",
-      "modelFamily": "chroma",
-      "route": "chroma1_hd",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
