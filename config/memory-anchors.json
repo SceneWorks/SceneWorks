@@ -5450,6 +5450,51 @@
       "overallAllocatorEnvelopeBytes": 42048946176
     },
     {
+      "id": "qwen_image:candle:q8:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-58db77f4920399c974f7",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-q8-candle-evidence.json",
+        "sha256": "c04821d4e6d493d2b91ba578b925642436760a384a2cb482ddcd3dd155075f7a",
+        "recordId": "imc-58db77f4920399c974f7",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "5f1135bb07164900859142b2262e76d623dc89310ccbdd277b0d8ea7d8065a84"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 29698818048,
+        "denoise": 29708255232,
+        "decode": 40463499264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 29698818048,
+        "denoise": 29708255232,
+        "decode": 40463499264
+      },
+      "overallAllocatorEnvelopeBytes": 40463499264
+    },
+    {
       "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-73a0ce2270695ffa49e6",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -9055,31 +9100,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:qwen_image:candle:q8",
-      "modelId": "qwen_image",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "38.7",
-          "provider": "qwen_image",
-          "abi": "1",
-          "vramGbByTier": "65.3"
-        }
-      }
     },
     {
       "id": "analytic:qwen_image_edit_2511_lightning:candle:bf16",
