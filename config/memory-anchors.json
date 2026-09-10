@@ -6131,6 +6131,51 @@
       "overallAllocatorEnvelopeBytes": 11710496768
     },
     {
+      "id": "realvisxl_lightning:candle:q8:base:base:sdxl-candle-realvisxl-lightning-staged-decode-attention-v1:imc-15631749f3a60486ddd0",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-lightning-q8-candle-evidence.json",
+        "sha256": "39d038fbab136ebd5b34559a1b236688b6b3284f813aaa2275dc466c064797fd",
+        "recordId": "imc-15631749f3a60486ddd0",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+        "loaderClosureDigest": "6bd247e956a8487884ffce3269d98718aca6423d207eba90b0210d26fce3c904"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4096786432,
+        "denoise": 11111759872,
+        "decode": 15842934784
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4096786432,
+        "denoise": 11111759872,
+        "decode": 15842934784
+      },
+      "overallAllocatorEnvelopeBytes": 15842934784
+    },
+    {
       "id": "sana_1600m:mlx:bf16:base:base:sana-base-bf16-mlx-full-ladder-v1-resident:imc-a4e0c62f15d4334a8a35",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -9466,30 +9511,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:realvisxl_lightning:candle:q8",
-      "modelId": "realvisxl_lightning",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:realvisxl_lightning:mlx:bf16",
