@@ -275,6 +275,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "chroma1_flash:candle:bf16:base:base:chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1:imc-3b6de030147fb4e44a37",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-bf16-candle-evidence.json",
+        "sha256": "dc69ae46af2efa9303fcb867fbf9a24c26867a34caaef4269df649ddb3e955e2",
+        "recordId": "imc-3b6de030147fb4e44a37",
+        "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "89e183da4ef22b7dd38e4c4315080ad8b9659bc1c2fabea71d3dd7203e392d16"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 41073770496,
+        "denoise": 46375370752,
+        "decode": 41040216064
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 41073770496,
+        "denoise": 46375370752,
+        "decode": 41040216064
+      },
+      "overallAllocatorEnvelopeBytes": 46375370752
+    },
+    {
       "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
       "modelId": "chroma1_flash",
       "modelFamily": "chroma",
@@ -7246,17 +7291,6 @@
       "route": "boogu_image_turbo",
       "backend": "mlx",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:candle:bf16",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
