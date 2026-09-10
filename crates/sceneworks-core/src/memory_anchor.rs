@@ -301,6 +301,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/ideogram-4-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json"),
     ),
