@@ -29,13 +29,22 @@
 // --download-missing` prints what it would fetch, with the manifest's own byte estimate, and
 // fetches nothing.
 //
-// Every guarded probe also carries a WALL-CLOCK budget (`--probe-budget-minutes`, defaulted per
-// lane by `PROBE_BUDGET_MINUTES`), passed to the guard as `--max-runtime-seconds`. A probe that
-// reaches it is stopped on the guard's ONE stop path — the same SIGTERM→SIGKILL escalation and the
-// same post-stop census a footprint stop takes — and reported as `capture_failed` with reason
+// EVERY probe carries a WALL-CLOCK budget (`--probe-budget-minutes`, defaulted per lane by
+// `PROBE_BUDGET_MINUTES`) and is stopped when it reaches it, on the terminal status
 // `runtime_budget_exceeded`. It is NOT an exceedance: a run that thrashed below the ceiling
 // measured nothing, so no bound is written, the store keeps no trace, and the cell classifies
-// `runnable` again on the next `--list` (sc-22738).
+// `runnable` again on the next `--list` (sc-22738). The walk then moves to the NEXT cell — one
+// wedged probe can no longer consume the whole job.
+//
+// TWO things can impose that budget, and they are not alternatives:
+//   * the footprint guard, on Darwin, via `--max-runtime-seconds` — one more trigger on its ONE
+//     stop path, so a runtime stop escalates and censuses exactly as a footprint stop does; and
+//   * the RUNNER itself, on every platform, via `probeTimeoutMs` → `run({ timeoutMs })`, which
+//     stops the probe's whole process TREE (`stopProcessTree`).
+// The guard is Darwin-only by construction (`guardsCapture`; the sampler is `/usr/bin/footprint`),
+// so until sc-22738's run 34356681566 the budget reached NO probe on the Windows CUDA lane and one
+// cell there ran 19h43m against a 165-minute budget. The runner's bound sits behind the guard's on
+// Darwin (`RUNNER_BACKSTOP_GRACE_SECONDS`) so the guard keeps owning the stop it can make.
 //
 // A cell the store already carries a CURRENT measured lower bound for classifies `exceeded_current`
 // and is never scheduled, with or without `--skip-current` (sc-22738): the host has proved it cannot
@@ -2786,17 +2795,90 @@ export async function capturedInCampaign(root, campaignDir) {
 // Process plumbing
 // ---------------------------------------------------------------------------------------------
 
-function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null } = {}) {
+/**
+ * How long the runner waits after its own SIGTERM before escalating to SIGKILL (sc-22738).
+ *
+ * The same shape the guard's `--term-grace` has, and for the same reason: a capture that is
+ * shutting down cleanly gets a moment to do it, one that is wedged does not get to keep the box.
+ * On Windows there is only one step — see `stopProcessTree`.
+ */
+export const RUNNER_STOP_GRACE_SECONDS = 15;
+
+/**
+ * Stop a spawned probe AND EVERYTHING IT SPAWNED (sc-22738, run 34356681566).
+ *
+ * `child.kill()` signals the immediate child alone. That is not enough here: the child is the
+ * capture harness, and the process actually holding the GPU is the memory adapter IT spawned. When
+ * run 34356681566 was finally cancelled after 19h43m on one cell, the runner's own cleanup had to
+ * reap `node`, `memory-candle-adapter`, `conhost` and `nvidia-smi` as orphans — and an adapter left
+ * alive poisons every following cell's peak (see `contaminatedHostHalt`).
+ *
+ * POSIX: the capture is spawned `detached`, which makes it a process-GROUP leader, so the negative
+ * pid reaches the adapter too, and TERM→KILL escalates.
+ *
+ * Windows: there is no process group to signal — `os.kill` supports only `CTRL_C_EVENT` and
+ * `CTRL_BREAK_EVENT` for another process, and node's `kill()` is `TerminateProcess` on the child
+ * alone, which is exactly how an adapter survives its parent. `taskkill /T` walks the tree; `/F` is
+ * unconditional because a console-less child honours no graceful signal from another process
+ * there. So on Windows BOTH steps of the escalation are the same unconditional tree kill, and the
+ * grace period buys nothing — stated here rather than discovered on a wedged runner.
+ */
+export function stopProcessTree(child, signal, { detached = false, platform = process.platform, spawnProcess = spawn } = {}) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return false;
+  try {
+    if (platform === "win32") {
+      spawnProcess("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" })
+        .on("error", () => {});
+    } else {
+      process.kill(detached ? -child.pid : child.pid, signal);
+    }
+    return true;
+  } catch {
+    // ESRCH (already gone) and EPERM (not ours) are both "nothing left to stop here": the caller's
+    // job is to stop waiting, not to succeed at signalling.
+    return false;
+  }
+}
+
+/**
+ * @param {object} [options]
+ * @param {number|null} [options.timeoutMs] wall-clock bound on the child, or null for none. On
+ *   expiry the whole process TREE is stopped (`stopProcessTree`) and the promise rejects with an
+ *   error carrying `timedOut: true` and `timeoutMs`, so a caller can tell a bound it imposed from
+ *   a failure the child reported.
+ */
+function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null, timeoutMs = null } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
     if (input !== null) child.stdin.end(input);
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timers = [];
+    const clearTimers = () => { for (const timer of timers) clearTimeout(timer); timers.length = 0; };
+    const timeoutError = () => Object.assign(
+      new Error(`${[command, ...args].join(" ")} exceeded its ${Math.round(timeoutMs / 1000)}s wall-clock budget and was stopped`),
+      { stdout, stderr, timedOut: true, timeoutMs },
+    );
+    if (timeoutMs !== null) {
+      timers.push(setTimeout(() => {
+        timedOut = true;
+        log?.write(`\nRUNNER STOP: ${Math.round(timeoutMs / 1000)}s wall-clock budget elapsed; stopping the probe's process tree\n`);
+        stopProcessTree(child, "SIGTERM", { detached });
+        timers.push(setTimeout(() => stopProcessTree(child, "SIGKILL", { detached }), RUNNER_STOP_GRACE_SECONDS * 1000));
+        // Last resort: a grandchild that survived BOTH steps can hold the stdio pipes open, and
+        // `close` would then never fire — which is the very hang this bound exists to end. Settle
+        // anyway, so the walk moves to the next cell instead of waiting on a process it cannot kill.
+        timers.push(setTimeout(() => reject(timeoutError()), RUNNER_STOP_GRACE_SECONDS * 2 * 1000));
+      }, timeoutMs));
+    }
     child.stdout.on("data", (chunk) => { stdout += chunk; log?.write(chunk); });
     child.stderr.on("data", (chunk) => { stderr += chunk; log?.write(chunk); });
-    child.on("error", reject);
+    child.on("error", (error) => { clearTimers(); reject(error); });
     child.on("close", (code, signal) => {
-      if (code === 0) resolve({ stdout, stderr });
+      clearTimers();
+      if (timedOut) reject(timeoutError());
+      else if (code === 0) resolve({ stdout, stderr });
       else reject(Object.assign(new Error(`${[command, ...args].join(" ")} exited ${code ?? signal}\n${stderr.slice(-4000)}`), { stdout, stderr, code }));
     });
   });
@@ -2851,14 +2933,36 @@ export const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES = 96_970_084_480;
 export const UNIFIED_RESERVE_BYTES = 2 * 1024 * 1024 * 1024;
 
 /**
+ * How long the adapter gets to answer a `probe` before the runner stops it (sc-22738).
+ *
+ * A probe reads host memory and prints one JSON line; it takes seconds. Five minutes is not a
+ * budget, it is a wedge ceiling — generous enough that a cold GPU-runtime init on a loaded box is
+ * never mistaken for a hang, finite so that one cannot hold the walk open indefinitely.
+ */
+export const ADAPTER_PROBE_TIMEOUT_SECONDS = 300;
+
+/**
  * The adapter's own host probe — the same `probe` action the harness runs first inside every
  * capture — so the ceilings below come from the figures the record will carry, not from a second
  * reading of the host. `memoryBytes` is required of every adapter; `wiredLimitBytes` is what the
  * MLX adapter resolves from host policy and is required when the anchor is an MLX one — the candle
  * adapter reports none, and on Darwin its capture is guarded from the host figure alone.
  */
-export async function probeAdapter(command, { cwd = ROOT, env = process.env, wiredLimitRequired = true } = {}) {
-  const { stdout } = await run(command[0], command.slice(1), { cwd, env, input: `${JSON.stringify({ action: "probe" })}\n` });
+export async function probeAdapter(command, { cwd = ROOT, env = process.env, wiredLimitRequired = true, timeoutSeconds = ADAPTER_PROBE_TIMEOUT_SECONDS } = {}) {
+  let stdout;
+  try {
+    // sc-22738: bounded for the same reason the capture is. This is the OTHER adapter process a
+    // cell starts, it runs BEFORE the guard exists (its answer is what derives the guard's
+    // ceilings), and an adapter that wedged in GPU-runtime init here would hang the walk on cell 1
+    // with nothing to stop it. Named as a probe failure rather than a wall-clock stop: nothing was
+    // rendered, and `runtime_budget_exceeded` would state a render budget that never applied.
+    ({ stdout } = await run(command[0], command.slice(1), {
+      cwd, env, input: `${JSON.stringify({ action: "probe" })}\n`, timeoutMs: Math.ceil(timeoutSeconds * 1000),
+    }));
+  } catch (error) {
+    if (error.timedOut) fail(`adapter probe did not answer within ${timeoutSeconds}s; the probe was stopped`);
+    throw error;
+  }
   const hardware = JSON.parse(stdout).hardware;
   const positive = (field) => Number.isSafeInteger(hardware?.[field]) && hardware[field] > 0;
   if (!positive("memoryBytes")) fail("adapter probe reported no positive hardware.memoryBytes");
@@ -2983,6 +3087,39 @@ export function probeBudgetMinutes(row, override = null) {
 }
 
 /**
+ * How far BEHIND the guard the runner's own backstop sits on a guarded capture (sc-22738).
+ *
+ * On Darwin the guard owns the stop path and must keep owning it: it alone can tell a wall-clock
+ * stop from a footprint stop, and only a footprint stop states a bound. The runner's backstop is
+ * therefore parked behind the guard's own deadline by more than the guard's whole escalation
+ * (`--term-grace 1` plus its post-stop census), so it can only ever fire when the guard FAILED to
+ * stop the group — the one case that used to have no bound at all.
+ */
+export const RUNNER_BACKSTOP_GRACE_SECONDS = 120;
+
+/**
+ * The wall-clock bound the RUNNER puts on one capture's process tree, in ms (sc-22738,
+ * run 34356681566).
+ *
+ * THE DEFECT THIS CLOSES. The budget above only ever reached a probe through `watchdogGuard`, and
+ * `guardsCapture` is `platform === "darwin"` — the footprint sampler is `/usr/bin/footprint`. So on
+ * the Windows CUDA lane the capture was spawned with no bound of any kind: run 34356681566 sat on
+ * `scail2_14b:bf16:candle` (85/132) from 15:15:45Z to the job's cancellation at 10:59:16Z the next
+ * day — 19h43m against a 165-minute budget, 7.2x — and the remaining 47 cells were never reached.
+ * Nothing was wrong with the budget; nothing was passing it.
+ *
+ * So the runner now bounds the capture itself, on every platform:
+ *
+ *   * UNGUARDED (win32, linux): exactly the budget. The runner IS the stop path.
+ *   * GUARDED (darwin): the budget plus `RUNNER_BACKSTOP_GRACE_SECONDS`, so the guard always wins
+ *     and the runner only fires when the guard did not.
+ */
+export function probeTimeoutMs(budgetMinutes, guarded) {
+  if (!Number.isFinite(budgetMinutes) || budgetMinutes <= 0) fail("probeTimeoutMs needs a positive budgetMinutes");
+  return Math.ceil((budgetMinutes * 60 + (guarded ? RUNNER_BACKSTOP_GRACE_SECONDS : 0)) * 1000);
+}
+
+/**
  * The `runtime_budget_exceeded` reason a wall-clock stop reports (sc-22738).
  *
  * Names the budget, the peak sampled (so a probe wedged at the ceiling reads differently from one
@@ -2992,16 +3129,24 @@ export function probeBudgetMinutes(row, override = null) {
  * the 90-minute campaign of 2026-09-07 were read as a hung engine for want of this sentence.
  *
  * Pure: `peak` is `watchdogPeakFootprint`'s reading or `null`, `ceiling` the guard's kill line as
- * a phrase, and nothing here touches the store.
+ * a phrase — or `null` on a platform the guard does not run on, where saying "against the guard's
+ * ceiling" would name a ceiling nothing enforced. `stoppedBy` is `"guard"` when the footprint guard
+ * ended the probe on its own stop path and `"runner"` when the runner's backstop did
+ * (`probeTimeoutMs`); the two are read differently, because a runner stop also means the guard was
+ * absent or failed.
  */
-export function runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling }) {
+export function runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling, stoppedBy = "guard" }) {
   const lane = probeLane(row);
   const laneDefault = PROBE_BUDGET_MINUTES[lane];
   const witnessed = WITNESSED_CAPTURE_SECONDS[lane];
+  const footprint = ceiling === null || ceiling === undefined
+    ? "peak physical footprint not sampled: the footprint guard is Darwin-only, so nothing sampled this probe"
+    : `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} against the ${ceiling}`;
   let reason =
     `runtime_budget_exceeded: the ${budgetMinutes}-minute probe budget (${budgetSeconds}s) elapsed; `
-    + `peak physical footprint ${peak ? `${peak.peakBytes} bytes over ${peak.samples} sample(s)` : "not sampled"} `
-    + `against the ${ceiling}. Nothing was measured, so no bound was recorded and this cell stays runnable. `
+    + `${footprint}. `
+    + (stoppedBy === "runner" ? "The runner's own wall-clock backstop stopped the probe's process tree. " : "")
+    + `Nothing was measured, so no bound was recorded and this cell stays runnable. `
     // sc-22738: the video figure is PER RENDER (a video capture is one render); the image figure
     // is a whole capture cycle.
     + `The longest completed ${lane} ${lane === "video" ? "render" : "capture"} on record ran ${witnessed}s`;
@@ -3386,7 +3531,12 @@ export function failureReason(error) {
 }
 
 export async function measureAnchor(row, context) {
-  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT } = context;
+  // `platform` decides ONLY whether this capture runs under the footprint guard (`guardsCapture`),
+  // and defaults to the host's. It is overridable for the same reason `guardsCapture` takes the
+  // parameter at all: the candle campaign runs on Windows and the MLX one on a Mac, so the
+  // UNGUARDED branch below is a branch no developer machine and no macOS lane ever takes — which
+  // is exactly how it shipped for months with no wall-clock bound on it (sc-22738).
+  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT, platform = process.platform } = context;
   const slug = anchorSlug(row.key);
   const log = new Log(path.join(workDir, "logs", `${slug}.log`));
   const captureOutput = path.join(workDir, "captures", `${slug}.json`);
@@ -3532,8 +3682,13 @@ export async function measureAnchor(row, context) {
   // sc-22738: this probe's wall-clock budget, resolved once so the guard, the failure arm and the
   // log all name the same figure.
   const budgetMinutes = probeBudgetMinutes(row, args.probeBudgetMinutes);
+  const guarded = guardsCapture(row.key, platform);
+  // sc-22738: the runner's OWN bound on this probe's process tree. On the guarded lane it sits
+  // behind the guard's deadline; everywhere else it is the only thing that can end a wedge. See
+  // `probeTimeoutMs` for the run it was written for.
+  const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
   try {
-    if (guardsCapture(row.key)) {
+    if (guarded) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
       // from the adapter's own probe for this host and the incident — see `watchdogGuard`.
       const hardware = await probeAdapter(providerCommand(args.adapter), {
@@ -3544,12 +3699,32 @@ export async function measureAnchor(row, context) {
       // The guard APPENDS to its event log; this capture's verdict must not read an earlier one's.
       await rm(watchdogEvents, { force: true });
       log.write(`$ /usr/bin/python3 ${guard.join(" ")} -- node ${captureArgs.join(" ")}\n`);
-      await exec("/usr/bin/python3", [...guard, "--", process.execPath, ...captureArgs], { env, log, detached: true });
+      await exec("/usr/bin/python3", [...guard, "--", process.execPath, ...captureArgs], { env, log, detached: true, timeoutMs });
     } else {
       log.write(`$ node ${captureArgs.join(" ")}\n`);
-      await exec(process.execPath, captureArgs, { env, log, detached: true });
+      await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
   } catch (error) {
+    // sc-22738 (run 34356681566): the RUNNER's own wall-clock backstop fired. Checked FIRST, and
+    // before the guard's event log is even read: on the unguarded lanes there is no event log at
+    // all, and on the guarded one this arm is reached only when the guard did not stop the group
+    // within its own deadline plus the whole escalation — in both cases what the runner knows is
+    // that it killed the tree, not anything about memory. Same claim as the guard's runtime stop,
+    // so it is the SAME terminal status and the same reason sentence: nothing measured, nothing
+    // recorded, cell stays `runnable`, walk continues with the next cell.
+    if (error.timedOut) {
+      return finish(
+        "runtime_budget_exceeded",
+        runtimeBudgetExceededReason({
+          row,
+          budgetMinutes,
+          budgetSeconds: Math.round(error.timeoutMs / 1000),
+          peak: guarded ? await watchdogPeakFootprint(watchdogEvents) : null,
+          ceiling: probedHardware ? `${watchdogCeilings(probedHardware).maxFootprintBytes}-byte ceiling` : null,
+          stoppedBy: "runner",
+        }),
+      );
+    }
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
     // sc-22738 (2026-09-07): a WALL-CLOCK stop, and the one hard stop that is NOT a measurement.
@@ -3572,7 +3747,7 @@ export async function measureAnchor(row, context) {
         ? `${watchdogCeilings(probedHardware).maxFootprintBytes}-byte ceiling`
         : "the guard's ceiling";
       return finish(
-        "capture_failed",
+        "runtime_budget_exceeded",
         runtimeBudgetExceededReason({ row, budgetMinutes, budgetSeconds, peak, ceiling }),
       );
     }
@@ -3591,7 +3766,7 @@ export async function measureAnchor(row, context) {
     if (artifact) {
       return finish("artifact_unsupported", `${artifact.provider} ${artifact.tier}: ${artifact.reason}`.slice(0, FAILURE_REASON_LIMIT));
     }
-    const refused = !hardStop && guardsCapture(row.key) && metalSubmissionsIgnored(error.stderr ?? error.message);
+    const refused = !hardStop && guarded && metalSubmissionsIgnored(error.stderr ?? error.message);
     // Whether the PREVIOUS anchor of this run refused the same way; cleared for every anchor at the
     // top of its own attempt, so the count is over consecutive attempts rather than over the run.
     const refusedBefore = previousMetalRefusal;

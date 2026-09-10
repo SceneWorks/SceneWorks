@@ -192,10 +192,10 @@ jobs:
     concurrency:
       group: memory-catalog-campaign-mlx-${{ startsWith(inputs.runner_label, 'nax') && 'nax' || 'rw-krea' }}
       cancel-in-progress: false
-    # The full MLX walk is ~147 anchors of real GPU renders and the harness imposes no per-anchor
-    # timeout, so this is deliberately a two-day ceiling rather than a measured budget: the ceiling
-    # exists to stop a WEDGED job holding the box forever, and every anchor that finished before a
-    # timeout has already been committed and pushed.
+    # The full MLX walk is ~147 anchors of real GPU renders, so this is deliberately a two-day
+    # ceiling rather than a measured budget. Each anchor is bounded on its own by the harness
+    # (`PROBE_BUDGET_MINUTES`, sc-22738), so this ceiling now only catches a wedge OUTSIDE a probe;
+    # every anchor that finished before a timeout has already been committed and pushed.
     timeout-minutes: 2880
     env:
       # Survives actions/checkout's `clean: true` between jobs on this persistent box, and keeps the

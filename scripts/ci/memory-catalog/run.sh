@@ -2,12 +2,18 @@
 # Walk every planned anchor for this backend, pushing the branch as measurements land (sc-22738).
 #
 # WHY A BACKGROUND PUSHER. The walk is a single long-lived node process that commits one anchor at
-# a time and can run for many hours; the harness has no per-anchor timeout and no push of its own.
-# If the only push happened after the process returned, a cancel, a job timeout or a wedged render
-# would throw away every anchor already measured -- hours of GPU time that cannot be re-derived
-# cheaply. So the walk runs in the background and a poller pushes the branch every time
+# a time and can run for many hours, and it has no push of its own. If the only push happened after
+# the process returned, a cancel, a job timeout or a wedged render would throw away every anchor
+# already measured -- hours of GPU time that cannot be re-derived cheaply. So the walk runs in the
+# background and a poller pushes the branch every time
 # $PUSH_EVERY new commits have appeared. `push.sh` then runs under `if: always()` and pushes the
 # remainder on success, failure, timeout and cancellation alike.
+#
+# WHY THERE IS NO PER-ANCHOR TIMEOUT HERE. There is one, and it belongs to the harness rather than
+# to this script (sc-22738, run 34356681566): `measure-memory-catalog.mjs` bounds each capture's
+# process tree by that anchor's own `PROBE_BUDGET_MINUTES` and reports the cell
+# `runtime_budget_exceeded` before moving to the NEXT anchor. A timeout here could only kill the
+# whole walk, which is precisely the outcome -- 47 unreached cells -- the bound exists to prevent.
 #
 # The poller only ever runs `git push` -- it never commits, never checks out and never touches the
 # worktree -- so it cannot make the tree dirty underneath the harness's stability assertion.

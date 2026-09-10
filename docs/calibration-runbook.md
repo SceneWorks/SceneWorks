@@ -1284,7 +1284,8 @@ first five:
 | `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
 | `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
 | `artifact_unsupported` | the pinned engine's production loader refused the shipped artifact (sc-22738) — the row carries the loader's own `unsupported:` sentence verbatim; **no evidence, no bound, no commit** | clean |
-| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it ran out of its wall-clock budget (`runtime_budget_exceeded`, below), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
+| `runtime_budget_exceeded` | the probe ran out of its WALL-CLOCK budget and was stopped (below). Its own outcome since sc-22738's run 34356681566, not folded in with `capture_failed`: **nothing was measured**, so no bound is recorded and the cell classifies `runnable` again. It is still a walk failure (exit 2) | clean |
+| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wall-clock stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
 | `check_failed` | the bundle failed `harness check` | clean |
 | `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
 
@@ -1348,14 +1349,28 @@ WITH warm passes (`docs/calibration/sc-22738/*`, `sc-18791/*`): a record without
 keeps every previous requirement. So the video budget is now per render: 165 minutes = 9,900 s is
 2.2× the 4,470 s witness and 1.83× the 5,400 s packed-tier lower bound.
 
-A probe that reaches its
-budget is stopped on the guard's ONE stop path — the same SIGTERM→SIGKILL escalation and post-stop
-census a footprint stop takes — and is reported as `capture_failed` with reason
-`runtime_budget_exceeded`, naming the budget, the peak footprint sampled (so you can tell a probe
-wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed render (video) or
-capture (image); a run
+A probe that reaches its budget is stopped and reported on its own outcome,
+`runtime_budget_exceeded`, naming the budget, the peak footprint sampled where one was (so you can
+tell a probe wedged at the ceiling from one wedged at 3 GB) and the lane's longest completed render
+(video) or capture (image); a run
 launched with `--probe-budget-minutes` below its lane's default is told, in the reason, that the
-stop is a budget shortfall and not evidence of a stall. **It is not an exceedance:** the run never
+stop is a budget shortfall and not evidence of a stall.
+
+**TWO things impose that budget, and they are not alternatives (sc-22738, run 34356681566).** On a
+Mac the footprint guard does it, via `--max-runtime-seconds`, on its ONE stop path — the same
+SIGTERM→SIGKILL escalation and post-stop census a footprint stop takes. Everywhere else the RUNNER
+does it: `measure-memory-catalog.mjs` bounds each capture's whole process TREE
+(`probeTimeoutMs` → `stopProcessTree`; `taskkill /T /F` on Windows, where node's `kill()` reaches
+only the immediate child and would leave `memory-candle-adapter.exe` running). The guard is
+Darwin-only by construction — its sampler is `/usr/bin/footprint` — so until this was added the
+budget reached NO probe on the Windows CUDA lane: run 34356681566 sat on `scail2_14b:bf16:candle`
+(85/132) from 15:15:45Z to the job's cancellation at 10:59:16Z the next day, 19h43m against a
+165-minute budget, and the remaining 47 cells were never reached. On a Mac the runner's bound sits
+two minutes BEHIND the guard's deadline (`RUNNER_BACKSTOP_GRACE_SECONDS`), so the guard keeps owning
+every stop it can make and the runner fires only when the guard did not. A runner stop says so in
+its reason, and claims no ceiling and no sampled peak where no guard ran.
+
+**It is not an exceedance:** the run never
 crossed a line, so no bound is written (the harness's `record-exceeded` refuses a wall-clock stop
 outright), the store keeps no trace, the watchdog stream and per-anchor log stay in the work dir,
 and the cell classifies `runnable` again on the next `--list`. Re-run it, or re-run it with a larger
@@ -1645,9 +1660,27 @@ work dir (summary JSON, per-anchor logs, retained raw bundles) is uploaded as a 
 every outcome, and a final step opens `chore(<campaign>): <backend> catalog campaign results` into
 `ref` when the branch has commits. Nothing is merged automatically.
 
+🔴 **If the repository forbids Actions from opening PRs, that final step WARNS rather than failing
+(sc-22738, run 34356681566).** `gh pr create` returns
+
+```
+pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve
+pull requests (createPullRequest)
+```
+
+when the repository/organization setting *"Allow GitHub Actions to create and approve pull
+requests"* is off. No `permissions:` block overrides it — `pull-requests: write` is already granted
+— so the step emits a `::warning` with a ready-to-click
+`compare/<ref>...<campaign branch>?expand=1` URL, writes the same link into the job summary, and
+exits 0. The branch and the artifact are already safe at that point; only the click is missing.
+That single message is the ONLY failure treated this way: any other `gh pr create` failure (a bad
+token, a base ref that does not exist, a rejected body) still reds the step, because there the PR is
+genuinely lost and nothing else would say so.
+
 Each job takes a `concurrency` group keyed on (backend, runner) with `cancel-in-progress: false`, so
 two campaigns queue rather than share a GPU. `timeout-minutes` is a wedge ceiling (2880 mlx / 1440
-candle), not a measured budget.
+candle), not a measured budget — and since sc-22738 each anchor is separately bounded by the harness
+(`PROBE_BUDGET_MINUTES`), so the job ceiling only catches a wedge OUTSIDE a probe.
 
 **Hugging Face roots.** `hf_cache_roots` (newline- or `;`-separated) wins; otherwise the runner-level
 `$SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE`; otherwise the lane default (`/Volumes/Models/huggingface/hub`
