@@ -39,6 +39,7 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
+image = { workspace = true, optional = true }
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8", features = ["cuda", "testkit"], optional = true }
 # sc-22736: the Wan 2.2 and SCAIL-2 capture arms read these crates' OWN public envelopes
 # (`PUBLIC_BUCKETS` / `PUBLIC_FRAMES`) and mint the request receipt admission demands through their
@@ -58,7 +59,7 @@ sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference",
 [features]
 default = []
 mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
-candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-sdxl", "dep:candle-gen-wan", "dep:runtime-cuda"]
+candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-sdxl", "dep:candle-gen-wan", "dep:runtime-cuda", "dep:image"]
 
 [[bin]]
 name = "memory-mlx-adapter"

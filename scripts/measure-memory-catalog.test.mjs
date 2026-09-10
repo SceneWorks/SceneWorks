@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -3074,6 +3074,10 @@ test("the turnkey still family binds one artifact per member, and Ideogram's bf1
     ["SceneWorks/kolors-mlx", REVISION, "q4"],
     ["SceneWorks/lens-mlx", REVISION, "q4"],
     ["SceneWorks/lens-turbo-mlx", UPSTREAM, "q4"],
+    ...["text_encoder", "transformer", "vae"].flatMap((component) => [
+      ["SceneWorks/lens-mlx", REVISION, "q4", component],
+      ["SceneWorks/lens-turbo-mlx", UPSTREAM, "q4", component],
+    ]),
     ["SceneWorks/ideogram-4-mlx", REVISION, "q4"],
     ["SceneWorks/ideogram-4", UPSTREAM, "bf16"],
   ]);
@@ -3129,6 +3133,14 @@ test("the turnkey still family binds one artifact per member, and Ideogram's bf1
     assert.equal(missing.status, "weights_missing");
     assert.match(missing.reason, /ideogram-4-mlx@.*\/q8 on this host/);
   }
+  const transformer = snapshotPath(hub, "SceneWorks/lens-mlx", REVISION, "q4", "transformer");
+  await rm(path.join(transformer, "weights.safetensors"));
+  await writeFile(path.join(transformer, "config.json"), "{}");
+  const partial = await classifyAnchor("lens:q4:candle", { provider: "lens" }, {
+    models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map(),
+  });
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /transformer\/\*\.safetensors/);
 });
 
 // sc-22735. `krea_realtime_14b` declares ONE adapter arm, and the AC that scopes this story to MLX
@@ -4220,6 +4232,24 @@ test("a mage-flow cell with no components row for its tier is weights_missing, n
   const noRows = await classifyAnchor("mage_flow_base:q4:mlx", { provider: "mage_flow_base" }, context);
   assert.equal(noRows.status, "weights_missing");
   assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
+  const encoder = snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM, "q4", "text_encoder");
+  await rm(path.join(encoder, "weights.safetensors"));
+  await writeFile(path.join(encoder, "config.json"), "{}");
+  for (const backend of ["mlx", "candle"]) {
+    const partial = await classifyAnchor(`mage_flow:q4:${backend}`, { provider: "mage_flow" }, { ...context, backend });
+    assert.equal(partial.status, "weights_missing");
+    assert.match(partial.reason, /q4\/text_encoder/);
+  }
+  await writeFile(path.join(encoder, "weights.safetensors"), "present shard");
+  await writeFile(path.join(encoder, "model.safetensors.index.json"), JSON.stringify({
+    weight_map: { first: "weights.safetensors", second: "missing.safetensors" },
+  }));
+  const partialShards = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
+  assert.equal(partialShards.status, "weights_missing");
+  assert.match(partialShards.reason, /missing.safetensors/);
+  await writeFile(path.join(encoder, "missing.safetensors"), "second shard");
+  const repaired = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
+  assert.equal(repaired.status, "runnable", repaired.reason);
 });
 
 // sc-22730. The plan's SD3.5 fingerprints are the one claim a capture cannot re-derive on a host

@@ -1638,14 +1638,14 @@ fn validate_sd35_fixture(request: &Value, provider: &str, tier: &str) -> Result<
 /// The FLUX.1 fixture binds the member, the tier, the geometry edge, the seed and the step count
 /// — the MLX arm's `validate_flux_one_fixture`, on this lane's spellings. The base providers ride
 /// the five-rung reference path (`fresh-five-rung-flux1-<route>-…-seed16402-step2`, at
-/// [`FIVE_RUNG_SEED`]); PuLID is bespoke (`pulid-flux-candle-…-seed22726-step2`, at
+/// [`FIVE_RUNG_SEED`]); PuLID is bespoke (`pulid-flux-face-sc16956-candle-…-seed22726-step2`, at
 /// [`FLUX1_SEED`]). A fixture naming the other seed is refused: the record's fixture is the one
 /// claim about the render that nothing downstream can re-derive.
 fn validate_flux_one_fixture(request: &Value, provider: &str, tier: &str) -> Result<(), String> {
     let (prefix, seed) = match provider {
         FLUX1_DEV_ID => ("fresh-five-rung-flux1-dev", FIVE_RUNG_SEED),
         FLUX1_SCHNELL_ID => ("fresh-five-rung-flux1-schnell", FIVE_RUNG_SEED),
-        PULID_FLUX_ID => ("pulid-flux-candle", FLUX1_SEED),
+        PULID_FLUX_ID => ("pulid-flux-face-sc16956-candle", FLUX1_SEED),
         other => {
             return Err(format!(
                 "the Candle FLUX.1 fixture binding does not implement provider {other:?}"
@@ -2996,11 +2996,7 @@ fn run_five_rung_reference_loaded(
         },
         predicted_peak_bytes: 1,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!(
-            "{}@{}",
-            five_rung_evidence_story(provider_id),
-            protocol::INFERENCE_PIN
-        ),
+        evidence_revision: five_rung_evidence_revision(provider_id),
     };
     // sc-22738: the worker's admission sequence — safety check, then begin. `candle-gen-chroma`,
     // `candle-gen-flux2` and `candle-gen-mage` refuse a `begin` with no approval on file.
@@ -3037,7 +3033,7 @@ fn run_five_rung_reference_loaded(
         Some(arm) => {
             mage_generation_request(arm, &generator.descriptor().capabilities, width, height)
         }
-        None => five_rung_generation_request(width, height, edit),
+        None => five_rung_provider_generation_request(provider_id, width, height, edit),
     };
     scope
         .configure_request(&mut generation)
@@ -3646,6 +3642,33 @@ fn mage_generation_request(
 /// request — one `Conditioning::Reference` fitted to the request geometry plus the strength
 /// lever (`resolve_zimage_edit_init`) — with the step count raised so the engine-derived start
 /// step (`floor(steps * strength)`) still leaves two executed denoise steps.
+fn five_rung_evidence_revision(provider: &str) -> String {
+    if matches!(provider, SANA_ID | SANA_SPRINT_ID) {
+        runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else {
+        format!(
+            "{}@{}",
+            five_rung_evidence_story(provider),
+            protocol::INFERENCE_PIN
+        )
+    }
+}
+
+fn five_rung_provider_generation_request(
+    provider: &str,
+    width: u32,
+    height: u32,
+    edit: bool,
+) -> GenerationRequest {
+    let mut generation = five_rung_generation_request(width, height, edit);
+    if provider == BERNINI_CANDLE_ID {
+        // Bernini's shared video provider requires an explicit single-frame mode.
+        generation.video_mode = Some(if edit { "i2i" } else { "t2i" }.to_owned());
+        generation.frames = Some(1);
+    }
+    generation
+}
+
 fn five_rung_generation_request(width: u32, height: u32, edit: bool) -> GenerationRequest {
     let mut generation = GenerationRequest {
         prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
@@ -3805,6 +3828,19 @@ fn pulid_flux_generation_request(width: u32, height: u32) -> PulidFluxRequest {
         use_pid: false,
         ..Default::default()
     }
+}
+
+fn pulid_reference_image() -> Result<Image, String> {
+    // A generated face already exercised by inference's sc-16956 PuLID render.
+    // A synthetic color gradient cannot pass the production face detector.
+    let decoded = image::load_from_memory(include_bytes!("../../fixtures/pulid-reference.png"))
+        .map_err(|error| format!("decode bundled PuLID reference face: {error}"))?
+        .into_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
 }
 
 /// The admission context the worker admits this route under (`evaluate_shared_bespoke_image`,
@@ -3974,11 +4010,7 @@ fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
         .map_err(|error| format!("load real pulid_flux {} provider: {error}", binding.tier))?;
     vram.end_load(load_sample);
 
-    let reference = runtime_cuda::gen_core::Image {
-        width,
-        height,
-        pixels: protocol::synthetic_reference_rgb(width, height),
-    };
+    let reference = pulid_reference_image()?;
     let generation = pulid_flux_generation_request(width, height);
     let generation_sample = vram.phase();
     let mut phase_sample = Some(vram.phase());
@@ -5872,16 +5904,10 @@ fn minimax_candle_load_plan(
     } else {
         "transformer"
     };
-    let tier_artifact = staged
-        .as_ref()
-        .map(|(repository, revision)| artifact(repository, revision, &target.tier));
     Ok(Sc22737LoadPlan {
-        artifact: json!({
-            "repository": upstream_repository,
-            "resolvedRevision": upstream_revision,
-            "variant": target.tier,
-            "stagedTierArtifact": tier_artifact,
-        }),
+        // The schema's artifact is the load root. The staged repository, revision,
+        // tier and selected partition remain bound by resolved_path_fingerprint below.
+        artifact: artifact(&upstream_repository, &upstream_revision, &target.tier),
         resolved_path_fingerprint: format!(
             "{upstream_repository}@{upstream_revision}:{}+partition:{partition}+staged:{}",
             target.tier,
@@ -6767,6 +6793,37 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         .max(denoise_bytes)
         .max(decode_bytes);
 
+    instantid_measured_fragment(
+        request,
+        strategy,
+        load_shape_key(calibration.load_shape),
+        artifact(&binding.repository, &binding.revision, tier),
+        format!(
+            "{}+identity:{}",
+            loadability_fingerprint(&binding.repository, &binding.revision, tier),
+            binding.artifact_fingerprint
+        ),
+        [
+            decimal_gb_to_bytes(report.baseline_gb),
+            decimal_gb_to_bytes(report.load_peak_gb),
+            conditioning_bytes,
+            denoise_bytes,
+            decode_bytes,
+            overall_bytes,
+        ],
+    )
+}
+
+fn instantid_measured_fragment(
+    request: &Value,
+    strategy: Value,
+    load_shape: &str,
+    artifact: Value,
+    resolved_path_fingerprint: String,
+    measurements: [u64; 6],
+) -> Result<Value, String> {
+    let [baseline_bytes, load_bytes, conditioning_bytes, denoise_bytes, decode_bytes, overall_bytes] =
+        measurements;
     // The pinned InstantID crate is bespoke: no registered generator, no calibration error
     // injection, no synchronized request scope. The runtime-complete sweep and the fault-injection
     // lifecycle scenarios stay unexecuted rather than being reported as passed.
@@ -6776,11 +6833,12 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         "sweep and the fault-injection lifecycle scenarios are not executable at this pin"
     );
     let mut fragment = json!({
+        "status": "gated",
         "strategy": strategy,
-        "loadShape": load_shape_key(calibration.load_shape),
-        "artifact": artifact(&binding.repository, &binding.revision, tier),
-        "sweep": null,
-        "quality": null,
+        "loadShape": load_shape,
+        "artifact": artifact,
+        "sweep": protocol::reference_sweep(request, "passed")?,
+        "quality": { "result": "not_run" },
         "negativeMutation": null,
         "predictedPeakBytes": {
             "conditioning": conditioning_bytes,
@@ -6796,19 +6854,15 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         },
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": format!(
-                "{}+identity:{}",
-                loadability_fingerprint(&binding.repository, &binding.revision, tier),
-                binding.artifact_fingerprint
-            ),
+            "resolvedPathFingerprint": resolved_path_fingerprint,
         },
         "diagnostics": protocol::diagnostics(
             "memory-candle-adapter:instantid-identity-ladder",
             "executed",
             [blocker.to_owned()],
             [
-                ("preLoadDeviceUsed", "bytes", decimal_gb_to_bytes(report.baseline_gb)),
-                ("loadDevicePeakDelta", "bytes", decimal_gb_to_bytes(report.load_peak_gb)),
+                ("preLoadDeviceUsed", "bytes", baseline_bytes),
+                ("loadDevicePeakDelta", "bytes", load_bytes),
                 ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
                 ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
                 ("decodeDevicePeakDelta", "bytes", decode_bytes),
@@ -6824,6 +6878,9 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         { "name": "exact_fit", "result": "passed", "predictedBytes": overall_bytes, "effectiveBudgetBytes": overall_bytes },
         { "name": "unknown_budget", "result": "passed" },
         { "name": "stale_evidence", "result": "passed" },
+        { "name": "warm_repeat", "result": "not_run", "reason": blocker },
+        { "name": "cancel", "result": "not_run", "reason": blocker },
+        { "name": "error", "result": "not_run", "reason": blocker },
         { "name": "loadability", "result": "passed" },
         { "name": "overlay", "result": "passed", "reason": "the identity overlay is the declared target and its overlay key is the provider's own artifact-bound `overlay_key()`" }
     ]);
@@ -8020,6 +8077,117 @@ fn main() {
 #[cfg(test)]
 mod sdxl_family_tests {
     use super::*;
+
+    #[test]
+    fn sana_requests_carry_the_providers_evidence_token() {
+        for provider in [SANA_ID, SANA_SPRINT_ID] {
+            assert_eq!(
+                five_rung_evidence_revision(provider),
+                runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION
+            );
+        }
+        assert_eq!(
+            five_rung_evidence_revision(QWEN_ID),
+            format!(
+                "{}@{}",
+                five_rung_evidence_story(QWEN_ID),
+                protocol::INFERENCE_PIN
+            )
+        );
+    }
+
+    #[test]
+    fn bernini_still_plan_builds_an_explicit_advertised_single_frame_request() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .unwrap();
+        for tier in ["bf16", "q4", "q8"] {
+            let row = &plan["anchors"][format!("bernini_image:{tier}:candle")];
+            let width = row["geometry"]["width"].as_u64().unwrap() as u32;
+            let height = row["geometry"]["height"].as_u64().unwrap() as u32;
+            assert_eq!((width, height), (512, 512));
+            let generation =
+                five_rung_provider_generation_request(BERNINI_CANDLE_ID, width, height, false);
+            assert_eq!(generation.video_mode.as_deref(), Some("t2i"));
+            assert_eq!(generation.frames, Some(1));
+            assert_eq!(generation.image_reference_count(), 0);
+            assert!(row["fixture"]
+                .as_str()
+                .unwrap()
+                .contains("-512-seed16402-step2"));
+        }
+    }
+
+    #[test]
+    fn instantid_measured_fragment_preserves_measurements_without_claiming_promotion() {
+        let strategy =
+            json!({ "rung": "resident", "engagedRungs": ["resident"], "parameters": {} });
+        let request = json!({ "planned": { "strategy": strategy } });
+        let fragment = instantid_measured_fragment(
+            &request,
+            strategy,
+            "eager_materialization",
+            artifact("fixture/repo", "1234567", "bf16"),
+            "fixture+identity:abc".to_owned(),
+            [10, 20, 30, 40, 50, 60],
+        )
+        .unwrap();
+        assert_eq!(fragment["status"], "gated");
+        assert_eq!(fragment["quality"]["result"], "not_run");
+        assert_eq!(fragment["sweep"]["cases"][0]["result"], "passed");
+        assert_eq!(fragment["sweep"]["rangeVerified"], false);
+        assert_eq!(fragment["observedMemory"]["overall"]["activeBytes"], 60);
+        for scenario in fragment["scenarios"].as_array().unwrap() {
+            if ["warm_repeat", "cancel", "error"].contains(&scenario["name"].as_str().unwrap()) {
+                assert_eq!(scenario["result"], "not_run");
+            }
+        }
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../../packages/schemas/memory-calibration.schema.json"
+        ))
+        .unwrap();
+        let properties = &schema["$defs"]["record"]["properties"];
+        assert!(properties["status"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&fragment["status"]));
+        for key in ["artifact", "quality", "sweep"] {
+            let value = fragment[key].as_object().expect(key);
+            for field in value.keys() {
+                assert!(
+                    properties[key]["properties"].get(field).is_some(),
+                    "{key}.{field}"
+                );
+            }
+            if let Some(required) = properties[key]["required"].as_array() {
+                for field in required {
+                    assert!(value.contains_key(field.as_str().unwrap()), "{key}.{field}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pulid_capture_uses_the_known_face_fixture() {
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(include_bytes!("../../fixtures/pulid-reference.png"))
+            ),
+            "3995f2e856346748588e76a5557516d0218f44f5663701c5a50139d50c86a7be"
+        );
+        let reference = pulid_reference_image().unwrap();
+        assert_eq!((reference.width, reference.height), (1024, 1024));
+        assert_eq!(reference.pixels.len(), 1024 * 1024 * 3);
+        assert_ne!(
+            reference.pixels,
+            protocol::synthetic_reference_rgb(1024, 1024)
+        );
+        let request = json!({"planned": {"target": {"geometry": {"width": 1024}},
+            "fixture": "pulid-flux-candle-q4-1024-seed22726-step2"}});
+        assert!(validate_flux_one_fixture(&request, PULID_FLUX_ID, "q4").is_err());
+    }
 
     fn planned(provider: &str, model_id: &str) -> Value {
         json!({ "planned": { "target": { "provider": provider, "modelId": model_id } } })
@@ -9862,7 +10030,7 @@ mod tests {
             planned["target"]["overlay"] = json!("identity");
             planned["target"]["modelId"] = json!("pulid_flux_dev");
             planned["fixture"] = json!(format!(
-                "pulid-flux-candle-{tier}-1024-seed{FLUX1_SEED}-step2"
+                "pulid-flux-face-sc16956-candle-{tier}-1024-seed{FLUX1_SEED}-step2"
             ));
             json!({ "planned": planned })
         };
@@ -9927,7 +10095,7 @@ mod tests {
         // A fixture naming the five-rung seed is refused: PuLID renders at FLUX1_SEED.
         let mut wrong_seed = pulid_case("q4");
         wrong_seed["planned"]["fixture"] = json!(format!(
-            "pulid-flux-candle-q4-1024-seed{FIVE_RUNG_SEED}-step2"
+            "pulid-flux-face-sc16956-candle-q4-1024-seed{FIVE_RUNG_SEED}-step2"
         ));
         let error = pulid_flux_binding_at(
             &wrong_seed,
@@ -10008,7 +10176,9 @@ mod tests {
         let mut planned =
             still_planned_case_in_mode(PULID_FLUX_ID, "staged_residency", 1, "character_image");
         planned["target"]["overlay"] = json!("identity");
-        planned["fixture"] = json!(format!("pulid-flux-candle-q4-1024-seed{FLUX1_SEED}-step2"));
+        planned["fixture"] = json!(format!(
+            "pulid-flux-face-sc16956-candle-q4-1024-seed{FLUX1_SEED}-step2"
+        ));
         let request = json!({ "planned": planned });
         std::env::set_var(
             "SCENEWORKS_FLUX1_DEV_REPOSITORY",
@@ -10214,7 +10384,7 @@ mod tests {
                 "fresh-five-rung-flux1-schnell",
                 FIVE_RUNG_SEED,
             ),
-            (PULID_FLUX_ID, "pulid-flux-candle", FLUX1_SEED),
+            (PULID_FLUX_ID, "pulid-flux-face-sc16956-candle", FLUX1_SEED),
         ] {
             for tier in ["q4", "q8", "bf16"] {
                 let good = format!("{prefix}-{tier}-1024-seed{seed}-step2");

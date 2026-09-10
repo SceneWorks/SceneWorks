@@ -1845,7 +1845,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "pulid-flux-candle-bf16-1024-seed22726-step2"
+      "fixture": "pulid-flux-face-sc16956-candle-bf16-1024-seed22726-step2"
     },
     "pulid_flux_dev:bf16:mlx": {
       "provider": "pulid_flux",
@@ -1875,7 +1875,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "pulid-flux-candle-q4-1024-seed22726-step2"
+      "fixture": "pulid-flux-face-sc16956-candle-q4-1024-seed22726-step2"
     },
     "pulid_flux_dev:q4:mlx": {
       "provider": "pulid_flux",
@@ -1905,7 +1905,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "pulid-flux-candle-q8-1024-seed22726-step2"
+      "fixture": "pulid-flux-face-sc16956-candle-q8-1024-seed22726-step2"
     },
     "pulid_flux_dev:q8:mlx": {
       "provider": "pulid_flux",
@@ -4881,15 +4881,15 @@
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
-        "width": 848,
-        "height": 480,
+        "width": 512,
+        "height": 512,
         "batch": 1,
         "frames": 1
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-bf16-848-seed16402-step2",
+      "fixture": "fresh-five-rung-bernini-image-bf16-512-seed16402-step2",
       "strategy": {
         "rung": "resident",
         "engagedRungs": [
@@ -4917,15 +4917,15 @@
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
-        "width": 848,
-        "height": 480,
+        "width": 512,
+        "height": 512,
         "batch": 1,
         "frames": 1
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-q4-848-seed16402-step2",
+      "fixture": "fresh-five-rung-bernini-image-q4-512-seed16402-step2",
       "strategy": {
         "rung": "resident",
         "engagedRungs": [
@@ -4953,15 +4953,15 @@
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
-        "width": 848,
-        "height": 480,
+        "width": 512,
+        "height": 512,
         "batch": 1,
         "frames": 1
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-q8-848-seed16402-step2",
+      "fixture": "fresh-five-rung-bernini-image-q8-512-seed16402-step2",
       "strategy": {
         "rung": "resident",
         "engagedRungs": [

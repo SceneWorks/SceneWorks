@@ -6757,6 +6757,7 @@ dependencies = [
  "candle-gen-scail2",
  "candle-gen-sdxl",
  "candle-gen-wan",
+ "image",
  "mlx-gen",
  "mlx-gen-flux2",
  "mlx-gen-instantid",
