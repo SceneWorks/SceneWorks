@@ -2117,8 +2117,9 @@ export function parseWatchdogHardStop(body) {
   const match = /^physical_footprint_at_or_above_(\d+):observed_(\d+)$/.exec(String(stop.reason));
   if (!match) {
     // sc-22738: the SECOND guard against a false lower bound, behind the runner's own
-    // (`measure-memory-catalog.mjs` returns `capture_failed` for a runtime stop before it ever
-    // calls `record-exceeded`). A wall-clock stop is the case this is now most likely to see: the
+    // (`measure-memory-catalog.mjs` returns `runtime_budget_exceeded` for a wall-clock stop —
+    // whether the guard made it or the runner's backstop did — before it ever calls
+    // `record-exceeded`). A wall-clock stop is the case this is now most likely to see: the
     // probe ran out of its `--max-runtime-seconds` budget wherever its footprint happened to be,
     // which is not a line it was witnessed to cross. Anything that is not a footprint stop is
     // refused here for the same reason, whatever put it in the log.
