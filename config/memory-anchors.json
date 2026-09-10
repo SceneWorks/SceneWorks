@@ -365,6 +365,51 @@
       "overallAllocatorEnvelopeBytes": 13424918528
     },
     {
+      "id": "chroma1_flash:candle:q8:base:base:chroma1-flash-q8-cuda-request-scoped-staged-residency-v1:imc-25b65ae124dc5818c8c3",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-q8-candle-evidence.json",
+        "sha256": "1faa5204e962ce4f8eecc66d49566a249fc56d47def70ba9f4ec2af2d5525dec",
+        "recordId": "imc-25b65ae124dc5818c8c3",
+        "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "89e183da4ef22b7dd38e4c4315080ad8b9659bc1c2fabea71d3dd7203e392d16"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12082741248,
+        "denoise": 17183014912,
+        "decode": 12049186816
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12082741248,
+        "denoise": 17183014912,
+        "decode": 12049186816
+      },
+      "overallAllocatorEnvelopeBytes": 17183014912
+    },
+    {
       "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
       "modelId": "chroma1_flash",
       "modelFamily": "chroma",
@@ -7335,17 +7380,6 @@
       "modelFamily": "boogu",
       "route": "boogu_image_turbo",
       "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:candle:q8",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "candle",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
