@@ -775,6 +775,23 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
 
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
+
+    Last moved: sc-22738, on top of `6968692a3` removing the candle-only short-circuit in
+    `tiersFor` (`backend === "candle" && backendTiers.length ? backendTiers : [...]`). That
+    short-circuit read `vramGbByTier` — a MEASUREMENT block — as a routing ceiling, so the moment a
+    candle lane declared any peak the axis collapsed to those keys alone and `downloadTiers` /
+    `inferred` were discarded. Six route-declared, download-shipped coordinates came back onto the
+    published axis, each widening its lane's tier axis by exactly one tier:
+
+      * `flux_dev`, `flux_schnell`, `flux2_dev` at bf16 (candle) — `["q4","q8"]` -> `["bf16","q4","q8"]`
+      * `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` at q8 (candle) — `["bf16","q4"]` -> `["bf16","q4","q8"]`
+
+    That is 6 lanes x 5 rungs = 30 fixture entries, and NOTHING else: no lane gained or lost a key,
+    no seventh lane moved, and every moved entry is exactly one more copy of that lane's own
+    pre-existing per-tier profile (so no rung flipped state for a tier that was already on the
+    axis). Matrix totals moved with it: cells 9265 -> 9390, publishedCells 2178 -> 2216,
+    anchoredCells 1935 -> 1973 (the 38 newly published cells are the flux_dev/flux_schnell candle
+    bf16 anchors binding).
     """
     matrix = load_matrix()
     census = {}

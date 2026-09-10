@@ -1220,10 +1220,34 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
-  const advertised =
-    backend === "candle" && backendTiers.length
-      ? backendTiers
-      : [...backendTiers, ...downloadTiers, ...inferred];
+  // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
+  // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment
+  // a candle lane declared ANY `vramGbByTier` key, threw `downloadTiers` and `inferred` away.
+  //
+  // That was the original (sc-15506) crude proxy for the one thing the filter above now does
+  // properly: keep a download row this lane's host would never fetch off this lane's axis. It was
+  // written when `downloadTiers` had no `platforms` test at all, so an MLX-only turnkey set would
+  // otherwise have advertised a bogus candle axis. sc-22731 replaced that proxy with the real rule
+  // (`servesLane` + `bundledLane` + `routedTiers`), and the proxy was left behind — still firing,
+  // and now reading `vramGbByTier` as a routing CEILING. It is a MEASUREMENT block: a missing key
+  // says a peak has not been recorded, never that the lane refuses the tier — the same distinction
+  // `parseBackendTierOverrides` is documented on. Its residue deleted six real coordinates:
+  //
+  //   * `flux_dev`, `flux_schnell`, `flux2_dev` at bf16 — `memory_route_registry.rs` declares
+  //     `BF16_NVFP4_Q4_Q8` for `candle:flux1_dev` / `candle:flux1_schnell` / `candle:flux2_dev`,
+  //     and each ships an ungated `bf16/` download row that serves every platform. The sc-22738
+  //     campaign then MEASURED flux_dev and flux_schnell there (executed, authoritative,
+  //     `loadability.result: "passed"` on a `…:bf16` resolved path), and the drop is what left
+  //     those two bundles compiled into `PACKAGED_MEMORY_ANCHOR_SOURCES` citing nothing.
+  //   * `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` at q8 — no registry rule names their
+  //     provider (silence is not a denial; see `routedLaneTiers`), but each lane's own
+  //     `memoryStrategyContract` declares `"tiers": ["q4", "q8", "bf16"]` on every implementation
+  //     and each ships an ungated `q8/` download row. Only `vramGbByTier` was missing q8.
+  //
+  // Removing it does NOT re-open what sc-22731 closed: `sana_1600m` / `sana_sprint_1600m` stay at
+  // `["bf16"]` on candle, because their three packed tiers are `platforms: ["macos"]` and
+  // `servesLane` — not this short-circuit — is what keeps them off the off-Mac axis.
+  const advertised = [...backendTiers, ...downloadTiers, ...inferred];
   return sortedUnique(advertised).filter(
     (tier) => tier !== "int8-convrot",
   ).length
