@@ -894,3 +894,25 @@ fn database_lock_retry_uses_only_the_machine_readable_api_code() {
         "rendered wording must never be the retry contract"
     );
 }
+
+#[tokio::test]
+async fn concurrent_receipt_writes_preserve_legacy_and_new_sibling_variants() {
+    let temp = tempdir().unwrap();
+    let legacy = json!({"repo":"owner/model","modelId":"model","variant":"q4",
+        "resolvedFiles":["q4/model.safetensors"], "snapshotRevision":"1111111111111111111111111111111111111111"});
+    std::fs::write(temp.path().join(INSTALL_MARKER), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let q8 = json!({"modelId":"model","variant":"q8"}).as_object().unwrap().clone();
+    let bf16 = json!({"modelId":"model","variant":"bf16"}).as_object().unwrap().clone();
+    let q8_files=vec!["q8/model.safetensors".to_owned()];
+    let bf16_files=vec!["bf16/model.safetensors".to_owned()];
+    let (a,b)=tokio::join!(
+        write_model_download_receipt(temp.path(), &q8, "owner/model", "q8", &q8_files, Some("rev"), Default::default()),
+        write_model_download_receipt(temp.path(), &bf16, "owner/model", "bf16", &bf16_files, Some("rev"), Default::default())
+    );
+    a.unwrap(); b.unwrap();
+    let top:Value=serde_json::from_slice(&std::fs::read(temp.path().join(INSTALL_MARKER)).unwrap()).unwrap();
+    let receipts=top["receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(),3);
+    assert!(receipts.contains(&legacy));
+    for variant in ["q4","q8","bf16"] { assert_eq!(receipts.iter().filter(|r|r["variant"]==variant).count(),1); }
+}

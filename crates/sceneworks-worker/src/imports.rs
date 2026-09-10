@@ -206,27 +206,42 @@ pub(crate) async fn write_model_download_receipt(
         );
         object.insert("loraFileSha256".to_owned(), Value::String(hash.to_owned()));
     }
-    let marker_path = target_dir.join(INSTALL_MARKER);
-    let mut receipts = match tokio::fs::read(&marker_path).await {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|value| value.get("receipts").and_then(Value::as_array).cloned())
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    receipts.retain(|existing| {
-        existing.get("repo") != receipt.get("repo")
-            || existing.get("modelId") != receipt.get("modelId")
-            || existing.get("variant") != receipt.get("variant")
-    });
-    receipts.push(receipt.clone());
-    let mut marker = receipt;
-    marker
-        .as_object_mut()
-        .expect("receipt is an object")
-        .insert("receipts".to_owned(), Value::Array(receipts));
-    let bytes = serde_json::to_vec_pretty(&marker)?;
-    tokio::fs::write(marker_path, bytes).await?;
+    let target_dir = target_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        let marker_path = target_dir.join(INSTALL_MARKER);
+        let _lock = sceneworks_core::download_receipt::lock(&target_dir)?;
+        let mut receipts = match std::fs::read(&marker_path) {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .map(|value| {
+                    value
+                        .get("receipts")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_else(|| vec![value])
+                })
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        receipts.retain(|existing| {
+            existing.get("repo") != receipt.get("repo")
+                || existing.get("modelId") != receipt.get("modelId")
+                || existing.get("variant") != receipt.get("variant")
+        });
+        receipts.push(receipt.clone());
+        let mut marker = receipt;
+        marker
+            .as_object_mut()
+            .expect("receipt is an object")
+            .insert("receipts".to_owned(), Value::Array(receipts));
+        sceneworks_core::download_receipt::write(&marker_path, &marker)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!("receipt write task failed: {error}"))
+    })??;
+
     Ok(())
 }
 

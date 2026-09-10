@@ -1952,6 +1952,54 @@ mod tests {
         });
     }
 
+    #[test]
+    fn repairing_a_legacy_revision_enables_runtime_local_loading_without_the_source() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let repo = "guardfx/revision-repair";
+        seed_snapshot(&library, repo, REV_A, "model.safetensors");
+        let mut receipt = json!({"repo":repo,"modelId":"repair", "resolvedFiles":["model.safetensors"],"snapshotRevision":null});
+        write_receipts(&data, repo, json!([receipt]));
+        let payload=json!({"modelManifestEntry":{"id":"repair","downloads":[{"provider":"huggingface","repo":repo,"files":["model.safetensors"]}]}}).as_object().unwrap().clone();
+        let settings = settings(data.clone());
+        with_local_cache(&library, || {
+            let artifact = publish_bundle(
+                &data,
+                &library,
+                repo,
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert!(guard
+                .resolutions()
+                .iter()
+                .all(|r| r.availability != ModelAvailability::LocalReady));
+            drop(guard);
+            receipt["snapshotRevision"] =
+                json!(sceneworks_core::download_receipt::recover_revision(
+                    &receipt,
+                    &library.join("models--guardfx--revision-repair")
+                )
+                .unwrap());
+            write_receipts(&data, repo, json!([receipt]));
+            std::fs::rename(&library, temp.path().join("unplugged")).unwrap();
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady
+            );
+            let loaded = crate::model_jobs::huggingface_snapshot_dir(&data, repo).unwrap();
+            assert!(loaded.starts_with(artifact.location.root()));
+            assert!(std::fs::File::open(loaded.join("model.safetensors")).is_ok());
+            drop(guard);
+        });
+    }
+
     /// A requirement whose receipt carries NO `snapshotRevision` makes the WHOLE repository
     /// unserveable, not merely that one requirement.
     ///
