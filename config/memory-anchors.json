@@ -1772,6 +1772,51 @@
       "overallAllocatorEnvelopeBytes": 43187699712
     },
     {
+      "id": "ideogram_4:candle:q4:base:base:ideogram4-candle-request-scoped-staged-residency-v1-base-q4:imc-3d1870dc3811d9c25893",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-q4-candle-evidence.json",
+        "sha256": "1a5ca83c2f78f873ff7bd05a155ec8456135310c6c3fa7d4d520f02f3579af43",
+        "recordId": "imc-3d1870dc3811d9c25893",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-q4",
+        "loaderClosureDigest": "079dd79ff08c35aa9f364423f6a6febad350c1090b1e577b10b88605c41df665"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 19229835264,
+        "denoise": 19229835264,
+        "decode": 20507000832
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 19229835264,
+        "denoise": 19229835264,
+        "decode": 20507000832
+      },
+      "overallAllocatorEnvelopeBytes": 20507000832
+    },
+    {
       "id": "ideogram_4:mlx:bf16:base:base:ideogram-4-bf16-mlx-shared-ladder-v1:imc-4a7972af13364c485a83",
       "modelId": "ideogram_4",
       "modelFamily": "ideogram",
@@ -7764,28 +7809,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:ideogram_4:candle:q4",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "38.5",
-          "sequentialPeakGb": "34"
-        }
-      }
     },
     {
       "id": "analytic:ideogram_4:candle:q8",
