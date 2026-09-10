@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:54baa53517df45995d313e9e0d2f936bb726fc7033aa033e3a2d74bd1c8d01e1",
+    "sceneWorksRevision": "source-tree:f8e8a0fc8eee3762ae7fd4c07e26ac2a1e631b4b766fb486147e1f66c9fd7dd1",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "4a257ac0247c412381c7ce905519f0407b05106ed9d847b4b4daaf93c569f663"
+        "sha256": "f387cd669bae62b34e7f1435d3823ce671dd80fb6097182caeb311eb31bc33ce"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "d5b690d46abdf4527bf3c7ad13da24b162f3489e75faad7431bcbec86c9c2011"
+        "sha256": "bd309f2e1f4f3e962433cd3b74e22a6f7f0926598e1a78f1b7c76c22917af926"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 2244,
-    "elidedCells": 7146,
+    "publishedCells": 2248,
+    "elidedCells": 7142,
     "elidedByState": {
-      "Implemented": 2730,
+      "Implemented": 2726,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 148,
-    "analyticOnlyCells": 195,
-    "anchoredCells": 2001,
+    "anchors": 149,
+    "analyticOnlyCells": 194,
+    "anchoredCells": 2005,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -4906,6 +4906,24 @@
       "cells": 4
     },
     {
+      "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+      "modelId": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/chroma1-hd-q4-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 4
+    },
+    {
       "id": "chroma1_hd:mlx:bf16:base:base:chroma1-hd-bf16-mlx-shared-ladder-v1:imc-460e14ea1de207325719",
       "modelId": "chroma1_hd",
       "backend": "mlx",
@@ -8806,12 +8824,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -8819,12 +8837,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -20395,6 +20413,202 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#chroma1_hd:candle:bf16:base:base:chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1:imc-7c225de3c2a22a6491a2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_hd:chroma1_hd:candle:q4:text_to_image:lora:resident",
+      "modelId": "chroma1_hd",
+      "resolvedRoute": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17410,
+      "owningModelStory": 17484,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_hd:chroma1_hd:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "chroma1_hd",
+      "resolvedRoute": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17410,
+      "owningModelStory": 17484,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_hd:chroma1_hd:candle:q4:text_to_image:none:resident",
+      "modelId": "chroma1_hd",
+      "resolvedRoute": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17410,
+      "owningModelStory": 17484,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_hd:chroma1_hd:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "chroma1_hd",
+      "resolvedRoute": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17410,
+      "owningModelStory": 17484,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b"
           }
         ]
       }
@@ -146768,6 +146982,10 @@
       "chroma1_hd:chroma1_hd:candle:bf16:text_to_image:lora:staged_residency",
       "chroma1_hd:chroma1_hd:candle:bf16:text_to_image:none:resident",
       "chroma1_hd:chroma1_hd:candle:bf16:text_to_image:none:staged_residency",
+      "chroma1_hd:chroma1_hd:candle:q4:text_to_image:lora:resident",
+      "chroma1_hd:chroma1_hd:candle:q4:text_to_image:lora:staged_residency",
+      "chroma1_hd:chroma1_hd:candle:q4:text_to_image:none:resident",
+      "chroma1_hd:chroma1_hd:candle:q4:text_to_image:none:staged_residency",
       "chroma1_hd:chroma1_hd:mlx:bf16:text_to_image:lora:resident",
       "chroma1_hd:chroma1_hd:mlx:bf16:text_to_image:lora:staged_residency",
       "chroma1_hd:chroma1_hd:mlx:bf16:text_to_image:none:bounded_transformer_residency",
