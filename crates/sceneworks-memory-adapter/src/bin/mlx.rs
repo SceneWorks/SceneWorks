@@ -3153,6 +3153,7 @@ fn scoped_generate_observed_after_configuration(
         .map_err(|error| format!("enter conditioning phase: {error}"))?;
     let mut current_phase = Some(MemoryPhase::Conditioning);
     let mut phase_error = None;
+    let coherence_before = gpu_view_retries();
     let result = generator.generate(&request, &mut |progress| {
         let next = match progress {
             Progress::Step { current: 1, .. } => Some(MemoryPhase::Denoise),
@@ -3179,6 +3180,7 @@ fn scoped_generate_observed_after_configuration(
         }
         on_progress(progress);
     });
+    report_gpu_view_retries(coherence_before);
     if phase_error.is_none() {
         if let Some(current) = current_phase {
             if let Err(error) = scope.leave_phase(current) {
