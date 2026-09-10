@@ -1348,6 +1348,87 @@ export function assertEveryDerivableCorpusIsPackaged(
 }
 
 /**
+ * THE COMPILED-IN-BUT-UNREACHABLE GUARD (sc-22738), the third side of the packaging triangle.
+ *
+ * `assertPackagedSources` asks "does every emitted anchor cite a compiled-in corpus".
+ * `assertEveryDerivableCorpusIsPackaged` asks "does every retained corpus that COULD anchor a
+ * catalog cell get compiled in". Neither asks the question this epic's review found unasked:
+ * **does every compiled-in corpus reach the catalog at all**.
+ *
+ * The gap was live. `flux-dev-bf16-candle-evidence.json` and `flux-schnell-bf16-candle-evidence.json`
+ * were executed, authoritative renders with `loadability.result: "passed"` on a `…:bf16` resolved
+ * path, compiled into `PACKAGED_MEMORY_ANCHOR_SOURCES` — and citing nothing, because a candle tier
+ * short-circuit in `tiersFor` had dropped bf16 off the published axis, so `catalogByCell` had no
+ * cell for them to resolve to. Both sibling guards stayed silent by construction: there was no
+ * anchor to check a source for, and the packaging rule only BINDS on a corpus whose cell exists.
+ * ~360 KB of dead compiled data, contradicting the matrix's own coverage claim, with every gate
+ * green.
+ *
+ * The rule is deliberately weaker than "every packaged corpus is CITED". Being uncited is a
+ * legitimate outcome: eleven packaged corpora today measure a cell a SIBLING corpus also measures
+ * and lost `selectRepresentative`'s race for it — real evidence, correctly packaged, simply not the
+ * representative. Asserting citation would red on all of them.
+ *
+ * It is scoped to the defect's exact shape: the corpus's `(model, backend)` LANE is on the
+ * published axis, and none of the tiers it measures there is. That is a lane the document already
+ * believes in, missing a coordinate the evidence proves — an axis bug, every time. A corpus whose
+ * lane is absent from the matrix ENTIRELY is out of scope here and is governed by its own
+ * declaration: `OUT_OF_MATRIX_CATALOG_ENTRIES` (the MiniMax-H3 corpora, whose route parsers this
+ * generator cannot enumerate on either lane), which carries the
+ * `assertOutOfMatrixEntriesAreStillUnroutable` tripwire. Keeping the scope on the lane rather than
+ * on a skip list is also what keeps this honest under a narrowed catalog: `buildAnchorStore` is
+ * called in tests with a single-model matrix, where every other packaged corpus is off-axis by
+ * construction and not by defect.
+ */
+export function assertEveryPackagedCorpusReachesTheCatalog(
+  corpora,
+  packaged,
+  catalogByCell,
+) {
+  const publishedLanes = new Set(
+    [...catalogByCell.values()].map((cell) => `${cell.modelId}:${cell.backend}`),
+  );
+  const unreachable = [];
+  for (const corpus of corpora) {
+    if (!packaged.has(corpus.path)) continue;
+    const missed = new Set();
+    let reached = false;
+    for (const record of corpus.records) {
+      const candidate = anchorCandidate(record, corpus);
+      if (candidate === null) continue;
+      if (!publishedLanes.has(`${candidate.modelId}:${candidate.backend}`)) {
+        continue;
+      }
+      const key = cellKey(
+        candidate.modelId,
+        candidate.backend,
+        candidate.tier,
+      );
+      if (catalogByCell.has(key)) {
+        reached = true;
+        break;
+      }
+      missed.add(key);
+    }
+    if (!reached && missed.size > 0) {
+      unreachable.push(
+        `${corpus.path} -> ${[...missed].sort(compareText).join(", ")}`,
+      );
+    }
+  }
+  if (unreachable.length > 0) {
+    throw new Error(
+      "corpora are compiled into PACKAGED_MEMORY_ANCHOR_SOURCES " +
+        `(${PACKAGED_SOURCES_PATH}) but resolve to NO routing-catalog cell, so they are dead ` +
+        "compiled data that can never anchor anything. Either the measurement describes a " +
+        "coordinate the published axis wrongly omits (fix the axis — this is what hid the two " +
+        "candle FLUX bf16 anchors), or the corpus does not belong in the packaged set: " +
+        `${unreachable.sort(compareText).join("; ")}`,
+    );
+  }
+}
+
+/**
  * Top-level `pub const <NAME>_BYTES: u64 = <n>;` measured constants in one provider source. Only
  * column-zero declarations count: the same spelling nested inside a function or a `#[cfg(test)]`
  * module is a fixture, not a provider fact.
@@ -1712,6 +1793,14 @@ export async function buildAnchorStore({
     packagedSources,
     catalogByCell,
     stagedExemptLanes,
+  );
+  // sc-22738: and the converse of the converse — a packaged corpus that reaches no catalog cell at
+  // all is dead compiled data, which is how two executed candle FLUX bf16 renders sat in the binary
+  // citing nothing while every gate stayed green.
+  assertEveryPackagedCorpusReachesTheCatalog(
+    corpora,
+    packagedSources,
+    catalogByCell,
   );
   const byIdentity = new Map();
   // sc-22738: EVERY completed render of a packaged corpus, overlay or not, catalog-resolved or

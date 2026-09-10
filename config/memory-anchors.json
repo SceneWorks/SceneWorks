@@ -776,6 +776,141 @@
       "overallAllocatorEnvelopeBytes": 66623825544
     },
     {
+      "id": "flux_dev:candle:bf16:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-87f517952e8742223c16",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-bf16-candle-evidence.json",
+        "sha256": "3241d5fb670b9bcf72fa0a15207dc8e8be5bc10b3ddfba8f76a3d5bd31418c0f",
+        "recordId": "imc-87f517952e8742223c16",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "a1fea0f76ceef1c1f354462ca7491e32ef15baa20dd2d49db643405285b353ad"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10606346240,
+        "denoise": 28155314176,
+        "decode": 35405168640
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10606346240,
+        "denoise": 28155314176,
+        "decode": 35405168640
+      },
+      "overallAllocatorEnvelopeBytes": 35405168640
+    },
+    {
+      "id": "flux_dev:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-302fb0e31ed545f30400",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-q4-candle-evidence.json",
+        "sha256": "fe2c21f61f2fc2e9122e2c7a4c17289322d28ba708525c7c3a03bb1e99da1516",
+        "recordId": "imc-302fb0e31ed545f30400",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "a1fea0f76ceef1c1f354462ca7491e32ef15baa20dd2d49db643405285b353ad"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3962568704,
+        "denoise": 10874781696,
+        "decode": 20540555264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3962568704,
+        "denoise": 10874781696,
+        "decode": 20540555264
+      },
+      "overallAllocatorEnvelopeBytes": 20540555264
+    },
+    {
+      "id": "flux_dev:candle:q8:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-29b2641f4b98b1ea0e9a",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-q8-candle-evidence.json",
+        "sha256": "c805ebdc68b06c24ce77535fb781d5f0676110f848c81c03bbc8f6e98d94d49a",
+        "recordId": "imc-29b2641f4b98b1ea0e9a",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "a1fea0f76ceef1c1f354462ca7491e32ef15baa20dd2d49db643405285b353ad"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6680477696,
+        "denoise": 19028508672,
+        "decode": 26278363136
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6680477696,
+        "denoise": 19028508672,
+        "decode": 26278363136
+      },
+      "overallAllocatorEnvelopeBytes": 26278363136
+    },
+    {
       "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
       "modelId": "flux_dev",
       "modelFamily": "flux",
@@ -912,6 +1047,141 @@
       },
       "overallAllocatorEnvelopeBytes": 75405173600,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "flux_schnell:candle:bf16:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-a8923dd83eccb18d8fc4",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-bf16-candle-evidence.json",
+        "sha256": "d549bc35c14cbd1785db9e3c47077b24d135ca6cc87f4fe7e544f2b96b45b546",
+        "recordId": "imc-a8923dd83eccb18d8fc4",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "6ec1516e2324d822b07ee23e9d6b1fbd4f9b72b9312f84343da3d10693983959"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10438574080,
+        "denoise": 27819769856,
+        "decode": 35338059776
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10438574080,
+        "denoise": 27819769856,
+        "decode": 35338059776
+      },
+      "overallAllocatorEnvelopeBytes": 35338059776
+    },
+    {
+      "id": "flux_schnell:candle:q4:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-9bb7a4d7fb80ee5d3f02",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-q4-candle-evidence.json",
+        "sha256": "3f73d285b5724c485922a90077394524d740a29fa2d39f22f2d254d56f53e915",
+        "recordId": "imc-9bb7a4d7fb80ee5d3f02",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "6ec1516e2324d822b07ee23e9d6b1fbd4f9b72b9312f84343da3d10693983959"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3962568704,
+        "denoise": 11545870336,
+        "decode": 19064160256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3962568704,
+        "denoise": 11545870336,
+        "decode": 19064160256
+      },
+      "overallAllocatorEnvelopeBytes": 19064160256
+    },
+    {
+      "id": "flux_schnell:candle:q8:base:base:flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-85ce037459bb6f7da7d8",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "provider": "flux1_schnell",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-schnell-q8-candle-evidence.json",
+        "sha256": "135a7723c3c13c5168599d9ab0c149f8f1bc721a2aec35e7f6fa27308d11087b",
+        "recordId": "imc-85ce037459bb6f7da7d8",
+        "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "6ec1516e2324d822b07ee23e9d6b1fbd4f9b72b9312f84343da3d10693983959"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6680477696,
+        "denoise": 17820549120,
+        "decode": 28023193600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6680477696,
+        "denoise": 17820549120,
+        "decode": 28023193600
+      },
+      "overallAllocatorEnvelopeBytes": 28023193600
     },
     {
       "id": "flux_schnell:mlx:bf16:base:base:flux1-schnell-bf16-mlx-shared-ladder-v1:imc-0be4aefad13dec909d8e",
@@ -1457,6 +1727,141 @@
       "overallAllocatorEnvelopeBytes": 81717838466
     },
     {
+      "id": "krea_2_raw:candle:bf16:base:base:krea-2-raw-bf16-cuda-staged-residency-v1:imc-53a4bb4226f6d5cf35ff",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-bf16-candle-evidence.json",
+        "sha256": "34c864f010f905baa82fc027a8e089716ec3a1d4cc0a6f0a36276e4faf2cf924",
+        "recordId": "imc-53a4bb4226f6d5cf35ff",
+        "calibrationFingerprint": "krea-2-raw-bf16-cuda-staged-residency-v1",
+        "loaderClosureDigest": "edf9dbc5a89f09d769d0ed81c1a5af9bc4fb728948586992a715189eb0a605ce"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28526510080,
+        "decode": 34633416704
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28526510080,
+        "decode": 34633416704
+      },
+      "overallAllocatorEnvelopeBytes": 34633416704
+    },
+    {
+      "id": "krea_2_raw:candle:q4:base:base:krea-2-raw-q4-cuda-staged-residency-v1:imc-497720004bc422f2773b",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-q4-candle-evidence.json",
+        "sha256": "7043fcece61a05e88327e1cd089fcf13b270f336b006905ba992f4dab158a990",
+        "recordId": "imc-497720004bc422f2773b",
+        "calibrationFingerprint": "krea-2-raw-q4-cuda-staged-residency-v1",
+        "loaderClosureDigest": "edf9dbc5a89f09d769d0ed81c1a5af9bc4fb728948586992a715189eb0a605ce"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3828350976,
+        "denoise": 11480858624,
+        "decode": 17587765248
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3828350976,
+        "denoise": 11480858624,
+        "decode": 17587765248
+      },
+      "overallAllocatorEnvelopeBytes": 17587765248
+    },
+    {
+      "id": "krea_2_raw:candle:q8:base:base:krea-2-raw-q8-cuda-staged-residency-v1:imc-15d5140d06c21cbc37c6",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "provider": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-raw-q8-candle-evidence.json",
+        "sha256": "507ac703db0f3f5638f0ee46839490ebfcead71ea8398d5cce5a11ad26f4e7ce",
+        "recordId": "imc-15d5140d06c21cbc37c6",
+        "calibrationFingerprint": "krea-2-raw-q8-cuda-staged-residency-v1",
+        "loaderClosureDigest": "edf9dbc5a89f09d769d0ed81c1a5af9bc4fb728948586992a715189eb0a605ce"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5371854848,
+        "denoise": 16849567744,
+        "decode": 22990028800
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5371854848,
+        "denoise": 16849567744,
+        "decode": 22990028800
+      },
+      "overallAllocatorEnvelopeBytes": 22990028800
+    },
+    {
       "id": "krea_2_raw:mlx:bf16:base:base:krea-2-raw-bf16-mlx-shared-ladder-v1:imc-9511a33e5d5748de9ae7",
       "modelId": "krea_2_raw",
       "modelFamily": "krea_2",
@@ -1592,6 +1997,51 @@
       "overallAllocatorEnvelopeBytes": 27566097584
     },
     {
+      "id": "krea_2_turbo:candle:bf16:base:base:krea-2-turbo-bf16-cuda-phase-curves-v1:imc-c9323d73137e799fdfc7",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-bf16-candle-evidence.json",
+        "sha256": "b53216e1b2ffd9f6219a0e79fce435c470abf662e3ff1de400e26560cdfb0d7e",
+        "recordId": "imc-c9323d73137e799fdfc7",
+        "calibrationFingerprint": "krea-2-turbo-bf16-cuda-phase-curves-v1",
+        "loaderClosureDigest": "3e5eb1737f71c79e529451971c972d44232bc385782508d1ebcd4200f72c358b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28524412928,
+        "decode": 34633416704
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8693743616,
+        "denoise": 28524412928,
+        "decode": 34633416704
+      },
+      "overallAllocatorEnvelopeBytes": 34633416704
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -1644,6 +2094,51 @@
         "decode": 22352494592
       },
       "overallAllocatorEnvelopeBytes": 22352494592
+    },
+    {
+      "id": "krea_2_turbo:candle:q8:base:base:krea-2-turbo-q8-cuda-phase-curves-v1:imc-ba1084a0591430489091",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/krea-2-turbo-q8-candle-evidence.json",
+        "sha256": "139f9a0fc6581bdb062561a5411008ded37b704ad25ceba906a96565b1614a96",
+        "recordId": "imc-ba1084a0591430489091",
+        "calibrationFingerprint": "krea-2-turbo-q8-cuda-phase-curves-v1",
+        "loaderClosureDigest": "3e5eb1737f71c79e529451971c972d44232bc385782508d1ebcd4200f72c358b"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5237637120,
+        "denoise": 16847470592,
+        "decode": 22990028800
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5237637120,
+        "denoise": 16847470592,
+        "decode": 22990028800
+      },
+      "overallAllocatorEnvelopeBytes": 22990028800
     },
     {
       "id": "krea_2_turbo:mlx:bf16:base:base:krea-2-turbo-bf16-mlx-shared-ladder-v1:imc-21df4ccb39c644c3c819",
@@ -1784,6 +2279,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "lens:candle:q8:base:base:lens-base-q8-candle-cuda-shared-ladder-v1:imc-655115630dbc30f5e5d4",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "provider": "lens",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-q8-candle-evidence.json",
+        "sha256": "9849edfe4077e9361c77311d4800735e35258a944affe389b0c7a5e59edbd978",
+        "recordId": "imc-655115630dbc30f5e5d4",
+        "calibrationFingerprint": "lens-base-q8-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "6cb7e2495825a645e51092ea22b4d6c4342126f2c4efa74e4ffca917e666b7fb"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6646923264,
+        "denoise": 11984175104,
+        "decode": 26479689728
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6646923264,
+        "denoise": 11984175104,
+        "decode": 26479689728
+      },
+      "overallAllocatorEnvelopeBytes": 26479689728
+    },
+    {
       "id": "lens:mlx:bf16:base:base:lens-bf16-mlx-shared-ladder-v1:imc-940e03ee82a79f7547e2",
       "modelId": "lens",
       "modelFamily": "lens",
@@ -1917,6 +2457,96 @@
         "decode": 92080257780
       },
       "overallAllocatorEnvelopeBytes": 92080257780
+    },
+    {
+      "id": "lens_turbo:candle:bf16:base:base:lens-turbo-bf16-candle-cuda-shared-ladder-v1:imc-6870ecc9389ed4bc03f3",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json",
+        "sha256": "9f5dd3e1973b1315fcac25bc797f3634ad3ec8570cf009451b7f864dcc75aef5",
+        "recordId": "imc-6870ecc9389ed4bc03f3",
+        "calibrationFingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "beb6a10994052580052d69b9788f63285fa57ff8c5135aa1ba655456d478a607"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 42550165504,
+        "denoise": 12049186816,
+        "decode": 26546798592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 42550165504,
+        "denoise": 12049186816,
+        "decode": 26546798592
+      },
+      "overallAllocatorEnvelopeBytes": 42550165504
+    },
+    {
+      "id": "lens_turbo:candle:q4:base:base:lens-candle-cuda-shared-ladder-device-format-blocks-v1:imc-9014371f60d73507e0f6",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json",
+        "sha256": "92c42d5f6c570b7863d4288ef7b158a983e460edc78b69814b6602416547ed3e",
+        "recordId": "imc-9014371f60d73507e0f6",
+        "calibrationFingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+        "loaderClosureDigest": "beb6a10994052580052d69b9788f63285fa57ff8c5135aa1ba655456d478a607"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5338300416,
+        "denoise": 7991197696,
+        "decode": 22486712320
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5338300416,
+        "denoise": 7991197696,
+        "decode": 22486712320
+      },
+      "overallAllocatorEnvelopeBytes": 22486712320
     },
     {
       "id": "lens_turbo:mlx:bf16:base:base:lens-turbo-bf16-mlx-shared-ladder-v1:imc-9faaaa1095d39acaba6f",
@@ -2190,6 +2820,141 @@
       },
       "overallAllocatorEnvelopeBytes": 159636259044,
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "ltx_2_5:candle:bf16:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-035c1d26fd729b748a52",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-bf16-candle-evidence.json",
+        "sha256": "bae4149eaceca5b99684152dc2cfcad24732e13da913f4f856c2d6cc288379f9",
+        "recordId": "imc-035c1d26fd729b748a52",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+        "loaderClosureDigest": "4ed7a1f0a83c848bd5df40ea97cfc59f87259a54246022863344168e52a9dd41"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 74158440448,
+        "denoise": 83086016512,
+        "decode": 92212822016
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 74158440448,
+        "denoise": 83086016512,
+        "decode": 92212822016
+      },
+      "overallAllocatorEnvelopeBytes": 92212822016
+    },
+    {
+      "id": "ltx_2_5:candle:q4:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-2f73f2bd662aad9ddd8c",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json",
+        "sha256": "0c87a7c97dddbed7ff4bbe2643e3aab0d399982f92beb69da7b4737b5ba8a773",
+        "recordId": "imc-2f73f2bd662aad9ddd8c",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+        "loaderClosureDigest": "4ed7a1f0a83c848bd5df40ea97cfc59f87259a54246022863344168e52a9dd41"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 49428824064,
+        "denoise": 57685311488,
+        "decode": 63154683904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 49428824064,
+        "denoise": 57685311488,
+        "decode": 63154683904
+      },
+      "overallAllocatorEnvelopeBytes": 63154683904
+    },
+    {
+      "id": "ltx_2_5:candle:q8:distilled:conv:sc-18797-ltx-2-5-candle-ladder-v1:imc-dc4ac6f6d8e504429cb2",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "provider": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-5-q8-candle-evidence.json",
+        "sha256": "2768e918b5e548f0c2586ebb07164b639fdd9cc3508a31527c1c6fa89f82f0e2",
+        "recordId": "imc-dc4ac6f6d8e504429cb2",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+        "loaderClosureDigest": "4ed7a1f0a83c848bd5df40ea97cfc59f87259a54246022863344168e52a9dd41"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 56274976768,
+        "denoise": 60370714624,
+        "decode": 69463965696
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 56274976768,
+        "denoise": 60370714624,
+        "decode": 69463965696
+      },
+      "overallAllocatorEnvelopeBytes": 69463965696
     },
     {
       "id": "ltx_2_5:mlx:bf16:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-39340b8e9208d6cca309",
@@ -3561,6 +4326,141 @@
       },
       "overallAllocatorEnvelopeBytes": 49518997268,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-candle-evidence.json",
+        "sha256": "2952e7f2cbcafa5af6a4636e89074af26f039eb6c797693f0ab4353fe168f41c",
+        "recordId": "imc-5478897bb3fa0e0761d4",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "e9372e3b358bc392075c21613a99cc46f938e2396b0cdd5417499b24ebc50480"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32216449024,
+        "denoise": 45170556928,
+        "decode": 56042192896
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 32216449024,
+        "denoise": 45170556928,
+        "decode": 56042192896
+      },
+      "overallAllocatorEnvelopeBytes": 56042192896
+    },
+    {
+      "id": "qwen_image_edit_2511:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-51d214b50624a3def614",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-q4-candle-evidence.json",
+        "sha256": "6339b5bb9ab69f5783dc8f840c3f976a8022e40fdc746d6495edb7d0f22718d8",
+        "recordId": "imc-51d214b50624a3def614",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "e9372e3b358bc392075c21613a99cc46f938e2396b0cdd5417499b24ebc50480"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32451330048,
+        "denoise": 32117882880,
+        "decode": 32117882880
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 32451330048,
+        "denoise": 32117882880,
+        "decode": 32117882880
+      },
+      "overallAllocatorEnvelopeBytes": 32451330048
+    },
+    {
+      "id": "qwen_image_edit_2511:candle:q8:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-578b46f031781c9df0d3",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-q8-candle-evidence.json",
+        "sha256": "571d87f0ae8fd70fb574d5885c10fdbfeb9e47a31978815134dfd8ac81920b8f",
+        "recordId": "imc-578b46f031781c9df0d3",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "e9372e3b358bc392075c21613a99cc46f938e2396b0cdd5417499b24ebc50480"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32988200960,
+        "denoise": 32131514368,
+        "decode": 38976618496
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 32988200960,
+        "denoise": 32131514368,
+        "decode": 38976618496
+      },
+      "overallAllocatorEnvelopeBytes": 38976618496
     },
     {
       "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
@@ -6315,6 +7215,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux2_dev:candle:bf16",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:flux2_dev:candle:q4",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -6502,97 +7413,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:flux_dev:candle:q4",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-674e1b40640dbf345cce",
-        "envelopeBytes": 17651074970,
-        "values": {
-          "provider": "flux1_dev"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux_dev:candle:q8",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "26.4",
-          "provider": "flux1_dev",
-          "abi": "1",
-          "vramGbByTier": "31.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux_schnell:candle:q4",
-      "modelId": "flux_schnell",
-      "modelFamily": "flux",
-      "route": "flux1_schnell",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-3e535b3422a162b35758",
-        "envelopeBytes": 17642573594,
-        "values": {
-          "provider": "flux1_schnell"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux_schnell:candle:q8",
-      "modelId": "flux_schnell",
-      "modelFamily": "flux",
-      "route": "flux1_schnell",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "26.4",
-          "provider": "flux1_schnell",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:ideogram_4:candle:bf16",
@@ -7044,89 +7864,6 @@
       }
     },
     {
-      "id": "analytic:krea_2_raw:candle:bf16",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_raw:candle:q4",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_raw:candle:q8",
-      "modelId": "krea_2_raw",
-      "modelFamily": "krea_2",
-      "route": "krea_2_raw",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:krea_2_turbo:candle:bf16",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "staged_residency",
-          "sequentialPeakGb": "39.4",
-          "provider": "krea_2_turbo_edit",
-          "abi": "1",
-          "vramGbByTier": "47.2"
-        }
-      }
-    },
-    {
-      "id": "analytic:krea_2_turbo:candle:q8",
-      "modelId": "krea_2_turbo",
-      "modelFamily": "krea_2",
-      "route": "krea_2_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "staged_residency",
-          "sequentialPeakGb": "29.4",
-          "provider": "krea_2_turbo_edit",
-          "abi": "1",
-          "vramGbByTier": "35.2"
-        }
-      }
-    },
-    {
       "id": "analytic:krea_realtime_14b:mlx:bf16",
       "modelId": "krea_realtime_14b",
       "modelFamily": "krea-realtime",
@@ -7175,39 +7912,6 @@
       "modelId": "lens",
       "modelFamily": "lens",
       "route": "lens",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens:candle:q8",
-      "modelId": "lens",
-      "modelFamily": "lens",
-      "route": "lens",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:candle:bf16",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:candle:q4",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
       "backend": "candle",
       "tier": "q4",
       "basis": "no_retained_evidence",
@@ -7265,39 +7969,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_5:candle:bf16",
-      "modelId": "ltx_2_5",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_5_distilled",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_5:candle:q4",
-      "modelId": "ltx_2_5",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_5_distilled",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_5:candle:q8",
-      "modelId": "ltx_2_5",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_5_distilled",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -7613,81 +8284,6 @@
           "provider": "qwen_image",
           "abi": "1",
           "vramGbByTier": "65.3"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image_edit_2511:candle:bf16",
-      "modelId": "qwen_image_edit_2511",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image_edit",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
-          "sequentialPeakGb": "52.2",
-          "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "81.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image_edit_2511:candle:q4",
-      "modelId": "qwen_image_edit_2511",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image_edit",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
-          "sequentialPeakGb": "36.9",
-          "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "56.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image_edit_2511:candle:q8",
-      "modelId": "qwen_image_edit_2511",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image_edit",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "4189b5618ecf5b3c8bb863312ca0724ccf74163e5b9597ebc581158e70dac9ae",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
-          "sequentialPeakGb": "39.3",
-          "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "69"
         }
       }
     },
@@ -8170,6 +8766,17 @@
       }
     },
     {
+      "id": "analytic:sd3_5_large:candle:q8",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:sd3_5_large_turbo:candle:bf16",
       "modelId": "sd3_5_large_turbo",
       "modelFamily": "sd3",
@@ -8192,6 +8799,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:sd3_5_large_turbo:candle:q8",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:sd3_5_medium:candle:bf16",
       "modelId": "sd3_5_medium",
       "modelFamily": "sd3",
@@ -8209,6 +8827,17 @@
       "route": "sd3_5_medium",
       "backend": "candle",
       "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:candle:q8",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
