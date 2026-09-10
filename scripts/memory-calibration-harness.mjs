@@ -1681,6 +1681,7 @@ export function planAnchor(plan, key) {
       modelId,
       tier,
       mode: anchor.mode,
+      ...(anchor.referenceCount !== undefined ? { referenceCount: anchor.referenceCount } : {}),
       overlay: anchor.overlay,
       ...(anchor.transformerVariant ? { transformerVariant: anchor.transformerVariant } : {}),
       ...(anchor.decoder ? { decoder: anchor.decoder } : {}),
@@ -2350,7 +2351,7 @@ export async function recordExceededBound({
     // states geometry as width/height/batch/frames), so every anchor capture — and therefore every
     // bound one can produce — is reference-free. Stated as a field rather than assumed because the
     // store keys on it: a reference-carrying request must not inherit a reference-free bound.
-    referenceCount: 0,
+    referenceCount: planned.target.referenceCount ?? 0,
     observedFootprintBytes: measured.observedFootprintBytes,
     ceilingBytes: measured.ceilingBytes,
     reason: measured.reason,

@@ -477,6 +477,7 @@
         "properties": {
           "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
           "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
+          "referenceCount": { "type": "integer", "minimum": 0 },
           "overlay": { "type": "string", "minLength": 1 },
           "transformerVariant": { "enum": ["distilled", "dev"] },
           "decoder": { "enum": ["conv", "diffvae"] },

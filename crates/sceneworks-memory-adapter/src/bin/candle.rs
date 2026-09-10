@@ -5346,14 +5346,13 @@ const BERNINI_CANDLE_ID: &str = "bernini";
 const BERNINI_CANDLE_VIDEO_MODEL_ID: &str = "bernini";
 const BERNINI_CANDLE_IMAGE_MODEL_ID: &str = "bernini_image";
 const BERNINI_CANDLE_VIDEO_EXECUTION_PATH: &str =
-    "the Candle Bernini dual-expert text-to-video path";
+    "the Candle Bernini dual-expert reference-to-video path";
 const BERNINI_CANDLE_IMAGE_EXECUTION_PATH: &str = "the Candle Bernini still text-to-image path";
 const BERNINI_CANDLE_STILL_CALIBRATION: &str = "Candle Bernini still calibration";
 /// The single cadence the shipped `bernini` manifest entry publishes (`limits.fps: [16]`).
 const BERNINI_CANDLE_FPS: u32 = 16;
-/// 3 s at [`BERNINI_CANDLE_FPS`], coerced onto the Wan `1 mod 4` lattice the A14B renderer requires.
-/// The manifest's shortest published duration, because this is the cell's ONE capture.
-const BERNINI_CANDLE_FRAMES: u32 = 49;
+/// The shortest frame count admitted by Bernini's reference-video memory contract.
+const BERNINI_CANDLE_FRAMES: u32 = 45;
 /// One seed for every sc-22737 Candle fixture. The fixture binds the family, member, tier and full
 /// geometry, so the seed does not also have to carry the route.
 const SC22737_CANDLE_SEED: u64 = 22737;
@@ -5364,7 +5363,7 @@ const SC22737_CANDLE_SEED: u64 = 22737;
 /// `provider` must name.
 const LTX23_CANDLE_ID: &str = "ltx_2_3_distilled";
 const LTX23_CANDLE_MODEL_ID: &str = "ltx_2_3";
-const LTX23_CANDLE_EXECUTION_PATH: &str = "the Candle LTX-2.3 base text-to-video path";
+const LTX23_CANDLE_EXECUTION_PATH: &str = "the Candle LTX-2.3 image-to-video path";
 /// `limits.requiresDimensionsMultipleOf` of the shipped `ltx_2_3` entry, mirroring the engine's
 /// `SIZE_MULTIPLE = 2 * SPATIAL_SCALE`.
 const LTX23_CANDLE_DIMENSION_MULTIPLE: u32 = 64;
@@ -5476,9 +5475,9 @@ const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     engine_id: BERNINI_CANDLE_ID,
     model_id: BERNINI_CANDLE_VIDEO_MODEL_ID,
     execution_path: BERNINI_CANDLE_VIDEO_EXECUTION_PATH,
-    fixture_prefix: "bernini-video-candle",
-    mode: "text_to_video",
-    reference_count: 0,
+    fixture_prefix: "bernini-r2v-candle",
+    mode: "reference_to_video",
+    reference_count: 1,
     legal_fps: &[BERNINI_CANDLE_FPS],
     frames: BERNINI_CANDLE_FRAMES,
     requires_audio: false,
@@ -5493,9 +5492,9 @@ const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     engine_id: LTX23_CANDLE_ID,
     model_id: LTX23_CANDLE_MODEL_ID,
     execution_path: LTX23_CANDLE_EXECUTION_PATH,
-    fixture_prefix: "ltx-2-3-candle",
-    mode: "text_to_video",
-    reference_count: 0,
+    fixture_prefix: "ltx-2-3-i2v-candle",
+    mode: "image_to_video",
+    reference_count: 1,
     legal_fps: &LTX23_CANDLE_FPS,
     frames: LTX23_CANDLE_FRAMES,
     requires_audio: false,
@@ -5607,9 +5606,9 @@ fn validate_bernini_candle_geometry(width: u32, height: u32, frames: u32) -> Res
     }
     // The renderer is Wan2.2-A14B, whose frame count is `1 mod 4` (`video_jobs/wan.rs`'s
     // `wan_frame_count`, which the Bernini video path calls for exactly that reason).
-    if frames % 4 != 1 || frames < 5 {
+    if !matches!(frames, 45 | 61 | 77) {
         return Err(format!(
-            "Candle Bernini requires geometry.frames on the Wan 1 mod 4 lattice (>= 5), got {frames}"
+            "Candle Bernini reference memory requires 45, 61, or 77 frames, got {frames}"
         ));
     }
     Ok(())
@@ -5801,10 +5800,7 @@ fn ltx23_candle_load_plan(
     // declared `deferred_materialization` alongside it were uncapturable. The plan rows now say
     // eager too; `run_sc22737_video_capture` still re-asserts the plan's shape against the LOADED
     // contract.
-    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LTX23_CANDLE_LOAD_SHAPE);
-    spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
+    let spec = ltx23_candle_load_spec(root, text_encoder, &target.tier)?;
     Ok(Sc22737LoadPlan {
         artifact: artifact(&repository, &revision, &target.tier),
         resolved_path_fingerprint: format!(
@@ -5813,6 +5809,24 @@ fn ltx23_candle_load_plan(
         ),
         spec,
     })
+}
+
+fn ltx23_candle_load_spec(
+    root: PathBuf,
+    text_encoder: PathBuf,
+    tier: &str,
+) -> Result<LoadSpec, String> {
+    let quant = match tier {
+        "q4" => Quant::Q4,
+        "q8" => Quant::Q8,
+        other => return Err(format!("Candle LTX-2.3 requires q4 or q8, got {other:?}")),
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_quant(quant)
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LTX23_CANDLE_LOAD_SHAPE);
+    spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
+    Ok(spec)
 }
 
 /// MiniMax-H3's Candle staging: the UPSTREAM snapshot root, with the packed components redirected
@@ -5944,6 +5958,14 @@ fn sc22737_video_target(
             arm.model_id, arm.mode
         ));
     }
+    if matches!(arm.engine_id, BERNINI_CANDLE_ID | LTX23_CANDLE_ID)
+        && target.get("referenceCount").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(format!(
+            "{} requires an explicit referenceCount of 1",
+            arm.model_id
+        ));
+    }
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(u64::from(arm.reference_count)) {
@@ -6028,8 +6050,8 @@ fn sc22737_video_target(
 }
 
 /// The measured request. The CONDITIONING is what selects a reference route — and, for MiniMax-H3,
-/// which DiT partition the engine resolves — so the reference member carries exactly one synthetic
-/// image reference at the target geometry and every other member carries none.
+/// which DiT partition the engine resolves. Each reference route carries one synthetic image,
+/// using the conditioning variant its production scope validates.
 fn sc22737_generation_request(
     arm: Sc22737VideoArm,
     target: &Sc22737VideoTarget,
@@ -6049,18 +6071,53 @@ fn sc22737_generation_request(
         ..Default::default()
     };
     if arm.reference_count > 0 {
-        request.conditioning = vec![Conditioning::Reference {
-            image: Image {
-                width: target.width,
-                height: target.height,
-                pixels: protocol::synthetic_reference_rgb(target.width, target.height),
-            },
-            // The engine owns the reference conditioning strength; the request-level lever stays
-            // unset, exactly as the worker's own conditioning resolver leaves it.
-            strength: None,
+        let image = Image {
+            width: target.width,
+            height: target.height,
+            pixels: protocol::synthetic_reference_rgb(target.width, target.height),
+        };
+        request.conditioning = vec![if arm.engine_id == BERNINI_CANDLE_ID {
+            request.video_mode = Some("r2v".to_owned());
+            Conditioning::MultiReference {
+                images: vec![image],
+            }
+        } else {
+            Conditioning::Reference {
+                image,
+                // The engine owns the reference conditioning strength; the request-level lever stays
+                // unset, exactly as the worker's own conditioning resolver leaves it.
+                strength: None,
+            }
         }];
     }
     request
+}
+
+fn sc22737_conditioning_overlay(
+    arm: Sc22737VideoArm,
+    generation: &GenerationRequest,
+    contract: &runtime_cuda::gen_core::MemoryProviderContract,
+) -> Result<Option<String>, String> {
+    match arm.engine_id {
+        BERNINI_CANDLE_ID => {
+            use runtime_cuda::providers::bernini::memory_strategy;
+            let receipt = memory_strategy::r2v_reference_receipt(arm.engine_id, generation)
+                .map_err(|error| format!("Bernini capture reference receipt: {error}"))?;
+            let mut overlay = format!("provider_video_mode:r2v+{receipt}");
+            if let Some(adapter) = memory_strategy::adapter_receipt_axis(contract) {
+                overlay.push('+');
+                overlay.push_str(&adapter);
+            }
+            Ok(Some(overlay))
+        }
+        LTX23_CANDLE_ID => Ok(Some(format!(
+            "reference:image:{}x{}:strength:{:08x}",
+            generation.width,
+            generation.height,
+            1.0_f32.to_bits()
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// Execute one sc-22737 Candle video cell: stage the family's load, prove the plan and the loaded
@@ -6142,6 +6199,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let mut generation = sc22737_generation_request(arm, &target);
     let context = MemoryRunContext {
         selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
@@ -6159,7 +6217,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
-        overlay: None,
+        overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
             committed_bytes: 0,
@@ -6201,7 +6259,6 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             .materialize_transformer_window(0, window)
             .map_err(|error| format!("configure {} transformer window: {error}", arm.engine_id))?;
     }
-    let mut generation = sc22737_generation_request(arm, &target);
     scope
         .configure_request(&mut generation)
         .map_err(|error| format!("apply {} capture strategy: {error}", arm.engine_id))?;
@@ -8818,6 +8875,104 @@ mod mage_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bernini_reference_probe_passes_the_provider_scope_and_binds_its_image() {
+        use runtime_cuda::gen_core::{MemoryBehaviorRoute, MemoryNumericTier};
+        use runtime_cuda::providers::bernini::memory_strategy as bernini;
+        let arm = BERNINI_CANDLE_VIDEO_ARM;
+        for (tier, quant) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+        ] {
+            let spec = bernini_candle_load_spec(
+                LoadSpec::new(WeightsSource::Dir(PathBuf::from("unused"))),
+                tier,
+                arm.model_id,
+            )
+            .unwrap();
+            let contract =
+                bernini::weights_free_memory_strategy_contract(arm.engine_id, &spec).unwrap();
+            let target = Sc22737VideoTarget {
+                tier: tier.to_owned(),
+                width: 848,
+                height: 480,
+                frames: 45,
+                fps: 16,
+                seed: SC22737_CANDLE_SEED,
+            };
+            let mut generation = sc22737_generation_request(arm, &target);
+            let overlay = sc22737_conditioning_overlay(arm, &generation, &contract).unwrap();
+            let numeric = MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            };
+            let mut context = runtime_cuda::gen_core::standard_memory_behavior_context(
+                &contract,
+                MemoryStrategy::Resident,
+                numeric,
+                MemoryBehaviorRoute {
+                    mode: MemoryMode::Other(arm.mode.to_owned()),
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                    overlay,
+                },
+            )
+            .unwrap();
+            context.geometry.width = target.width;
+            context.geometry.height = target.height;
+            context.geometry.frames = target.frames;
+            assert!(matches!(
+                bernini::registered_safety_check(&spec, &contract, &context),
+                runtime_cuda::gen_core::MemorySafetyDecision::Accept
+            ));
+            let mut scope =
+                bernini::registered_begin_request(arm.engine_id, &spec, &contract, &context)
+                    .unwrap()
+                    .unwrap();
+            scope.configure_request(&mut generation).unwrap();
+            if let Conditioning::MultiReference { images } = &mut generation.conditioning[0] {
+                images[0].pixels[0] ^= 1;
+            }
+            assert!(scope.configure_request(&mut generation).is_err());
+            context.geometry.frames = 49;
+            assert!(matches!(
+                bernini::registered_safety_check(&spec, &contract, &context),
+                runtime_cuda::gen_core::MemorySafetyDecision::Reject { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn ltx_probe_loads_the_declared_packed_tier_and_fits_one_reference() {
+        for (tier, quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+            let spec =
+                ltx23_candle_load_spec(PathBuf::from(tier), PathBuf::from("gemma"), tier).unwrap();
+            assert_eq!(spec.quantize, Some(quant));
+            let target = Sc22737VideoTarget {
+                tier: tier.to_owned(),
+                width: 768,
+                height: 512,
+                frames: 97,
+                fps: 24,
+                seed: SC22737_CANDLE_SEED,
+            };
+            let generation = sc22737_generation_request(LTX23_CANDLE_ARM, &target);
+            let [Conditioning::Reference { image, strength }] = generation.conditioning.as_slice()
+            else {
+                panic!("LTX must carry one fitted reference")
+            };
+            assert_eq!(
+                (image.width, image.height, image.pixels.len()),
+                (768, 512, 768 * 512 * 3)
+            );
+            assert_eq!(strength.unwrap_or(1.0), 1.0);
+        }
+        assert!(ltx23_candle_load_spec(PathBuf::new(), PathBuf::new(), "bf16").is_err());
+    }
+
     /// sc-22738: every plan row an sc-22737 video arm serves declares the load shape that arm
     /// stages. The engines behind these arms execute exactly one shape (see
     /// `Sc22737VideoArm::load_shape`), and the only production check — the plan/provider
@@ -8863,6 +9018,23 @@ mod tests {
                      executes; a row declaring another shape cannot be captured",
                     arm.engine_id
                 );
+                if matches!(arm.engine_id, BERNINI_CANDLE_ID | LTX23_CANDLE_ID) {
+                    let tier = key.split(':').nth(1).unwrap();
+                    let request = json!({"planned": {"target": {
+                        "provider": arm.engine_id, "modelId": arm.model_id, "tier": tier,
+                        "mode": row["mode"], "referenceCount": row["referenceCount"],
+                        "geometry": row["geometry"] }, "fixture": row["fixture"] }});
+                    assert!(sc22737_video_target(&request, arm).is_ok(), "{key}");
+                    let mut legacy = request.clone();
+                    legacy["planned"]["target"]["mode"] = json!("text_to_video");
+                    assert!(sc22737_video_target(&legacy, arm).is_err());
+                    let mut missing_count = request;
+                    missing_count["planned"]["target"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("referenceCount");
+                    assert!(sc22737_video_target(&missing_count, arm).is_err());
+                }
                 rows += 1;
             }
             assert!(

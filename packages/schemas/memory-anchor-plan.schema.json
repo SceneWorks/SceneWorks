@@ -30,6 +30,7 @@
       ],
       "properties": {
         "provider": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "referenceCount": { "type": "integer", "minimum": 0 },
         "mode": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
         "overlay": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
         "transformerVariant": { "enum": ["distilled", "dev"] },

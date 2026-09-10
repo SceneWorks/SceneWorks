@@ -3883,8 +3883,10 @@ async function videoFamilyBareTiers() {
     const { modelId, tier, backend } = anchorParts(key);
     assert.equal(row.provider, "bernini", key);
     assert.equal(row.calibrationFingerprint, `bernini-image-${tier}-${backend}-dual-expert-ladder-v1`, key);
-    assert.equal(row.mode, modelId === "bernini" ? "text_to_video" : "text_to_image", key);
-    assert.equal(row.geometry.frames, modelId === "bernini" ? 49 : 1, key);
+    const candleVideo = modelId === "bernini" && backend === "candle";
+    assert.equal(row.mode, candleVideo ? "reference_to_video" : modelId === "bernini" ? "text_to_video" : "text_to_image", key);
+    assert.equal(row.geometry.frames, candleVideo ? 45 : modelId === "bernini" ? 49 : 1, key);
+    if (candleVideo) assert.equal(row.referenceCount, 1, key);
   }
 
   const ltx = rows(({ modelId }) => modelId === "ltx_2_3");
@@ -3893,6 +3895,8 @@ async function videoFamilyBareTiers() {
     const { tier, backend } = anchorParts(key);
     if (backend === "candle") {
       assert.equal(row.provider, "ltx_2_3_distilled", key);
+      assert.equal(row.mode, "image_to_video", key);
+      assert.equal(row.referenceCount, 1, key);
       assert.equal(row.calibrationFingerprint, `sc-20772-ltx-2-3-candle-${tier}-i2v-v1`, key);
     } else {
       assert.equal(row.provider, "ltx_2_3", key);
