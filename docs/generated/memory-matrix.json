@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:aa8c03e7cca53470a9a6905a21a01656c70eb89a09a6cb0164edc349e6814d0d",
+    "sceneWorksRevision": "source-tree:ae4785306501206981bf514c8a13c5fe210a659b96e63ba9987c8da0600fd638",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "289ed47ca1e810e26153e7d0cd9f41f355f49e8d5e2216d205558aa961d91962"
+        "sha256": "4a9c048569e0e309c8f0724818226af652b69daa2c6d0fcde13864c6b5707e75"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "3946853ded7641d0c8dc22defca72a69b99ecaf94fc1e2ea3c56460b6cf3b46b"
+        "sha256": "097560a009b2781bae4c7dae1c26fbb554d9ed5b92fa3ec4131cff5125f1050e"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 2859,
-    "elidedCells": 6531,
+    "publishedCells": 2914,
+    "elidedCells": 6476,
     "elidedByState": {
-      "Implemented": 2115,
+      "Implemented": 2060,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 171,
-    "analyticOnlyCells": 172,
-    "anchoredCells": 2623,
+    "anchors": 172,
+    "analyticOnlyCells": 171,
+    "anchoredCells": 2678,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -6943,6 +6943,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/realvisxl-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 55
+    },
+    {
+      "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+      "modelId": "realvisxl",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/realvisxl-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 55
@@ -15049,12 +15067,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 45,
-      "published": 15,
-      "elided": 30,
+      "published": 30,
+      "elided": 15,
       "implemented": 45,
       "states": {
-        "Anchored": 15,
-        "Implemented": 30
+        "Anchored": 30,
+        "Implemented": 15
       }
     },
     {
@@ -15062,12 +15080,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 45,
-      "published": 15,
-      "elided": 30,
+      "published": 30,
+      "elided": 15,
       "implemented": 45,
       "states": {
-        "Anchored": 15,
-        "Implemented": 30
+        "Anchored": 30,
+        "Implemented": 15
       }
     },
     {
@@ -15087,12 +15105,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 45,
-      "published": 15,
-      "elided": 30,
+      "published": 30,
+      "elided": 15,
       "implemented": 45,
       "states": {
-        "Anchored": 15,
-        "Implemented": 30
+        "Anchored": 30,
+        "Implemented": 15
       }
     },
     {
@@ -15100,12 +15118,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 45,
-      "published": 10,
-      "elided": 35,
+      "published": 20,
+      "elided": 25,
       "implemented": 30,
       "states": {
-        "Anchored": 10,
-        "Implemented": 20,
+        "Anchored": 20,
+        "Implemented": 10,
         "Missing": 15
       },
       "implementedBy": {
@@ -140663,6 +140681,3228 @@
       }
     },
     {
+      "id": "realvisxl:sdxl:candle:q4:character_image:identity:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:identity:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:identity:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:lora:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:lora:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:lora:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:lora:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:none:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:none:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:none:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:character_image:none:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:identity:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:identity:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:identity:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:lora:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:lora:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:lora:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:lora:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:none:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:none:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:none:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:edit_image:none:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:identity:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:identity:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:identity:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:lora:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:lora:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:lora:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:lora:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:none:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:none:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:none:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_detail:none:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:identity:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:identity:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:identity:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:lora:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:lora:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:lora:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:lora:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:none:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:none:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:none:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:image_inpaint:none:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/realvisxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:identity:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:identity:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:identity:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:lora:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:lora:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:lora:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:none:resident",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "realvisxl:sdxl:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "realvisxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17490,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a"
+          }
+        ]
+      }
+    },
+    {
       "id": "sana_1600m:sana_1600m:mlx:bf16:image_to_image:none:resident",
       "modelId": "sana_1600m",
       "resolvedRoute": "sana_1600m",
@@ -185174,7 +188414,62 @@
       "realvisxl:sdxl:candle:bf16:text_to_image:none:bounded_attention",
       "realvisxl:sdxl:candle:bf16:text_to_image:none:bounded_decode",
       "realvisxl:sdxl:candle:bf16:text_to_image:none:resident",
-      "realvisxl:sdxl:candle:bf16:text_to_image:none:staged_residency"
+      "realvisxl:sdxl:candle:bf16:text_to_image:none:staged_residency",
+      "realvisxl:sdxl:candle:q4:character_image:identity:bounded_attention",
+      "realvisxl:sdxl:candle:q4:character_image:identity:bounded_decode",
+      "realvisxl:sdxl:candle:q4:character_image:identity:resident",
+      "realvisxl:sdxl:candle:q4:character_image:lora:bounded_attention",
+      "realvisxl:sdxl:candle:q4:character_image:lora:bounded_decode",
+      "realvisxl:sdxl:candle:q4:character_image:lora:resident",
+      "realvisxl:sdxl:candle:q4:character_image:lora:staged_residency",
+      "realvisxl:sdxl:candle:q4:character_image:none:bounded_attention",
+      "realvisxl:sdxl:candle:q4:character_image:none:bounded_decode",
+      "realvisxl:sdxl:candle:q4:character_image:none:resident",
+      "realvisxl:sdxl:candle:q4:character_image:none:staged_residency",
+      "realvisxl:sdxl:candle:q4:edit_image:identity:bounded_attention",
+      "realvisxl:sdxl:candle:q4:edit_image:identity:bounded_decode",
+      "realvisxl:sdxl:candle:q4:edit_image:identity:resident",
+      "realvisxl:sdxl:candle:q4:edit_image:lora:bounded_attention",
+      "realvisxl:sdxl:candle:q4:edit_image:lora:bounded_decode",
+      "realvisxl:sdxl:candle:q4:edit_image:lora:resident",
+      "realvisxl:sdxl:candle:q4:edit_image:lora:staged_residency",
+      "realvisxl:sdxl:candle:q4:edit_image:none:bounded_attention",
+      "realvisxl:sdxl:candle:q4:edit_image:none:bounded_decode",
+      "realvisxl:sdxl:candle:q4:edit_image:none:resident",
+      "realvisxl:sdxl:candle:q4:edit_image:none:staged_residency",
+      "realvisxl:sdxl:candle:q4:image_detail:identity:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_detail:identity:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_detail:identity:resident",
+      "realvisxl:sdxl:candle:q4:image_detail:lora:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_detail:lora:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_detail:lora:resident",
+      "realvisxl:sdxl:candle:q4:image_detail:lora:staged_residency",
+      "realvisxl:sdxl:candle:q4:image_detail:none:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_detail:none:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_detail:none:resident",
+      "realvisxl:sdxl:candle:q4:image_detail:none:staged_residency",
+      "realvisxl:sdxl:candle:q4:image_inpaint:identity:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_inpaint:identity:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_inpaint:identity:resident",
+      "realvisxl:sdxl:candle:q4:image_inpaint:lora:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_inpaint:lora:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_inpaint:lora:resident",
+      "realvisxl:sdxl:candle:q4:image_inpaint:lora:staged_residency",
+      "realvisxl:sdxl:candle:q4:image_inpaint:none:bounded_attention",
+      "realvisxl:sdxl:candle:q4:image_inpaint:none:bounded_decode",
+      "realvisxl:sdxl:candle:q4:image_inpaint:none:resident",
+      "realvisxl:sdxl:candle:q4:image_inpaint:none:staged_residency",
+      "realvisxl:sdxl:candle:q4:text_to_image:identity:bounded_attention",
+      "realvisxl:sdxl:candle:q4:text_to_image:identity:bounded_decode",
+      "realvisxl:sdxl:candle:q4:text_to_image:identity:resident",
+      "realvisxl:sdxl:candle:q4:text_to_image:lora:bounded_attention",
+      "realvisxl:sdxl:candle:q4:text_to_image:lora:bounded_decode",
+      "realvisxl:sdxl:candle:q4:text_to_image:lora:resident",
+      "realvisxl:sdxl:candle:q4:text_to_image:lora:staged_residency",
+      "realvisxl:sdxl:candle:q4:text_to_image:none:bounded_attention",
+      "realvisxl:sdxl:candle:q4:text_to_image:none:bounded_decode",
+      "realvisxl:sdxl:candle:q4:text_to_image:none:resident",
+      "realvisxl:sdxl:candle:q4:text_to_image:none:staged_residency"
     ],
     "realvisxl_lightning": [],
     "sana_1600m": [
