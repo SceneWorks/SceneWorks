@@ -4152,7 +4152,11 @@ fn repair_missing_snapshot_revisions(managed: &FsPath, model: &Value, data_dir: 
         let Some(revision) = download_receipt::recover_revision(entry, &root) else {
             return false;
         };
-        let snapshot = root.join("snapshots").join(&revision);
+        let Ok((_, snapshot)) = sceneworks_core::hf_home::model_source_library(data_dir)
+            .discover_snapshot(repo, Some(&revision))
+        else {
+            return false;
+        };
         let files = string_array_field(entry, "resolvedFiles");
         if !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
             || !listed_shard_indexes_are_complete(&snapshot, &files)
