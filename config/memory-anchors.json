@@ -4994,6 +4994,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "mage_flow_edit_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3:imc-b8617211f88b35dcd7ba",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-candle-evidence.json",
+        "sha256": "b3a026c3d7f8433ee672fb06c56f694181c3705c7f5cd08d4bdce74db51b01af",
+        "recordId": "imc-b8617211f88b35dcd7ba",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "7ad5085184b4f8af6d855c662bc695859ea22692b66bb6a12016a7a9251794e0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13527678976,
+        "decode": 13192134656
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13527678976,
+        "decode": 13192134656
+      },
+      "overallAllocatorEnvelopeBytes": 13527678976
+    },
+    {
       "id": "mage_flow_edit_turbo:mlx:bf16:base:base:mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1:imc-e745d017ddf6fafc0f3d",
       "modelId": "mage_flow_edit_turbo",
       "modelFamily": "mage-flow",
@@ -8807,17 +8852,6 @@
       "route": "mage_flow_edit_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_turbo:candle:bf16",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
