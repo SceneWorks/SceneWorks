@@ -3270,10 +3270,11 @@ export function probeTimeoutMs(budgetMinutes, guarded) {
  * 165 minutes is 9,900 s. `stoppedAtSeconds` is that other deadline, the one that actually fired,
  * and it is named as ITSELF rather than as the budget.
  *
- * WHAT MAKES IT ACTIONABLE (sc-22738 review). A budget is a kill line, so a cell whose own backend
- * has no completed capture behind that line — every heavy candle video cell — is told exactly that,
- * with the per-lane flag that raises it. Otherwise a re-run is just the same kill at the same
- * point, which is what "permanently unmeasurable at the default budget" means.
+ * WHAT MAKES IT ACTIONABLE (sc-22738 review). A budget is a kill line, so every stop names the
+ * longest completed capture on the stopped cell's OWN backend and the cell that figure was read
+ * from — enough to see that the candle video figure is an `ltx_2_5` capture and this cell is a 14B
+ * DiT — plus the per-lane flag that raises the budget. Otherwise a re-run is just the same kill at
+ * the same second, which is what "permanently unmeasurable at the default budget" means.
  */
 export function runtimeBudgetExceededReason({
   row, budgetMinutes, peak, ceiling, stoppedBy = "guard", stoppedAtSeconds = null,
