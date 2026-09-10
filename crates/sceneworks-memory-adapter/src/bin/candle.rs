@@ -1638,14 +1638,14 @@ fn validate_sd35_fixture(request: &Value, provider: &str, tier: &str) -> Result<
 /// The FLUX.1 fixture binds the member, the tier, the geometry edge, the seed and the step count
 /// — the MLX arm's `validate_flux_one_fixture`, on this lane's spellings. The base providers ride
 /// the five-rung reference path (`fresh-five-rung-flux1-<route>-…-seed16402-step2`, at
-/// [`FIVE_RUNG_SEED`]); PuLID is bespoke (`pulid-flux-candle-…-seed22726-step2`, at
+/// [`FIVE_RUNG_SEED`]); PuLID is bespoke (`pulid-flux-face-sc16956-candle-…-seed22726-step2`, at
 /// [`FLUX1_SEED`]). A fixture naming the other seed is refused: the record's fixture is the one
 /// claim about the render that nothing downstream can re-derive.
 fn validate_flux_one_fixture(request: &Value, provider: &str, tier: &str) -> Result<(), String> {
     let (prefix, seed) = match provider {
         FLUX1_DEV_ID => ("fresh-five-rung-flux1-dev", FIVE_RUNG_SEED),
         FLUX1_SCHNELL_ID => ("fresh-five-rung-flux1-schnell", FIVE_RUNG_SEED),
-        PULID_FLUX_ID => ("pulid-flux-candle", FLUX1_SEED),
+        PULID_FLUX_ID => ("pulid-flux-face-sc16956-candle", FLUX1_SEED),
         other => {
             return Err(format!(
                 "the Candle FLUX.1 fixture binding does not implement provider {other:?}"
@@ -2996,11 +2996,7 @@ fn run_five_rung_reference_loaded(
         },
         predicted_peak_bytes: 1,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!(
-            "{}@{}",
-            five_rung_evidence_story(provider_id),
-            protocol::INFERENCE_PIN
-        ),
+        evidence_revision: five_rung_evidence_revision(provider_id),
     };
     // sc-22738: the worker's admission sequence — safety check, then begin. `candle-gen-chroma`,
     // `candle-gen-flux2` and `candle-gen-mage` refuse a `begin` with no approval on file.
@@ -3037,7 +3033,7 @@ fn run_five_rung_reference_loaded(
         Some(arm) => {
             mage_generation_request(arm, &generator.descriptor().capabilities, width, height)
         }
-        None => five_rung_generation_request(width, height, edit),
+        None => five_rung_provider_generation_request(provider_id, width, height, edit),
     };
     scope
         .configure_request(&mut generation)
@@ -3646,6 +3642,33 @@ fn mage_generation_request(
 /// request — one `Conditioning::Reference` fitted to the request geometry plus the strength
 /// lever (`resolve_zimage_edit_init`) — with the step count raised so the engine-derived start
 /// step (`floor(steps * strength)`) still leaves two executed denoise steps.
+fn five_rung_evidence_revision(provider: &str) -> String {
+    if matches!(provider, SANA_ID | SANA_SPRINT_ID) {
+        runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else {
+        format!(
+            "{}@{}",
+            five_rung_evidence_story(provider),
+            protocol::INFERENCE_PIN
+        )
+    }
+}
+
+fn five_rung_provider_generation_request(
+    provider: &str,
+    width: u32,
+    height: u32,
+    edit: bool,
+) -> GenerationRequest {
+    let mut generation = five_rung_generation_request(width, height, edit);
+    if provider == BERNINI_CANDLE_ID {
+        // Bernini's shared video provider requires an explicit single-frame mode.
+        generation.video_mode = Some(if edit { "i2i" } else { "t2i" }.to_owned());
+        generation.frames = Some(1);
+    }
+    generation
+}
+
 fn five_rung_generation_request(width: u32, height: u32, edit: bool) -> GenerationRequest {
     let mut generation = GenerationRequest {
         prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
@@ -3805,6 +3828,19 @@ fn pulid_flux_generation_request(width: u32, height: u32) -> PulidFluxRequest {
         use_pid: false,
         ..Default::default()
     }
+}
+
+fn pulid_reference_image() -> Result<Image, String> {
+    // A generated face already exercised by inference's sc-16956 PuLID render.
+    // A synthetic color gradient cannot pass the production face detector.
+    let decoded = image::load_from_memory(include_bytes!("../../fixtures/pulid-reference.png"))
+        .map_err(|error| format!("decode bundled PuLID reference face: {error}"))?
+        .into_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
 }
 
 /// The admission context the worker admits this route under (`evaluate_shared_bespoke_image`,
@@ -3974,11 +4010,7 @@ fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
         .map_err(|error| format!("load real pulid_flux {} provider: {error}", binding.tier))?;
     vram.end_load(load_sample);
 
-    let reference = runtime_cuda::gen_core::Image {
-        width,
-        height,
-        pixels: protocol::synthetic_reference_rgb(width, height),
-    };
+    let reference = pulid_reference_image()?;
     let generation = pulid_flux_generation_request(width, height);
     let generation_sample = vram.phase();
     let mut phase_sample = Some(vram.phase());
@@ -5314,14 +5346,13 @@ const BERNINI_CANDLE_ID: &str = "bernini";
 const BERNINI_CANDLE_VIDEO_MODEL_ID: &str = "bernini";
 const BERNINI_CANDLE_IMAGE_MODEL_ID: &str = "bernini_image";
 const BERNINI_CANDLE_VIDEO_EXECUTION_PATH: &str =
-    "the Candle Bernini dual-expert text-to-video path";
+    "the Candle Bernini dual-expert reference-to-video path";
 const BERNINI_CANDLE_IMAGE_EXECUTION_PATH: &str = "the Candle Bernini still text-to-image path";
 const BERNINI_CANDLE_STILL_CALIBRATION: &str = "Candle Bernini still calibration";
 /// The single cadence the shipped `bernini` manifest entry publishes (`limits.fps: [16]`).
 const BERNINI_CANDLE_FPS: u32 = 16;
-/// 3 s at [`BERNINI_CANDLE_FPS`], coerced onto the Wan `1 mod 4` lattice the A14B renderer requires.
-/// The manifest's shortest published duration, because this is the cell's ONE capture.
-const BERNINI_CANDLE_FRAMES: u32 = 49;
+/// The shortest frame count admitted by Bernini's reference-video memory contract.
+const BERNINI_CANDLE_FRAMES: u32 = 45;
 /// One seed for every sc-22737 Candle fixture. The fixture binds the family, member, tier and full
 /// geometry, so the seed does not also have to carry the route.
 const SC22737_CANDLE_SEED: u64 = 22737;
@@ -5332,7 +5363,7 @@ const SC22737_CANDLE_SEED: u64 = 22737;
 /// `provider` must name.
 const LTX23_CANDLE_ID: &str = "ltx_2_3_distilled";
 const LTX23_CANDLE_MODEL_ID: &str = "ltx_2_3";
-const LTX23_CANDLE_EXECUTION_PATH: &str = "the Candle LTX-2.3 base text-to-video path";
+const LTX23_CANDLE_EXECUTION_PATH: &str = "the Candle LTX-2.3 image-to-video path";
 /// `limits.requiresDimensionsMultipleOf` of the shipped `ltx_2_3` entry, mirroring the engine's
 /// `SIZE_MULTIPLE = 2 * SPATIAL_SCALE`.
 const LTX23_CANDLE_DIMENSION_MULTIPLE: u32 = 64;
@@ -5444,9 +5475,9 @@ const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     engine_id: BERNINI_CANDLE_ID,
     model_id: BERNINI_CANDLE_VIDEO_MODEL_ID,
     execution_path: BERNINI_CANDLE_VIDEO_EXECUTION_PATH,
-    fixture_prefix: "bernini-video-candle",
-    mode: "text_to_video",
-    reference_count: 0,
+    fixture_prefix: "bernini-r2v-candle",
+    mode: "reference_to_video",
+    reference_count: 1,
     legal_fps: &[BERNINI_CANDLE_FPS],
     frames: BERNINI_CANDLE_FRAMES,
     requires_audio: false,
@@ -5461,9 +5492,9 @@ const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     engine_id: LTX23_CANDLE_ID,
     model_id: LTX23_CANDLE_MODEL_ID,
     execution_path: LTX23_CANDLE_EXECUTION_PATH,
-    fixture_prefix: "ltx-2-3-candle",
-    mode: "text_to_video",
-    reference_count: 0,
+    fixture_prefix: "ltx-2-3-i2v-candle",
+    mode: "image_to_video",
+    reference_count: 1,
     legal_fps: &LTX23_CANDLE_FPS,
     frames: LTX23_CANDLE_FRAMES,
     requires_audio: false,
@@ -5575,9 +5606,9 @@ fn validate_bernini_candle_geometry(width: u32, height: u32, frames: u32) -> Res
     }
     // The renderer is Wan2.2-A14B, whose frame count is `1 mod 4` (`video_jobs/wan.rs`'s
     // `wan_frame_count`, which the Bernini video path calls for exactly that reason).
-    if frames % 4 != 1 || frames < 5 {
+    if !matches!(frames, 45 | 61 | 77) {
         return Err(format!(
-            "Candle Bernini requires geometry.frames on the Wan 1 mod 4 lattice (>= 5), got {frames}"
+            "Candle Bernini reference memory requires 45, 61, or 77 frames, got {frames}"
         ));
     }
     Ok(())
@@ -5769,10 +5800,7 @@ fn ltx23_candle_load_plan(
     // declared `deferred_materialization` alongside it were uncapturable. The plan rows now say
     // eager too; `run_sc22737_video_capture` still re-asserts the plan's shape against the LOADED
     // contract.
-    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LTX23_CANDLE_LOAD_SHAPE);
-    spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
+    let spec = ltx23_candle_load_spec(root, text_encoder, &target.tier)?;
     Ok(Sc22737LoadPlan {
         artifact: artifact(&repository, &revision, &target.tier),
         resolved_path_fingerprint: format!(
@@ -5781,6 +5809,24 @@ fn ltx23_candle_load_plan(
         ),
         spec,
     })
+}
+
+fn ltx23_candle_load_spec(
+    root: PathBuf,
+    text_encoder: PathBuf,
+    tier: &str,
+) -> Result<LoadSpec, String> {
+    let quant = match tier {
+        "q4" => Quant::Q4,
+        "q8" => Quant::Q8,
+        other => return Err(format!("Candle LTX-2.3 requires q4 or q8, got {other:?}")),
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_quant(quant)
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LTX23_CANDLE_LOAD_SHAPE);
+    spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
+    Ok(spec)
 }
 
 /// MiniMax-H3's Candle staging: the UPSTREAM snapshot root, with the packed components redirected
@@ -5872,16 +5918,10 @@ fn minimax_candle_load_plan(
     } else {
         "transformer"
     };
-    let tier_artifact = staged
-        .as_ref()
-        .map(|(repository, revision)| artifact(repository, revision, &target.tier));
     Ok(Sc22737LoadPlan {
-        artifact: json!({
-            "repository": upstream_repository,
-            "resolvedRevision": upstream_revision,
-            "variant": target.tier,
-            "stagedTierArtifact": tier_artifact,
-        }),
+        // The schema's artifact is the load root. The staged repository, revision,
+        // tier and selected partition remain bound by resolved_path_fingerprint below.
+        artifact: artifact(&upstream_repository, &upstream_revision, &target.tier),
         resolved_path_fingerprint: format!(
             "{upstream_repository}@{upstream_revision}:{}+partition:{partition}+staged:{}",
             target.tier,
@@ -5916,6 +5956,14 @@ fn sc22737_video_target(
         return Err(format!(
             "{} is measured in {:?} mode, got {mode:?}",
             arm.model_id, arm.mode
+        ));
+    }
+    if matches!(arm.engine_id, BERNINI_CANDLE_ID | LTX23_CANDLE_ID)
+        && target.get("referenceCount").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(format!(
+            "{} requires an explicit referenceCount of 1",
+            arm.model_id
         ));
     }
     for field in ["referenceCount", "reference_count"] {
@@ -6002,8 +6050,8 @@ fn sc22737_video_target(
 }
 
 /// The measured request. The CONDITIONING is what selects a reference route — and, for MiniMax-H3,
-/// which DiT partition the engine resolves — so the reference member carries exactly one synthetic
-/// image reference at the target geometry and every other member carries none.
+/// which DiT partition the engine resolves. Each reference route carries one synthetic image,
+/// using the conditioning variant its production scope validates.
 fn sc22737_generation_request(
     arm: Sc22737VideoArm,
     target: &Sc22737VideoTarget,
@@ -6023,18 +6071,53 @@ fn sc22737_generation_request(
         ..Default::default()
     };
     if arm.reference_count > 0 {
-        request.conditioning = vec![Conditioning::Reference {
-            image: Image {
-                width: target.width,
-                height: target.height,
-                pixels: protocol::synthetic_reference_rgb(target.width, target.height),
-            },
-            // The engine owns the reference conditioning strength; the request-level lever stays
-            // unset, exactly as the worker's own conditioning resolver leaves it.
-            strength: None,
+        let image = Image {
+            width: target.width,
+            height: target.height,
+            pixels: protocol::synthetic_reference_rgb(target.width, target.height),
+        };
+        request.conditioning = vec![if arm.engine_id == BERNINI_CANDLE_ID {
+            request.video_mode = Some("r2v".to_owned());
+            Conditioning::MultiReference {
+                images: vec![image],
+            }
+        } else {
+            Conditioning::Reference {
+                image,
+                // The engine owns the reference conditioning strength; the request-level lever stays
+                // unset, exactly as the worker's own conditioning resolver leaves it.
+                strength: None,
+            }
         }];
     }
     request
+}
+
+fn sc22737_conditioning_overlay(
+    arm: Sc22737VideoArm,
+    generation: &GenerationRequest,
+    contract: &runtime_cuda::gen_core::MemoryProviderContract,
+) -> Result<Option<String>, String> {
+    match arm.engine_id {
+        BERNINI_CANDLE_ID => {
+            use runtime_cuda::providers::bernini::memory_strategy;
+            let receipt = memory_strategy::r2v_reference_receipt(arm.engine_id, generation)
+                .map_err(|error| format!("Bernini capture reference receipt: {error}"))?;
+            let mut overlay = format!("provider_video_mode:r2v+{receipt}");
+            if let Some(adapter) = memory_strategy::adapter_receipt_axis(contract) {
+                overlay.push('+');
+                overlay.push_str(&adapter);
+            }
+            Ok(Some(overlay))
+        }
+        LTX23_CANDLE_ID => Ok(Some(format!(
+            "reference:image:{}x{}:strength:{:08x}",
+            generation.width,
+            generation.height,
+            1.0_f32.to_bits()
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// Execute one sc-22737 Candle video cell: stage the family's load, prove the plan and the loaded
@@ -6116,6 +6199,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let mut generation = sc22737_generation_request(arm, &target);
     let context = MemoryRunContext {
         selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
@@ -6133,7 +6217,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
-        overlay: None,
+        overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
             committed_bytes: 0,
@@ -6175,7 +6259,6 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             .materialize_transformer_window(0, window)
             .map_err(|error| format!("configure {} transformer window: {error}", arm.engine_id))?;
     }
-    let mut generation = sc22737_generation_request(arm, &target);
     scope
         .configure_request(&mut generation)
         .map_err(|error| format!("apply {} capture strategy: {error}", arm.engine_id))?;
@@ -6289,11 +6372,11 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     // sc-22738 sweep: a bare equality is correct for all four members of this table, and each for a
     // reason read off the pinned engines rather than assumed.
     //
-    //  - **Bernini (49 frames)**: the CANDLE z16 is causal — `candle_gen_wan::vae16::WanVae16`
+    //  - **Bernini (45 frames)**: the CANDLE z16 is causal — `candle_gen_wan::vae16::WanVae16`
     //    declares `causal_temporal: true` as its own literal
     //    (`candle-gen-wan/src/vae16.rs:344-349`), deliberately distinct from the shared
     //    `VaeTiling::WAN` the MLX z16 binds, and `candle-gen-bernini/src/lib.rs:73` inherits it. So
-    //    `out_f = 1 + (f_lat−1)·4 = 49` for a `1 mod 4` count. This is the one place the two lanes
+    //    `out_f = 1 + (f_lat−1)·4 = 45` for a `1 mod 4` count. This is the one place the two lanes
     //    genuinely disagree about the same VAE: the MLX Bernini arm had to stop using an equality
     //    for exactly this reason, and this arm must not copy that change.
     //  - **LTX-2.3 (97 frames)**: `VaeTiling::LTX` is causal at ×8 and the engine refuses any
@@ -6767,6 +6850,37 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         .max(denoise_bytes)
         .max(decode_bytes);
 
+    instantid_measured_fragment(
+        request,
+        strategy,
+        load_shape_key(calibration.load_shape),
+        artifact(&binding.repository, &binding.revision, tier),
+        format!(
+            "{}+identity:{}",
+            loadability_fingerprint(&binding.repository, &binding.revision, tier),
+            binding.artifact_fingerprint
+        ),
+        [
+            decimal_gb_to_bytes(report.baseline_gb),
+            decimal_gb_to_bytes(report.load_peak_gb),
+            conditioning_bytes,
+            denoise_bytes,
+            decode_bytes,
+            overall_bytes,
+        ],
+    )
+}
+
+fn instantid_measured_fragment(
+    request: &Value,
+    strategy: Value,
+    load_shape: &str,
+    artifact: Value,
+    resolved_path_fingerprint: String,
+    measurements: [u64; 6],
+) -> Result<Value, String> {
+    let [baseline_bytes, load_bytes, conditioning_bytes, denoise_bytes, decode_bytes, overall_bytes] =
+        measurements;
     // The pinned InstantID crate is bespoke: no registered generator, no calibration error
     // injection, no synchronized request scope. The runtime-complete sweep and the fault-injection
     // lifecycle scenarios stay unexecuted rather than being reported as passed.
@@ -6776,11 +6890,12 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         "sweep and the fault-injection lifecycle scenarios are not executable at this pin"
     );
     let mut fragment = json!({
+        "status": "gated",
         "strategy": strategy,
-        "loadShape": load_shape_key(calibration.load_shape),
-        "artifact": artifact(&binding.repository, &binding.revision, tier),
-        "sweep": null,
-        "quality": null,
+        "loadShape": load_shape,
+        "artifact": artifact,
+        "sweep": protocol::reference_sweep(request, "passed")?,
+        "quality": { "result": "not_run" },
         "negativeMutation": null,
         "predictedPeakBytes": {
             "conditioning": conditioning_bytes,
@@ -6796,19 +6911,15 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         },
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": format!(
-                "{}+identity:{}",
-                loadability_fingerprint(&binding.repository, &binding.revision, tier),
-                binding.artifact_fingerprint
-            ),
+            "resolvedPathFingerprint": resolved_path_fingerprint,
         },
         "diagnostics": protocol::diagnostics(
             "memory-candle-adapter:instantid-identity-ladder",
             "executed",
             [blocker.to_owned()],
             [
-                ("preLoadDeviceUsed", "bytes", decimal_gb_to_bytes(report.baseline_gb)),
-                ("loadDevicePeakDelta", "bytes", decimal_gb_to_bytes(report.load_peak_gb)),
+                ("preLoadDeviceUsed", "bytes", baseline_bytes),
+                ("loadDevicePeakDelta", "bytes", load_bytes),
                 ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
                 ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
                 ("decodeDevicePeakDelta", "bytes", decode_bytes),
@@ -6824,6 +6935,9 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         { "name": "exact_fit", "result": "passed", "predictedBytes": overall_bytes, "effectiveBudgetBytes": overall_bytes },
         { "name": "unknown_budget", "result": "passed" },
         { "name": "stale_evidence", "result": "passed" },
+        { "name": "warm_repeat", "result": "not_run", "reason": blocker },
+        { "name": "cancel", "result": "not_run", "reason": blocker },
+        { "name": "error", "result": "not_run", "reason": blocker },
         { "name": "loadability", "result": "passed" },
         { "name": "overlay", "result": "passed", "reason": "the identity overlay is the declared target and its overlay key is the provider's own artifact-bound `overlay_key()`" }
     ]);
@@ -8021,6 +8135,117 @@ fn main() {
 mod sdxl_family_tests {
     use super::*;
 
+    #[test]
+    fn sana_requests_carry_the_providers_evidence_token() {
+        for provider in [SANA_ID, SANA_SPRINT_ID] {
+            assert_eq!(
+                five_rung_evidence_revision(provider),
+                runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION
+            );
+        }
+        assert_eq!(
+            five_rung_evidence_revision(QWEN_ID),
+            format!(
+                "{}@{}",
+                five_rung_evidence_story(QWEN_ID),
+                protocol::INFERENCE_PIN
+            )
+        );
+    }
+
+    #[test]
+    fn bernini_still_plan_builds_an_explicit_advertised_single_frame_request() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .unwrap();
+        for tier in ["bf16", "q4", "q8"] {
+            let row = &plan["anchors"][format!("bernini_image:{tier}:candle")];
+            let width = row["geometry"]["width"].as_u64().unwrap() as u32;
+            let height = row["geometry"]["height"].as_u64().unwrap() as u32;
+            assert_eq!((width, height), (512, 512));
+            let generation =
+                five_rung_provider_generation_request(BERNINI_CANDLE_ID, width, height, false);
+            assert_eq!(generation.video_mode.as_deref(), Some("t2i"));
+            assert_eq!(generation.frames, Some(1));
+            assert_eq!(generation.image_reference_count(), 0);
+            assert!(row["fixture"]
+                .as_str()
+                .unwrap()
+                .contains("-512-seed16402-step2"));
+        }
+    }
+
+    #[test]
+    fn instantid_measured_fragment_preserves_measurements_without_claiming_promotion() {
+        let strategy =
+            json!({ "rung": "resident", "engagedRungs": ["resident"], "parameters": {} });
+        let request = json!({ "planned": { "strategy": strategy } });
+        let fragment = instantid_measured_fragment(
+            &request,
+            strategy,
+            "eager_materialization",
+            artifact("fixture/repo", "1234567", "bf16"),
+            "fixture+identity:abc".to_owned(),
+            [10, 20, 30, 40, 50, 60],
+        )
+        .unwrap();
+        assert_eq!(fragment["status"], "gated");
+        assert_eq!(fragment["quality"]["result"], "not_run");
+        assert_eq!(fragment["sweep"]["cases"][0]["result"], "passed");
+        assert_eq!(fragment["sweep"]["rangeVerified"], false);
+        assert_eq!(fragment["observedMemory"]["overall"]["activeBytes"], 60);
+        for scenario in fragment["scenarios"].as_array().unwrap() {
+            if ["warm_repeat", "cancel", "error"].contains(&scenario["name"].as_str().unwrap()) {
+                assert_eq!(scenario["result"], "not_run");
+            }
+        }
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../../packages/schemas/memory-calibration.schema.json"
+        ))
+        .unwrap();
+        let properties = &schema["$defs"]["record"]["properties"];
+        assert!(properties["status"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&fragment["status"]));
+        for key in ["artifact", "quality", "sweep"] {
+            let value = fragment[key].as_object().expect(key);
+            for field in value.keys() {
+                assert!(
+                    properties[key]["properties"].get(field).is_some(),
+                    "{key}.{field}"
+                );
+            }
+            if let Some(required) = properties[key]["required"].as_array() {
+                for field in required {
+                    assert!(value.contains_key(field.as_str().unwrap()), "{key}.{field}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pulid_capture_uses_the_known_face_fixture() {
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(include_bytes!("../../fixtures/pulid-reference.png"))
+            ),
+            "3995f2e856346748588e76a5557516d0218f44f5663701c5a50139d50c86a7be"
+        );
+        let reference = pulid_reference_image().unwrap();
+        assert_eq!((reference.width, reference.height), (1024, 1024));
+        assert_eq!(reference.pixels.len(), 1024 * 1024 * 3);
+        assert_ne!(
+            reference.pixels,
+            protocol::synthetic_reference_rgb(1024, 1024)
+        );
+        let request = json!({"planned": {"target": {"geometry": {"width": 1024}},
+            "fixture": "pulid-flux-candle-q4-1024-seed22726-step2"}});
+        assert!(validate_flux_one_fixture(&request, PULID_FLUX_ID, "q4").is_err());
+    }
+
     fn planned(provider: &str, model_id: &str) -> Value {
         json!({ "planned": { "target": { "provider": provider, "modelId": model_id } } })
     }
@@ -8650,6 +8875,104 @@ mod mage_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bernini_reference_probe_passes_the_provider_scope_and_binds_its_image() {
+        use runtime_cuda::gen_core::{MemoryBehaviorRoute, MemoryNumericTier};
+        use runtime_cuda::providers::bernini::memory_strategy as bernini;
+        let arm = BERNINI_CANDLE_VIDEO_ARM;
+        for (tier, quant) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+        ] {
+            let spec = bernini_candle_load_spec(
+                LoadSpec::new(WeightsSource::Dir(PathBuf::from("unused"))),
+                tier,
+                arm.model_id,
+            )
+            .unwrap();
+            let contract =
+                bernini::weights_free_memory_strategy_contract(arm.engine_id, &spec).unwrap();
+            let target = Sc22737VideoTarget {
+                tier: tier.to_owned(),
+                width: 848,
+                height: 480,
+                frames: 45,
+                fps: 16,
+                seed: SC22737_CANDLE_SEED,
+            };
+            let mut generation = sc22737_generation_request(arm, &target);
+            let overlay = sc22737_conditioning_overlay(arm, &generation, &contract).unwrap();
+            let numeric = MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            };
+            let mut context = runtime_cuda::gen_core::standard_memory_behavior_context(
+                &contract,
+                MemoryStrategy::Resident,
+                numeric,
+                MemoryBehaviorRoute {
+                    mode: MemoryMode::Other(arm.mode.to_owned()),
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                    overlay,
+                },
+            )
+            .unwrap();
+            context.geometry.width = target.width;
+            context.geometry.height = target.height;
+            context.geometry.frames = target.frames;
+            assert!(matches!(
+                bernini::registered_safety_check(&spec, &contract, &context),
+                runtime_cuda::gen_core::MemorySafetyDecision::Accept
+            ));
+            let mut scope =
+                bernini::registered_begin_request(arm.engine_id, &spec, &contract, &context)
+                    .unwrap()
+                    .unwrap();
+            scope.configure_request(&mut generation).unwrap();
+            if let Conditioning::MultiReference { images } = &mut generation.conditioning[0] {
+                images[0].pixels[0] ^= 1;
+            }
+            assert!(scope.configure_request(&mut generation).is_err());
+            context.geometry.frames = 49;
+            assert!(matches!(
+                bernini::registered_safety_check(&spec, &contract, &context),
+                runtime_cuda::gen_core::MemorySafetyDecision::Reject { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn ltx_probe_loads_the_declared_packed_tier_and_fits_one_reference() {
+        for (tier, quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+            let spec =
+                ltx23_candle_load_spec(PathBuf::from(tier), PathBuf::from("gemma"), tier).unwrap();
+            assert_eq!(spec.quantize, Some(quant));
+            let target = Sc22737VideoTarget {
+                tier: tier.to_owned(),
+                width: 768,
+                height: 512,
+                frames: 97,
+                fps: 24,
+                seed: SC22737_CANDLE_SEED,
+            };
+            let generation = sc22737_generation_request(LTX23_CANDLE_ARM, &target);
+            let [Conditioning::Reference { image, strength }] = generation.conditioning.as_slice()
+            else {
+                panic!("LTX must carry one fitted reference")
+            };
+            assert_eq!(
+                (image.width, image.height, image.pixels.len()),
+                (768, 512, 768 * 512 * 3)
+            );
+            assert_eq!(strength.unwrap_or(1.0), 1.0);
+        }
+        assert!(ltx23_candle_load_spec(PathBuf::new(), PathBuf::new(), "bf16").is_err());
+    }
+
     /// sc-22738: every plan row an sc-22737 video arm serves declares the load shape that arm
     /// stages. The engines behind these arms execute exactly one shape (see
     /// `Sc22737VideoArm::load_shape`), and the only production check — the plan/provider
@@ -8695,6 +9018,23 @@ mod tests {
                      executes; a row declaring another shape cannot be captured",
                     arm.engine_id
                 );
+                if matches!(arm.engine_id, BERNINI_CANDLE_ID | LTX23_CANDLE_ID) {
+                    let tier = key.split(':').nth(1).unwrap();
+                    let request = json!({"planned": {"target": {
+                        "provider": arm.engine_id, "modelId": arm.model_id, "tier": tier,
+                        "mode": row["mode"], "referenceCount": row["referenceCount"],
+                        "geometry": row["geometry"] }, "fixture": row["fixture"] }});
+                    assert!(sc22737_video_target(&request, arm).is_ok(), "{key}");
+                    let mut legacy = request.clone();
+                    legacy["planned"]["target"]["mode"] = json!("text_to_video");
+                    assert!(sc22737_video_target(&legacy, arm).is_err());
+                    let mut missing_count = request;
+                    missing_count["planned"]["target"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("referenceCount");
+                    assert!(sc22737_video_target(&missing_count, arm).is_err());
+                }
                 rows += 1;
             }
             assert!(
@@ -9862,7 +10202,7 @@ mod tests {
             planned["target"]["overlay"] = json!("identity");
             planned["target"]["modelId"] = json!("pulid_flux_dev");
             planned["fixture"] = json!(format!(
-                "pulid-flux-candle-{tier}-1024-seed{FLUX1_SEED}-step2"
+                "pulid-flux-face-sc16956-candle-{tier}-1024-seed{FLUX1_SEED}-step2"
             ));
             json!({ "planned": planned })
         };
@@ -9927,7 +10267,7 @@ mod tests {
         // A fixture naming the five-rung seed is refused: PuLID renders at FLUX1_SEED.
         let mut wrong_seed = pulid_case("q4");
         wrong_seed["planned"]["fixture"] = json!(format!(
-            "pulid-flux-candle-q4-1024-seed{FIVE_RUNG_SEED}-step2"
+            "pulid-flux-face-sc16956-candle-q4-1024-seed{FIVE_RUNG_SEED}-step2"
         ));
         let error = pulid_flux_binding_at(
             &wrong_seed,
@@ -10008,7 +10348,9 @@ mod tests {
         let mut planned =
             still_planned_case_in_mode(PULID_FLUX_ID, "staged_residency", 1, "character_image");
         planned["target"]["overlay"] = json!("identity");
-        planned["fixture"] = json!(format!("pulid-flux-candle-q4-1024-seed{FLUX1_SEED}-step2"));
+        planned["fixture"] = json!(format!(
+            "pulid-flux-face-sc16956-candle-q4-1024-seed{FLUX1_SEED}-step2"
+        ));
         let request = json!({ "planned": planned });
         std::env::set_var(
             "SCENEWORKS_FLUX1_DEV_REPOSITORY",
@@ -10214,7 +10556,7 @@ mod tests {
                 "fresh-five-rung-flux1-schnell",
                 FIVE_RUNG_SEED,
             ),
-            (PULID_FLUX_ID, "pulid-flux-candle", FLUX1_SEED),
+            (PULID_FLUX_ID, "pulid-flux-face-sc16956-candle", FLUX1_SEED),
         ] {
             for tier in ["q4", "q8", "bf16"] {
                 let good = format!("{prefix}-{tier}-1024-seed{seed}-step2");

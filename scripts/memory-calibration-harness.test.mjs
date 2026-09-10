@@ -20,6 +20,7 @@ import {
   METAL_REFUSAL_TOLERANCE, METAL_SUBMISSIONS_IGNORED_CODE, METAL_SUBMISSIONS_IGNORED_PHRASE,
   metalSubmissionsIgnored, parseWatchdogPeak, parseWatchdogHardStop, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
+import { anchorCandidate } from "./extract-memory-anchors.mjs";
 
 /**
  * A one-anchor plan in the collapsed format (sc-22514). Every runner test drives exactly one
@@ -399,6 +400,29 @@ test("complete record validates and identity includes evidence scope plus resolv
     mutate(changed);
     assert.notEqual(recordId(changed), record.id);
   }
+});
+
+test("reference capture cardinality survives planning, schema validation and anchor extraction", () => {
+  const key = "fixture_reference:q4:candle";
+  const plan = anchorPlanFixture(key, { mode: "image_to_video", referenceCount: 1 });
+  const planned = planAnchor(plan, key);
+  assert.equal(planned.target.referenceCount, 1);
+  const record = complete();
+  record.target.referenceCount = 1;
+  record.diagnostics = { source: "fixture", rawLog: "fixture", commands: [], notes: [], measurements: [
+    { name: "conditioningDevicePeakDelta", unit: "bytes", value: 100 },
+    { name: "denoiseDevicePeakDelta", unit: "bytes", value: 200 },
+    { name: "decodeDevicePeakDelta", unit: "bytes", value: 150 },
+  ] };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+  assert.equal(anchorCandidate(record, { path: "fixture.json", sha256: "a".repeat(64) }).referenceCount, 1);
+  const original = record.id;
+  record.target.referenceCount = 0;
+  assert.notEqual(recordId(record), original);
+  plan.anchors[key].referenceCount = -1;
+  assert.throws(() => validatePlan(plan), /referenceCount/);
 });
 
 test("runtime-complete accepts an honest overall CUDA high-water mark without fabricated phases", () => {
