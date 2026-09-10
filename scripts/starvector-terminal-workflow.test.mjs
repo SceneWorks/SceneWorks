@@ -10,14 +10,14 @@ import { promisify } from "node:util";
 import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provision.mjs";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
 const producer = await readFile("scripts/starvector-terminal-producer.mjs", "utf8");
 const route = await readFile("scripts/starvector-terminal-route.mjs", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const pin = "1cd0e393863f7d3d880400e409519bcadfb43959";
+const pin = "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8";
 const execFile = promisify(execFileCallback);
 const productServiceSupported = process.platform === "darwin" || process.platform === "win32";
 
@@ -58,6 +58,10 @@ if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
 if (process.argv.length === 1 && process.env.SCENEWORKS_GPU_CHECK === "1") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
+  const fs = require("node:fs");
+  const registrationPath = path.join(process.env.SCENEWORKS_DATA_DIR, "fixture-worker.json");
+  if (worker && process.env.STARVECTOR_TEST_FAIL_RELOAD === "1") process.exit(3);
+  if (worker) fs.writeFileSync(registrationPath, JSON.stringify({ id: process.env.SCENEWORKS_WORKER_ID, pid: process.pid }));
   let relocatedLibrary;
   let server;
   const timer = setInterval(() => {
@@ -88,7 +92,7 @@ if (process.argv.length === 1) {
         const mlx = process.env.SCENEWORKS_GPU_ID === "mlx";
         const capabilities = mlx ? ["gpu", "vector_image_to_svg"] : ["gpu", "nvidia", "candle", "vector_image_to_svg"];
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ id: process.env.SCENEWORKS_WORKER_ID, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU", status: "idle", currentJobId: null, capabilities }]));
+        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU", status: "idle", currentJobId: null, capabilities }]));
         return;
       }
       if (request.method === "GET" && request.url === "/api/v1/models") {
@@ -138,7 +142,8 @@ if (process.argv.length === 1) {
 async function runProductServiceCli(fixture, command, port, timeout = 8_000) {
   const args = command === "start"
     ? [fixture.serviceScript, "start", fixture.root, fixture.output, pin, `http://127.0.0.1:${port}`, fixture.weightsRoot, fixture.tuple]
-    : [fixture.serviceScript, "stop", fixture.output];
+    : command === "reload-worker" ? [fixture.serviceScript, command, fixture.root, fixture.output]
+    : [fixture.serviceScript, command, fixture.output];
   return execFile(process.execPath, args, { env: fixture.cliEnv, timeout });
 }
 
@@ -642,4 +647,101 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   assert.equal(requests, 4, "tampered existing materialization is rejected without network");
   assert.equal(await readFile(path.join(assets, "input.png"), "utf8"), "drift");
   await rm(root, { recursive: true, force: true });
+});
+
+test("owned headless worker unload/reload preserves API and projects, proves exit and fresh registration", { timeout: 30_000, skip: !productServiceSupported }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    const initialPath = path.join(fixture.output, "product-service-initial-provenance.json"), initialBytes = await readFile(initialPath, "utf8");
+    const initial = JSON.parse(initialBytes); record = initial;
+    const project = path.join(productServiceStateRoot(fixture.output), "data", "fixture-project.json");
+    await writeFile(project, '{"asset":"retained imported raster"}\n');
+    await runProductServiceCli(fixture, "unload-worker", 0);
+    assert.throws(() => process.kill(initial.worker_pid, 0), { code: "ESRCH" });
+    assert.doesNotThrow(() => process.kill(initial.api_pid, 0));
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    assert.equal(record.worker_pid, null);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).status, 200);
+    await assert.rejects(() => runProductServiceCli(fixture, "unload-worker", 0), /already unloaded/);
+    await runProductServiceCli(fixture, "reload-worker", 0);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    assert.notEqual(record.worker_pid, initial.worker_pid);
+    assert.notEqual(record.worker.worker_id, initial.worker.worker_id);
+    assert.equal(record.api_pid, initial.api_pid);
+    assert.equal(record.instance_token, initial.instance_token);
+    assert.deepEqual(record.offline, initial.offline);
+    assert.equal(record.api_binary_sha256, initial.api_binary_sha256);
+    assertPidsRunning(record);
+    assert.equal(await readFile(project, "utf8"), '{"asset":"retained imported raster"}\n');
+    assert.equal(await readFile(initialPath, "utf8"), initialBytes);
+    const history = JSON.parse(await readFile(path.join(fixture.output, "product-service-worker-lifecycle.json"), "utf8"));
+    assert.deepEqual(history.events.map(({ operation, status }) => [operation, status]), [["unload", "succeeded"], ["reload", "starting"], ["reload", "succeeded"]]);
+    assert.equal(history.events[0].exited, true);
+    assert.equal(history.events[0].previous_worker_pid, initial.worker_pid);
+    assert.equal(history.events[2].current.worker_pid, record.worker_pid);
+    await runProductServiceCli(fixture, "stop", 0);
+    for (const pid of [record.api_pid, record.worker_pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    record = null;
+  } finally { await forceFixtureCleanup(fixture, record); }
+});
+
+test("owned unload refuses fake termination and mutated lineage before signaling", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    await assert.rejects(() => unloadOwnedWorker(fixture.output, { terminate: async () => {} }), /did not exit after unload/);
+    assertPidsRunning(record);
+    const historyPath = path.join(fixture.output, "product-service-worker-lifecycle.json"), original = await readFile(historyPath, "utf8");
+    const history = JSON.parse(original); history.instance_token = "0".repeat(64);
+    await writeFile(historyPath, JSON.stringify(history));
+    await assert.rejects(() => unloadOwnedWorker(fixture.output, { terminate: async () => assert.fail("invalid lineage must not signal") }), /lineage is invalid/);
+    assertPidsRunning(record);
+    await writeFile(historyPath, original);
+    await runProductServiceCli(fixture, "stop", 0); record = null;
+  } finally { await forceFixtureCleanup(fixture, record); }
+});
+
+test("owned reload rejects changed binary and preserves an unloaded API for final cleanup", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    await runProductServiceCli(fixture, "unload-worker", 0);
+    const binary = path.resolve(fixture.root, record.worker_binary), original = `${binary}.original`;
+    // Fixture binaries can be hard links to Node: replace the directory entry,
+    // never write into that shared executable inode.
+    await rename(binary, original);
+    await writeFile(binary, "changed binary");
+    try { await assert.rejects(() => runProductServiceCli(fixture, "reload-worker", 0), /binary differs from initial provenance/); }
+    finally { await rm(binary); await rename(original, binary); }
+    assert.doesNotThrow(() => process.kill(record.api_pid, 0));
+    await runProductServiceCli(fixture, "stop", 0); record = null;
+  } finally { await forceFixtureCleanup(fixture, record); }
+});
+
+test("failed headless reload retains lifecycle evidence and final stop cleans current ownership", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    await runProductServiceCli(fixture, "unload-worker", 0);
+    fixture.cliEnv.STARVECTOR_TEST_FAIL_RELOAD = "1";
+    await assert.rejects(() => runProductServiceCli(fixture, "reload-worker", 0), /reloaded worker exited before fresh registration/);
+    const current = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    assert.equal(current.worker_pid, null);
+    const history = JSON.parse(await readFile(path.join(fixture.output, "product-service-worker-lifecycle.json"), "utf8"));
+    const failedPid = history.events.find((event) => event.status === "starting").current.worker_pid;
+    assert.throws(() => process.kill(failedPid, 0), { code: "ESRCH" });
+    assert.equal(history.events.at(-1).status, "failed");
+    assert.doesNotThrow(() => process.kill(record.api_pid, 0));
+    await runProductServiceCli(fixture, "stop", 0);
+    assert.throws(() => process.kill(record.api_pid, 0), { code: "ESRCH" });
+    record = null;
+  } finally { await forceFixtureCleanup(fixture, record); }
 });

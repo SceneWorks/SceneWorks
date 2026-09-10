@@ -128,8 +128,11 @@ dumps). The jobs and scripts are retained on purpose.
 - Measurement campaigns — capability dumps, memory-matrix regeneration,
   calibration captures, VRAM/canary runs — run **once, at the end of an epic**,
   immediately after its single pin bump, or on explicit request. Never per story,
-  never per pin movement. Records demoted to floors during development is the
-  accepted state.
+  never per pin movement. Records reported stale during development is the
+  accepted state: measurement never gates, and staleness never changes runtime
+  behaviour (sc-22738) — the runtime keeps using a stale record, anchor, curve or
+  bound exactly as if it were current; "stale" is only the probe tooling's cue
+  to re-capture.
 - Story "done" = the code, its tests, one adversarial review + one fix pass, and
   green required CI on the PR. Nothing more unless the story *is* a measurement
   story.
@@ -218,9 +221,10 @@ inference first. The SceneWorks side **does not bump the pin**:
 - Schedule SceneWorks stories that need the new engine **after** the epic's
   single pin bump (§5), where they get real CI against the landed pin.
 - A mid-epic bump costs a full SceneWorks CI cycle for no behaviour, a
-  `Cargo.lock` edit every in-flight branch must merge, staled calibration
-  records, and pins a SHA that may never reach inference `main`. If the schedule
-  seems to need one, the schedule is wrong.
+  `Cargo.lock` edit every in-flight branch must merge, calibration records the
+  tooling then reports stale (a re-capture signal only — never a runtime change),
+  and pins a SHA that may never reach inference `main`. If the schedule seems to
+  need one, the schedule is wrong.
 
 The inference feature branch must remain reachable until the SceneWorks feature
 is on `main`. Never delete or rewrite it during the epic.

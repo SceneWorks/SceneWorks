@@ -129,8 +129,8 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
-  assert.match(workflow, /default: "33999207731"/);
-  assert.match(workflow, /default: starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1/);
+  assert.match(workflow, /default: "34478405706"/);
+  assert.match(workflow, /default: starvector-terminal-preflight-e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8-34478405706-1/);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-metadata release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
@@ -170,17 +170,17 @@ test("workflow shell blocks consume untrusted dispatch inputs only through quote
 
 test("provision transport accepts only the sealed current native-preflight run and artifact", async () => {
   const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
-    revision: "1cd0e393863f7d3d880400e409519bcadfb43959",
-    workflowRunId: "33999207731",
-    artifactName: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
+    revision: "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
+    workflowRunId: "34478405706",
+    artifactName: "starvector-terminal-preflight-e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8-34478405706-1",
   });
   assert.deepEqual(accepted, {
-    revision: "1cd0e393863f7d3d880400e409519bcadfb43959",
-    workflow_run_id: "33999207731",
-    artifact_name: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
+    revision: "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
+    workflow_run_id: "34478405706",
+    artifact_name: "starvector-terminal-preflight-e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8-34478405706-1",
     workflow_run_attempt: 1,
-    artifact_id: 9979002999,
-    artifact_digest: "sha256:c70a0ffe4a8951a7caf24f95e2cbfca1f3d71a295cb2196265a27eac483955f1",
+    artifact_id: 10152562888,
+    artifact_digest: "sha256:c8c50df391786aae4a2cf96cb1f41b3c4c296348295481f22c6423474bd08f69",
   });
   for (const [label, mutation] of [
     ["revision", { revision: "0".repeat(40) }],
@@ -198,9 +198,9 @@ test("provision transport accepts only the sealed current native-preflight run a
 
 test("live preflight artifact and run metadata must match every sealed transport identity", async () => {
   const run = {
-    id: 33999207731,
+    id: 34478405706,
     run_attempt: 1,
-    head_sha: "1cd0e393863f7d3d880400e409519bcadfb43959",
+    head_sha: "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
     workflow_id: 312370029,
     name: "Real-weight validation",
     path: ".github/workflows/real-weights.yml",
@@ -211,14 +211,14 @@ test("live preflight artifact and run metadata must match every sealed transport
     head_repository: { id: 1299380446, full_name: "SceneWorks/inference" },
   };
   const artifact = {
-    id: 9979002999,
-    name: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
-    size_in_bytes: 6355,
-    digest: "sha256:c70a0ffe4a8951a7caf24f95e2cbfca1f3d71a295cb2196265a27eac483955f1",
+    id: 10152562888,
+    name: "starvector-terminal-preflight-e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8-34478405706-1",
+    size_in_bytes: 6275,
+    digest: "sha256:c8c50df391786aae4a2cf96cb1f41b3c4c296348295481f22c6423474bd08f69",
     expired: false,
     workflow_run: {
-      id: 33999207731,
-      head_sha: "1cd0e393863f7d3d880400e409519bcadfb43959",
+      id: 34478405706,
+      head_sha: "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
       repository_id: 1299380446,
       head_repository_id: 1299380446,
     },

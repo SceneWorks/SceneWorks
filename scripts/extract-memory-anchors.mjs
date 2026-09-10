@@ -211,6 +211,12 @@ export async function loadCorpora(root = ROOT, files = null) {
       path: relative,
       sha256: sha256(body),
       records: parsed.records,
+      // sc-22738: the bundle's second entry kind, carried alongside the records rather than in a
+      // separate reader — a corpus that states a measured lower bound states it in the same file
+      // it would have stated a record in, and shape detection above already qualified the file.
+      exceededBounds: Array.isArray(parsed.exceededBounds)
+        ? parsed.exceededBounds
+        : [],
     });
   }
   return corpora;
@@ -355,6 +361,14 @@ export function anchorCandidate(record, corpus) {
     residentSetSeen:
       backend === "mlx" &&
       (measured.get("residentSetMaterializedBeforeWindow") ?? 0) >= 1,
+    // sc-22738: when and on how large a host the render COMPLETED — the two terms
+    // `retainExceededBounds` needs to decide whether this record retires a measured lower bound on
+    // the same cell. `null` where the record states none; a record with no timestamp supersedes
+    // nothing.
+    capturedAt: typeof record.capturedAt === "string" ? record.capturedAt : null,
+    hostMemoryBytes: Number.isInteger(record.hardware?.memoryBytes)
+      ? record.hardware.memoryBytes
+      : null,
     sourcePath: corpus.path,
     sourceSha256: corpus.sha256,
     recordId,
@@ -391,32 +405,90 @@ export function phaseAllocatorEnvelopes(record) {
  *   stated — is deliberately NOT a filter here: since sc-22510 an axis-free row is how a cell
  *   measured without pipeline axes is CLASSIFIED, and withdrawing those rows would narrow the
  *   catalog coverage that story established rather than fix anything.
- * * `candle` mirrors `MemoryAnchor::derive_image_phase_peaks`: that law prices exactly the SHALLOW
- *   optimized composition — `staged_residency` engaged and nothing deeper — on a still, with no
- *   pipeline axes. Every deeper rung exists to make a phase smaller, so the shallow anchor upper
- *   bounds them; a resident composition holds the text encoder through denoise and decode and is
- *   strictly LARGER, the direction the anchor cannot cover, so the law refuses it. Anchoring the
- *   cell from a resident render would therefore emit a row the law rejects on every lookup.
+ * * `candle` mirrors `MemoryAnchor::derive_image_phase_peaks` — but ONLY for a STILL cell. That law
+ *   prices exactly the SHALLOW optimized composition — `staged_residency` engaged and nothing
+ *   deeper — on a still, with no pipeline axes. Every deeper rung exists to make a phase smaller,
+ *   so the shallow anchor upper bounds them; a resident composition holds the text encoder through
+ *   denoise and decode and is strictly LARGER, the direction the anchor cannot cover, so the law
+ *   refuses it. Anchoring the cell from a resident render would therefore emit a row the law
+ *   rejects on every lookup.
+ * * A candle VIDEO cell is priced by the VIDEO law instead, so it mirrors the `mlx` bullet above.
+ *   `crates/sceneworks-worker/src/video_admission.rs::anchor_derived_phase_peaks` maps the
+ *   REQUEST's own lane onto `AnchorBackend` (`VideoLane::Candle => AnchorBackend::Candle`) and
+ *   calls `MemoryAnchorStore::derive_video_phase_peaks_for_cell` for both lanes, and
+ *   `MemoryAnchor::derive_video_phase_peaks` is not backend-gated the way
+ *   `derive_image_phase_peaks` (`self.backend != AnchorBackend::Candle`) and
+ *   `derive_mlx_image_phase_peaks` (`!= AnchorBackend::Mlx`) are.
+ *
+ *   sc-22736: reading the image law for a video row was wrong in the direction that HIDES a cell.
+ *   `derive_image_phase_peaks` demands `frames == 1` and a pipeline-axis-free record, which no
+ *   video capture can satisfy — so every candle video anchor would have been refused at
+ *   extraction and its cell left unanchored, including the six LTX-2.5 candle rows the plan has
+ *   declared since sc-22725 (`transformerVariant: "distilled"`, `decoder: "conv"`, `frames: 145`)
+ *   and the twelve Wan/SCAIL-2 candle rows this story adds. No measurement had run yet, so the
+ *   defect was latent rather than shipped.
  *
  * An unknown lane has no law to mirror and gets no opinion.
  */
-export function isDerivable(candidate) {
+export function isDerivable(candidate, stagedExemptLanes = EMPTY_LANE_SET) {
   const regime = candidate.measuredRegime;
   if (candidate.backend === "mlx") {
     return true;
   }
   if (candidate.backend === "candle") {
+    // sc-22736: the still law below is exactly that — a STILL law. A candle VIDEO record (Wan 2.2,
+    // SCAIL-2, LTX-2.5) is priced by the video law, whose regime guards are all anchor-vs-request
+    // and which carries no backend gate, so every candle video composition is a usable anchor —
+    // exactly as on MLX. `?? 1` because an axis-free record is the still it is, not a video.
+    if ((candidate.geometry?.frames ?? 1) > 1) return true;
+    // sc-22734: a provider whose contract classifies `staged_residency` STRUCTURALLY NOT
+    // APPLICABLE has no staged composition to have been measured in, so for those cells the law's
+    // admissible anchor is the RESIDENT render instead — and only the resident one. The asymmetry
+    // above rests on the staged anchor being the shallower of two real compositions; where staging
+    // is structurally impossible there is no co-resident encoder above the anchor to go unpriced,
+    // which is exactly the case `MemoryAnchor::derive_image_phase_peaks` now admits.
+    const stagedExempt = stagedExemptLanes.has(
+      `${candidate.modelId}:${candidate.backend}`,
+    );
     return (
       candidate.transformerVariant === null &&
       candidate.decoder === null &&
       candidate.geometry?.frames === 1 &&
-      regime?.staged === true &&
+      regime?.staged === !stagedExempt &&
       regime?.decodeTiled === false &&
       regime?.attentionChunked === false &&
       regime?.transformerWindowed === false
     );
   }
   return true;
+}
+
+/** Shared empty set, so the default argument allocates nothing per call. */
+const EMPTY_LANE_SET = new Set();
+
+/**
+ * The `<modelId>:<backend>` lanes whose manifest declares `staged_residency` a STRUCTURAL
+ * exemption — the architecture evidence behind
+ * `MemoryAnchor::staged_residency_structurally_not_applicable`.
+ *
+ * Derived from the checked-in manifest, never a hand-kept list: each exemption carries
+ * `evidence[].source` naming the engine's own `memory_strategy.rs`, which is where the
+ * classification actually lives. A model that later gains a separable conditioning component loses
+ * its exemption in the manifest and its cells go back to needing a staged anchor, with no second
+ * edit here.
+ */
+export function stagedResidencyExemptLanes(manifest) {
+  const lanes = new Set();
+  for (const model of manifest?.models ?? []) {
+    for (const backend of ["mlx", "candle"]) {
+      if (
+        model[backend]?.memoryStrategyStructuralExemptions?.staged_residency
+      ) {
+        lanes.add(`${model.id}:${backend}`);
+      }
+    }
+  }
+  return lanes;
 }
 
 /**
@@ -432,11 +504,14 @@ export function isDerivable(candidate) {
  * which reads as coverage and admits nothing: krea's resident-only capture is the largest envelope
  * its corpus retains AND the one composition `derive_image_phase_peaks` refuses.
  */
-export function selectRepresentative(candidates) {
+export function selectRepresentative(
+  candidates,
+  stagedExemptLanes = EMPTY_LANE_SET,
+) {
   return candidates.reduce((best, candidate) => {
     if (best === null) return candidate;
-    const candidateDerivable = isDerivable(candidate);
-    if (candidateDerivable !== isDerivable(best))
+    const candidateDerivable = isDerivable(candidate, stagedExemptLanes);
+    if (candidateDerivable !== isDerivable(best, stagedExemptLanes))
       return candidateDerivable ? candidate : best;
     // sc-22667 (D3): an MLX render whose window opened above its materialized resident set
     // outranks one measured on a cold first request, whatever their envelopes — the cold record's
@@ -498,8 +573,14 @@ const anchorId = (candidate) =>
  * loader it was never measured against — the false green this key exists to prevent.
  */
 export function loaderClosureDigestFor(previousStore, anchorId) {
-  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
-    ?.loaderClosureDigest;
+  const recorded = [
+    ...(previousStore?.anchors ?? []),
+    // sc-22738: an exceeded bound's currency key is carried by exactly the same rule, and for
+    // exactly the same reason — the bound describes what a particular loader did, so its key stays
+    // frozen at the measurement's own revision and a new bound fails loudly rather than borrowing
+    // the pin's digest.
+    ...(previousStore?.exceededBounds ?? []),
+  ].find((entry) => entry.id === anchorId)?.source?.loaderClosureDigest;
   if (typeof recorded !== "string" || !/^[0-9a-f]{64}$/.test(recorded)) {
     throw new Error(
       `anchor ${anchorId} has no recorded loader-closure digest in ${STORE_PATH}. A newly ` +
@@ -519,14 +600,25 @@ export function loaderClosureDigestFor(previousStore, anchorId) {
  * neither half. `null` for an anchor keyed at its own measurement revision.
  */
 export function currencyAttestationFor(previousStore, anchorId) {
-  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
-    ?.currencyAttestation;
+  const recorded = [
+    ...(previousStore?.anchors ?? []),
+    ...(previousStore?.exceededBounds ?? []),
+  ].find((entry) => entry.id === anchorId)?.source?.currencyAttestation;
   return recorded && typeof recorded === "object" ? recorded : null;
 }
 
 /** Serialise one candidate into the store's anchor shape (field order is the file's field order). */
-function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
+function anchorRow(
+  candidate,
+  catalogCell,
+  previousStore,
+  underivedReason,
+  stagedExemptLanes = EMPTY_LANE_SET,
+) {
   const id = anchorId(candidate);
+  const stagedExempt = stagedExemptLanes.has(
+    `${candidate.modelId}:${candidate.backend}`,
+  );
   const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
   const currencyAttestation = currencyAttestationFor(previousStore, id);
   return {
@@ -583,6 +675,182 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
     // `Some` when the anchor validates its measured point but no lane law may derive from it,
     // with the stated per-model reason (epic 22505 feature-end fix round). Absent otherwise.
     ...(underivedReason === null ? {} : { underivedReason }),
+    // sc-22734: the engine's own structural classification, from the manifest exemption whose
+    // evidence names its `memory_strategy.rs`. Emitted only when true, so every row that predates
+    // the field stays byte-identical and keeps the staged-only law (`#[serde(default)]` on the
+    // Rust side). Last, matching `MemoryAnchor`'s field order.
+    ...(stagedExempt ? { stagedResidencyStructurallyNotApplicable: true } : {}),
+  };
+}
+
+const exceededBoundId = (entry, cell) =>
+  [
+    "exceeded",
+    cell.modelId,
+    entry.backend,
+    entry.target.tier,
+    entry.target.transformerVariant ?? "base",
+    entry.target.decoder ?? "base",
+    entry.calibrationFingerprint,
+    entry.id,
+  ].join(":");
+
+/**
+ * The axes a measured lower bound is keyed on — exactly `ExceededBoundQuery`'s identity conjuncts
+ * (`memory_anchor.rs`), spelled once for both a retained bound entry and a completed record's
+ * candidate so the two can be compared. Geometry is deliberately NOT in the key: it is compared
+ * by coverage, not equality (see `retainExceededBounds`).
+ */
+const boundIdentity = ({
+  modelId,
+  backend,
+  tier,
+  transformerVariant,
+  decoder,
+  provider,
+  mode,
+  overlay,
+  referenceCount,
+}) =>
+  [
+    modelId,
+    backend,
+    tier,
+    transformerVariant ?? "-",
+    decoder ?? "-",
+    provider,
+    mode,
+    overlay ?? "-",
+    referenceCount,
+  ].join(":");
+
+const entryIdentity = (entry) =>
+  boundIdentity({
+    modelId: entry.target.modelId,
+    backend: entry.backend,
+    tier: entry.target.tier,
+    transformerVariant: entry.target.transformerVariant ?? null,
+    decoder: entry.target.decoder ?? null,
+    provider: entry.target.provider,
+    mode: entry.target.mode,
+    overlay:
+      entry.target.overlay && entry.target.overlay !== "none"
+        ? entry.target.overlay
+        : null,
+    referenceCount: entry.referenceCount,
+  });
+
+const entryCapturedAt = (entry) =>
+  typeof entry.capturedAt === "string" ? entry.capturedAt : null;
+
+/**
+ * Which retained `exceededBounds` entries still stand as evidence (sc-22738).
+ *
+ * A bound is a MEASUREMENT — "this cell's peak is at or above X on a host of H bytes" — and it is
+ * retired the only way the standing rule allows a measurement to be retired: by a later
+ * measurement of the same cell. The runtime never demotes a stale bound on currency; a stale bound
+ * therefore has to be lifted HERE, by the evidence a re-measurement produces, or it can never be
+ * lifted at all. Two rules, both keyed on the bound's own identity axes:
+ *
+ * 1. A COMPLETED render supersedes a bound. A record of the same cell whose geometry covers the
+ *    bound's on every axis, captured LATER than the stop, on a host NO LARGER than the one that
+ *    was stopped, proves the cell completes where the bound said it could not; the bound is
+ *    retired. The host term is why: a completion on a 512 GiB host says nothing about the 128 GiB
+ *    host the inequality was measured on. Every completed record counts, not only the cell's
+ *    representative anchor — an overlay render supersedes an overlay bound, and only that.
+ * 2. A LATER STOP replaces an earlier one at the same geometry. Two bounds of one identity at one
+ *    geometry are one fact measured twice; the later measurement stands and the earlier is
+ *    dropped, whichever footprint was larger — the earlier was taken under a loader the later run
+ *    has since re-measured. Bounds at DIFFERENT geometries all stay: a cell stopped at more than
+ *    one geometry carries the strongest true inequality for each (`binding_exceeded_bound`).
+ *
+ * `bounds` are `{ entry, corpus, cell }` triples; `completed` are `anchorCandidate` results.
+ * Entries with no `capturedAt` are never superseded and never supersede — ordering is the whole
+ * claim, so a record that cannot be ordered cannot make it. Returns the retained triples in the
+ * order given.
+ */
+export function retainExceededBounds(bounds, completed) {
+  const latestStopAt = new Map();
+  for (const { entry } of bounds) {
+    const at = entryCapturedAt(entry);
+    if (at === null) continue;
+    const { width, height, frames } = entry.target.geometry;
+    const key = `${entryIdentity(entry)}|${width}x${height}x${frames}`;
+    const seen = latestStopAt.get(key);
+    if (seen === undefined || at > seen) latestStopAt.set(key, at);
+  }
+  return bounds.filter(({ entry }) => {
+    const at = entryCapturedAt(entry);
+    if (at === null) return true;
+    const identity = entryIdentity(entry);
+    const { width, height, frames } = entry.target.geometry;
+    if (latestStopAt.get(`${identity}|${width}x${height}x${frames}`) !== at) return false;
+    const stoppedHost = entry.hardware?.memoryBytes;
+    return !completed.some(
+      (candidate) =>
+        candidate.capturedAt !== null &&
+        candidate.capturedAt > at &&
+        boundIdentity(candidate) === identity &&
+        candidate.geometry.width >= width &&
+        candidate.geometry.height >= height &&
+        candidate.geometry.frames >= frames &&
+        Number.isInteger(candidate.hostMemoryBytes) &&
+        Number.isInteger(stoppedHost) &&
+        candidate.hostMemoryBytes <= stoppedHost,
+    );
+  });
+}
+
+/**
+ * One bundle `exceededBounds` entry as the store carries it (sc-22738).
+ *
+ * Deliberately NOT `anchorRow`'s shape with fields blanked out. A bound states one inequality and
+ * carries the identity that inequality is keyed on — there is no measured regime, no phase
+ * decomposition and no envelope, because the render was killed before any of those existed, and a
+ * row with zeroed phase peaks would read as a measurement of zero rather than as an absence.
+ */
+function exceededBoundRow(entry, corpus, cell, previousStore) {
+  const id = exceededBoundId(entry, cell);
+  return {
+    id,
+    modelId: cell.modelId,
+    modelFamily: cell.modelFamily,
+    route: entry.target.route ?? entry.target.provider,
+    provider: entry.target.provider,
+    backend: entry.backend,
+    tier: entry.target.tier,
+    transformerVariant: entry.target.transformerVariant ?? null,
+    decoder: entry.target.decoder ?? null,
+    mode: entry.target.mode,
+    overlay:
+      entry.target.overlay && entry.target.overlay !== "none"
+        ? entry.target.overlay
+        : null,
+    referenceCount: entry.referenceCount,
+    loadShape: entry.loadShape,
+    geometry: {
+      width: entry.target.geometry.width,
+      height: entry.target.geometry.height,
+      frames: entry.target.geometry.frames,
+      // A bound is a footprint reading, not a rate measurement: the killed run emitted no
+      // `outputFps`, so the row states none rather than copying the plan's request back as if it
+      // had been observed. The Rust lookup does not key on fps.
+      fps: null,
+    },
+    observedFootprintBytes: entry.observedFootprintBytes,
+    ceilingBytes: entry.ceilingBytes,
+    hostMemoryBytes: entry.hardware.memoryBytes,
+    reason: entry.reason,
+    source: {
+      path: corpus.path,
+      sha256: corpus.sha256,
+      recordId: entry.id,
+      calibrationFingerprint: entry.calibrationFingerprint,
+      loaderClosureDigest: loaderClosureDigestFor(previousStore, id),
+      ...(currencyAttestationFor(previousStore, id)
+        ? { currencyAttestation: currencyAttestationFor(previousStore, id) }
+        : {}),
+    },
   };
 }
 
@@ -605,10 +873,27 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
  * to withhold derivation from a single-geometry anchor. The regime guard below is unaffected: it
  * is about WHICH composition was measured, not about fitting anything.
  *
- * Candle anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle cell from
- * a composition the candle law rejects, so every candle anchor that exists is derivable.
+ * Candle STILL anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle image
+ * cell from a composition the candle law rejects, so every candle image anchor that exists is
+ * derivable. That stays true after sc-22734 widened WHICH composition the law accepts on a
+ * structurally staging-free lane: `isDerivable` was widened in lockstep, so the two still agree
+ * exactly. Candle VIDEO anchors are a different matter (sc-22736): `isDerivable` admits every
+ * candle video composition, and the video law refuses an axis-free row on BOTH lanes
+ * (`memory_anchor.rs` `derive_video_phase_estimates_raw` prices only at and below the measured point
+ * without `(transformerVariant, decoder)`), so the axis-free reason is stated lane-blind, before
+ * the MLX-only image branch.
  */
 export function underivedReasonFor(candidate) {
+  if ((candidate.geometry.frames ?? 1) > 1) {
+    if (candidate.transformerVariant === null || candidate.decoder === null) {
+      return (
+        "the source record states no (transformer variant, decoder) pipeline axes and the video " +
+        "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
+        "and prices nothing beyond it"
+      );
+    }
+    return null;
+  }
   if (candidate.backend !== "mlx") return null;
   if (candidate.geometry.frames === 1) {
     const regime = candidate.measuredRegime;
@@ -626,13 +911,6 @@ export function underivedReasonFor(candidate) {
       );
     }
     return null;
-  }
-  if (candidate.transformerVariant === null || candidate.decoder === null) {
-    return (
-      "the source record states no (transformer variant, decoder) pipeline axes and the video " +
-      "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
-      "and prices nothing beyond it"
-    );
   }
   return null;
 }
@@ -1038,6 +1316,7 @@ export function assertEveryDerivableCorpusIsPackaged(
   corpora,
   packaged,
   catalogByCell,
+  stagedExemptLanes = EMPTY_LANE_SET,
 ) {
   const lapsed = [];
   for (const corpus of corpora) {
@@ -1046,7 +1325,7 @@ export function assertEveryDerivableCorpusIsPackaged(
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null || candidate.overlay !== null) continue;
-      if (!isDerivable(candidate)) continue;
+      if (!isDerivable(candidate, stagedExemptLanes)) continue;
       const key = cellKey(
         candidate.modelId,
         candidate.backend,
@@ -1379,6 +1658,10 @@ export async function buildAnchorStore({
   const manifestBody = await readFile(path.join(root, MANIFEST_PATH), "utf8");
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const manifestSha256 = sha256(manifestBody);
+  // sc-22734: the lanes whose engine has no staged composition at all, derived from the manifest's
+  // own structural exemptions. Threaded into every derivability decision below so the ONE anchor
+  // such a cell can be captured in — the resident render — is admitted rather than discarded.
+  const stagedExemptLanes = stagedResidencyExemptLanes(manifest);
   const pin = inferencePin(await readFile(path.join(root, PIN_PATH), "utf8"));
   // The store's own previous content supplies frozen provenance only. See
   // `loaderClosureDigestFor` and `carryManifestTierEvidence` for the two narrow carry-forward rules.
@@ -1424,13 +1707,22 @@ export async function buildAnchorStore({
   const packagedSources = packagedAnchorSources(
     await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8"),
   );
-  assertEveryDerivableCorpusIsPackaged(corpora, packagedSources, catalogByCell);
+  assertEveryDerivableCorpusIsPackaged(
+    corpora,
+    packagedSources,
+    catalogByCell,
+    stagedExemptLanes,
+  );
   const byIdentity = new Map();
+  // sc-22738: EVERY completed render of a packaged corpus, overlay or not, catalog-resolved or
+  // not — the population a measured lower bound can be superseded from (`retainExceededBounds`).
+  const completedRenders = [];
   for (const corpus of corpora) {
     if (!packagedSources.has(corpus.path)) continue;
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null) continue;
+      completedRenders.push(candidate);
       // An OVERLAY render measures a different resident set (krea's q4 MLX evidence is
       // control-branch-only, under its own `*_control` provider). Anchoring the base cell from it
       // would let one provider's measurement answer for another's render, which is exactly what
@@ -1451,12 +1743,12 @@ export async function buildAnchorStore({
   }
   const extracted = new Map();
   for (const [key, candidates] of byIdentity) {
-    const chosen = selectRepresentative(candidates);
+    const chosen = selectRepresentative(candidates, stagedExemptLanes);
     // A cell whose every retained render is in a composition the lane's law refuses is NOT
     // anchored: the row would be rejected on every lookup, so it would read as coverage while
     // admitting nothing. It falls through to the analytic-only pass below, where its largest
     // envelope is cited as `measured_envelope` — the honest classification for it.
-    if (!isDerivable(chosen)) continue;
+    if (!isDerivable(chosen, stagedExemptLanes)) continue;
     const cell = catalogByCell.get(
       cellKey(chosen.modelId, chosen.backend, chosen.tier),
     );
@@ -1467,6 +1759,7 @@ export async function buildAnchorStore({
         cell,
         previousStore,
         underivedReasonFor(chosen),
+        stagedExemptLanes,
       ),
     );
   }
@@ -1576,11 +1869,37 @@ export async function buildAnchorStore({
       )
     : [];
 
+  // 6. Measured lower bounds (sc-22738). One row per retained `exceededBounds` entry, from the
+  //    SAME packaged corpora the anchors come from — the Rust loader re-derives each bound's
+  //    handshake against the compiled-in file, so an unpackaged corpus would make the store
+  //    unloadable exactly as an unpackaged anchor would. A bound for a coordinate the routing
+  //    catalog does not resolve is dropped for the same reason an anchor for one is: the request
+  //    it would refuse cannot be made. A bound a LATER completed render of the cell has superseded,
+  //    or a later stop at the same geometry has replaced, is retired here (`retainExceededBounds`):
+  //    the runtime never demotes a bound on currency, so re-measurement is the only way one is
+  //    ever lifted, and this is where the re-measurement's evidence does the lifting.
+  const retainedBounds = [];
+  for (const corpus of corpora) {
+    if (!packagedSources.has(corpus.path)) continue;
+    for (const entry of corpus.exceededBounds) {
+      const cell = catalogByCell.get(
+        cellKey(entry.target.modelId, entry.backend, entry.target.tier),
+      );
+      if (!cell) continue;
+      retainedBounds.push({ entry, corpus, cell });
+    }
+  }
+  const exceededBounds = retainExceededBounds(retainedBounds, completedRenders).map(
+    ({ entry, corpus, cell }) => exceededBoundRow(entry, corpus, cell, previousStore),
+  );
+  exceededBounds.sort((left, right) => compareText(left.id, right.id));
+
   return {
     schemaVersion: MEMORY_ANCHOR_SCHEMA_VERSION,
     anchors,
     analyticOnly,
     componentDeltas,
+    exceededBounds,
   };
 }
 

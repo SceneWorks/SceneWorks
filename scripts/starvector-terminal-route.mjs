@@ -9,8 +9,8 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
-import { assertTerminalProductWorkerReady } from "./starvector-terminal-product-service.mjs";
-import { probeTerminalCuda } from "./lib/starvector-terminal-gpu.mjs";
+import { assertTerminalProductWorkerReady, unloadOwnedWorker, reloadOwnedWorker } from "./starvector-terminal-product-service.mjs";
+import { observeTerminalMemory, startTerminalMemorySampler, terminalHardwareFromSamples } from "./lib/starvector-terminal-memory.mjs";
 
 const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
@@ -81,22 +81,29 @@ async function runParityCases(baseUrl, records, transcript, fetchOptions) {
   for (const record of records) completed.push({ case_id: record.case_id, seed: record.seed, job: await submitAndPoll(baseUrl, record, transcript, fetchOptions) });
   return completed;
 }
-async function runLifecycle(baseUrl, records, transcript, fetchOptions) {
+export async function runLifecycle(baseUrl, records, transcript, fetchOptions, { unload, reload, submit = submitAndPoll }) {
   const observed = [];
   for (const record of records) {
     if (!["load", "unload", "reload", "memory_reported"].includes(record.operation)) die("lifecycle record has unknown operation");
     if (record.operation === "unload") {
-      const result = await request(new URL("/api/v1/worker/restart", baseUrl), { method: "POST", headers: fetchOptions.headers });
-      const succeeded = result?.accepted === true || result?.status === "accepted";
-      await appendFile(transcript, JSON.stringify({ phase: "worker_restart_requested", case_id: record.case_id, operation: "unload", result, succeeded }) + "\n");
-      if (!succeeded) die("worker restart did not acknowledge unload lifecycle operation");
+      // The REST restart endpoint only emits a desktop sentinel. This headless
+      // controller must observe its own worker's exit before claiming unload.
+      const result = await unload();
+      if (result?.status !== "succeeded" || result.exited !== true) die("owned worker did not exit for unload");
+      await appendFile(transcript, JSON.stringify({ phase: "owned_worker_unloaded", case_id: record.case_id, result }) + "\n");
       observed.push({ case_id: record.case_id, operation: "unload", observation: result }); continue;
     }
-    const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions);
+    let transition;
+    if (record.operation === "reload") {
+      transition = await reload();
+      if (transition?.status !== "succeeded" || !Number.isSafeInteger(transition.worker_pid) || transition.worker_pid === transition.previous_worker_pid) die("owned worker reload lacks a new observed PID");
+      await appendFile(transcript, JSON.stringify({ phase: "owned_worker_reloaded", case_id: record.case_id, result: transition }) + "\n");
+    }
+    const job = await submit(baseUrl, record, transcript, fetchOptions);
     const value = job?.result?.terminalEvidence ?? job?.terminalEvidence;
     if (!value || value.accepted !== true || !["complete_root", "eos"].includes(value.finishReason)) die(`product worker did not complete lifecycle ${record.operation}`);
     if (record.operation === "memory_reported" && (!job.terminalMetrics || typeof job.terminalMetrics.peakMemoryBytes !== "number")) die("product worker did not report memory for lifecycle observation");
-    observed.push({ case_id: record.case_id, operation: record.operation, job });
+    observed.push({ case_id: record.case_id, operation: record.operation, job, ...(transition ? { observation: transition } : {}) });
   }
   return observed;
 }
@@ -216,7 +223,7 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
     return { case_index, seed: event.seed, input_png_sha256: native.sourceRasterSha256, native_preview_png_sha256: native.previewPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
   });
   const lifecycle = Object.fromEntries(events.lifecycle.map((event) => {
-    if (event.operation === "unload") return ["unload", event.observation?.accepted === true || event.observation?.status === "accepted"];
+    if (event.operation === "unload") return ["unload", event.observation?.status === "succeeded" && event.observation?.exited === true];
     const item = evidence(event, "lifecycle");
     return [event.operation, item.accepted === true && ["complete_root", "eos"].includes(item.finishReason) && (event.operation !== "memory_reported" || typeof event.job.terminalMetrics?.peakMemoryBytes === "number")];
   }));
@@ -231,49 +238,17 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, upstream_reference: entry.upstream_reference, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
 }
 
-async function shell(command, args) {
-  const result = await execFile(command, args, { maxBuffer: 1024 * 1024 });
-  return result.stdout.trim();
-}
-function positiveInteger(value, label) { if (!Number.isInteger(value) || value < 1) die(`runtime probe ${label} is not a positive integer`); return value; }
-async function liveRuntime(output, tuple, events) {
-  const service = await json(path.join(output, "product-service-provenance.json"));
-  if (!Number.isInteger(service.api_pid) || !Number.isInteger(service.worker_pid)) die("runtime probe lacks source-built API/worker PIDs");
-  const metricRecords = [...events.image_quality, ...events.lifecycle.filter((entry) => entry.job).map((entry) => ({ job: entry.job }))];
-  const observed = metricRecords
-    .map((entry) => entry.job?.terminalMetrics?.peakMemoryBytes).filter((value) => Number.isInteger(value) && value > 0);
-  if (!observed.length) die("runtime probe lacks worker-owned peak memory observations");
-  const os = process.platform, arch = process.arch, peakProcess = Math.max(...observed);
-  let hardware;
-  if (os === "darwin") {
-    const total = positiveInteger(Number(await shell("sysctl", ["-n", "hw.memsize"])), "macOS total memory");
-    const vm = await shell("vm_stat", []), page = Number((vm.match(/page size of (\d+) bytes/) ?? [])[1]);
-    const free = [...vm.matchAll(/Pages (?:free|inactive|speculative):\s+(\d+)\./g)].reduce((sum, match) => sum + Number(match[1]), 0) * page;
-    positiveInteger(free, "macOS available memory");
-    hardware = { runner_name: process.env.RUNNER_NAME ?? "macos-self-hosted", os: "macOS", arch, system_memory_total_bytes: total, baseline_available_bytes: free, peak_process_rss_bytes: peakProcess, accelerator: { name: "Apple unified memory", uuid: null, driver_runtime: "MLX", total_bytes: total, baseline_free_bytes: free, peak_used_bytes: peakProcess } };
-  } else if (os === "win32") {
-    const binding = service.gpu_binding;
-    if (!binding?.uuid || binding.gpu_id !== service.worker?.gpu_id) die("CUDA runtime lacks pre-execution physical GPU binding");
-    const observedGpu = await probeTerminalCuda(binding.uuid, { expectedUuid: binding.uuid });
-    if (observedGpu.index !== binding.gpu_id || observedGpu.name !== binding.name) die("CUDA hardware identity drifted during the campaign");
-    const { uuid, name, driver, total_bytes: total, free_bytes: free, used_bytes: used } = observedGpu;
-    const system = JSON.parse(await shell("powershell", ["-NoProfile", "-Command", "@{ total=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; free=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB } | ConvertTo-Json -Compress"]));
-    const acceleratorPeaks = metricRecords.map((entry) => entry.job?.terminalMetrics?.peakAcceleratorBytes).filter((value) => Number.isInteger(value) && value > 0);
-    if (!acceleratorPeaks.length) die("CUDA runtime probe lacks worker-owned peak accelerator memory observations");
-    hardware = { runner_name: process.env.RUNNER_NAME ?? "windows-self-hosted", os: "Windows", arch, system_memory_total_bytes: positiveInteger(system.total, "Windows total memory"), baseline_available_bytes: positiveInteger(system.free, "Windows available memory"), peak_process_rss_bytes: peakProcess, accelerator: { name, uuid, driver_runtime: `CUDA/${driver}`, total_bytes: total, baseline_free_bytes: free, peak_used_bytes: Math.max(used, ...acceleratorPeaks) } };
-  } else die(`unsupported terminal campaign runtime platform ${os}`);
+async function liveRuntime(output, tuple, events, observation, service) {
+  const metricRecords = [...events.image_quality, ...events.deterministic_parity, ...events.lifecycle.filter((entry) => entry.job), ...events.limits];
+  const observed = metricRecords.map((entry) => entry.job?.terminalMetrics?.peakMemoryBytes).filter((value) => Number.isSafeInteger(value) && value > 0);
+  const hardware = terminalHardwareFromSamples({ samples: observation.samples, allocatorPeaks: observed, platform: process.platform, arch: process.arch, runnerName: process.env.RUNNER_NAME ?? `${process.platform}-self-hosted` });
   const probePath = path.join(output, "runtime-probe.json"), lifecyclePath = path.join(output, "lifecycle-memory.json");
-  await writeFile(lifecyclePath, JSON.stringify({ tuple, observed_at: new Date().toISOString(), lifecycle: events.lifecycle, quality_memory_bytes: observed }, null, 2) + "\n");
-  await writeFile(probePath, JSON.stringify({ tuple, observed_at: new Date().toISOString(), service, hardware }, null, 2) + "\n");
+  const processLifecycle = await json(path.join(output, "product-service-worker-lifecycle.json"));
+  await writeFile(lifecyclePath, JSON.stringify({ tuple, lifecycle: events.lifecycle, process_lifecycle: processLifecycle, provider_allocator_peak_bytes: observed, provider_metric: "JobMetrics.peakMemoryBytes: MLX allocator or CUDA device high-water; never process RSS", observation }, null, 2) + "\n");
+  await writeFile(probePath, JSON.stringify({ tuple, service, hardware, observation }, null, 2) + "\n");
   hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
-  // The raw probe must contain exactly the hardware facts used by the receipt;
-  // rewrite after binding its self-hash would be circular, so keep its digest
-  // alongside the raw bytes in the caller and never synthesize this value.
   const runtime = { hardware, inventory_sha256: tuple.endsWith(":1b") ? service.models?.["starvector-1b"]?.inventory_sha256 : service.models?.["starvector-8b"]?.inventory_sha256, raw_probe_path: probePath, lifecycle_memory_transcript_path: lifecyclePath, lifecycle_memory_transcript_sha256: sha(await readFile(lifecyclePath)) };
   if (!/^[a-f0-9]{64}$/.test(runtime.inventory_sha256 ?? "")) die("runtime probe lacks validated model inventory identity");
-  // Avoid a self-referential raw-probe hash: the canonical observation is the
-  // bytes captured above and its digest is the only value admitted into the run.
-  runtime.hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
   return runtime;
 }
 function exactMetricIdentity(context, observation) {
@@ -323,19 +298,30 @@ async function main() {
   const bundle = await readSealedBundle(bundlePath), cases = validateBundle(bundle, tuple);
   await mkdir(output, { recursive: true });
   const transcript = path.join(output, "vector-generate-route.ndjson");
-  const events = { tuple,
-    image_quality: await runCases(baseUrl, cases.image_quality, transcript, bundle.fetch ?? {}, "image_quality"),
-    deterministic_parity: await runParityCases(baseUrl, cases.deterministic_parity, transcript, bundle.fetch ?? {}),
-    lifecycle: await runLifecycle(baseUrl, cases.lifecycle, transcript, bundle.fetch ?? {}),
-    limits: await runCases(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, "limits"),
-  };
+  const service = structuredClone(controllerContext.service);
+  const sampler = await startTerminalMemorySampler({ observe: () => observeTerminalMemory(service), file: path.join(output, "runtime-memory-samples.ndjson") });
+  let events, observation;
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  try {
+    events = { tuple,
+      image_quality: await runCases(baseUrl, cases.image_quality, transcript, bundle.fetch ?? {}, "image_quality"),
+      deterministic_parity: await runParityCases(baseUrl, cases.deterministic_parity, transcript, bundle.fetch ?? {}),
+      lifecycle: await runLifecycle(baseUrl, cases.lifecycle, transcript, bundle.fetch ?? {}, {
+        unload: async () => { let result; await sampler.transition(async () => { result = await unloadOwnedWorker(output); service.worker_pid = null; }); return result; },
+        reload: async () => { let result; await sampler.transition(async () => { result = await reloadOwnedWorker(root, output); service.worker_pid = result.worker_pid; service.worker = result.worker; }); return result; },
+      }),
+      limits: await runCases(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, "limits"),
+    };
+  } finally { observation = await sampler.stop(); }
+  // Optional raster composition is a different workload and cannot author the
+  // StarVector tuple's host or accelerator headroom observation.
   if (tuple === "candle-cuda:8b") {
     events.hostile_sanitizer = await runHostileSanitizer(bundle.hostile_sanitizer, output, transcript);
     events.prompt_composition = [];
     for (const record of bundle.prompt_composition) { const workflow = await submitPromptWorkflow(baseUrl, record, transcript, bundle.fetch ?? {}); events.prompt_composition.push({ case_id: record.case_id, suite: "prompt_composition", job: workflow, workflow }); }
   }
   const eventsPath = path.join(output, "route-events.json"); await writeFile(eventsPath, JSON.stringify(events, null, 2) + "\n");
-  const runtime = await liveRuntime(output, tuple, events);
+  const runtime = await liveRuntime(output, tuple, events, observation, service);
   const runtimePath = path.join(output, "runtime.json"); await writeFile(runtimePath, JSON.stringify(runtime, null, 2) + "\n");
   const transcriptSha = sha(await readFile(transcript));
   const metricScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "starvector-terminal-metrics.py"); await stat(metricScript);

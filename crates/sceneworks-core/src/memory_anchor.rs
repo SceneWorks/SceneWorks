@@ -101,6 +101,626 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
     ),
     (
+        "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/bernini-image-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-q4-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-q4-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/scail2-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-turbo-q8-mlx-evidence.json"),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),
@@ -634,6 +1254,165 @@ pub struct MemoryAnchorStore {
     /// cell. `default` so a store written before the migration still parses.
     #[serde(default)]
     pub component_deltas: Vec<ComponentDelta>,
+    /// Measured LOWER BOUNDS from captures a physical-footprint hard stop ended (sc-22738, epic
+    /// 22723). This is the store's THIRD entry kind and the only one whose evidence is a render
+    /// that did NOT complete: see [`ExceededBound`]. `default` so a store written before the
+    /// migration still parses.
+    #[serde(default)]
+    pub exceeded_bounds: Vec<ExceededBound>,
+}
+
+/// A MEASURED LOWER BOUND on one cell's peak: the request reached `observed_footprint_bytes` of
+/// kernel physical footprint on a host of `host_memory_bytes` and was terminated by the capture
+/// guard before it finished (sc-22738, epic 22723 E4/E5).
+///
+/// WHY THIS IS EVIDENCE AND NOT A DROPPED CAPTURE. Before this row existed a footprint hard stop
+/// stamped nothing at all: `measure-memory-catalog.mjs` recorded `capture_failed`, the store kept
+/// no trace, and production kept admitting the very request that had just been killed — the
+/// `bernini:bf16:mlx` 848x480x49 render that ran 72 minutes and reached 97,147,294,328 bytes
+/// before the guard stopped it mid-decode. The run learned the single most decision-relevant fact
+/// about the cell (its peak is AT LEAST that), and the pipeline threw it away.
+///
+/// WHAT IT CLAIMS, AND WHAT IT DELIBERATELY DOES NOT. It claims one inequality — `peak >=
+/// observed_footprint_bytes` at this geometry — and nothing else. It is NOT a phase decomposition,
+/// NOT a point a law may fit, and NOT a substitute for a [`MemoryAnchor`]: it prices no estimate,
+/// widens no envelope and enters no derivation. Its ONLY consumer is the pre-load refusal
+/// ([`ExceededBound::required_bytes`]), which is why every field it carries is either identity or
+/// the inequality's own terms.
+///
+/// IT IS RETIRED ONLY BY RE-MEASUREMENT (sc-22738). A LATER completed capture of the same cell —
+/// same identity axes, geometry covering the bound's, on a host no larger than the one that was
+/// stopped — supersedes it: `scripts/extract-memory-anchors.mjs` (`retainExceededBounds`) drops
+/// the bound from the store and the anchor stands in its place. A later stop at the same geometry
+/// replaces the earlier bound rather than sitting beside it. Stops at other geometries all stay,
+/// each the strongest true inequality for its own point. Nothing else lifts a bound.
+///
+/// IT BINDS REGARDLESS OF CURRENCY (sc-22738). The bound carries the same
+/// [`AnchorSource::loader_closure_digest`] an anchor does, and for the same reason: so the probe
+/// tooling can tell when the loader that produced it has moved and the cell is worth stopping at
+/// again — the runner (`measure-memory-catalog.mjs`) then classifies the cell runnable and the
+/// MLX memory adapter's pre-load refusal lets it through to the guarded capture, whose outcome
+/// supersedes the bound as above. The runtime never reads that key. A bound whose closure has
+/// moved refuses exactly what it refused the day it was measured, because the alternative — a
+/// shared-engine fix silently re-admitting the very request a host was already unable to finish —
+/// is the failure the bound exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExceededBound {
+    pub id: String,
+    pub model_id: String,
+    pub model_family: String,
+    pub route: String,
+    pub provider: String,
+    pub backend: AnchorBackend,
+    pub tier: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: String,
+    pub overlay: Option<String>,
+    pub reference_count: u32,
+    pub load_shape: AnchorLoadShape,
+    pub geometry: AnchorGeometry,
+    /// The kernel `phys_footprint` of the guarded process group at the sample that tripped the
+    /// hard stop. The cell's true peak is at or above this: the render was still allocating.
+    pub observed_footprint_bytes: u64,
+    /// The guard's hard-stop ceiling for that run, carried so a reader can see how far past it the
+    /// group had already gone in one sampling interval.
+    pub ceiling_bytes: u64,
+    /// Whole-host memory of the capture host. Recorded because the inequality is only interesting
+    /// relative to a budget, and a bound measured on a smaller host must not read as a claim about
+    /// a larger one.
+    pub host_memory_bytes: u64,
+    /// The guard's own hard-stop reason, verbatim.
+    pub reason: String,
+    pub source: AnchorSource,
+}
+
+impl ExceededBound {
+    /// Whether a request at `(width, height, frames)` is at or above the geometry this bound was
+    /// measured at, on every axis. Monotonicity is the whole claim: a render that already needed
+    /// at least X bytes at this geometry cannot need less at a strictly larger one. A request
+    /// SMALLER on any axis is outside the bound and takes no refusal from it.
+    pub const fn covers_geometry(&self, width: u32, height: u32, frames: u32) -> bool {
+        width >= self.geometry.width
+            && height >= self.geometry.height
+            && frames >= self.geometry.frames
+    }
+
+    /// What a host must be able to give this request before it may be admitted: the measured lower
+    /// bound plus the lane's activation headroom.
+    ///
+    /// The headroom term is not padding. The footprint reading is a LOWER bound taken at the
+    /// instant the guard fired — for the Bernini capture, mid-VAE-decode on a curve that had just
+    /// climbed 18 GiB in under a second — so admitting at exactly the bound would admit a render
+    /// already known to want more. Charging the lane's ordinary activation allowance on top is the
+    /// same term every floor candidate already carries, applied to a peak the measurement proved
+    /// rather than to one an estimate guessed.
+    pub const fn required_bytes(&self, headroom_bytes: u64) -> u64 {
+        self.observed_footprint_bytes.saturating_add(headroom_bytes)
+    }
+
+    /// Whether this bound refuses a host — the whole decision, stated once so production and the
+    /// capture-side mirror cannot drift.
+    ///
+    /// TWO disjuncts, and the FIRST is the load-bearing one:
+    ///
+    /// * **A host no larger than the one that failed.** This is what the measurement literally
+    ///   says: a machine of `host_memory_bytes` ran this render and could not finish it. Nothing
+    ///   about a same-sized machine makes it likelier to succeed, so it is refused outright. This
+    ///   disjunct is the reason the fix bites at all — the Bernini stop was taken on the same
+    ///   128 GiB Mac that would otherwise queue the render again, and a footprint-versus-budget
+    ///   comparison alone would have re-admitted it: 90.5 GiB plus the lane's 16 GiB allowance is
+    ///   106.5 GiB, which an idle 128 GiB host appears to have.
+    /// * **A larger host that cannot currently carry the requirement.** A bigger machine MIGHT
+    ///   finish this render, so it is graded on what it can actually offer right now rather than
+    ///   refused on the strength of a smaller host's failure.
+    ///
+    /// `host_total_bytes` is the budget's own physical ceiling, which on the MLX lane can be the
+    /// allocator's limit rather than `hw.memsize` — i.e. at or below the figure a bound records.
+    /// The comparison is deliberately left inclusive-and-conservative there: erring towards
+    /// refusal on a host of ambiguous size is the direction that does not take the machine down.
+    pub const fn refuses_host(
+        &self,
+        host_total_bytes: u64,
+        effective_bytes: u64,
+        headroom_bytes: u64,
+    ) -> bool {
+        host_total_bytes <= self.host_memory_bytes
+            || effective_bytes < self.required_bytes(headroom_bytes)
+    }
+}
+
+/// The identity a request presents to [`MemoryAnchorStore::exceeded_bound_for`]. Every conjunct is
+/// an axis a [`MemoryAnchor`] lookup also keys on, for the same reason: a bound measured on one
+/// provider, mode or pipeline cell says nothing about another's.
+#[derive(Debug, Clone, Copy)]
+pub struct ExceededBoundQuery<'a> {
+    pub model_id: &'a str,
+    /// The two axes only a CATALOG resolution can state. Production always states both — the
+    /// worker has resolved the catalog family and the engine route before it asks — and the
+    /// capture-side mirror in the memory adapter states neither, because a capture plan names a
+    /// provider and a model id and there is no catalog inside the adapter binary to resolve them
+    /// from.
+    ///
+    /// `None` is therefore "this caller cannot state the axis", not a wildcard for anyone: both
+    /// are redundant with axes already graded — the catalog family is a function of `model_id`,
+    /// and the route of `provider` — so omitting them narrows nothing that `model_id`, `provider`,
+    /// `backend` and `tier` have not already pinned. A caller that CAN state them must, so a
+    /// mis-resolved route cannot borrow another cell's bound.
+    pub model_family: Option<&'a str>,
+    pub route: Option<&'a str>,
+    pub provider: &'a str,
+    pub backend: AnchorBackend,
+    pub tier: &'a str,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: &'a str,
+    pub overlay: Option<&'a str>,
+    pub reference_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
 }
 
 /// Why a cell is analytic-only, strongest evidence first. The variant names the BEST evidence that
@@ -744,6 +1523,14 @@ pub struct AnchorSource {
     /// revision, no lock and no workspace input, a pin bump that leaves the loader's source
     /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
     /// unrelated change stays authoritative.
+    ///
+    /// A RE-CAPTURE SIGNAL FOR THE PROBE TOOLING ONLY (sc-22738). `measure-memory-catalog.mjs`,
+    /// `generate-memory-matrix.mjs` (`current` per anchor, `summary.staleAnchors`) and
+    /// `stale-lane-report.mjs` compare this key to decide what to re-capture. Nothing in the
+    /// runtime does: an anchor binds, derives and a bound refuses exactly as if this key matched,
+    /// whether or not it does. There is no `is_current` on this type on purpose — a runtime
+    /// function that could express "stale" is how a shared-engine fix that touches nearly every
+    /// closure would silently move what a live request gets.
     pub loader_closure_digest: String,
     /// HOW the key above was derived (sc-22667). `None`: at the record's own measurement revision,
     /// the default. `Some`: at [`AnchorCurrencyAttestation::attested_revision`] instead, on the
@@ -902,6 +1689,28 @@ pub struct MemoryAnchor {
     /// packaged row is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_bytes: Option<ComponentBytes>,
+    /// The provider contract classifies `staged_residency` STRUCTURALLY NOT APPLICABLE on this
+    /// anchor's lane (sc-22734), so the cell has no staged composition to be measured in.
+    ///
+    /// This is an architecture fact about the engine, not a property of the render: SenseNova-U1 is
+    /// one fused dual-path checkpoint whose conditioning and denoise weights are interleaved in
+    /// every resident layer, so there is no separable conditioning component to release and no
+    /// phase boundary to stage at. The extractor writes it from the model's own manifest
+    /// (`<lane>.memoryStrategyStructuralExemptions.staged_residency`, whose `evidence[].source`
+    /// names the engine's `memory_strategy.rs`), never as a blanket switch.
+    ///
+    /// [`MemoryAnchor::derive_image_phase_peaks`] reads it to admit the ONE composition such a cell
+    /// can be captured in. Its ordinary refusal of a resident candle anchor rests on the staged
+    /// anchor being the SHALLOWER of two real compositions — a resident render additionally holds
+    /// the text encoder through denoise and decode, which the staged intercepts do not price. Where
+    /// staging is structurally impossible that asymmetry does not exist: resident IS the shallowest
+    /// composition, there is no co-resident encoder above it, and the law prices it exactly as the
+    /// MLX lane already prices its resident anchors.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if`: every packaged row predates this field, stays
+    /// byte-identical, and keeps the old behaviour (`false` → the staged-only guard, unchanged).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged_residency_structurally_not_applicable: bool,
 }
 
 /// Store-key spelling of the LTX-2.5 transformer variant, matching the retained evidence.
@@ -987,7 +1796,198 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     }
     validate_analytic_only(&store)?;
     validate_component_deltas(&store)?;
+    validate_exceeded_bounds(&store)?;
     Ok(store)
+}
+
+/// An attestation is a justification or it is nothing (sc-22667): both revisions must be real
+/// and distinct, and the reading of the diff must be stated. What is NOT checked here is whether
+/// the attested revision equals the pin — that is the currency verdict, reported by the probe
+/// tooling and never a load failure, exactly as a mismatched digest is. One check for both row
+/// kinds that carry an [`AnchorSource`]: an anchor and a measured lower bound are stamped by the
+/// same walk (`anchor-loader-closure.mjs --stamp-anchors`) and attested from the same file.
+fn validate_currency_attestation(
+    kind: &str,
+    id: &str,
+    source: &AnchorSource,
+) -> Result<(), String> {
+    let Some(attestation) = &source.currency_attestation else {
+        return Ok(());
+    };
+    for (field, revision) in [
+        ("measuredRevision", &attestation.measured_revision),
+        ("attestedRevision", &attestation.attested_revision),
+    ] {
+        if !is_revision(revision) {
+            return Err(format!(
+                "{kind} {id} currency attestation {field} {revision:?} is not a 40-hex revision"
+            ));
+        }
+    }
+    if attestation.measured_revision == attestation.attested_revision {
+        return Err(format!(
+            "{kind} {id} currency attestation attests its own measurement revision {}",
+            attestation.measured_revision
+        ));
+    }
+    for (field, value) in [
+        ("attestedAt", &attestation.attested_at),
+        ("story", &attestation.story),
+        ("class", &attestation.class),
+        ("why", &attestation.why),
+        ("witness", &attestation.witness),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "{kind} {id} currency attestation states no {field} — an attestation without its \
+                 justification is a re-stamp"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The exceeded-bound half of the store's invariants (sc-22738).
+///
+/// The handshake is the anchor's, narrowed to the fields the inequality is made of: the cited
+/// corpus must be compiled in, hash to what the row recorded, and carry an `exceededBounds` entry
+/// whose identity, geometry and byte figures are the row's. The store may not drift from the
+/// retained evidence it cites, and a bound is the one row kind where drift would turn a refusal on.
+fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
+    let mut seen = BTreeMap::new();
+    for bound in &store.exceeded_bounds {
+        if let Some(previous) = seen.insert(bound.id.clone(), &bound.id) {
+            return Err(format!("duplicate exceeded bound {previous}"));
+        }
+        validate_currency_attestation("exceeded bound", &bound.id, &bound.source)?;
+        if bound.geometry.width == 0 || bound.geometry.height == 0 || bound.geometry.frames == 0 {
+            return Err(format!(
+                "exceeded bound {} has a degenerate geometry",
+                bound.id
+            ));
+        }
+        if bound.reason.trim().is_empty() {
+            return Err(format!(
+                "exceeded bound {} states no hard-stop reason — an unexplained refusal is a gap \
+                 wearing a row's clothes",
+                bound.id
+            ));
+        }
+        // The guard samples and terminates at or above its ceiling, so a row claiming a footprint
+        // BELOW the ceiling it cites did not come from a hard stop at all.
+        if bound.ceiling_bytes == 0 || bound.observed_footprint_bytes < bound.ceiling_bytes {
+            return Err(format!(
+                "exceeded bound {} records footprint {} under its own hard-stop ceiling {} — that \
+                 is not a run the guard stopped",
+                bound.id, bound.observed_footprint_bytes, bound.ceiling_bytes
+            ));
+        }
+        if bound.host_memory_bytes < bound.observed_footprint_bytes {
+            return Err(format!(
+                "exceeded bound {} records a footprint larger than the whole capture host",
+                bound.id
+            ));
+        }
+        if !is_sha256(&bound.source.loader_closure_digest) {
+            return Err(format!(
+                "exceeded bound {} loader closure digest {} is not a sha256",
+                bound.id, bound.source.loader_closure_digest
+            ));
+        }
+        let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == bound.source.path)
+        else {
+            return Err(format!(
+                "exceeded bound {} cites source {} which is not a compiled retained-evidence file",
+                bound.id, bound.source.path
+            ));
+        };
+        let digest = format!("{:x}", Sha256::digest(source_raw.as_bytes()));
+        if digest != bound.source.sha256 {
+            return Err(format!(
+                "exceeded bound {} source digest mismatch for {}: recorded {} actual {digest}",
+                bound.id, bound.source.path, bound.source.sha256
+            ));
+        }
+        let source: serde_json::Value = serde_json::from_str(source_raw).map_err(|error| {
+            format!(
+                "retained evidence {} does not parse: {error}",
+                bound.source.path
+            )
+        })?;
+        let entry = source
+            .get("exceededBounds")
+            .and_then(|entries| entries.as_array())
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("id").and_then(|id| id.as_str())
+                        == Some(bound.source.record_id.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "exceeded bound {} cites entry {} absent from the exceededBounds of {}",
+                    bound.id, bound.source.record_id, bound.source.path
+                )
+            })?;
+        let target = entry.get("target").unwrap_or(&serde_json::Value::Null);
+        let str_at = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        };
+        let u64_at = |value: &serde_json::Value, key: &str| value.get(key).and_then(|v| v.as_u64());
+        let entry_route = str_at(target, "route").or_else(|| str_at(target, "provider"));
+        let load_shape_key = match bound.load_shape {
+            AnchorLoadShape::EagerMaterialization => "eager_materialization",
+            AnchorLoadShape::DeferredMaterialization => "deferred_materialization",
+        };
+        let geometry = target.get("geometry").unwrap_or(&serde_json::Value::Null);
+        let entry_overlay = str_at(target, "overlay")
+            .filter(|overlay| overlay != "none")
+            .filter(|overlay| !overlay.is_empty());
+        if str_at(target, "modelId").as_deref() != Some(bound.model_id.as_str())
+            || str_at(target, "tier").as_deref() != Some(bound.tier.as_str())
+            || str_at(entry, "backend").as_deref() != Some(bound.backend.as_key())
+            || str_at(target, "mode").as_deref() != Some(bound.mode.as_str())
+            || str_at(target, "provider").as_deref() != Some(bound.provider.as_str())
+            || entry_route.as_deref() != Some(bound.route.as_str())
+            || optional_axis_key(str_at(target, "transformerVariant").as_deref())
+                != variant_key_opt(bound.transformer_variant)
+            || optional_axis_key(str_at(target, "decoder").as_deref())
+                != decoder_key_opt(bound.decoder)
+            || str_at(entry, "loadShape").as_deref() != Some(load_shape_key)
+            || str_at(entry, "calibrationFingerprint").as_deref()
+                != Some(bound.source.calibration_fingerprint.as_str())
+            || entry_overlay != bound.overlay
+            || u64_at(entry, "referenceCount") != Some(u64::from(bound.reference_count))
+        {
+            return Err(format!(
+                "exceeded bound {} identity disagrees with its source entry {}",
+                bound.id, bound.source.record_id
+            ));
+        }
+        if u64_at(geometry, "width") != Some(u64::from(bound.geometry.width))
+            || u64_at(geometry, "height") != Some(u64::from(bound.geometry.height))
+            || u64_at(geometry, "frames") != Some(u64::from(bound.geometry.frames))
+            || u64_at(entry, "observedFootprintBytes") != Some(bound.observed_footprint_bytes)
+            || u64_at(entry, "ceilingBytes") != Some(bound.ceiling_bytes)
+            || entry
+                .get("hardware")
+                .and_then(|hardware| u64_at(hardware, "memoryBytes"))
+                != Some(bound.host_memory_bytes)
+            || str_at(entry, "reason").as_deref() != Some(bound.reason.as_str())
+        {
+            return Err(format!(
+                "exceeded bound {} figures disagree with its source entry {} — the store may not \
+                 drift from the retained evidence it cites",
+                bound.id, bound.source.record_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The analytic-only half of the store's invariants (sc-22510).
@@ -1111,45 +2111,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             anchor.id, anchor.source.loader_closure_digest
         ));
     }
-    // An attestation is a justification or it is nothing (sc-22667): both revisions must be real
-    // and distinct, and the reading of the diff must be stated. What is NOT checked here is
-    // whether the attested revision equals the pin — that is the currency verdict, reported at
-    // admission and never a load failure, exactly as a mismatched digest is.
-    if let Some(attestation) = &anchor.source.currency_attestation {
-        for (field, revision) in [
-            ("measuredRevision", &attestation.measured_revision),
-            ("attestedRevision", &attestation.attested_revision),
-        ] {
-            if !is_revision(revision) {
-                return Err(format!(
-                    "memory anchor {} currency attestation {field} {revision:?} is not a 40-hex \
-                     revision",
-                    anchor.id
-                ));
-            }
-        }
-        if attestation.measured_revision == attestation.attested_revision {
-            return Err(format!(
-                "memory anchor {} currency attestation attests its own measurement revision {}",
-                anchor.id, attestation.measured_revision
-            ));
-        }
-        for (field, value) in [
-            ("attestedAt", &attestation.attested_at),
-            ("story", &attestation.story),
-            ("class", &attestation.class),
-            ("why", &attestation.why),
-            ("witness", &attestation.witness),
-        ] {
-            if value.trim().is_empty() {
-                return Err(format!(
-                    "memory anchor {} currency attestation states no {field} — an attestation \
-                     without its justification is a re-stamp",
-                    anchor.id
-                ));
-            }
-        }
-    }
+    validate_currency_attestation("memory anchor", &anchor.id, &anchor.source)?;
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
         .find(|(path, _)| *path == anchor.source.path)
@@ -1494,18 +2456,29 @@ fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
 
 /// The checked-in loader-closure declarations — the CURRENT value of every declared model's
 /// currency key. Derived at the pinned inference revision by `scripts/anchor-loader-closure.mjs`.
+///
+/// Parsed here so `cargo test` can hold the store to its declarations (every packaged anchor's
+/// `(model, lane)` must be declared; an attestation must name the pin the file was derived at).
+/// The runtime admission seam never reads it (sc-22738): there is no packaged accessor, and no
+/// anchor, bound or curve lookup takes an `AnchorLoaderClosures`.
 pub const PACKAGED_ANCHOR_LOADER_CLOSURES: &str =
     include_str!("../../../config/anchor-loader-closures.json");
 
 /// Must equal the `digestVersion` of the checked-in file. Two versions answer different questions,
-/// so a version bump reads as "no declaration" (fail closed to the floor) rather than silently
-/// comparing digests derived under different rules.
+/// so a version bump is refused at parse rather than silently comparing digests derived under
+/// different rules.
 pub const ANCHOR_LOADER_CLOSURE_VERSION: &str = "anchor-loader-closure v2";
 
 /// One `(model, backend lane)`'s declared loader closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnchorLoaderClosure {
+    /// For a CATALOG ALIAS only (sc-22724): the engine provider id this model id resolves to
+    /// (`z_image_edit` → `z_image_turbo`). The inference tree never names the alias, so the
+    /// derivation asks its literal rule of the engine id and hashes it into the closure text.
+    /// Absent for every model that is its own engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<String>,
     /// The loader entry points the closure is rooted at, repo-relative in the inference tree.
     pub entry_points: Vec<String>,
     /// The digest of the closure's source content. This is what an anchor is compared against.
@@ -1535,9 +2508,9 @@ pub fn anchor_loader_closure_key(model_id: &str, backend: AnchorBackend) -> Stri
 }
 
 impl AnchorLoaderClosures {
-    /// The current loader-closure digest for one `(model, backend lane)`, or `None` when the
-    /// coordinate is undeclared — which is fail-closed: an anchor whose loader nothing tracks
-    /// cannot be shown to be current, so it is not.
+    /// The declared loader-closure digest for one `(model, backend lane)`, or `None` when the
+    /// coordinate is undeclared. A tooling/test accessor: the runtime compares no anchor against
+    /// it (sc-22738).
     pub fn digest_for(&self, model_id: &str, backend: AnchorBackend) -> Option<&str> {
         self.models
             .get(&anchor_loader_closure_key(model_id, backend))
@@ -1597,27 +2570,6 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// The packaged declarations, parsed once. `None` demotes every anchor to the caller's floor.
-pub fn packaged_anchor_loader_closures() -> Option<&'static AnchorLoaderClosures> {
-    static PACKAGED: OnceLock<Option<AnchorLoaderClosures>> = OnceLock::new();
-    PACKAGED
-        .get_or_init(|| load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES).ok())
-        .as_ref()
-}
-
-impl MemoryAnchor {
-    /// Whether this anchor's evidence is CURRENT (sc-22511, E9).
-    ///
-    /// The one and only currency question: does the code that loads THIS model on THIS backend
-    /// still hash to what it hashed when the anchor was measured? Not the pin, not a sibling model,
-    /// not a shared crate the loader never reaches, not the calibration campaign that produced the
-    /// record — none of those can move this answer, by construction of the key.
-    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
-        closures.digest_for(&self.model_id, self.backend)
-            == Some(self.source.loader_closure_digest.as_str())
-    }
-}
-
 /// The packaged store, parsed and validated once. `None` is fail-open: callers keep their
 /// pre-existing floor.
 pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
@@ -1628,6 +2580,38 @@ pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
 }
 
 impl MemoryAnchorStore {
+    /// The BINDING measured lower bound for one request, or `None` (sc-22738).
+    ///
+    /// Binding means: same identity on every axis a measured point is keyed on, and request
+    /// geometry at or above the bound's on every axis. Among the survivors the LARGEST footprint
+    /// wins — several bounds may cover one request once a cell has been stopped at more than one
+    /// geometry, and the strongest true inequality is the useful one.
+    ///
+    /// Currency is NOT a conjunct, and the signature cannot express one: a bound whose loader
+    /// closure has since moved refuses exactly what it refused when measured. The moved closure is
+    /// the probe tooling's cue to stop at the cell again, never the runtime's cue to forget it.
+    pub fn binding_exceeded_bound(&self, query: ExceededBoundQuery<'_>) -> Option<&ExceededBound> {
+        self.exceeded_bounds
+            .iter()
+            .filter(|bound| {
+                bound.model_id == query.model_id
+                    && query
+                        .model_family
+                        .is_none_or(|family| bound.model_family == family)
+                    && query.route.is_none_or(|route| bound.route == route)
+                    && bound.provider == query.provider
+                    && bound.backend == query.backend
+                    && bound.tier == query.tier
+                    && bound.transformer_variant == query.transformer_variant
+                    && bound.decoder == query.decoder
+                    && bound.mode == query.mode
+                    && bound.overlay.as_deref() == query.overlay
+                    && bound.reference_count == query.reference_count
+                    && bound.covers_geometry(query.width, query.height, query.frames)
+            })
+            .max_by_key(|bound| bound.observed_footprint_bytes)
+    }
+
     /// The unique anchor for one `(model, backend lane, tier, transformer variant, decoder)`
     /// coordinate. The pipeline axes are part of the key, not a post-filter: the corpus measures no
     /// dev-vs-distilled pair at a common regime, so one variant's anchor may not price the other's
@@ -1648,6 +2632,33 @@ impl MemoryAnchorStore {
                 // lookup: it certifies neither variant, so it must not stand in for either.
                 && anchor.transformer_variant == Some(transformer_variant)
                 && anchor.decoder == Some(decoder)
+        })
+    }
+
+    /// The unique VIDEO anchor for one `(model, backend lane, tier, transformer variant, decoder)`
+    /// coordinate where the pipeline axes are OPTIONAL on both sides (sc-22736): an LTX-2.5
+    /// request carries both and resolves exactly as [`Self::anchor_for`] does; a request on a
+    /// video route that has no such axes at all (Wan 2.2, SCAIL-2, LTX-2.3) resolves the axis-free
+    /// multi-frame anchor of its cell. The match is on `Option` EQUALITY, never on a wildcard: an
+    /// axis-free anchor still answers no variant-keyed lookup, and an axis-keyed anchor answers no
+    /// axis-free one. A single-frame axis-free row is an IMAGE anchor and is not a video anchor
+    /// under any spelling — the mirror of [`Self::image_anchor_for`]'s refusal to hand a video
+    /// anchor to an image request.
+    pub fn video_anchor_for(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
+    ) -> Option<&MemoryAnchor> {
+        self.anchors.iter().find(|anchor| {
+            anchor.model_id == model_id
+                && anchor.backend == backend
+                && anchor.tier == tier
+                && anchor.transformer_variant == transformer_variant
+                && anchor.decoder == decoder
+                && anchor.geometry.frames > 1
         })
     }
 
@@ -1843,23 +2854,24 @@ impl MemoryAnchor {
         if request.width == 0 || request.height == 0 || request.frames == 0 {
             return None;
         }
+        // Every per-token coefficient in this law is an LTX-2.5 pipeline fact keyed on the
+        // transformer variant and decoder. An anchor that states no such axes has no fitted law
+        // (sc-22736): a video route without those axes (Wan 2.2, SCAIL-2, LTX-2.3) is priced ONLY at
+        // and below its own measured point, and an image anchor (single frame, sc-22509) is not a
+        // video anchor at all. Consulted BEFORE the underived flag below, because the ONLY reason
+        // a video anchor is stamped underived is this very absence of axes — and the measured-point
+        // bound is exactly the "validates its measured point and prices nothing beyond it" the
+        // reason states. It fits nothing, so, like the image law, it does not consult the flag.
+        if self.transformer_variant.is_none() || self.decoder.is_none() {
+            return self.measured_point_bound_raw(request);
+        }
         // An anchor marked underived validates its measured point and prices nothing (epic 22505
         // feature-end fix round): every lane law carries this refusal so the store's statement and
         // the runtime behaviour cannot disagree.
         if self.underived_reason.is_some() {
             return None;
         }
-        // Every coefficient in this law is an LTX-2.5 pipeline fact keyed on the transformer
-        // variant and decoder. An anchor from a lane that has no such axes (the candle image
-        // anchors, sc-22509) is refused here rather than silently priced by video coefficients.
-        if self.transformer_variant.is_none() || self.decoder.is_none() {
-            return None;
-        }
-        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
-        if (!request.deferred_materialization && anchor_deferred)
-            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
-            || (!request.decode_tiled && self.measured_regime.decode_tiled)
-        {
+        if !self.measured_regime_prices(request) {
             return None;
         }
         let anchor_tokens = latent_tokens(
@@ -1910,6 +2922,73 @@ impl MemoryAnchor {
             conditioning,
             denoise,
             decode,
+        })
+    }
+
+    /// REGIME GUARD (anchor vs request), shared by the fitted video law and the measured-point
+    /// bound: a phase priced from the anchor's own measured intercept requires the anchor to have
+    /// run that phase UNBOUNDED. A deferred-materialization anchor carries no transformer
+    /// residency in its conditioning peak; a windowed anchor carries one block instead of the
+    /// whole transformer in its denoise peak; a tiled anchor carries a tile workspace instead of
+    /// the full decode working set. Reusing any of those for an unbounded request would
+    /// under-estimate by the whole omitted residency.
+    fn measured_regime_prices(&self, request: AnchorDeriveRequest) -> bool {
+        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
+        !((!request.deferred_materialization && anchor_deferred)
+            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
+            || (!request.decode_tiled && self.measured_regime.decode_tiled))
+    }
+
+    /// The MEASURED-POINT BOUND for a video anchor that states no pipeline axes (sc-22736): Wan 2.2,
+    /// SCAIL-2 and LTX-2.3 anchors, whose routes have no `(transformer variant, decoder)` and for
+    /// which no per-token coefficient has been measured.
+    ///
+    /// Such an anchor prices nothing BEYOND its measured point — the law above has no slope for it
+    /// and none is invented here — but it does bound every request the measured render DOMINATES:
+    /// a request at no more output pixels and no more frames than the anchor, under a regime the
+    /// anchor's measured intercepts price ([`Self::measured_regime_prices`]), cannot exceed the
+    /// anchor's own per-phase peaks, so each phase is estimated AT the anchor's measured intercept
+    /// (widened by the shared allocator margin by the caller, like every anchored term). Pixels
+    /// rather than latent tokens because the token lattice is a per-model fact this law does not
+    /// know, and pixels are lattice-free and aspect-symmetric — a portrait bucket is bounded by
+    /// its landscape twin; frames per axis because the temporal lattice is likewise unknown.
+    ///
+    /// A request bounding a phase the anchor measured unbounded (a tiled decode against an untiled
+    /// anchor, a deferred request against an eager one) is still priced at the unbounded measured
+    /// intercept: bounding only shrinks that phase's working set, so the measured peak remains an
+    /// upper bound — no architecture constant is substituted, because every such constant in this
+    /// module is an LTX-2.5 fact.
+    ///
+    /// `None` for a single-frame anchor (an image anchor is not a video anchor), a degenerate
+    /// geometry, a request the anchor does not dominate, or a regime it cannot price — each of
+    /// which leaves the caller on its analytic floor.
+    fn measured_point_bound_raw(
+        &self,
+        request: AnchorDeriveRequest,
+    ) -> Option<RawVideoPhaseEstimates> {
+        if self.geometry.frames <= 1
+            || request.width == 0
+            || request.height == 0
+            || request.frames == 0
+        {
+            return None;
+        }
+        let request_pixels = u64::from(request.width) * u64::from(request.height);
+        let anchor_pixels = u64::from(self.geometry.width) * u64::from(self.geometry.height);
+        if request_pixels > anchor_pixels || request.frames > self.geometry.frames {
+            return None;
+        }
+        if !self.measured_regime_prices(request) {
+            return None;
+        }
+        let phase = |bytes: u64| RawPhaseEstimate {
+            bytes: i128::from(bytes),
+            anchored: true,
+        };
+        Some(RawVideoPhaseEstimates {
+            conditioning: phase(self.phase_active_peak_bytes.conditioning),
+            denoise: phase(self.phase_active_peak_bytes.denoise),
+            decode: phase(self.phase_active_peak_bytes.decode),
         })
     }
 
@@ -2181,6 +3260,14 @@ impl MemoryAnchor {
     /// parameters and no facts the law prices every composition containing the anchor's at the
     /// shallow staged working set, which upper-bounds the deeper rungs. An anchor carrying
     /// [`MemoryAnchor::underived_reason`] is refused, as before.
+    ///
+    /// sc-22734 adds the one cell shape that asymmetry does not describe: a provider whose contract
+    /// classifies `staged_residency` STRUCTURALLY NOT APPLICABLE has no staged composition at all,
+    /// so its anchor is resident and prices a resident candidate. See
+    /// [`MemoryAnchor::staged_residency_structurally_not_applicable`] for why that is sound rather
+    /// than the refused resident case. The two shapes are mutually exclusive and a row that mixes
+    /// them (staged anchor on an exempt cell, resident anchor on a non-exempt one) is still
+    /// refused, so no packaged row's disposition moves.
     pub fn derive_image_phase_peaks(
         &self,
         request: AnchorImageDeriveRequest,
@@ -2189,16 +3276,42 @@ impl MemoryAnchor {
         if self.underived_reason.is_some() || self.backend != AnchorBackend::Candle {
             return None;
         }
-        if !self.measured_regime.staged
-            || self.measured_regime.decode_tiled
+        if self.measured_regime.decode_tiled
             || self.measured_regime.attention_chunked
             || self.measured_regime.transformer_windowed
-            || !request.staged_residency
         {
             return None;
         }
+        // Two admissible shapes, and a cell is only ever one of them
+        // ([`MemoryAnchor::staged_residency_structurally_not_applicable`]).
+        let regime = match (
+            self.measured_regime.staged,
+            self.staged_residency_structurally_not_applicable,
+        ) {
+            // The ordinary cell: a staged anchor prices a staged candidate.
+            (true, false) => {
+                if !request.staged_residency {
+                    return None;
+                }
+                RequestRegime::staged()
+            }
+            // sc-22734: a cell whose engine has NO staged composition. Its anchor is the resident
+            // render — the only one that exists — and it prices a resident candidate. There is no
+            // co-resident encoder above it to go unpriced, which is the whole reason the staged
+            // asymmetry exists, so the law prices it the way the MLX lane prices its residents.
+            (false, true) => {
+                if request.staged_residency {
+                    return None;
+                }
+                RequestRegime::resident()
+            }
+            // A staged anchor on a cell that declares staging impossible, or a resident anchor on a
+            // cell that has a staged composition it should have been captured in: both are records
+            // the law cannot honestly price, so both stay refused.
+            _ => return None,
+        };
         self.derive_phase_peaks(
-            &ImageDeriveRequest::new(request.width, request.height, RequestRegime::staged()),
+            &ImageDeriveRequest::new(request.width, request.height, regime),
             components,
             ArchitectureFacts::default(),
         )
@@ -2311,6 +3424,124 @@ fn positive(bytes: i128) -> Option<u64> {
     (bytes > 0).then(|| u64::try_from(bytes).ok()).flatten()
 }
 
+// ---------------------------------------------------------------------------------------------
+// MLX admission policy shared by the worker's fit gate and the memory adapter (sc-22738)
+// ---------------------------------------------------------------------------------------------
+//
+// The memory adapter's ordinary LTX-2.3 capture admits through the SAME projection the worker's
+// gate would build for the cell (epic 22723 sc-22738, review round 2). The three inputs that
+// projection needs beyond the provider contract — the fixed unified-memory reserve, the generic
+// activation allowance and the floor's weights arithmetic — were private to
+// `crates/sceneworks-worker/src/{fit_gate,mlx_fit_gate}.rs`, and the adapter's first cut restated
+// two of them as fresh literals and the third as a hand transcription. They are declared ONCE here;
+// the worker reads its constants from these and both crates call [`floor_weights_bytes`]. A
+// change to any of them therefore moves the worker's admission and the adapter's projection
+// together, or not at all.
+
+/// Bytes per binary gigabyte (GiB) — `hw.memsize / 1024³`, the unit every MLX budget figure is
+/// stated in (`gpu::total_unified_memory_gb`, the epic's measured on-disk tables).
+pub const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+
+/// The MLX lane's fixed unified-memory reserve: `mlx_fit_gate::live_request_budget` presents it as
+/// `MemoryBudget::reserved_headroom_bytes` for every non-Mage engine, and
+/// `MemoryBudget::effective_bytes` subtracts it before the shared predicate compares. Exact
+/// verified cells do not use this number for their foreign demand (that is derived from captured
+/// MLX/wired limits); it is Decision 2's promise that no-record/out-of-envelope/stale requests
+/// take the legacy reserve rather than silently adopting a new policy.
+pub const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
+
+/// The MLX lane's generic flat activation allowance (`HEADROOM_GB`, sc-10863): the max
+/// common-case measured 1024² transient (14.04 GiB) plus a ~4 GiB OS/app reserve. The video
+/// lane's estimate floor is `floor weights + this` (`video_admission::floor_phase_peaks`), and a
+/// provider decode profile only ever RAISES that floor (`profiled_floor_phase_peaks`).
+pub const MLX_GENERIC_HEADROOM_GB: f64 = 18.0;
+
+/// GiB to bytes, rounded to the nearest byte and clamped into `u64` — the worker's own conversion
+/// (`mlx_fit_gate::gib_to_bytes`), so an allowance stated in GiB means the same byte count on both
+/// sides of the seam.
+pub fn gib_to_bytes(gib: f64) -> u64 {
+    (gib * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+/// The contract facts the floor's weights term reads, lifted off `gen_core::MemoryProviderContract`
+/// by each caller (this crate does not see gen-core's types). Every field is a declaration the
+/// provider makes about itself; nothing here is a tuned coefficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsFacts {
+    /// `asset_facts.conditioning_bytes` — the conditioning encoder stack.
+    pub conditioning_bytes: u64,
+    /// `asset_facts.base_bytes` — every resident weight of a plain render.
+    pub base_bytes: u64,
+    /// `asset_facts.transformer_bytes` — the load-exact transformer, evictable sub-stack included.
+    pub transformer_bytes: u64,
+    /// Bytes the provider declares it drops from INSIDE `transformer_bytes` before the declaring
+    /// phase reaches steady state: `transformer_bytes - steady_state_transformer_bytes()`. Zero for
+    /// every provider that has not adopted the sub-stack vocabulary.
+    pub intra_transformer_evicted_bytes: u64,
+    /// The sum of every auxiliary resident component (control branches, adapter stacks, …) the
+    /// composition does NOT bound: `resident_components()` filtered to `kind.is_auxiliary()` and
+    /// to `bounded_by` either absent or naming a rung the composition leaves disengaged.
+    pub auxiliary_resident_bytes: u64,
+}
+
+/// Which reductions the engaged composition applies to [`FloorWeightsFacts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsComposition {
+    /// `StagedResidency` engaged.
+    pub staged: bool,
+    /// `BoundedTransformerResidency` engaged.
+    pub bounded_transformer: bool,
+    /// What rung 4 keeps resident of the transformer once it has removed it: 0 on the video lane,
+    /// the law's window share on the image lane. Ignored unless `bounded_transformer`.
+    pub resident_window_bytes: u64,
+}
+
+/// The floor's per-rung WEIGHTS term (sc-18096), derived only from the provider's own
+/// declarations:
+///
+/// * `staged` ⇒ the co-residency drop the rung exists for: the resident working set is the larger
+///   of the conditioning stack and everything else (the `staged_weights_gb` split the load-time
+///   gate has always used).
+/// * `bounded_transformer` ⇒ the transformer's declared bytes leave the resident floor and the
+///   rung's RESIDENT WINDOW comes back in, clamped at the load-exact transformer so no lane can
+///   state more than it loads.
+/// * The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
+///   at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
+///   removes that same `transformer_bytes`, sub-stack included. Applying both would leave
+///   `max(0, decoder − evicted)` where the answer is `decoder`.
+/// * A declared intra-transformer eviction leaves the floor only on the STAGED branch, and only
+///   down to the load-exact transformer (sc-19721): the drop lowers the steady state, not the
+///   peak, so it may only cancel against bytes provably NOT co-resident with the precompute instant.
+/// * Rungs 2 and 3 bound TRANSIENTS, not weights, and take no reduction here.
+/// * Unbounded auxiliary components stay resident.
+pub fn floor_weights_bytes(facts: FloorWeightsFacts, composition: FloorWeightsComposition) -> u64 {
+    let conditioning = facts.conditioning_bytes;
+    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
+    // evictable sub-stack is still materialized.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let heavy = if composition.staged && !composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.intra_transformer_evicted_bytes)
+            .max(facts.transformer_bytes)
+    } else if composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_add(
+                composition
+                    .resident_window_bytes
+                    .min(facts.transformer_bytes),
+            )
+    } else {
+        heavy_load_exact
+    };
+    let base = if composition.staged {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    base.saturating_add(facts.auxiliary_resident_bytes)
+}
+
 /// The workload axes of [`MemoryAnchor::derive_mlx_image_phase_peaks`]: geometry only. The lane
 /// entry point prices the resident composition, which upper-bounds every composition the lane can
 /// execute.
@@ -2377,16 +3608,23 @@ impl MemoryAnchorStore {
     /// bytes, which is a priced crossing that happens to cost nothing and is taken normally: the
     /// distilled variant materializes no component its dev sibling lacks, and refusing that
     /// crossing would discard a derivation the evidence fully supports.
+    ///
+    /// The pipeline axes are OPTIONAL (sc-22736): a request on a route without them resolves its
+    /// axis-free anchor through [`Self::video_anchor_for`] and is priced by that anchor's
+    /// measured-point bound; the sibling+delta fall-through below is LTX-2.5's — it crosses
+    /// `(variant, decoder)` axes — so an axis-free request that has no exact anchor takes no
+    /// sibling and keeps its floor.
     pub fn derive_video_phase_peaks_for_cell(
         &self,
         model_id: &str,
         backend: AnchorBackend,
         tier: &str,
-        transformer_variant: Ltx25TransformerVariant,
-        decoder: Ltx25Decoder,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
         request: AnchorDeriveRequest,
     ) -> Option<AnchorCellDerivation<'_>> {
-        if let Some(anchor) = self.anchor_for(model_id, backend, tier, transformer_variant, decoder)
+        if let Some(anchor) =
+            self.video_anchor_for(model_id, backend, tier, transformer_variant, decoder)
         {
             return Some(AnchorCellDerivation {
                 phases: anchor.derive_video_phase_peaks(request)?,
@@ -2394,6 +3632,9 @@ impl MemoryAnchorStore {
                 delta_bytes: 0,
             });
         }
+        let (Some(transformer_variant), Some(decoder)) = (transformer_variant, decoder) else {
+            return None;
+        };
         let mut candidates: Vec<(u32, &MemoryAnchor, u64)> = Vec::new();
         for anchor in self.anchors.iter().filter(|anchor| {
             anchor.model_id == model_id
@@ -2496,9 +3737,16 @@ mod tests {
             assert!(paths.insert(*path), "{path} is compiled in twice");
             let parsed: serde_json::Value =
                 serde_json::from_str(raw).unwrap_or_else(|error| panic!("{path}: {error}"));
+            // sc-22738: a corpus carries retained RECORDS, measured lower BOUNDS, or both. A
+            // footprint hard stop produces a bundle with no record at all — the render never got
+            // far enough to decompose — and it is retained evidence all the same.
+            let records = parsed["records"].as_array().is_some_and(|r| !r.is_empty());
+            let bounds = parsed["exceededBounds"]
+                .as_array()
+                .is_some_and(|r| !r.is_empty());
             assert!(
-                parsed["records"].as_array().is_some_and(|r| !r.is_empty()),
-                "{path} carries no retained records, so it is not a corpus"
+                records || bounds,
+                "{path} carries neither retained records nor measured bounds, so it is not a corpus"
             );
         }
         let sorted: Vec<&str> = paths.iter().copied().collect();
@@ -2509,12 +3757,20 @@ mod tests {
         assert_eq!(sorted, declared, "the compiled-in list must stay sorted");
 
         let store = packaged_memory_anchors().expect("the packaged anchor store must load");
-        for anchor in &store.anchors {
+        for (id, cited) in store
+            .anchors
+            .iter()
+            .map(|anchor| (&anchor.id, &anchor.source.path))
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter()
+                    .map(|bound| (&bound.id, &bound.source.path)),
+            )
+        {
             assert!(
-                paths.contains(anchor.source.path.as_str()),
-                "{} cites {}, which is not compiled in",
-                anchor.id,
-                anchor.source.path
+                paths.contains(cited.as_str()),
+                "{id} cites {cited}, which is not compiled in",
             );
         }
     }
@@ -2623,25 +3879,51 @@ mod tests {
     // carries any.
     // -------------------------------------------------------------------------------------
 
-    #[test]
-    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
-        let corpus = retained_corpus();
-        let measured: std::collections::BTreeSet<(String, &str, &str)> = corpus
+    /// Every `(tier, transformer variant, decoder)` cell that ANY packaged corpus measures for
+    /// LTX-2.5 on MLX as a completed run — the sc-18791 seed corpus and, since the sc-22738
+    /// campaign, the per-cell corpora under `docs/calibration/sc-22738/`. Derived from the
+    /// compiled-in list rather than pinned, so a campaign that lands a new pipeline cell (the
+    /// rerun's dev/conv bf16 and q4) extends the expectation instead of reddening it.
+    fn measured_ltx25_mlx_cells() -> std::collections::BTreeSet<(String, String, String)> {
+        PACKAGED_MEMORY_ANCHOR_SOURCES
             .iter()
+            .flat_map(|(_, raw)| {
+                let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
+                source["records"]
+                    .as_array()
+                    .map(|records| records.to_vec())
+                    .unwrap_or_default()
+            })
+            .filter(|record| {
+                record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                    && record["backend"].as_str() == Some("mlx")
+                    && record["status"].as_str() == Some("runtime_complete")
+            })
             .map(|record| {
                 (
-                    record.tier.clone(),
-                    transformer_variant_key(record.transformer_variant),
-                    decoder_key(record.decoder),
+                    record["target"]["tier"].as_str().expect("tier").to_owned(),
+                    record["target"]["transformerVariant"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
+                    record["target"]["decoder"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
+        let measured = measured_ltx25_mlx_cells();
         // Shape, not a frozen count: the corpus spans more than one variant and more than one
         // decoder, so this test cannot silently degenerate into a single-cell assertion.
         assert!(
             measured
                 .iter()
-                .map(|(_, variant, _)| *variant)
+                .map(|(_, variant, _)| variant.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
@@ -2650,7 +3932,7 @@ mod tests {
         assert!(
             measured
                 .iter()
-                .map(|(_, _, decoder)| *decoder)
+                .map(|(_, _, decoder)| decoder.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
@@ -2665,8 +3947,8 @@ mod tests {
                     anchor.model_id == "ltx_2_5"
                         && anchor.backend == AnchorBackend::Mlx
                         && anchor.tier == *tier
-                        && variant_key_opt(anchor.transformer_variant) == *variant_key
-                        && decoder_key_opt(anchor.decoder) == *decoder_key_str
+                        && variant_key_opt(anchor.transformer_variant) == variant_key.as_str()
+                        && decoder_key_opt(anchor.decoder) == decoder_key_str.as_str()
                 })
                 .count();
             assert_eq!(
@@ -2686,13 +3968,32 @@ mod tests {
             "the store must not carry an anchor for a pipeline cell the corpus never measured"
         );
         // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
-        // asks that the LTX-2.5 rows still come from the LTX-2.5 corpus and nothing more.
+        // asks that every LTX-2.5 row still comes from a packaged corpus that carries a completed
+        // LTX-2.5 MLX record — the seed corpus or a sc-22738 campaign corpus — and nothing more.
         for anchor in store()
             .anchors
             .iter()
             .filter(|anchor| anchor.model_id == "ltx_2_5")
         {
-            assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+            let cites_ltx25_corpus = PACKAGED_MEMORY_ANCHOR_SOURCES
+                .iter()
+                .find(|(path, _)| *path == anchor.source.path)
+                .map(|(_, raw)| {
+                    let source: serde_json::Value =
+                        serde_json::from_str(raw).expect("corpus parses");
+                    source["records"].as_array().is_some_and(|records| {
+                        records.iter().any(|record| {
+                            record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                                && record["backend"].as_str() == Some("mlx")
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            assert!(
+                cites_ltx25_corpus,
+                "{}: an LTX-2.5 anchor must cite a packaged corpus carrying LTX-2.5 MLX records",
+                anchor.id
+            );
         }
     }
 
@@ -2941,13 +4242,23 @@ mod tests {
                 Ltx25Decoder::Conv
             )
             .is_none());
-        // Measured at q4: dev/diffvae only.
+        // Measured at q4: dev/diffvae (seed corpus) and, since the sc-22738 rerun, dev/conv.
+        // Never measured at q4: either distilled combo.
         assert!(store()
             .anchor_for(
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q4",
                 Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::Conv
+            )
+            .is_some());
+        assert!(store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q4",
+                Ltx25TransformerVariant::Distilled,
                 Ltx25Decoder::Conv
             )
             .is_none());
@@ -3120,6 +4431,33 @@ mod tests {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
             doctored["anchors"][ltx][field] = value;
+            // The doctored identity may now name a cell another packaged anchor really occupies
+            // (the sc-22738 rerun anchored dev/conv at bf16, so relabelling the seed dev/diffvae
+            // row's decoder collides with it). Drop that other row so the ONLY defect the loader
+            // can see is the doctored row disagreeing with its own record — the duplicate-cell
+            // guard is a different invariant with its own test.
+            let identity = |anchor: &serde_json::Value| {
+                [
+                    "modelId",
+                    "backend",
+                    "tier",
+                    "transformerVariant",
+                    "decoder",
+                    "overlay",
+                    "referenceCount",
+                ]
+                .map(|key| anchor[key].clone())
+            };
+            let target = identity(&doctored["anchors"][ltx]);
+            let anchors = doctored["anchors"].as_array().expect("anchors").clone();
+            doctored["anchors"] = serde_json::Value::Array(
+                anchors
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, anchor)| *index == ltx || identity(anchor) != target)
+                    .map(|(_, anchor)| anchor)
+                    .collect(),
+            );
             let error = load_memory_anchors(&doctored.to_string())
                 .err()
                 .unwrap_or_else(|| panic!("{field} must bind to the source record"));
@@ -3245,9 +4583,43 @@ mod tests {
     // is the COMPARISON: which anchors a rotated key stales, and which it leaves alone.
     // -------------------------------------------------------------------------------------
 
+    /// The tooling's currency question, restated locally for the two config-consistency tests
+    /// below. Deliberately NOT a method on `MemoryAnchor`: the runtime carries no such function
+    /// (sc-22738), and `scripts/anchor-loader-closure.mjs` owns the real one.
+    fn anchor_is_current(anchor: &MemoryAnchor, closures: &AnchorLoaderClosures) -> bool {
+        closures.digest_for(&anchor.model_id, anchor.backend)
+            == Some(anchor.source.loader_closure_digest.as_str())
+    }
+
     fn packaged_closures() -> AnchorLoaderClosures {
         load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
             .expect("the packaged loader closures parse")
+    }
+
+    /// sc-22724: a catalog alias declares the engine id it resolves to, and the strict parse
+    /// keeps the field (`deny_unknown_fields` would otherwise demote every anchor to the floor
+    /// the moment the derivation wrote it). A model that is its own engine carries none.
+    #[test]
+    fn a_catalog_alias_declaration_carries_its_engine_id() {
+        let closures = packaged_closures();
+        let alias = closures
+            .models
+            .get("z_image_edit:mlx")
+            .expect("z_image_edit:mlx is declared");
+        assert_eq!(alias.engine_id.as_deref(), Some("z_image_turbo"));
+        let own = closures
+            .models
+            .get("z_image_turbo:mlx")
+            .expect("z_image_turbo:mlx is declared");
+        assert_eq!(own.engine_id, None);
+        // The field round-trips through serde exactly as the derivation wrote it.
+        let raw: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        assert_eq!(
+            raw["models"]["z_image_edit:mlx"]["engineId"],
+            "z_image_turbo"
+        );
+        assert!(raw["models"]["z_image_turbo:mlx"].get("engineId").is_none());
     }
 
     #[test]
@@ -3270,12 +4642,13 @@ mod tests {
     /// CURRENCY IS REPORTED, NEVER ASSERTED — and that distinction is the point of E8.
     ///
     /// A packaged anchor whose model's loader source has moved since the measurement is STALE BY
-    /// DESIGN: `is_current` returns false, admission demotes that cell to the conservative floor,
-    /// and the render still runs. Asserting currency here would turn the first pin bump that
-    /// genuinely touches a loader into a red `cargo test` on a change with nothing wrong in it —
-    /// which is the pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level
-    /// down. `bump-inference` regenerates the closures with `--write` automatically, so that red
-    /// would land on the bump itself.
+    /// DESIGN, and since sc-22738 that is a fact only the probe tooling acts on: the runtime binds
+    /// and derives from it exactly as from a current one, and the render still runs. Asserting
+    /// currency here would turn the first pin bump that genuinely touches a loader into a red
+    /// `cargo test` on a change with nothing wrong in it — which is the
+    /// pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level down.
+    /// `bump-inference` regenerates the closures with `--write` automatically, so that red would
+    /// land on the bump itself.
     ///
     /// What IS asserted is the loud half above: an anchor for a model nobody DECLARED is a
     /// mistake in the store, not a designed state, and it fails.
@@ -3286,13 +4659,14 @@ mod tests {
         let stale: Vec<&str> = store
             .anchors
             .iter()
-            .filter(|anchor| !anchor.is_current(&closures))
+            .filter(|anchor| !anchor_is_current(anchor, &closures))
             .map(|anchor| anchor.id.as_str())
             .collect();
         if !stale.is_empty() {
             eprintln!(
                 "note: {} of {} packaged anchors are not current against their model's declared \
-                 loader closure and will demote to the conservative floor: {}",
+                 loader closure (a re-capture signal for the tooling; the runtime binds them \
+                 regardless): {}",
                 stale.len(),
                 store.anchors.len(),
                 stale.join(", ")
@@ -3300,8 +4674,11 @@ mod tests {
         }
     }
 
-    /// An attestation supplies the loader digest at its reviewed revision. A later pin keeps
-    /// that evidence current while the loader is unchanged, just as measured evidence does.
+    /// sc-22667: an attested anchor carries the WHOLE justification, and the attestation binds to
+    /// the pin it names — a packaged attestation whose `attestedRevision` is not the pin the
+    /// closures were derived at is an attestation of some other pin, and the anchor it keys must
+    /// not read current on the strength of it. Read off the packaged closure file's own
+    /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
     #[test]
     fn attested_anchor_currency_follows_loader_changes_not_unrelated_pin_changes() {
         let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
@@ -3316,8 +4693,8 @@ mod tests {
         );
         for anchor in &attested {
             let attestation = anchor.source.currency_attestation.as_ref().unwrap();
-            // Construct the reviewed starting point without requiring today's packaged evidence
-            // to be current. A stale packaged anchor is allowed to use the conservative floor.
+            // Exercise the tooling's source-currency comparison independently of runtime
+            // admission, which preserves measured anchors despite source drift.
             let mut closures = packaged_closures();
             let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
             closures
@@ -3327,7 +4704,7 @@ mod tests {
                 .digest = anchor.source.loader_closure_digest.clone();
             closures.inference_revision = attestation.attested_revision.clone();
             assert!(
-                anchor.is_current(&closures),
+                anchor_is_current(anchor, &closures),
                 "{}: reviewed loader",
                 anchor.id
             );
@@ -3338,7 +4715,7 @@ mod tests {
                 "0".repeat(40)
             };
             assert!(
-                anchor.is_current(&closures),
+                anchor_is_current(anchor, &closures),
                 "{}: unchanged loader at a later pin",
                 anchor.id
             );
@@ -3350,7 +4727,7 @@ mod tests {
                     "0".repeat(64)
                 };
             assert!(
-                !anchor.is_current(&closures),
+                !anchor_is_current(anchor, &closures),
                 "{}: changed loader",
                 anchor.id
             );
@@ -3364,6 +4741,108 @@ mod tests {
                 attestation.class
             );
         }
+    }
+
+    #[test]
+    fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        let pin: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        let pin = pin["inferenceRevision"]
+            .as_str()
+            .expect("the closure file names its pin");
+        // sc-22738: a measured lower bound is attested from the same file and stamped by the same
+        // walk, so it is held to the same contradiction check — an attested bound that reads stale
+        // would be one the probe tooling re-measures on the strength of a justification saying it
+        // need not.
+        let attested: Vec<(&str, AnchorBackend, &AnchorSource)> = store
+            .anchors
+            .iter()
+            .map(|anchor| (anchor.id.as_str(), anchor.backend, &anchor.source))
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter()
+                    .map(|bound| (bound.id.as_str(), bound.backend, &bound.source)),
+            )
+            .filter(|(_, _, source)| source.currency_attestation.is_some())
+            .collect();
+        for (id, backend, source) in &attested {
+            let attestation = source.currency_attestation.as_ref().unwrap();
+            let model_id = id
+                .strip_prefix("exceeded:")
+                .unwrap_or(id)
+                .split(':')
+                .next()
+                .unwrap();
+            let is_current = closures.digest_for(model_id, *backend)
+                == Some(source.loader_closure_digest.as_str());
+            // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
+            // An attestation of an older revision would leave the row stale AND claim a
+            // justification — the contradiction this test exists to catch.
+            assert_eq!(
+                is_current,
+                attestation.attested_revision == pin,
+                "{id}: attested at {} against pin {pin} but is_current={is_current}",
+                attestation.attested_revision,
+            );
+            assert!(
+                matches!(
+                    attestation.class.as_str(),
+                    "accounting-only" | "witnessed-unchanged"
+                ),
+                "{id}: attestation class {:?} is not one the doctrine names",
+                attestation.class
+            );
+        }
+    }
+
+    /// sc-22738: the attestation shape is validated on a BOUND exactly as on an anchor — a bound
+    /// is the row kind where a silently-accepted malformed justification would keep a refusal
+    /// current on nothing.
+    #[test]
+    fn a_malformed_currency_attestation_on_a_bound_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let bounds = store["exceededBounds"]
+            .as_array()
+            .expect("the packaged store carries exceeded bounds");
+        assert!(!bounds.is_empty());
+        let attested = bounds
+            .iter()
+            .position(|bound| bound["source"]["currencyAttestation"].is_object());
+        let index = attested.unwrap_or(0);
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            let source = &mut doctored["exceededBounds"][index]["source"];
+            if attested.is_none() {
+                source["currencyAttestation"] = serde_json::json!({
+                    "measuredRevision": "1".repeat(40),
+                    "attestedRevision": "2".repeat(40),
+                    "attestedAt": "2026-09-07",
+                    "story": "sc-22738",
+                    "class": "accounting-only",
+                    "why": "test",
+                    "witness": "test",
+                });
+            }
+            patch(&mut source["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("exceeded bound"), "{error}");
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
+        assert!(
+            error.contains("attests its own measurement revision"),
+            "{error}"
+        );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
     }
 
     /// The attestation's shape is validated at load like the digest's: a revision that is not a
@@ -3399,137 +4878,6 @@ mod tests {
         assert!(error.contains("unknown field"), "{error}");
         // Well-formed as shipped.
         assert!(load_memory_anchors(&store.to_string()).is_ok());
-    }
-
-    /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
-    /// model's anchors — a sibling model declared beside it keeps its own.
-    ///
-    /// Both sides of this are REAL packaged anchors, not fabricated ones. `ltx_2_3` and `ltx_2_5`
-    /// share the crate `mlx-gen-ltx`, which is precisely the pair the crate-level provider digest
-    /// could not separate (E9's first named failure): under that unit a 2.3-only edit rotated 2.5.
-    #[test]
-    fn a_rotated_loader_digest_stales_exactly_that_models_anchors() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        // A KNOWN-CURRENT BASELINE BY CONSTRUCTION: every declared digest is set to what that
-        // model's own anchors recorded. This is a comparison test, and it must not silently become
-        // a currency gate — whether the real pinned source still agrees is a separate question
-        // whose answer is allowed to be "no" (a stale anchor demotes to the floor, by design).
-        let mut closures = packaged_closures();
-        for anchor in &store.anchors {
-            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-            let declared = closures
-                .models
-                .get_mut(&key)
-                .unwrap_or_else(|| panic!("{key} is declared"));
-            declared
-                .digest
-                .clone_from(&anchor.source.loader_closure_digest);
-        }
-        let closures = closures;
-        let subject = anchor_loader_closure_key("ltx_2_5", AnchorBackend::Mlx);
-        let sibling = anchor_loader_closure_key("ltx_2_3", AnchorBackend::Mlx);
-        assert_ne!(subject, sibling);
-
-        let anchors_for = |key: &str| -> Vec<&MemoryAnchor> {
-            store
-                .anchors
-                .iter()
-                .filter(|anchor| anchor_loader_closure_key(&anchor.model_id, anchor.backend) == key)
-                .collect()
-        };
-        let subject_anchors = anchors_for(&subject);
-        let sibling_anchors = anchors_for(&sibling);
-        assert!(
-            !subject_anchors.is_empty() && !sibling_anchors.is_empty(),
-            "both models must carry packaged anchors for this comparison to mean anything"
-        );
-
-        // Rotate ONE model's key at a time and read both populations back.
-        let rotated = |key: &str, to: &str| {
-            let mut moved = closures.clone();
-            moved
-                .models
-                .get_mut(key)
-                .unwrap_or_else(|| panic!("{key} is declared"))
-                .digest = to.repeat(64);
-            moved
-        };
-
-        // The sibling's loader moved: every ltx_2_5 anchor stays authoritative, every ltx_2_3
-        // anchor stales.
-        let moved_sibling = rotated(&sibling, "c");
-        for anchor in &subject_anchors {
-            assert!(
-                anchor.is_current(&moved_sibling),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                !anchor.is_current(&moved_sibling),
-                "anchor {} must stale when ITS OWN loader moves",
-                anchor.id
-            );
-        }
-
-        // And the mirror image.
-        let moved_subject = rotated(&subject, "d");
-        for anchor in &subject_anchors {
-            assert!(
-                !anchor.is_current(&moved_subject),
-                "anchor {} must stale when its OWN loader moves",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                anchor.is_current(&moved_subject),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
-        }
-    }
-
-    /// The same anchor on the other backend lane is a different loader and a different key.
-    #[test]
-    fn currency_is_keyed_per_backend_lane_and_fails_closed_when_undeclared() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let closures = packaged_closures();
-        let mut candle = store.anchors[0].clone();
-        candle.backend = AnchorBackend::Candle;
-        assert!(
-            !candle.is_current(&closures),
-            "an undeclared (model, lane) cannot be shown current, so it is not"
-        );
-    }
-
-    /// The campaign fingerprint is provenance, not currency: a re-fingerprinted campaign over the
-    /// same loader must not demote the anchor (E9).
-    #[test]
-    fn the_calibration_fingerprint_is_not_a_currency_term() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let anchor = &store.anchors[0];
-        // Current BY CONSTRUCTION, for the reason spelled out in
-        // `a_rotated_loader_digest_stales_exactly_that_models_anchors`: the claim here is about the
-        // FINGERPRINT, and reading it off the live pinned source would quietly make it a currency
-        // gate that reds on any pin bump the loader source actually moved through.
-        let mut closures = packaged_closures();
-        let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-        closures
-            .models
-            .get_mut(&key)
-            .unwrap_or_else(|| panic!("{key} is declared"))
-            .digest
-            .clone_from(&anchor.source.loader_closure_digest);
-
-        let mut refingerprinted = anchor.clone();
-        assert!(refingerprinted.is_current(&closures));
-        refingerprinted.source.calibration_fingerprint = "sc-99999-some-later-campaign".to_owned();
-        assert!(
-            refingerprinted.is_current(&closures),
-            "a later campaign fingerprint must not move currency"
-        );
     }
 
     #[test]
@@ -4065,6 +5413,9 @@ mod tests {
             overall_allocator_envelope_bytes: measured["overallDevicePeakDelta"],
             underived_reason: None,
             component_bytes: None,
+            // The retained corpus this fixture replays predates the structural-exemption fact and
+            // carries no structurally-exempt cell, so every replayed row keeps the staged-only law.
+            staged_residency_structurally_not_applicable: false,
         }
     }
 
@@ -4381,10 +5732,23 @@ mod tests {
     /// residency is request-scoped even under eager materialization, and the window opened on a
     /// cold first request. `z_image_turbo` q4 was re-captured with the window opened above its
     /// materialized resident set and is now IN domain
-    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the five other MLX image
-    /// anchors keep the cold-request shape until their own re-capture and stay in this census.
+    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the other MLX image
+    /// anchors of that pre-campaign bundle keep the cold-request shape until their own re-capture
+    /// and stay in this census.
+    ///
+    /// CENSUS SCOPE (sc-22738): the cold-request rows are exactly the MLX image anchors still
+    /// cited from the pre-campaign bundle `docs/generated/memory-calibration-evidence.json`. The
+    /// sc-22738 campaign re-captured the MLX image catalog under the fixed adapter into
+    /// `docs/calibration/sc-22738/`, and those rows are NOT this census: some report the resident
+    /// set in their conditioning level (klein q4: 15.1 GB against a 21.7 GB set) and are in the
+    /// law's domain, others (sd3_5, mage_flow, chroma) legitimately hold their text encoder
+    /// staged below it. Selecting "every MLX image anchor but z_image_turbo" was a frozen census
+    /// of the five bundle rows and red the moment a re-captured anchor landed. The bundle rows
+    /// that a later campaign re-captures leave this census with their file, and an empty census
+    /// is the test retired, not a failure.
     #[test]
     fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
+        const PRE_CAMPAIGN_BUNDLE: &str = "docs/generated/memory-calibration-evidence.json";
         let packaged: Vec<&MemoryAnchor> = store()
             .anchors
             .iter()
@@ -4392,13 +5756,12 @@ mod tests {
                 anchor.backend == AnchorBackend::Mlx
                     && anchor.geometry.frames == 1
                     && anchor.model_id != "z_image_turbo"
+                    && anchor.source.path == PRE_CAMPAIGN_BUNDLE
             })
             .collect();
-        assert!(
-            packaged.len() >= 5,
-            "the packaged store carries the five cold-request MLX image anchors, found {}",
-            packaged.len()
-        );
+        if packaged.is_empty() {
+            return;
+        }
         for anchor in packaged {
             assert!(
                 !anchor.measured_regime.staged,
@@ -4823,6 +6186,435 @@ mod tests {
         );
     }
 
+    /// sc-22738: the shared floor weights arithmetic, one assertion per branch the worker's
+    /// `mlx_fit_gate::floor_weights_bytes` used to carry privately. Facts: conditioning 26,
+    /// transformer 20 (of which 6 evictable), decoder 4, base 50, one unbounded auxiliary of 3.
+    #[test]
+    fn the_shared_floor_weights_term_prices_every_composition_the_worker_prices() {
+        let facts = FloorWeightsFacts {
+            conditioning_bytes: 26,
+            base_bytes: 50,
+            transformer_bytes: 20,
+            intra_transformer_evicted_bytes: 6,
+            auxiliary_resident_bytes: 3,
+        };
+        let composition = |staged: bool, bounded_transformer: bool, resident_window_bytes: u64| {
+            FloorWeightsComposition {
+                staged,
+                bounded_transformer,
+                resident_window_bytes,
+            }
+        };
+        // Resident: conditioning + heavy (24) + auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(false, false, 0)), 53);
+        // Staged: max(conditioning 26, heavy 24 − 6 evicted clamped at the transformer 20 = 20)
+        // = 26, plus the auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(true, false, 0)), 29);
+        // Staged with a drop smaller than the clamp room: heavy 24 − 2 = 22 ≥ 20.
+        let small_drop = FloorWeightsFacts {
+            intra_transformer_evicted_bytes: 2,
+            ..facts
+        };
+        assert_eq!(
+            floor_weights_bytes(small_drop, composition(true, false, 0)),
+            29
+        );
+        let tall_heavy = FloorWeightsFacts {
+            base_bytes: 60,
+            ..facts
+        };
+        // heavy 34 − 6 = 28 > conditioning 26.
+        assert_eq!(
+            floor_weights_bytes(tall_heavy, composition(true, false, 0)),
+            31
+        );
+        // Rung 4 alone: the transformer leaves (24 − 20 = 4), the window comes back clamped at the
+        // load-exact transformer; the eviction is NOT applied on top.
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 0)), 33);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 5)), 38);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 99)), 53);
+        // Staged + rung 4: exclusive — the rung-4 branch, then the staged max. heavy = 4 + 5 = 9;
+        // max(26, 9) = 26; + 3.
+        assert_eq!(floor_weights_bytes(facts, composition(true, true, 5)), 29);
+        // The weights-free contract prices zero everywhere.
+        assert_eq!(
+            floor_weights_bytes(FloorWeightsFacts::default(), composition(true, true, 7)),
+            0
+        );
+    }
+
+    /// sc-22738: the byte forms of the two shared allowances are the worker's own conversion of
+    /// the GiB declarations, and nothing else — the adapter's admission budget and floor read
+    /// these, so a drift here is a drift in what ships.
+    #[test]
+    fn the_shared_allowances_convert_to_the_bytes_the_worker_presents() {
+        assert_eq!(
+            gib_to_bytes(LEGACY_UNIFIED_FALLBACK_RESERVE_GB),
+            2_147_483_648
+        );
+        assert_eq!(gib_to_bytes(MLX_GENERIC_HEADROOM_GB), 19_327_352_832);
+        assert_eq!(gib_to_bytes(0.0), 0);
+        assert_eq!(gib_to_bytes(-1.0), 0);
+        assert_eq!(gib_to_bytes(1.5), 1_610_612_736);
+    }
+
+    /// The Bernini stop, as a fixture: `bernini:bf16:mlx` text_to_video at 848x480x49, stopped at
+    /// 97,147,294,328 bytes of physical footprint on a 128 GiB host (sc-22738, measured 2026-09-06).
+    fn bernini_bound() -> ExceededBound {
+        ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
+            model_id: "bernini".to_owned(),
+            model_family: "bernini".to_owned(),
+            route: "bernini".to_owned(),
+            provider: "bernini".to_owned(),
+            backend: AnchorBackend::Mlx,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video".to_owned(),
+            overlay: None,
+            reference_count: 0,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 49,
+                fps: None,
+            },
+            observed_footprint_bytes: 97_147_294_328,
+            ceiling_bytes: 94_822_600_832,
+            host_memory_bytes: 137_438_953_472,
+            reason: "physical_footprint_at_or_above_94822600832:observed_97147294328".to_owned(),
+            source: AnchorSource {
+                path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                    .to_owned(),
+                sha256: "0".repeat(64),
+                record_id: "exc-0".to_owned(),
+                calibration_fingerprint: "fp".to_owned(),
+                loader_closure_digest: "b".repeat(64),
+                currency_attestation: None,
+            },
+        }
+    }
+
+    fn bound_store(bounds: Vec<ExceededBound>) -> MemoryAnchorStore {
+        MemoryAnchorStore {
+            schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: Vec::new(),
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: bounds,
+        }
+    }
+
+    fn bernini_query(width: u32, height: u32, frames: u32) -> ExceededBoundQuery<'static> {
+        ExceededBoundQuery {
+            model_id: "bernini",
+            model_family: Some("bernini"),
+            route: Some("bernini"),
+            provider: "bernini",
+            backend: AnchorBackend::Mlx,
+            tier: "bf16",
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video",
+            overlay: None,
+            reference_count: 0,
+            width,
+            height,
+            frames,
+        }
+    }
+
+    /// sc-22738: a measured lower bound binds at and above its own geometry, on the identity it was
+    /// measured on — and regardless of whether its currency key still matches the packaged loader
+    /// closures (see `a_bound_whose_loader_closure_moved_still_binds`).
+    #[test]
+    fn a_measured_lower_bound_binds_at_and_above_its_geometry_on_its_own_identity() {
+        let store = bound_store(vec![bernini_bound()]);
+        let bind = |query| {
+            store
+                .binding_exceeded_bound(query)
+                .map(|bound| bound.observed_footprint_bytes)
+        };
+        // The measured point itself, and every request at or above it on all three axes.
+        assert_eq!(bind(bernini_query(848, 480, 49)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(848, 480, 97)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(1280, 720, 49)), Some(97_147_294_328));
+        // SMALLER on any single axis is outside the claim: the inequality was measured at one
+        // geometry and monotonicity only runs upwards.
+        assert_eq!(bind(bernini_query(848, 480, 25)), None);
+        assert_eq!(bind(bernini_query(640, 480, 49)), None);
+        assert_eq!(bind(bernini_query(848, 256, 49)), None);
+        // Every identity axis is a conjunct — a foreign tier, mode, provider, lane, overlay or
+        // reference surface must not borrow this cell's measurement.
+        for foreign in [
+            ExceededBoundQuery {
+                tier: "q4",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                mode: "image_to_video",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                provider: "bernini_image",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                backend: AnchorBackend::Candle,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                overlay: Some("control"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                reference_count: 1,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                model_family: Some("wan"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                route: Some("wan_2_2_t2v_a14b"),
+                ..bernini_query(848, 480, 49)
+            },
+        ] {
+            assert_eq!(bind(foreign), None, "a foreign identity borrowed the bound");
+        }
+        // A caller that cannot state the catalog axes still binds: both are functions of axes
+        // already graded, and the capture-side mirror has no catalog to resolve them from.
+        assert_eq!(
+            bind(ExceededBoundQuery {
+                model_family: None,
+                route: None,
+                ..bernini_query(848, 480, 49)
+            }),
+            Some(97_147_294_328),
+        );
+    }
+
+    /// sc-22738 (Michael's standing rule): the runtime ALWAYS behaves as if the measurement were
+    /// valid. A bound whose `loaderClosureDigest` matches nothing the packaged closures declare —
+    /// or that is stamped at a digest the ledger has since moved past — binds exactly as a current
+    /// one. The lookup signature cannot even take the closures, so the only way to demote here is to
+    /// re-add the parameter. MUTATION: restoring `bound.is_current(closures)` as a conjunct (or
+    /// `let closures = closures?;`) turns every assertion below red.
+    #[test]
+    fn a_bound_whose_loader_closure_moved_still_binds() {
+        let store = bound_store(vec![bernini_bound()]);
+        // The store's bound is stamped at "b"*64; the packaged ledger declares something else for
+        // bernini:mlx (or nothing at all — the lookup does not care which).
+        let declared = load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
+            .expect("packaged closures parse")
+            .digest_for("bernini", AnchorBackend::Mlx)
+            .map(str::to_owned);
+        assert_ne!(
+            declared.as_deref(),
+            Some(
+                store.exceeded_bounds[0]
+                    .source
+                    .loader_closure_digest
+                    .as_str()
+            ),
+            "the fixture must be stale against the ledger for this test to prove anything"
+        );
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // And a bound at a digest no ledger has ever declared binds too: currency is not a term.
+        let mut undeclared = bernini_bound();
+        undeclared.source.loader_closure_digest = "f".repeat(64);
+        let store = bound_store(vec![undeclared]);
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(1280, 720, 97))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+    }
+
+    /// sc-22738: several bounds can cover one request once a cell has been stopped more than once.
+    /// The STRONGEST true inequality is the useful one.
+    #[test]
+    fn the_largest_covering_bound_wins() {
+        let smaller = ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-small".to_owned(),
+            observed_footprint_bytes: 80_000_000_000,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 25,
+                fps: None,
+            },
+            ..bernini_bound()
+        };
+        let store = bound_store(vec![smaller, bernini_bound()]);
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // At a geometry only the smaller bound covers, the smaller one is the whole claim.
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 25))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(80_000_000_000),
+        );
+    }
+
+    /// sc-22738: the requirement a host is graded against is the measured footprint PLUS the lane's
+    /// activation allowance — never the bare reading, which was taken mid-climb.
+    #[test]
+    fn the_requirement_is_the_measured_footprint_plus_the_lanes_headroom() {
+        let bound = bernini_bound();
+        assert_eq!(bound.required_bytes(0), 97_147_294_328);
+        assert_eq!(
+            bound.required_bytes(gib_to_bytes(16.0)),
+            97_147_294_328 + 17_179_869_184
+        );
+        assert_eq!(
+            bound.required_bytes(u64::MAX),
+            u64::MAX,
+            "the sum saturates rather than wrapping into a requirement of nearly zero",
+        );
+    }
+
+    /// sc-22738: THE predicate, and the disjunct that makes the Bernini fix bite.
+    ///
+    /// A host no larger than the one the render failed on is refused outright. Grading such a host
+    /// on footprint-versus-budget alone would re-admit it — 90.5 GiB plus the lane's 16 GiB
+    /// allowance is 106.5 GiB, and an idle 128 GiB Mac appears to have that — which is exactly the
+    /// re-admission this story exists to stop.
+    #[test]
+    fn a_host_no_larger_than_the_one_that_failed_is_refused_outright() {
+        let bound = bernini_bound();
+        let headroom = gib_to_bytes(16.0);
+        let host = 137_438_953_472_u64;
+        assert!(
+            bound.required_bytes(headroom) < host,
+            "the requirement alone does NOT exceed an idle 128 GiB host; the host-size disjunct \
+             is what refuses it",
+        );
+        assert!(
+            bound.refuses_host(host, host, headroom),
+            "the same 128 GiB machine that could not finish this render must not be given it again",
+        );
+        assert!(
+            bound.refuses_host(host - 1, u64::MAX, headroom),
+            "a SMALLER host is refused even with an impossible budget",
+        );
+        // A larger host is graded on what it can actually offer.
+        let bigger = host * 4;
+        assert!(
+            !bound.refuses_host(bigger, bigger, headroom),
+            "a machine four times the size may still run it",
+        );
+        assert!(
+            bound.refuses_host(bigger, bound.required_bytes(headroom) - 1, headroom),
+            "a larger but busy host that cannot offer the requirement is refused",
+        );
+        assert!(
+            !bound.refuses_host(bigger, bound.required_bytes(headroom), headroom),
+            "exact equality fits",
+        );
+    }
+
+    /// sc-22738: the store refuses a bound that is not a hard stop's reading — one under its own
+    /// ceiling, one above the whole capture host, or one that states no reason.
+    #[test]
+    fn a_bound_that_is_not_a_hard_stops_reading_fails_the_load() {
+        let refuse = |bound: ExceededBound, fragment: &str| {
+            let error = validate_exceeded_bounds(&bound_store(vec![bound]))
+                .expect_err("the store accepted a bound that is not a hard stop's reading");
+            assert!(error.contains(fragment), "unexpected error: {error}");
+        };
+        refuse(
+            ExceededBound {
+                observed_footprint_bytes: 94_822_600_831,
+                ..bernini_bound()
+            },
+            "under its own hard-stop ceiling",
+        );
+        refuse(
+            ExceededBound {
+                host_memory_bytes: 97_147_294_327,
+                ..bernini_bound()
+            },
+            "larger than the whole capture host",
+        );
+        refuse(
+            ExceededBound {
+                reason: "  ".to_owned(),
+                ..bernini_bound()
+            },
+            "states no hard-stop reason",
+        );
+        refuse(
+            ExceededBound {
+                geometry: AnchorGeometry {
+                    frames: 0,
+                    ..bernini_bound().geometry
+                },
+                ..bernini_bound()
+            },
+            "degenerate geometry",
+        );
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    loader_closure_digest: "not-a-digest".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "is not a sha256",
+        );
+        // The corpus handshake, both halves: a bound may only cite a compiled-in retained-evidence
+        // file, and it must hash to what the row recorded — the store may not drift from the
+        // evidence a refusal is drawn from.
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    path: "docs/calibration/sc-22738/not-compiled-in.json".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "not a compiled retained-evidence file",
+        );
+        refuse(bernini_bound(), "source digest mismatch");
+    }
+
+    /// sc-22738: the packaged Bernini bound is bound BYTE-EXACTLY to the corpus it cites — this is
+    /// the row a production refusal is drawn from, so a store that drifted from its evidence would
+    /// refuse renders on a number nothing measured.
+    #[test]
+    fn the_packaged_bernini_bound_agrees_with_its_retained_evidence() {
+        let store = packaged_memory_anchors().expect("the packaged anchor store must load");
+        let bound = store
+            .exceeded_bounds
+            .iter()
+            .find(|bound| bound.model_id == "bernini" && bound.tier == "bf16")
+            .expect("the bernini:bf16:mlx footprint hard stop is retained");
+        assert_eq!(bound.backend, AnchorBackend::Mlx);
+        assert_eq!(bound.mode, "text_to_video");
+        assert_eq!(bound.geometry.frames, 49);
+        assert_eq!(bound.observed_footprint_bytes, 97_147_294_328);
+        assert_eq!(bound.host_memory_bytes, 137_438_953_472);
+        // `validate_exceeded_bounds` re-derived every one of those figures from the compiled-in
+        // bundle at load; asserting the load succeeded plus the row's own content is the whole of
+        // the handshake, stated without a second copy of the comparison.
+        assert!(validate_exceeded_bounds(store).is_ok());
+    }
+
     /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is
     /// never smaller than with full facts — for the whole set and for each fact dropped alone.
     #[test]
@@ -5029,6 +6821,139 @@ mod tests {
         assert!(
             bracketed >= 5,
             "all five retained candle compositions must be bracketed, got {bracketed}"
+        );
+    }
+
+    /// sc-22734. A candle cell whose provider contract classifies `staged_residency`
+    /// STRUCTURALLY NOT APPLICABLE has no staged composition to have been captured in, so its
+    /// anchor is the RESIDENT render and the entry point prices it. The two shapes are mutually
+    /// exclusive, so no packaged row's disposition moves: the flag defaults to `false` and every
+    /// existing anchor keeps the staged-only guard exactly.
+    #[test]
+    fn a_structurally_staging_free_candle_cell_is_priced_from_its_resident_anchor() {
+        let staged_anchor = krea_candle_anchor();
+        // The exempt cell's anchor is a RESIDENT render, so the fixture must be one: the
+        // re-captured z_image_turbo q4 row is the packaged anchor whose every phase level carries
+        // the whole resident set (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`),
+        // which is exactly the domain a resident derivation needs. Re-labelled onto the candle
+        // lane, because no candle capture of a structurally staging-free family exists yet — the
+        // sc-22734 arms are what will produce the first one.
+        let resident_capture = |exempt: bool| {
+            let mut anchor = store()
+                .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+                .expect("the z_image_turbo q4 MLX anchor is packaged")
+                .clone();
+            anchor.backend = AnchorBackend::Candle;
+            anchor.staged_residency_structurally_not_applicable = exempt;
+            anchor
+        };
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident = AnchorImageDeriveRequest {
+            width: 768,
+            height: 768,
+            staged_residency: false,
+        };
+        let staged = AnchorImageDeriveRequest {
+            staged_residency: true,
+            ..resident
+        };
+
+        // The flag defaults off, so the packaged shape is untouched: staged anchor + staged
+        // request prices, resident request does not.
+        assert!(!staged_anchor.staged_residency_structurally_not_applicable);
+        let krea = AnchorImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+            staged_residency: true,
+        };
+        assert!(staged_anchor
+            .derive_image_phase_peaks(krea, KREA_Q4_COMPONENTS)
+            .is_some());
+        assert!(staged_anchor
+            .derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
+                    staged_residency: false,
+                    ..krea
+                },
+                KREA_Q4_COMPONENTS,
+            )
+            .is_none());
+
+        // The exempt cell: a resident anchor, which the law otherwise refuses outright.
+        let exempt = resident_capture(true);
+        assert!(!exempt.measured_regime.staged);
+        let derived = exempt
+            .derive_image_phase_peaks(resident, components)
+            .expect("a staging-free cell prices from its resident anchor");
+        assert_eq!(
+            derived,
+            AnchorDerivedPhases {
+                conditioning: exempt.phase_active_peak_bytes.conditioning,
+                denoise: exempt.phase_active_peak_bytes.denoise,
+                decode: exempt.phase_active_peak_bytes.decode,
+            },
+            "at the anchor's own geometry the resident derivation is the anchor"
+        );
+        // ...and it answers ONLY the resident candidate. A staged candidate on a cell with no
+        // staged composition is not a request this engine can be asked to honour.
+        assert!(exempt
+            .derive_image_phase_peaks(staged, components)
+            .is_none());
+
+        // The two mixed shapes stay refused, so the flag can never launder a record the law
+        // cannot honestly price: a STAGED anchor on an exempt cell, and a RESIDENT anchor on a
+        // cell that has a staged composition it should have been captured in.
+        let mut staged_on_exempt = resident_capture(true);
+        staged_on_exempt.measured_regime.staged = true;
+        for request in [staged, resident] {
+            assert!(staged_on_exempt
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+        let resident_on_ordinary = resident_capture(false);
+        assert!(!resident_on_ordinary.measured_regime.staged);
+        for request in [staged, resident] {
+            assert!(resident_on_ordinary
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+
+        // Every deeper rung is still refused on the exempt lane, and so is an underived row.
+        for deeper in ["decode_tiled", "attention_chunked", "transformer_windowed"] {
+            let mut anchor = exempt.clone();
+            match deeper {
+                "decode_tiled" => anchor.measured_regime.decode_tiled = true,
+                "attention_chunked" => anchor.measured_regime.attention_chunked = true,
+                _ => anchor.measured_regime.transformer_windowed = true,
+            }
+            assert!(
+                anchor
+                    .derive_image_phase_peaks(resident, components)
+                    .is_none(),
+                "{deeper} is deeper than the law prices, exemption or not"
+            );
+        }
+        let mut underived = exempt.clone();
+        underived.underived_reason = Some("measured_envelope".to_owned());
+        assert!(underived
+            .derive_image_phase_peaks(resident, components)
+            .is_none());
+
+        // The flag rides the store round trip, and is absent from a row that does not set it.
+        let json = serde_json::to_string(&exempt).expect("serialize");
+        assert!(json.contains("\"stagedResidencyStructurallyNotApplicable\":true"));
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&json).expect("round trip"),
+            exempt.clone()
+        );
+        let packaged = serde_json::to_string(&staged_anchor).expect("serialize");
+        assert!(
+            !packaged.contains("stagedResidencyStructurallyNotApplicable"),
+            "a row that does not set it stays byte-identical to the packaged shape"
+        );
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&packaged).expect("round trip"),
+            staged_anchor.clone()
         );
     }
 
@@ -5692,6 +7617,247 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
+    // sc-22736: axis-free VIDEO anchors (Wan 2.2, SCAIL-2, LTX-2.3) — the measured-point bound.
+    // -------------------------------------------------------------------------------------
+
+    /// A synthetic Wan 2.2 I2V candle anchor: multi-frame, no pipeline axes, one reference, and
+    /// stamped with the axis-free underived reason exactly as the extractor writes it.
+    fn axis_free_video_anchor() -> MemoryAnchor {
+        MemoryAnchor {
+            id: "wan_2_2_i2v_14b:candle:bf16:-:-:sc-22736-wan2-2-i2v-a14b-candle-dense-v1:imc-test"
+                .to_owned(),
+            model_id: "wan_2_2_i2v_14b".to_owned(),
+            model_family: "wan-video".to_owned(),
+            route: "wan2_2_i2v_14b".to_owned(),
+            provider: "wan2_2_i2v_14b".to_owned(),
+            backend: AnchorBackend::Candle,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "image_to_video".to_owned(),
+            overlay: None,
+            reference_count: 1,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            measured_regime: AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            },
+            source: AnchorSource {
+                path: String::new(),
+                sha256: String::new(),
+                record_id: "imc-test".to_owned(),
+                calibration_fingerprint: "sc-22736-wan2-2-i2v-a14b-candle-dense-v1".to_owned(),
+                loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
+            },
+            geometry: AnchorGeometry {
+                width: 1280,
+                height: 720,
+                frames: 77,
+                fps: Some(16),
+            },
+            phase_active_peak_bytes: AnchorPhaseBytes {
+                conditioning: 30_000_000_000,
+                denoise: 62_000_000_000,
+                decode: 48_000_000_000,
+            },
+            phase_allocator_envelope_bytes: None,
+            overall_allocator_envelope_bytes: 62_000_000_000,
+            underived_reason: Some(
+                "the source record states no (transformer variant, decoder) pipeline axes and the \
+                 video law's per-token coefficients are keyed on them; this anchor validates its \
+                 measured point and prices nothing beyond it"
+                    .to_owned(),
+            ),
+            component_bytes: None,
+            staged_residency_structurally_not_applicable: false,
+        }
+    }
+
+    fn widened_measured(anchor: &MemoryAnchor) -> AnchorDerivedPhases {
+        let expect = |measured: u64| {
+            ((measured as f64) * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil() as u64
+        };
+        AnchorDerivedPhases {
+            conditioning: expect(anchor.phase_active_peak_bytes.conditioning),
+            denoise: expect(anchor.phase_active_peak_bytes.denoise),
+            decode: expect(anchor.phase_active_peak_bytes.decode),
+        }
+    }
+
+    /// An axis-free video anchor prices every request it dominates AT its measured point — no
+    /// per-token slope, none invented — and refuses everything beyond it. Mutations this kills:
+    /// dropping the pixel or the frame dominance check (the beyond-anchor rows derive); restoring
+    /// the axis-free `return None` (nothing derives); scaling the intercepts by any coefficient
+    /// (the equality against the widened measured peaks fails).
+    #[test]
+    fn an_axis_free_video_anchor_bounds_every_request_it_dominates_at_its_measured_point() {
+        let anchor = axis_free_video_anchor();
+        let expected = widened_measured(&anchor);
+        // At the measured point itself.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 77)),
+            Some(expected)
+        );
+        // Dominated: fewer frames, fewer pixels, the portrait twin — each bounded by the same
+        // measured peaks, never scaled down (no lower clamp is a per-token law's property; this
+        // one has no slope).
+        for (width, height, frames) in [
+            (1280, 720, 45),
+            (832, 480, 77),
+            (720, 1280, 77),
+            (16, 16, 1),
+        ] {
+            assert_eq!(
+                anchor.derive_video_phase_peaks(plain_request(width, height, frames)),
+                Some(expected),
+                "{width}x{height} f{frames}"
+            );
+        }
+        // Beyond the measured point in either axis: refused, the caller keeps its floor.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 81)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 736, 77)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1920, 1080, 45)),
+            None
+        );
+        // Degenerate geometry is refused, as everywhere.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(0, 720, 77)),
+            None
+        );
+        // A request bounding a phase the anchor measured UNBOUNDED is still priced at the
+        // unbounded intercept: no LTX architecture constant is substituted for a Wan phase.
+        let mut tiled = plain_request(832, 480, 45);
+        tiled.decode_tiled = true;
+        assert_eq!(anchor.derive_video_phase_peaks(tiled), Some(expected));
+        // ...and the mirror is refused: a tiled anchor cannot price an untiled request.
+        let mut tiled_anchor = anchor.clone();
+        tiled_anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            tiled_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        let mut deferred_anchor = anchor.clone();
+        deferred_anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            deferred_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        // The axis-free underived reason is the STATEMENT of this bound, not a refusal of it:
+        // without the reason the answer is identical.
+        let mut unstated = anchor.clone();
+        unstated.underived_reason = None;
+        assert_eq!(
+            unstated.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            Some(expected)
+        );
+        // An axis-free SINGLE-FRAME row is an image anchor and is not a video anchor under any
+        // spelling.
+        let mut still = anchor.clone();
+        still.geometry.frames = 1;
+        assert_eq!(
+            still.derive_video_phase_peaks(plain_request(832, 480, 1)),
+            None
+        );
+    }
+
+    /// The store resolves an axis-free video anchor for an axis-free request and for nothing
+    /// else, and the cell derivation goes through it with no sibling crossing. Mutation this kills:
+    /// dropping the `frames > 1` guard in `video_anchor_for` (the image row resolves as video), or
+    /// matching the axes as wildcards (the variant-keyed lookups resolve).
+    #[test]
+    fn the_store_resolves_an_axis_free_video_anchor_only_for_an_axis_free_request() {
+        let anchor = axis_free_video_anchor();
+        let mut image = anchor.clone();
+        image.id = "z_image_turbo:candle:q4:-:-:x:imc-image".to_owned();
+        image.model_id = "z_image_turbo".to_owned();
+        image.geometry.frames = 1;
+        let store = MemoryAnchorStore {
+            schema_version: 1,
+            anchors: vec![anchor.clone(), image],
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
+        };
+        assert_eq!(
+            store
+                .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "bf16", None, None)
+                .map(|found| found.id.as_str()),
+            Some(anchor.id.as_str())
+        );
+        // Wrong lane, wrong tier, a variant-keyed request: nothing.
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Mlx, "bf16", None, None)
+            .is_none());
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "q4", None, None)
+            .is_none());
+        for variant in [
+            Ltx25TransformerVariant::Dev,
+            Ltx25TransformerVariant::Distilled,
+        ] {
+            for decoder in [Ltx25Decoder::Conv, Ltx25Decoder::DiffVae] {
+                assert!(store
+                    .video_anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        Some(variant),
+                        Some(decoder)
+                    )
+                    .is_none());
+                assert!(store
+                    .anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        variant,
+                        decoder
+                    )
+                    .is_none());
+            }
+        }
+        // The image row answers no video lookup even though it is axis-free.
+        assert!(store
+            .video_anchor_for("z_image_turbo", AnchorBackend::Candle, "bf16", None, None)
+            .is_none());
+        // Cell derivation: the exact anchor, delta 0, the measured-point bound.
+        let derived = store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "bf16",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
+            .expect("the dominated request derives");
+        assert_eq!(derived.anchor.id, anchor.id);
+        assert_eq!(derived.delta_bytes, 0);
+        assert_eq!(derived.phases, widened_measured(&anchor));
+        // No sibling crossing exists for an axis-free cell: an unanchored tier keeps its floor.
+        assert!(store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "q4",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
+            .is_none());
+    }
+
+    // -------------------------------------------------------------------------------------
     // Variant/decoder component deltas (epic 22505 E2, feature-end fix round).
     // -------------------------------------------------------------------------------------
 
@@ -5737,8 +7903,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the unmeasured variant cell derives from its sibling");
@@ -5832,8 +7998,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("a zero crossing still derives — a zero delta is priced, not missing");
@@ -5877,8 +8043,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the exact cell derives");
@@ -5902,8 +8068,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the doctored store still derives the cell via a sibling");
@@ -5922,8 +8088,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     "bf16",
-                    Ltx25TransformerVariant::Distilled,
-                    Ltx25Decoder::DiffVae,
+                    Some(Ltx25TransformerVariant::Distilled),
+                    Some(Ltx25Decoder::DiffVae),
                     request,
                 )
                 .is_none(),
@@ -5945,12 +8111,19 @@ mod tests {
     /// non-windowed request from a windowed anchor. The direction is covered instead by
     /// `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta` (byte-for
     /// -byte application) and by the engine-agreement tests (which key the table itself).
+    ///
+    /// SCOPE (sc-22738): the validation is over the seed corpus's OWN topology, so the doctored
+    /// store keeps only the LTX-2.5 anchors that corpus produced. The sc-22738 rerun anchored
+    /// dev/conv at bf16 and q4 from its own corpora; left in, distilled/conv would derive from
+    /// dev/conv (a variant crossing priced zero) instead of dev/diffvae plus the decoder crossing,
+    /// and the nonzero-delta interrogation below would have nothing to interrogate.
     #[test]
     fn leave_one_out_sibling_delta_derivations_bracket_the_retained_distilled_records() {
         let mut doctored = store().clone();
         doctored.anchors.retain(|anchor| {
-            !(anchor.model_id == "ltx_2_5"
-                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled))
+            anchor.model_id != "ltx_2_5"
+                || (anchor.source.path == LTX25_CORPUS_PATH
+                    && anchor.transformer_variant != Some(Ltx25TransformerVariant::Distilled))
         });
         let corpus = retained_corpus();
         let distilled: Vec<_> = corpus
@@ -5975,8 +8148,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     &record.tier,
-                    record.transformer_variant,
-                    record.decoder,
+                    Some(record.transformer_variant),
+                    Some(record.decoder),
                     AnchorDeriveRequest {
                         width: record.width,
                         height: record.height,
@@ -6149,8 +8322,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 &record.tier,
-                record.transformer_variant,
-                record.decoder,
+                Some(record.transformer_variant),
+                Some(record.decoder),
                 AnchorDeriveRequest {
                     width: record.width,
                     height: record.height,

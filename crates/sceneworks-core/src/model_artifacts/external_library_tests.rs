@@ -8,6 +8,30 @@ use tempfile::TempDir;
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
+/// A released ledger lock must be free IMMEDIATELY, even while a descriptor this process handed to
+/// a child still references the same open file description. `flock(2)` locks live on the open file
+/// description, and `fork(2)` gives the child a reference to it, so releasing by `close(2)` alone
+/// only takes effect once every such reference is gone. `inherited_descriptor` reproduces that
+/// sharing without a child process, so the interleaving is injected rather than waited for. Before
+/// sc-22738 the next ledger read or write blocked behind an already-released lock for as long as
+/// an unrelated `Command` sat between `fork` and `exec`.
+#[test]
+fn a_released_ledger_lock_is_free_even_while_an_inherited_descriptor_survives() {
+    let temp = TempDir::new().unwrap();
+    let store = ExternalLibraryBindingStore::new(&temp.path().join("data")).unwrap();
+
+    let guard = store.lock_exclusive().unwrap();
+    let inherited = guard.inherited_descriptor().expect("descriptor duplicates");
+    drop(guard);
+
+    let probe = crate::file_lock::FileLock::try_exclusive(store.open_lock().unwrap());
+    assert!(
+        probe.is_ok(),
+        "a ledger lock released by its owner must not stay held by an inherited descriptor"
+    );
+    drop(inherited);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_volume_uuid_parser_is_exact_and_fail_closed() {

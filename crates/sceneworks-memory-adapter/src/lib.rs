@@ -6,15 +6,148 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "1cd0e393863f7d3d880400e409519bcadfb43959";
+pub const INFERENCE_PIN: &str = "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
+/// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
+/// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
+/// checkpoint routed to one engine provider (`qwen_image_edit`; worker `image_jobs/qwen.rs`
+/// `qwen_edit_engine_id` and `image_jobs/qwen_edit_candle.rs`). The Candle engine additionally pins
+/// this exact repository directory and revision by path suffix (`candle-gen-qwen-image` `edit.rs`
+/// `exact_base_tier`), so a re-host under any other name cannot satisfy an edit capture at all.
+pub const QWEN_EDIT_REPOSITORY: &str = "SceneWorks/qwen-image-edit-2511-mlx";
+/// The built-in Lightning distill LoRA the `qwen_image_edit_2511_lightning` id folds into the MMDiT
+/// at load. It is NOT a manifest download — the worker fetches it lazily into the HF cache at a
+/// pinned revision (`QWEN_LIGHTNING_LORA_REPO` in the worker's `image_jobs/qwen.rs`, and
+/// `QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO` on the Candle lane) — so the capture is handed its
+/// snapshot through its own `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` family.
+pub const QWEN_EDIT_LIGHTNING_REPOSITORY: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+/// The one distill file inside that snapshot. The Candle engine refuses any other file name by exact
+/// suffix (`edit.rs` `is_exact_lightning_path`), and the MLX worker names the same file, so this is a
+/// pinned artifact identity rather than a convenience default.
+pub const QWEN_EDIT_LIGHTNING_FILE: &str =
+    "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
+/// The FLUX.2-klein-9B tiered rehost (sc-22727) — the `flux2_klein_9b` catalog model's artifact,
+/// bound through `SCENEWORKS_FLUX2_KLEIN_*`. The engine discriminates it from the KV rehost by the
+/// snapshot path AND by `LoadSpec::resolved_route` (`turnkey_identity` /
+/// `KleinArtifactInventory::validate_resolved_route` in `mlx-gen-flux2/src/artifact_inventory.rs`),
+/// which is why the two variants get separate env families rather than one shared "klein" family.
+pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
+/// The FLUX.2-klein-9B **KV-cache** rehost (sc-22727): a separately distilled checkpoint of the same
+/// architecture, loaded through the SAME engine provider id `flux2_klein_9b`
+/// (`crates/sceneworks-worker/src/engines.rs` — `sceneworks_id: flux2_klein_9b_kv`,
+/// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
+pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The UNDISTILLED Krea 2 base rehost (sc-22735) — the `krea_2_raw` provider's own artifact, on
+/// BOTH lanes. Bound through the separate `SCENEWORKS_KREA_RAW_*` family for the same reason
+/// `z_image` does not ride the Turbo family: Raw runs TRUE classifier-free guidance (two DiT
+/// forwards per step) over its own 12B checkpoint, so a Raw plan satisfied by Turbo weights would
+/// file Turbo's peaks under the base model's name.
+pub const KREA_RAW_REPOSITORY: &str = "SceneWorks/krea-2-raw-mlx";
+/// The Krea Realtime 14B rehost (sc-22735) — the autoregressive VIDEO member of the family, and
+/// MLX-only: `mlx-gen-krea-realtime` is the only engine that registers the provider, the worker
+/// refuses the job off macOS by name (`video_jobs/mod.rs`), and every shipped download is
+/// `platforms: ["macos"]`. Each `<tier>/` subdir is a complete, self-contained tree — the Krea DiT
+/// at that tier plus the stock Wan 2.1 z16 VAE, UMT5 encoder and tokenizer — so the capture binds
+/// one root, not a tier root plus co-requisites.
+pub const KREA_REALTIME_REPOSITORY: &str = "SceneWorks/krea-realtime-14b-mlx";
+/// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
+/// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
+/// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
+/// `PULID_CANDLE_FLUX_REPO`), so both bind the one `SCENEWORKS_FLUX1_DEV_*` family — the way
+/// `z_image_edit` rides the Turbo family.
+pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
+/// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
+pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+// sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`) on
+// both lanes (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`, and
+// `crates/sceneworks-core/src/jobs_store/routing/candle.rs`), each with its own independently
+// pinned tiered rehost. The engine id is NOT the artifact identity: `candle-gen-sdxl`'s
+// `SDXL_ROUTES` seals a per-route repository/revision and mints a per-route calibration
+// fingerprint, so an anchor must bind the exact model's artifact family, never the engine's.
+/// RealVisXL V5.0 — also the InstantID backbone (`image_jobs/instantid.rs` `INSTANTID_SDXL_REPO`).
+pub const REALVISXL_REPOSITORY: &str = "SceneWorks/realvisxl-mlx";
+/// The step-distilled RealVisXL Lightning finetune (5 steps / guidance 1.0 in the worker's row).
+pub const REALVISXL_LIGHTNING_REPOSITORY: &str = "SceneWorks/realvisxl-lightning-mlx";
+pub const ILLUSTRIOUS_XL_V1_REPOSITORY: &str = "SceneWorks/illustrious-xl-v1-mlx";
+pub const ILLUSTRIOUS_XL_V2_REPOSITORY: &str = "SceneWorks/illustrious-xl-v2-mlx";
+/// The SANA 1.6B tiered rehost (sc-22731) — the `sana_1600m` provider's MLX artifact. The three
+/// packed tiers are `platforms: ["macos"]` turnkeys, so this repository serves the MLX lane ONLY;
+/// the Candle lane loads [`SANA_DENSE_REPOSITORY`] instead.
+pub const SANA_REPOSITORY: &str = "SceneWorks/Sana_1600M_1024px_mlx";
+/// The SANA-Sprint 1.6B tiered rehost (sc-22731), the `sana_sprint_1600m` provider's MLX artifact.
+pub const SANA_SPRINT_REPOSITORY: &str = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
+/// The upstream dense diffusers snapshot the CANDLE `sana_1600m` route loads
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `SANA_CANDLE_DIFFUSERS_REPO`). It has no tier
+/// sub-directory and ships one variant, so it is bound through
+/// [`validate_huggingface_revision_root`] and only ever at `bf16` — `candle-gen-sana`'s
+/// `validate_load_spec` refuses any `LoadSpec::quantize`, and there is no packed SANA artifact
+/// off-Mac to point it at.
+pub const SANA_DENSE_REPOSITORY: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+/// The Sprint route's upstream dense diffusers snapshot (`SANA_SPRINT_CANDLE_DIFFUSERS_REPO`).
+pub const SANA_SPRINT_DENSE_REPOSITORY: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+/// The three Chroma1 tiered rehosts (sc-22731). One per route, on BOTH lanes: the Candle lane
+/// packed-loads the same SceneWorks turnkey the macOS path does, and `candle-gen-chroma`'s
+/// `ChromaLoadReceipt::capture` pins each route to its own repository and revision by name — so a
+/// Flash plan can never be satisfied by HD weights.
+pub const CHROMA1_HD_REPOSITORY: &str = "SceneWorks/chroma1-hd-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_BASE_REPOSITORY: &str = "SceneWorks/chroma1-base-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_FLASH_REPOSITORY: &str = "SceneWorks/chroma1-flash-mlx";
+// sc-22734. The SenseNova-U1 FAMILY: SIX catalog models the worker routes onto TWO engine ids on
+// both lanes — `sensenova_u1_8b` for the quality trio and `sensenova_u1_8b_fast` for the 8-step
+// distilled trio (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`) — each with its own
+// independently pinned tiered rehost (`q4/ q8/ bf16/`, `mlx.standardTierLayout`). The engine id is
+// NOT the artifact identity here: both engines already enumerate all six public routes
+// (`QUALITY_PUBLIC_ROUTES` / `FAST_PUBLIC_ROUTES`) and refuse a `LoadSpec` whose
+// `resolved_route` names a repository the path does not carry
+// (`validate_resolved_artifact_binding`), so an anchor must bind the exact model's artifact family
+// or it would re-label the base model's peaks as an infographic finetune's.
+/// The base SenseNova-U1 8B tiered rehost — the `sensenova_u1_8b` route of the quality engine.
+pub const SENSENOVA_U1_8B_REPOSITORY: &str = "SceneWorks/sensenova-u1-8b-mlx";
+/// The Infographic V2 finetune's own rehost. Tensor-compatible with the base checkpoint but an
+/// independently resolved artifact, so it binds its own `SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_*`
+/// family.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v2-mlx";
+/// The Infographic V3 finetune's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v3-mlx";
+/// The 8-step distilled base variant. A SEPARATE re-host, not the base weights plus an adapter:
+/// the distill LoRA is pre-merged at convert time and each tier subdir carries the
+/// `distill_merged.json` marker the engine's `load_fast` reads, so nothing is attached at load.
+pub const SENSENOVA_U1_8B_FAST_REPOSITORY: &str = "SceneWorks/sensenova-u1-8b-fast-mlx";
+/// The distilled Infographic V2 variant's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx";
+/// The distilled Infographic V3 variant's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx";
+/// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
+/// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
+/// mode — `crates/sceneworks-worker/src/engines.rs`), on both adapters, through the
+/// `SCENEWORKS_Z_IMAGE_*` family.
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
+/// The undistilled Z-Image BASE tiered rehost (sc-22724) — the `z_image` provider's own artifact,
+/// bound through the separate `SCENEWORKS_Z_IMAGE_BASE_*` family so a base plan can never be
+/// satisfied by Turbo weights and re-label Turbo's peaks as the base model's.
+pub const Z_IMAGE_BASE_REPOSITORY: &str = "SceneWorks/z-image-mlx";
+/// The three SD3.5 tiered rehosts (sc-22730). Unlike the Z-Image pair these are three DISTINCT
+/// engine providers (`sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` — the same ids on both
+/// lanes, with no aliasing), each with its own artifact family, so each gets its own
+/// `SCENEWORKS_SD3_5_*` env triple. Serving one route from another's weights would re-label that
+/// route's peaks; the arms validate the repository literal before any weight work.
+pub const SD3_5_LARGE_REPOSITORY: &str = "SceneWorks/sd3.5-large-mlx";
+pub const SD3_5_LARGE_TURBO_REPOSITORY: &str = "SceneWorks/sd3.5-large-turbo-mlx";
+pub const SD3_5_MEDIUM_REPOSITORY: &str = "SceneWorks/sd3.5-medium-mlx";
 /// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
@@ -39,6 +172,95 @@ pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
 /// variant-suffixed validator.
 pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
+/// The Kolors tiered rehost (sc-22732) — the `kolors` provider's own artifact on BOTH lanes. The
+/// ChatGLM3-6B text encoder is packed INSIDE each tier subdir alongside the SDXL-style U-Net and the
+/// dense SDXL VAE, and the derived fast tokenizer is baked in too
+/// (`crates/sceneworks-worker/src/engines.rs`, `image_jobs/base.rs`), so this one root is the whole
+/// load: the arm binds no second repository. Kolors' IP-Adapter and strict-pose ControlNet stacks
+/// live in their own upstream repos, but those are the two BESPOKE routes, and no anchor measures
+/// them.
+pub const KOLORS_REPOSITORY: &str = "SceneWorks/kolors-mlx";
+/// The base Lens tiered rehost (sc-22732). The gpt-oss-20b MoE text encoder and the FLUX.2
+/// autoencoder are packed per tier, so a Lens capture opens exactly one root.
+pub const LENS_REPOSITORY: &str = "SceneWorks/lens-mlx";
+/// The distilled Lens-Turbo tiered rehost (sc-22732) — a DIFFERENT repository at a DIFFERENT
+/// revision from [`LENS_REPOSITORY`], bound through its own `SCENEWORKS_LENS_TURBO_*` family the way
+/// `flux1_schnell` is split from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
+pub const LENS_TURBO_REPOSITORY: &str = "SceneWorks/lens-turbo-mlx";
+/// The PACKED Ideogram 4 turnkey (sc-22732). It carries the `q4/` and `q8/` tiers ONLY, and it
+/// serves both catalog models — `ideogram_4` and `ideogram_4_turbo` share this repo AND this
+/// revision, differing by the `turbo_lora.safetensors` the turbo tier ships beside the glob.
+pub const IDEOGRAM_REPOSITORY: &str = "SceneWorks/ideogram-4-mlx";
+/// The Ideogram 4 bf16 tier, which lives in a SEPARATE repository at a separate revision
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `IDEOGRAM_BF16_REPO`) because the MLX-quantized
+/// turnkey above is not bf16. Bound through its own `SCENEWORKS_IDEOGRAM_BF16_*` family: a bf16 plan
+/// resolved against the packed family would name the wrong artifact and the wrong revision, and the
+/// record's loadability fingerprint is the one claim about the snapshot nothing downstream can
+/// re-derive.
+pub const IDEOGRAM_BF16_REPOSITORY: &str = "SceneWorks/ideogram-4";
+/// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
+/// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
+/// and the VAE are bit-identical across all six variants and are hosted ONCE in
+/// [`MAGE_COMPONENTS_REPOSITORY`], which the manifest declares as a per-tier co-requisite of every
+/// Mage entry (`config/manifests/builtin.models.jsonc`). Both engines resolve that split through
+/// `LoadSpec::components` (`mlx-gen-mage` `model::resolve_component_dirs`, `candle-gen-mage`
+/// `resolved_component_dirs`), so a Mage capture binds TWO artifact triples: the variant's own tier
+/// root and the shared components snapshot.
+///
+/// One constant per variant rather than a derived string: the anchor key, the engine provider id and
+/// the artifact are three separate namespaces, and a capture that resolved the repository by
+/// transforming the provider id would silently follow any future rename.
+pub const MAGE_FLOW_REPOSITORY: &str = "SceneWorks/Mage-Flow";
+pub const MAGE_FLOW_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Base";
+pub const MAGE_FLOW_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Turbo";
+pub const MAGE_FLOW_EDIT_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit";
+pub const MAGE_FLOW_EDIT_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Base";
+pub const MAGE_FLOW_EDIT_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Turbo";
+/// The shared Mage text-encoder + VAE rehost. Named `-mlx` upstream but consumed by BOTH lanes: the
+/// manifest ships exactly these co-requisite downloads for every Mage entry regardless of backend,
+/// and `candle-gen-mage` reads the same `text_encoder`/`vae` component ids.
+pub const MAGE_COMPONENTS_REPOSITORY: &str = "SceneWorks/Mage-Flow-Components-mlx";
+/// The two component ids both Mage engines advertise, in descriptor order (`mlx-gen-mage`
+/// `model::REQUIRED_COMPONENTS`, `candle-gen-mage` `REQUIRED_COMPONENTS`).
+pub const MAGE_COMPONENT_TEXT_ENCODER: &str = "text_encoder";
+pub const MAGE_COMPONENT_VAE: &str = "vae";
+/// The Wan 2.2 artifacts (sc-22736). The first family whose artifact is per (lane, TIER) rather
+/// than per lane, so each route names THREE repositories: the MLX rehost the macOS lane opens for
+/// every tier, the Candle rehost the Windows/Linux lane opens for `q4` and `q8`, and the upstream
+/// dense Diffusers checkpoint that lane's `bf16` leg opens instead — the manifest ships that one
+/// with the weights at the snapshot ROOT and no pinned revision.
+///
+/// One constant per (route, lane, layout) rather than one shared `WAN22`: the three routes are
+/// three different checkpoints, and a capture satisfied by a sibling's weights would re-label its
+/// peaks. `measure-memory-catalog.test.mjs` derives the same set from `PROVIDER_FAMILIES` and
+/// asserts each appears here, so editing either side alone is a red test rather than a runner that
+/// stages a root the adapter refuses by name mid-campaign.
+pub const WAN22_TI2V_5B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
+pub const WAN22_TI2V_5B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-candle";
+pub const WAN22_TI2V_5B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+pub const WAN22_T2V_A14B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-t2v-a14b-mlx";
+pub const WAN22_T2V_A14B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-t2v-a14b-candle";
+pub const WAN22_T2V_A14B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
+pub const WAN22_I2V_A14B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-i2v-a14b-mlx";
+pub const WAN22_I2V_A14B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-i2v-a14b-candle";
+pub const WAN22_I2V_A14B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
+/// SCAIL-2 (sc-22736) is the opposite shape: ONE repository, all three tiers, and BOTH engine
+/// lanes open it — which is exactly why the two lanes' calibration identities carry a backend
+/// token. Named `-mlx` upstream and consumed by Candle too, like the Mage components rehost above.
+pub const SCAIL2_REPOSITORY: &str = "SceneWorks/scail2-mlx";
+/// The Bernini MLX artifact (sc-22737). ONE tiered rehost serves BOTH shipped catalog entries —
+/// `bernini` (the Wan2.2-A14B video renderer) and `bernini_image` (the still route over the same
+/// block stack) — because they are not two providers: `crates/sceneworks-worker/src/engines.rs`
+/// maps `bernini_image` onto the engine id `bernini`, and `video_jobs/bernini.rs`'s
+/// `bernini_engine_id` maps the video entry onto the same one. The tier sub-directories
+/// (`q4/`, `q8/`, `bf16/`) live inside this snapshot, so a capture's `_ROOT` is the tier dir.
+pub const BERNINI_REPOSITORY: &str = "SceneWorks/bernini-mlx";
+/// The Bernini CANDLE artifact (sc-22737). A DIFFERENT repository from [`BERNINI_REPOSITORY`], and
+/// the one manifest download either Bernini entry ships for `platforms: ["windows", "linux"]`. It
+/// is UNTIERED at the download level and carries the same three tier sub-directories inside it,
+/// which is why `memory_route_registry.rs` declares `BF16_Q4_Q8` for `candle:bernini` while the
+/// off-Mac download row names no `variant` at all.
+pub const BERNINI_CANDLE_REPOSITORY: &str = "SceneWorks/bernini";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and
@@ -306,6 +528,48 @@ pub fn validate_ltx25_rgb_frames(
     Ok(())
 }
 
+/// The frame count a VAE-decoding video engine actually RENDERS for a `requested`-frame clip.
+///
+/// Both inputs are read by the caller from the engine's own `gen_core::tiling::VaeTiling` constant
+/// (`mlx_gen_wan::WAN_Z16_VAE_TILING`, `mlx_gen_scail2::VAE_TILING`, …), so nothing here restates a
+/// per-model number. The rule itself is gen-core's own decoded-depth contract
+/// (`crates/contracts/gen-core/src/tiling.rs`, `TilingConfig::plan`'s `out_f`): a request first
+/// becomes `t_lat = (requested − 1) / temporal_scale + 1` latent frames — the wan family's
+/// `pipeline::latent_shape` and the z16 encoder's `1 + (T − 1)/4` chunking — and the decoder then
+/// emits `1 + (t_lat − 1)·scale` when its temporal decode is **causal**, or the full `t_lat·scale`
+/// when it is **not**.
+///
+/// sc-22738: this is why an MLX SCAIL-2 or Wan-A14B 77-frame request comes back as **80** frames —
+/// `VaeTiling::WAN` is non-causal (`mlx-gen-wan`'s own
+/// `conservative_video_decode_memory_profile_for_vae` prices the same over-delivery), and the
+/// worker's production path neither snaps the request away from it (`wan_frame_count(77) == 77`)
+/// nor rejects the longer clip. The causal z48 TI2V-5B and the causal candle z16 return exactly the
+/// requested count. Each lane's arm binds this rule back to the engines' own symbols in its tests.
+pub fn vae_decoded_frame_count(
+    requested: u32,
+    temporal_scale: i32,
+    causal_temporal: bool,
+) -> Result<u32, String> {
+    if requested == 0 {
+        return Err("a video request must ask for at least one frame".to_owned());
+    }
+    let scale = u32::try_from(temporal_scale)
+        .ok()
+        .filter(|scale| *scale > 0)
+        .ok_or_else(|| format!("a VAE temporal scale must be positive, got {temporal_scale}"))?;
+    let latent_frames = (requested - 1) / scale + 1;
+    let decoded = if causal_temporal {
+        (latent_frames - 1)
+            .checked_mul(scale)
+            .and_then(|frames| frames.checked_add(1))
+    } else {
+        latent_frames.checked_mul(scale)
+    };
+    decoded.ok_or_else(|| {
+        format!("the decoded frame count for {requested} frames at scale {scale} overflowed u32")
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePhase {
     Conditioning,
@@ -348,7 +612,96 @@ pub fn request_from_stdin() -> Result<Value, String> {
     serde_json::from_str(&input).map_err(|error| format!("parse provider request JSON: {error}"))
 }
 
+/// Every scalar quality metric a record can carry, in the order the harness names them.
+const QUALITY_METRICS: [&str; 6] = [
+    "maximumError",
+    "meanError",
+    "rootMeanSquareError",
+    "maximumErrorThreshold",
+    "meanErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+];
+
+/// The metrics `memory-calibration-harness.mjs` requires for a given record status —
+/// `validateComplete` reads four, `validateRuntimeComplete` reads all six. Every other status
+/// (`gated`, `declared`, the bounded-carrier statuses) carries no scalar quality metrics at all,
+/// so nothing is required of it here.
+fn required_quality_metrics(status: &str) -> &'static [&'static str] {
+    /// `validateComplete`'s four: the RMS pair is read only by the runtime-complete validator, so
+    /// requiring it of a `complete` record would refuse records the harness accepts today.
+    const COMPLETE: [&str; 4] = [
+        "maximumError",
+        "meanError",
+        "maximumErrorThreshold",
+        "meanErrorThreshold",
+    ];
+    match status {
+        "runtime_complete" => &QUALITY_METRICS,
+        "complete" => &COMPLETE,
+        _ => &[],
+    }
+}
+
+/// Refuse a record whose quality metrics are absent or non-finite BEFORE it is filed (E4/E5).
+///
+/// This exists because an adapter arm has exactly two ways to publish an unusable metric and both
+/// of them are silent at the source. A metric the arm never emits is simply missing, and — because
+/// `serde_json`'s `From<f64>` maps every non-finite float to `Value::Null` — a NaN or an infinity
+/// computed from an invalid comparison is written as `null` rather than failing to serialize. The
+/// harness sees the same thing in both cases and refuses the record with a message that cannot tell
+/// them apart, hundreds of GPU-seconds after the render that produced it (sc-22738: the SD3.5 arm
+/// emitted no `rootMeanSquareError` at all and three anchors were refused after a successful
+/// render). Checking here — at the ONE point every adapter binary files a record through — turns
+/// both into a refusal naming the metric and the status that requires it.
+///
+/// Only presence and finiteness are checked. Whether a metric is inside its threshold is the arm's
+/// own comparison, which it makes against its own named constants before building the fragment.
+pub fn validate_quality_metrics(response: &Value) -> Result<(), String> {
+    let Some(quality) = response.get("quality").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // sc-22738: a receipt declaring `warmPasses: 0` ran no comparison render, so it carries no
+    // comparison figure to require — the harness, the schema and `sceneworks-core` read the same
+    // declaration and accept `result: not_run` in its place. Any figure it DOES carry is still
+    // held to finiteness below.
+    let required = if quality.get("warmPasses").and_then(Value::as_u64) == Some(0) {
+        &[][..]
+    } else {
+        required_quality_metrics(status)
+    };
+    for metric in QUALITY_METRICS {
+        let Some(value) = quality.get(metric) else {
+            if required.contains(&metric) {
+                return Err(format!(
+                    "a {status} record must carry quality.{metric}; the harness reads it and \
+                     refuses the record without it"
+                ));
+            }
+            continue;
+        };
+        // `null` here is the serialized form of a non-finite f64, not an authored null: `json!`
+        // cannot represent NaN or an infinity any other way.
+        let number = value.as_f64().ok_or_else(|| {
+            format!(
+                "quality.{metric} must be a nonnegative finite number, got {value} \
+                 (a non-finite comparison result serializes to null)"
+            )
+        })?;
+        if !number.is_finite() || number < 0.0 {
+            return Err(format!(
+                "quality.{metric} must be a nonnegative finite number, got {number}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn write_response(response: &Value) -> Result<(), String> {
+    validate_quality_metrics(response)?;
     serde_json::to_writer(io::stdout(), response)
         .map_err(|error| format!("write provider response JSON: {error}"))
 }
@@ -583,6 +936,170 @@ pub fn validate_still_geometry(request: &Value, calibration_label: &str) -> Resu
     Ok(())
 }
 
+// ==== capture lane: how many renders one capture runs (sc-22738, 2026-09-08) ====================
+
+/// The lane a plan row is captured under — the SAME derivation `scripts/measure-memory-catalog.mjs`
+/// budgets a probe by (`videoLane`, #2784): a video anchor renders more than one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureLane {
+    Image,
+    Video,
+}
+
+/// Warm passes an IMAGE capture runs after its measured render: a clean warm control and a warm
+/// repeat, which feed the determinism envelope (`quality`), the clean-warm allocator bounds
+/// (`lifecycleClean*` / `lifecycleWarmRepeat*`) and the `warm_repeat` scenario. Unchanged.
+pub const IMAGE_WARM_PASSES: u32 = 2;
+
+/// Warm passes a VIDEO capture runs after its measured render: NONE (sc-22738, decided 2026-09-08).
+///
+/// The anchor's peaks come from the FIRST render — `extract-memory-anchors.mjs` and
+/// `sceneworks-core::memory_anchor` read only the three phase peaks, the overall allocator
+/// envelope and `outputFps` off a record — while the two warm passes existed for the
+/// residency-retention and allocator-envelope checks and cost 2x the render on video. Witnessed:
+/// `scail2_14b:bf16:mlx` ~8,500 s per three-render capture (8,709 s, 2026-09-06);
+/// `wan_2_2_t2v_14b:bf16:mlx` 13,411 s; `wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget without
+/// finishing (the packed tier dequantizes per step, so it is SLOWER than dense). A video capture is
+/// therefore one measured render, and its receipt says so instead of writing zeros: the
+/// `warm_repeat` scenario is `not_run`, `quality` carries `warmPasses: 0` with `result: not_run` and
+/// no comparison figures, and no `lifecycleClean*` / `lifecycleWarmRepeat*` measurement is emitted.
+pub const VIDEO_WARM_PASSES: u32 = 0;
+
+/// Why a single-render video receipt runs no warm pass — the `warm_repeat` scenario's reason and
+/// the head of every video arm's lifecycle blocker, so the record states it once in its own words.
+pub const VIDEO_WARM_PASSES_NOT_RUN: &str = "sc-22738 (2026-09-08): a video capture is ONE \
+    measured render; the clean warm control and warm repeat are not run on the video lane. The \
+    anchor's phase peaks come from the first render, and the two warm passes cost 2x the render on \
+    video (witnessed: scail2_14b:bf16:mlx 8,709 s per three-render capture, wan_2_2_t2v_14b:bf16:mlx \
+    13,411 s, wan_2_2_t2v_14b:q4:mlx unfinished at 16,200 s). Output determinism, the warm-peak \
+    bound and post-cleanup retention are therefore NOT MEASURED for this record; nothing here is a \
+    zero";
+
+/// One capture's render plan, derived from the plan row's lane and nothing else: a lane property,
+/// never a per-model choice. Every arm asks this before it renders, and a receipt's `warmPasses`
+/// declaration is read back from it rather than restated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturePolicy {
+    pub lane: CaptureLane,
+    /// Warm passes after the measured render: [`IMAGE_WARM_PASSES`] or [`VIDEO_WARM_PASSES`].
+    pub warm_passes: u32,
+}
+
+impl CapturePolicy {
+    pub const fn for_lane(lane: CaptureLane) -> Self {
+        Self {
+            lane,
+            warm_passes: match lane {
+                CaptureLane::Image => IMAGE_WARM_PASSES,
+                CaptureLane::Video => VIDEO_WARM_PASSES,
+            },
+        }
+    }
+
+    /// Total `generate` calls one capture makes: the measured render plus the lane's warm passes.
+    pub const fn renders(self) -> u32 {
+        1 + self.warm_passes
+    }
+
+    /// A video arm's declaration that its plan row IS on the video lane and that this capture runs
+    /// the video lane's warm passes — the one place a video arm's single render is decided.
+    pub fn require_video(self, arm_label: &str) -> Result<Self, String> {
+        if self.lane != CaptureLane::Video {
+            return Err(format!(
+                "{arm_label} is a video arm; the plan declares a single-frame geometry, which is \
+                 the image lane"
+            ));
+        }
+        Ok(self)
+    }
+
+    /// The `quality` block of a receipt whose warm passes were NOT run: the contract and the
+    /// thresholds the comparison WOULD be judged by travel so the record is self-describing, the
+    /// result is `not_run`, and no comparison figure is written (`warmPasses: 0` is the schema's
+    /// permission for a `runtime_complete` record to carry exactly this shape).
+    pub fn not_run_quality(
+        self,
+        contract: &str,
+        thresholds: (f64, f64, f64),
+    ) -> Result<Value, String> {
+        if self.warm_passes != 0 {
+            return Err(format!(
+                "a {:?} capture runs {} warm passes and measures its quality; only a zero-warm-pass \
+                 capture may file quality as not_run",
+                self.lane, self.warm_passes
+            ));
+        }
+        let (maximum, mean, rms) = thresholds;
+        Ok(json!({
+            "contract": format!("{contract}; NOT MEASURED: {VIDEO_WARM_PASSES_NOT_RUN}"),
+            "result": "not_run",
+            "warmPasses": self.warm_passes,
+            "maximumErrorThreshold": maximum,
+            "meanErrorThreshold": mean,
+            "rootMeanSquareErrorThreshold": rms,
+        }))
+    }
+
+    /// The `warm_repeat` scenario of a receipt whose warm passes were NOT run.
+    pub fn not_run_warm_repeat_scenario(self) -> Result<Value, String> {
+        if self.warm_passes != 0 {
+            return Err(format!(
+                "a {:?} capture runs {} warm passes; its warm_repeat scenario is measured, not \
+                 not_run",
+                self.lane, self.warm_passes
+            ));
+        }
+        Ok(
+            json!({ "name": "warm_repeat", "result": "not_run", "reason": VIDEO_WARM_PASSES_NOT_RUN }),
+        )
+    }
+}
+
+/// The lane of a plan row (`planned.target.geometry.frames > 1` is video), as
+/// `measure-memory-catalog.mjs` derives the budget lane.
+pub fn capture_lane(request: &Value) -> Result<CaptureLane, String> {
+    let frames = planned(request)?
+        .pointer("/target/geometry/frames")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "planned.target.geometry.frames must be an integer".to_owned())?;
+    if frames == 0 {
+        return Err("planned.target.geometry.frames must be positive".to_owned());
+    }
+    Ok(if frames > 1 {
+        CaptureLane::Video
+    } else {
+        CaptureLane::Image
+    })
+}
+
+/// The capture policy of a plan row: see [`CapturePolicy`].
+pub fn capture_policy(request: &Value) -> Result<CapturePolicy, String> {
+    Ok(CapturePolicy::for_lane(capture_lane(request)?))
+}
+
+/// Which render of a capture a `generate` call is: the measured one, or the n-th warm pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderRole {
+    Measured,
+    /// Warm pass `n` (1-based), only ever issued when the lane's `warm_passes >= n`.
+    Warm(u32),
+}
+
+/// Drive the renders one capture makes under `policy`: the measured render, then exactly
+/// `policy.warm_passes` warm passes, in order. Returns the measured output and the warm outputs.
+/// A video policy calls `render` ONCE; an image policy calls it three times.
+pub fn drive_renders<T, E>(
+    policy: CapturePolicy,
+    mut render: impl FnMut(RenderRole) -> Result<T, E>,
+) -> Result<(T, Vec<T>), E> {
+    let measured = render(RenderRole::Measured)?;
+    let mut warm = Vec::with_capacity(policy.warm_passes as usize);
+    for pass in 1..=policy.warm_passes {
+        warm.push(render(RenderRole::Warm(pass))?);
+    }
+    Ok((measured, warm))
+}
+
 /// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
 /// `"control"`, `"identity"` (sc-16069).
 ///
@@ -660,11 +1177,249 @@ pub fn settle_plain_overlay_scenario(
     Ok(())
 }
 
+/// The reference image an `edit_image` anchor conditions on: a deterministic RGB gradient at the
+/// request geometry (`width * height * 3` interleaved bytes), which is exactly the shape the worker
+/// hands the engine — it fits the user's source to the request geometry before conditioning
+/// (`fit_engine_image` in `image_jobs/base.rs`). A reference is what makes an edit capture measure
+/// the edit path (VAE-encode of the source, the reduced denoise tail) rather than text-to-image
+/// wearing a different mode label; the pixel CONTENT does not move memory, so a synthetic one
+/// keeps the capture hermetic and reproducible.
+pub fn synthetic_reference_rgb(width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width.max(1) as u64, height.max(1) as u64);
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push((x * 255 / w.max(2).saturating_sub(1).max(1)).min(255) as u8);
+            pixels.push((y * 255 / h.max(2).saturating_sub(1).max(1)).min(255) as u8);
+            pixels.push((((x + y) * 255) / (w + h).saturating_sub(2).max(1)).min(255) as u8);
+        }
+    }
+    pixels
+}
+
+// ------------------------------------------------------------------------------------------
+// InstantID identity stack (sc-22729)
+// ------------------------------------------------------------------------------------------
+
+/// The env var BOTH InstantID worker lanes honour for a pre-staged converted bundle
+/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `ensure_instantid_weights`). The
+/// IP-Adapter and the SCRFD/ArcFace face stack are fetched on first use from a pinned repo rather
+/// than declared as manifest downloads, so an anchor binds the operator's staged copy through the
+/// same seam the worker reads — never by re-deriving the fetch.
+pub const INSTANTID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_INSTANTID_WEIGHTS";
+/// The IdentityNet `ControlNetModel` directory (`SCENEWORKS_INSTANTID_CONTROLNET` in the worker).
+pub const INSTANTID_CONTROLNET_ENV: &str = "SCENEWORKS_INSTANTID_CONTROLNET";
+pub const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
+pub const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const INSTANTID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+/// Every file the staged bundle must carry. Duplicated from the worker's own private constants;
+/// `instantid_bundle_filenames_match_the_worker` reads that source and proves the two agree.
+pub const INSTANTID_IDENTITY_BUNDLE_FILES: [&str; 3] = [
+    INSTANTID_IP_ADAPTER_FILE,
+    INSTANTID_SCRFD_FILE,
+    INSTANTID_ARCFACE_FILE,
+];
+/// The IdentityNet weight file inside the ControlNet directory.
+pub const INSTANTID_CONTROLNET_WEIGHT_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+/// The resolved InstantID identity stack one capture loads.
+///
+/// `face_dir` is the bundle root itself, exactly as the worker stages it: the candle lane passes
+/// `scrfd_path.parent()` and the MLX lane joins the two face files out of the same directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstantIdIdentityBundle {
+    pub root: std::path::PathBuf,
+    pub ip_adapter: std::path::PathBuf,
+    pub scrfd: std::path::PathBuf,
+    pub arcface: std::path::PathBuf,
+    pub face_dir: std::path::PathBuf,
+}
+
+/// Resolve the bundle under `root`, refusing up front and naming EVERY missing file rather than
+/// failing later inside the loader with one file's error.
+pub fn instantid_identity_bundle_at(
+    root: std::path::PathBuf,
+) -> Result<InstantIdIdentityBundle, String> {
+    let missing = INSTANTID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .filter(|file| !root.join(file).is_file())
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "the InstantID identity bundle at {} is missing {} (expected {})",
+            root.display(),
+            missing.join(", "),
+            INSTANTID_IDENTITY_BUNDLE_FILES.join(", ")
+        ));
+    }
+    Ok(InstantIdIdentityBundle {
+        ip_adapter: root.join(INSTANTID_IP_ADAPTER_FILE),
+        scrfd: root.join(INSTANTID_SCRFD_FILE),
+        arcface: root.join(INSTANTID_ARCFACE_FILE),
+        face_dir: root.clone(),
+        root,
+    })
+}
+
+/// The bundle named by [`INSTANTID_IDENTITY_BUNDLE_ENV`], canonicalized.
+pub fn instantid_identity_bundle() -> Result<InstantIdIdentityBundle, String> {
+    let root = std::fs::canonicalize(std::path::PathBuf::from(required_env(
+        INSTANTID_IDENTITY_BUNDLE_ENV,
+    )?))
+    .map_err(|error| format!("canonicalize {INSTANTID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    instantid_identity_bundle_at(root)
+}
+
+/// The IdentityNet ControlNet directory named by [`INSTANTID_CONTROLNET_ENV`], canonicalized and
+/// proven to carry the weight file the loader opens.
+pub fn instantid_controlnet_dir() -> Result<std::path::PathBuf, String> {
+    let root = std::fs::canonicalize(std::path::PathBuf::from(required_env(
+        INSTANTID_CONTROLNET_ENV,
+    )?))
+    .map_err(|error| format!("canonicalize {INSTANTID_CONTROLNET_ENV}: {error}"))?;
+    if !root.join(INSTANTID_CONTROLNET_WEIGHT_FILE).is_file() {
+        return Err(format!(
+            "the InstantID IdentityNet directory at {} carries no {INSTANTID_CONTROLNET_WEIGHT_FILE}",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
 pub fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("required environment variable {name} is not set"))
+}
+
+/// The env var both PuLID-FLUX worker lanes read for a pre-staged identity bundle, under TWO
+/// semantics. The Candle lane (`image_jobs/pulid_candle.rs` `ensure_pulid_candle_weights`) takes
+/// it as a complete bundle: a directory holding all five files, used as-is, and ignored if any
+/// file is missing. The MLX lane (`image_jobs/pulid.rs` `ensure_pulid_weights`) takes it as the
+/// directory to FILL — missing files are downloaded into it — and it is outranked by a fully-set
+/// `PULID_FLUX_WEIGHTS` / `PULID_EVA_WEIGHTS` / `PULID_FACE_WEIGHTS_DIR` preset
+/// (`pulid_weights_env_preset`). The identity stack is fetched on first use rather than declared
+/// as a manifest download, so an anchor binds the operator's staged copy through this same seam,
+/// and it uses the strict Candle reading on both lanes: every file present, nothing downloaded.
+pub const PULID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_PULID_WEIGHTS";
+/// The five loose files both lanes require in ONE directory, which doubles as the provider's
+/// `face_dir`: the adapter checkpoint, the EVA tower, and the three face models both engines read
+/// out of `face_dir` by name. `measure-memory-catalog.mjs` `PROVIDER_FAMILIES.pulid_flux.bundle`
+/// carries the same list in the same order, and its test parses this file to prove it.
+pub const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
+pub const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
+pub const PULID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const PULID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+pub const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
+/// Every file the bundle must carry.
+pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
+    PULID_ADAPTER_FILE,
+    PULID_EVA_FILE,
+    PULID_SCRFD_FILE,
+    PULID_ARCFACE_FILE,
+    PULID_BISENET_FILE,
+];
+
+/// The PuLID identity stack an anchor binds: `(adapter, eva, face_dir)`.
+///
+/// Both lanes take exactly these three handles — MLX through `LoadSpec::identity`
+/// (`IdentityWeights { encoder, eva, face_dir }`), Candle through `PulidFluxPaths`
+/// `{ pulid_weights, eva_weights, face_dir }` — and both engines then read the three face models
+/// out of `face_dir` BY NAME. So a bundle missing any one of the five is refused HERE, naming the
+/// files, rather than surfacing as an opaque loader error several gigabytes into a capture.
+///
+/// The record names the stack by CONTENT — the SHA-256 of each of the five files and one composite
+/// over them — never by the host path it was staged at: two hosts staging the same upstream files
+/// measured the same identity stack, and the same host restaging different files did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PulidIdentityBundle {
+    pub root: PathBuf,
+    pub adapter: PathBuf,
+    pub eva: PathBuf,
+    pub face_dir: PathBuf,
+    /// `(file name, lowercase SHA-256 of its bytes)` for every file in
+    /// [`PULID_IDENTITY_BUNDLE_FILES`], in that order.
+    pub file_sha256: Vec<(&'static str, String)>,
+    /// SHA-256 over the `<file>:<sha256>\n` lines of `file_sha256`, in order — the one token a
+    /// loadability fingerprint carries for the whole stack.
+    pub composite_sha256: String,
+}
+
+impl PulidIdentityBundle {
+    /// The record's `artifact.identityBundle`: `{ "<file>": "<sha256>", ... }` plus the composite.
+    pub fn artifact_json(&self) -> Value {
+        let mut files = Map::new();
+        for (file, sha256) in &self.file_sha256 {
+            files.insert((*file).to_owned(), Value::String(sha256.clone()));
+        }
+        json!({
+            "files": files,
+            "compositeSha256": self.composite_sha256,
+        })
+    }
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    io::copy(&mut file, &mut hasher)
+        .map_err(|error| format!("hash {}: {error}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
+/// the five files, so a bundle that is present but unreadable is refused here too.
+pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, String> {
+    let missing: Vec<&str> = PULID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .copied()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{PULID_IDENTITY_BUNDLE_ENV} bundle {} is missing {}; the PuLID identity stack is one \
+             directory holding all five files (it IS the provider's face_dir)",
+            root.display(),
+            missing.join(", ")
+        ));
+    }
+    let mut file_sha256 = Vec::with_capacity(PULID_IDENTITY_BUNDLE_FILES.len());
+    let mut composite = {
+        use sha2::Digest;
+        sha2::Sha256::new()
+    };
+    for file in PULID_IDENTITY_BUNDLE_FILES {
+        let sha256 = sha256_hex_of_file(&root.join(file))?;
+        {
+            use sha2::Digest;
+            composite.update(format!("{file}:{sha256}\n").as_bytes());
+        }
+        file_sha256.push((file, sha256));
+    }
+    let composite_sha256 = {
+        use sha2::Digest;
+        format!("{:x}", composite.finalize())
+    };
+    Ok(PulidIdentityBundle {
+        adapter: root.join(PULID_ADAPTER_FILE),
+        eva: root.join(PULID_EVA_FILE),
+        face_dir: root.clone(),
+        root,
+        file_sha256,
+        composite_sha256,
+    })
+}
+
+/// Resolve the staged bundle from [`PULID_IDENTITY_BUNDLE_ENV`], canonicalized so the record's
+/// fingerprint names a real path rather than whatever spelling the operator exported.
+pub fn pulid_identity_bundle() -> Result<PulidIdentityBundle, String> {
+    let root = std::fs::canonicalize(PathBuf::from(required_env(PULID_IDENTITY_BUNDLE_ENV)?))
+        .map_err(|error| format!("canonicalize {PULID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    pulid_identity_bundle_at(root)
 }
 
 pub fn validate_artifact_identity(
@@ -673,8 +1428,12 @@ pub fn validate_artifact_identity(
     expected_repository: &str,
 ) -> Result<(), String> {
     if repository != expected_repository {
+        // The OFFENDING repository is named as well as the expected one: a sibling-member root
+        // handed to the wrong arm is the failure this check exists for, and an operator (or a
+        // test) cannot tell that refusal apart from any other without seeing what was passed.
         return Err(format!(
-            "artifact repository must be the fixed {expected_repository} calibration artifact"
+            "artifact repository must be the fixed {expected_repository} calibration artifact, \
+             not {repository}"
         ));
     }
     if revision.len() != 40
@@ -869,7 +1628,43 @@ pub fn plain_gated_fragment(
     parts: PlainGatedFragment<'_>,
 ) -> Result<Value, String> {
     validate_plain_overlay_target(request, execution_path)?;
-    let mut fragment = json!({
+    let mut fragment = gated_fragment_body(parts);
+    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    Ok(fragment)
+}
+
+/// The same gated fragment for a provider path that DID load and exercise a material overlay
+/// (sc-22728: the Qwen edit Lightning distill is one built-in LoRA folded into the MMDiT at load).
+/// The declared target is required to be exactly that overlay, so an overlay-free plan can never
+/// pick up a `passed` overlay verdict, and a differently-overlaid one can never be recorded here.
+/// `overlay_reason` states what actually participated in the measured renders.
+pub fn overlay_gated_fragment(
+    request: &Value,
+    expected_overlay: &str,
+    execution_path: &str,
+    overlay_reason: &str,
+    parts: PlainGatedFragment<'_>,
+) -> Result<Value, String> {
+    validate_exact_overlay_target(request, expected_overlay, execution_path)?;
+    let mut fragment = gated_fragment_body(parts);
+    let scenarios = fragment
+        .get_mut("scenarios")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "provider fragment.scenarios must be an array".to_owned())?;
+    let overlay_index = scenarios
+        .iter()
+        .position(|scenario| scenario.get("name").and_then(Value::as_str) == Some("overlay"))
+        .ok_or_else(|| "provider fragment is missing the required overlay scenario".to_owned())?;
+    scenarios[overlay_index] = json!({
+        "name": "overlay",
+        "result": "passed",
+        "reason": overlay_reason,
+    });
+    Ok(fragment)
+}
+
+fn gated_fragment_body(parts: PlainGatedFragment<'_>) -> Value {
+    json!({
         "status": "gated",
         "artifact": parts.artifact,
         "sweep": parts.sweep,
@@ -881,14 +1676,47 @@ pub fn plain_gated_fragment(
         "loadability": parts.loadability,
         "diagnostics": parts.diagnostics,
         "capturedAt": captured_at(),
-    });
-    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
-    Ok(fragment)
+    })
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
+    // The failure line FIRST, informational notes after it — which is how eighteen sc-22738 Mage
+    // refusals came to be reported as a GPU-view coherence statistic rather than as the lifecycle
+    // refusal that actually stopped them: a per-render note printed the moment the render returned
+    // sat where the outcome belonged.
+    //
+    // The runner reads the OTHER end (`measure-memory-catalog.mjs#failureReason` quotes the last
+    // non-banner line), so this ordering alone would have put the same tally back in every summary
+    // row. `failureReason` therefore skips the `note:` prefix `flush_deferred_notes` writes below;
+    // that prefix is the contract between the two, and renaming it here without teaching the
+    // runner reinstates the defect (sc-22738).
     eprintln!("memory-strategy provider adapter: {}", message.as_ref());
+    flush_deferred_notes();
     std::process::exit(1);
+}
+
+/// Informational, non-failing render notes, held until the process is done (sc-22738).
+///
+/// See [`fail`] for why they are not printed where they are produced. Notes are flushed by [`fail`]
+/// and by [`flush_deferred_notes`], which the adapter binaries call on the success path.
+static DEFERRED_NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record one informational note for emission after the process's outcome is known.
+pub fn defer_note(note: impl Into<String>) {
+    if let Ok(mut notes) = DEFERRED_NOTES.lock() {
+        notes.push(note.into());
+    }
+}
+
+/// Emit every deferred note, prefixed so it reads as informational, and clear the buffer.
+pub fn flush_deferred_notes() {
+    let notes = match DEFERRED_NOTES.lock() {
+        Ok(mut notes) => std::mem::take(&mut *notes),
+        Err(_) => Vec::new(),
+    };
+    for note in notes {
+        eprintln!("memory-strategy provider adapter: note: {note}");
+    }
 }
 
 /// The allocator counters an MLX phase window is opened against, abstracted so the ORDER in which
@@ -966,6 +1794,129 @@ pub fn open_resident_phase_window<C: ResidencyCounters>(
         );
     }
     Ok(opening)
+}
+
+/// Test support shared by BOTH adapter binaries (sc-22729 review).
+///
+/// Ordinary public API rather than `#[cfg(test)]`: the binaries are separate compilation units that
+/// merely DEPEND on this crate, so nothing gated on this crate's own `test` cfg is visible to them.
+/// The alternative was the same hundred lines copied into `mlx.rs` and `candle.rs`, where the two
+/// copies would drift — and the whole point of the fixture is that both lanes stage the identity
+/// stack the same way.
+pub mod staging {
+    use super::{
+        INSTANTID_CONTROLNET_ENV, INSTANTID_CONTROLNET_WEIGHT_FILE, INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_IDENTITY_BUNDLE_FILES,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Serializes the process-global `SCENEWORKS_INSTANTID_*` swap. Both `instantid_binding` and
+    /// `instantid_candle_identity` read five environment variables; two tests mutating them
+    /// concurrently would each resolve half of the other's tree.
+    static INSTANTID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub const INSTANTID_ENV_NAMES: [&str; 5] = [
+        "SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY",
+        "SCENEWORKS_INSTANTID_REALVISXL_REVISION",
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+        INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_CONTROLNET_ENV,
+    ];
+
+    /// A synthetic InstantID staging tree, installed into the process environment for as long as
+    /// this value lives. RAII rather than a restore statement so a panicking assertion cannot leak
+    /// the injected environment into every later test in the process.
+    pub struct StagedInstantId {
+        root: PathBuf,
+        /// The tiered backbone snapshot root, in the exact Hugging Face layout the validators want.
+        pub snapshot: PathBuf,
+        /// The IdentityNet `ControlNetModel` directory. Created EMPTY — call
+        /// [`StagedInstantId::stage_identitynet_weight`] to complete it.
+        pub identitynet: PathBuf,
+        /// The identity bundle root, carrying all three of `INSTANTID_IDENTITY_BUNDLE_FILES`.
+        pub bundle: PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl StagedInstantId {
+        /// A well-formed 40-hex revision. Any value works: the validators check SHAPE and the path
+        /// suffix, never that the revision exists anywhere.
+        pub const REVISION: &'static str = "e40202d63baef826c7df95a639a811698c1178d2";
+
+        pub fn install(tag: &str, repository: &str, tier: &str) -> Self {
+            let guard = INSTANTID_ENV_LOCK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let root = std::env::temp_dir().join(format!(
+                "sc-22729-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the clock is after the epoch")
+                    .as_nanos()
+            ));
+            let snapshot = root
+                .join(format!("models--{}", repository.replace('/', "--")))
+                .join("snapshots")
+                .join(Self::REVISION)
+                .join(tier);
+            let identitynet = root.join("identitynet");
+            let bundle = root.join("bundle");
+            for dir in [&snapshot, &identitynet, &bundle] {
+                std::fs::create_dir_all(dir).expect("create the staged tree");
+            }
+            for file in INSTANTID_IDENTITY_BUNDLE_FILES {
+                std::fs::write(bundle.join(file), b"x").expect("stage a bundle file");
+            }
+            for (name, value) in [
+                (INSTANTID_ENV_NAMES[0], repository.to_owned()),
+                (INSTANTID_ENV_NAMES[1], Self::REVISION.to_owned()),
+                (INSTANTID_ENV_NAMES[2], snapshot.display().to_string()),
+                (INSTANTID_ENV_NAMES[3], bundle.display().to_string()),
+                (INSTANTID_ENV_NAMES[4], identitynet.display().to_string()),
+            ] {
+                std::env::set_var(name, value);
+            }
+            Self {
+                root,
+                snapshot,
+                identitynet,
+                bundle,
+                _guard: guard,
+            }
+        }
+
+        pub fn stage_identitynet_weight(&self) {
+            std::fs::write(
+                self.identitynet.join(INSTANTID_CONTROLNET_WEIGHT_FILE),
+                b"x",
+            )
+            .expect("stage the IdentityNet weight");
+        }
+
+        /// The five artifact paths, canonicalized, in the role order the worker's
+        /// `instantid_artifact_fingerprint` hashes them: backbone, IdentityNet, IP-Adapter, SCRFD,
+        /// ArcFace.
+        pub fn ordered_paths(&self) -> Vec<PathBuf> {
+            let bundle = std::fs::canonicalize(&self.bundle).expect("canonicalize the bundle");
+            let mut paths = vec![
+                std::fs::canonicalize(&self.snapshot).expect("canonicalize the snapshot"),
+                std::fs::canonicalize(&self.identitynet).expect("canonicalize the IdentityNet dir"),
+            ];
+            paths.extend(INSTANTID_IDENTITY_BUNDLE_FILES.map(|file| bundle.join(file)));
+            paths
+        }
+    }
+
+    impl Drop for StagedInstantId {
+        fn drop(&mut self) {
+            for name in INSTANTID_ENV_NAMES {
+                std::env::remove_var(name);
+            }
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1302,6 +2253,61 @@ mod tests {
         }
     }
 
+    /// sc-22728: the overlay-carrying gated fragment records `passed` for exactly the overlay the
+    /// target declares and refuses every other declaration — including `"none"`, so a plan with no
+    /// overlay can never collect a `passed` overlay verdict from a path that loaded one.
+    #[test]
+    fn an_overlay_gated_fragment_settles_only_the_overlay_its_target_declares() {
+        let parts = || PlainGatedFragment {
+            artifact: json!({}),
+            sweep: json!({}),
+            blocker: "gated",
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({ "result": "passed" }),
+            diagnostics: json!({}),
+        };
+        let request = json!({ "planned": { "target": { "overlay": "lora" } } });
+        let fragment = overlay_gated_fragment(
+            &request,
+            "lora",
+            "the edit path",
+            "the distill ran",
+            parts(),
+        )
+        .unwrap();
+        let overlay = fragment["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|scenario| scenario["name"] == "overlay")
+            .unwrap()
+            .clone();
+        assert_eq!(overlay["result"], "passed");
+        assert_eq!(overlay["reason"], "the distill ran");
+        assert_eq!(fragment["status"], "gated");
+        for declared in ["none", "identity", "control:1"] {
+            let request = json!({ "planned": { "target": { "overlay": declared } } });
+            let error = overlay_gated_fragment(
+                &request,
+                "lora",
+                "the edit path",
+                "the distill ran",
+                parts(),
+            )
+            .unwrap_err();
+            assert!(error.contains(declared), "{error}");
+            assert!(error.contains("refusing"), "{error}");
+        }
+        // And the plain builder still refuses a material overlay, so the two are not interchangeable.
+        assert!(plain_gated_fragment(
+            &json!({ "planned": { "target": { "overlay": "lora" } } }),
+            "the edit path",
+            parts(),
+        )
+        .is_err());
+    }
+
     #[test]
     fn fresh_reference_sweep_preserves_parameters_without_fabricating_empty_rungs() {
         let bounded = json!({
@@ -1434,6 +2440,110 @@ mod tests {
             .unwrap();
         assert_eq!(overlay["result"], "not_applicable");
         assert_ne!(overlay["result"], "not_run");
+    }
+
+    /// A runtime-complete quality block carrying every metric the harness reads.
+    fn runtime_complete_quality() -> Value {
+        json!({
+            "contract": "identical inputs",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": 0.01,
+            "meanError": 0.001,
+            "rootMeanSquareError": 0.002,
+            "maximumErrorThreshold": 3e-2,
+            "meanErrorThreshold": 3e-3,
+            "rootMeanSquareErrorThreshold": 3e-2,
+        })
+    }
+
+    fn record(status: &str, quality: Value) -> Value {
+        json!({ "status": status, "quality": quality })
+    }
+
+    #[test]
+    fn a_complete_quality_block_is_filed() {
+        validate_quality_metrics(&record("runtime_complete", runtime_complete_quality())).unwrap();
+    }
+
+    /// sc-22738's defect exactly: the arm emitted no `rootMeanSquareError`, the fragment serialized
+    /// happily, and three SD3.5 anchors were refused at the harness AFTER a successful render.
+    #[test]
+    fn a_runtime_complete_record_missing_the_rms_metric_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality
+            .as_object_mut()
+            .unwrap()
+            .remove("rootMeanSquareError");
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(error.contains("quality.rootMeanSquareError"), "{error}");
+        assert!(error.contains("runtime_complete"), "{error}");
+    }
+
+    #[test]
+    fn a_runtime_complete_record_missing_the_rms_threshold_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality
+            .as_object_mut()
+            .unwrap()
+            .remove("rootMeanSquareErrorThreshold");
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(
+            error.contains("quality.rootMeanSquareErrorThreshold"),
+            "{error}"
+        );
+    }
+
+    /// `json!` cannot represent NaN or an infinity, so an invalid comparison reaches the record as
+    /// `null` rather than as a serialization failure. That null is what has to be refused.
+    #[test]
+    fn a_non_finite_metric_is_refused_as_the_null_it_serializes_to() {
+        for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut quality = runtime_complete_quality();
+            quality["rootMeanSquareError"] = json!(non_finite);
+            assert_eq!(
+                quality["rootMeanSquareError"],
+                Value::Null,
+                "a non-finite f64 must serialize to null, which is what the guard sees"
+            );
+            let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+            assert!(error.contains("nonnegative finite number"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_negative_metric_is_refused() {
+        let mut quality = runtime_complete_quality();
+        quality["meanError"] = json!(-1e-9);
+        let error = validate_quality_metrics(&record("runtime_complete", quality)).unwrap_err();
+        assert!(error.contains("quality.meanError"), "{error}");
+    }
+
+    /// `validateComplete` reads four metrics and never the RMS pair, so requiring it of a
+    /// `complete` record would refuse records the harness accepts today.
+    #[test]
+    fn a_complete_record_may_omit_the_rms_pair() {
+        let mut quality = runtime_complete_quality();
+        let object = quality.as_object_mut().unwrap();
+        object.remove("rootMeanSquareError");
+        object.remove("rootMeanSquareErrorThreshold");
+        validate_quality_metrics(&record("complete", quality.clone())).unwrap();
+        let mut missing_mean = quality;
+        missing_mean.as_object_mut().unwrap().remove("meanError");
+        let error = validate_quality_metrics(&record("complete", missing_mean)).unwrap_err();
+        assert!(error.contains("quality.meanError"), "{error}");
+    }
+
+    /// A gated record's quality block carries no scalar metrics at all.
+    #[test]
+    fn a_gated_record_carries_no_required_metrics() {
+        validate_quality_metrics(&record("gated", json!({ "result": "not_run" }))).unwrap();
+    }
+
+    /// A probe response has no quality block; the guard must not invent one.
+    #[test]
+    fn a_response_without_a_quality_block_is_filed() {
+        validate_quality_metrics(&json!({ "backends": ["mlx"] })).unwrap();
     }
 
     #[test]
@@ -1689,6 +2799,78 @@ mod tests {
         .is_err());
     }
 
+    /// sc-22734. Each of the SIX SenseNova rehosts is its own artifact identity: a root under one
+    /// member's repository can never satisfy another member's plan, and a wrong tier suffix can
+    /// never satisfy this one. Six independently pinned rehosts behind two engine ids is exactly
+    /// the shape where binding the ENGINE would let one member's peaks be recorded as another's.
+    #[test]
+    fn every_sensenova_member_identity_rejects_a_sibling_repository_and_a_wrong_tier() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let family = [
+            SENSENOVA_U1_8B_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY,
+            SENSENOVA_U1_8B_FAST_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY,
+        ];
+        let mut unique = family.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            family.len(),
+            "two SenseNova members share a rehost, so one member's anchor could bind the other's"
+        );
+        for repository in family {
+            let root = PathBuf::from(format!(
+                "/cache/models--{}/snapshots/{revision}/q8",
+                repository.replace('/', "--")
+            ));
+            assert!(
+                validate_huggingface_snapshot_root(&root, repository, revision, "q8", repository)
+                    .is_ok(),
+                "{repository}"
+            );
+            // The upstream ungated snapshot is not the tiered rehost the anchor measures.
+            assert!(
+                validate_huggingface_snapshot_root(
+                    &root,
+                    "sensenova/SenseNova-U1-8B-MoT",
+                    revision,
+                    "q8",
+                    repository
+                )
+                .is_err(),
+                "{repository}"
+            );
+            // A q8 root cannot satisfy a q4 plan.
+            assert!(
+                validate_huggingface_snapshot_root(&root, repository, revision, "q4", repository)
+                    .is_err(),
+                "{repository}"
+            );
+            // And no SIBLING member's root can satisfy this member's plan.
+            for sibling in family.iter().filter(|other| **other != repository) {
+                let sibling_root = PathBuf::from(format!(
+                    "/cache/models--{}/snapshots/{revision}/q8",
+                    sibling.replace('/', "--")
+                ));
+                assert!(
+                    validate_huggingface_snapshot_root(
+                        &sibling_root,
+                        repository,
+                        revision,
+                        "q8",
+                        repository
+                    )
+                    .is_err(),
+                    "{sibling} must not satisfy a {repository} plan"
+                );
+            }
+        }
+    }
+
     /// The `mlx:minimax_h3` capture resolves TWO artifact triples, and the two are validated by
     /// DIFFERENT shapes: the rehost carries a tier sub-directory, the upstream snapshot does not.
     /// Each validator must refuse the other's root, or a capture could stage the shared partitions
@@ -1761,5 +2943,236 @@ mod tests {
             MINIMAX_UPSTREAM_REPOSITORY
         )
         .is_err());
+    }
+
+    /// sc-22729: the InstantID bundle filenames are declared in TWO places — here, and privately
+    /// in the worker's `image_jobs/instantid.rs`. The worker's constants are `pub(crate)`/private
+    /// so they cannot be imported; this reads the worker source instead, so a rename there reds
+    /// this crate rather than silently making an anchor bind a file the worker never stages.
+    #[test]
+    fn instantid_bundle_filenames_match_the_worker() {
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sceneworks-worker/src/image_jobs/instantid.rs");
+        let source = std::fs::read_to_string(&worker)
+            .unwrap_or_else(|error| panic!("read {}: {error}", worker.display()));
+        for file in INSTANTID_IDENTITY_BUNDLE_FILES
+            .iter()
+            .chain([&INSTANTID_CONTROLNET_WEIGHT_FILE])
+        {
+            assert!(
+                source.contains(&format!("\"{file}\"")),
+                "{file} is not a literal in {}",
+                worker.display()
+            );
+        }
+        for env in [INSTANTID_IDENTITY_BUNDLE_ENV, INSTANTID_CONTROLNET_ENV] {
+            assert!(
+                source.contains(env),
+                "{env} is not read by {}",
+                worker.display()
+            );
+        }
+        // The InstantID backbone IS the plain `realvisxl` rehost, so an anchor for either model
+        // resolves the same tiered artifact family.
+        assert!(source.contains(&format!("\"{REALVISXL_REPOSITORY}\"")));
+    }
+
+    /// sc-22729: the bundle refuses up front and names every missing file, so an operator staging
+    /// the identity stack is told the whole gap once instead of one file per attempt.
+    #[test]
+    fn instantid_identity_bundle_names_every_missing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sc-22729-instantid-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let error = instantid_identity_bundle_at(root.clone()).unwrap_err();
+        for file in INSTANTID_IDENTITY_BUNDLE_FILES {
+            assert!(error.contains(file), "{file} unnamed in {error}");
+        }
+        std::fs::write(root.join(INSTANTID_IP_ADAPTER_FILE), b"x").unwrap();
+        let error = instantid_identity_bundle_at(root.clone()).unwrap_err();
+        assert!(!error.contains(INSTANTID_IP_ADAPTER_FILE) || error.contains("expected"));
+        for file in [INSTANTID_SCRFD_FILE, INSTANTID_ARCFACE_FILE] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+        let bundle = instantid_identity_bundle_at(root.clone()).unwrap();
+        assert_eq!(
+            bundle.face_dir, root,
+            "the bundle dir IS the face stack dir"
+        );
+        assert_eq!(bundle.ip_adapter, root.join(INSTANTID_IP_ADAPTER_FILE));
+        assert_eq!(bundle.scrfd, root.join(INSTANTID_SCRFD_FILE));
+        assert_eq!(bundle.arcface, root.join(INSTANTID_ARCFACE_FILE));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-22724: the edit reference is one interleaved RGB frame at the request geometry, and it
+    /// is deterministic — two captures of the same anchor condition on the same bytes.
+    #[test]
+    fn synthetic_reference_is_one_rgb_frame_at_the_request_geometry() {
+        let pixels = synthetic_reference_rgb(64, 48);
+        assert_eq!(pixels.len(), 64 * 48 * 3);
+        assert_eq!(pixels, synthetic_reference_rgb(64, 48));
+        assert_ne!(
+            pixels[..3],
+            pixels[pixels.len() - 3..],
+            "a gradient, not a flat field"
+        );
+        assert_eq!(synthetic_reference_rgb(1, 1).len(), 3);
+        assert_eq!(
+            synthetic_reference_rgb(0, 0).len(),
+            3,
+            "a degenerate geometry still yields one pixel"
+        );
+    }
+
+    // ==== capture lane (sc-22738) ==============================================================
+
+    fn plan_with_frames(frames: u64) -> Value {
+        json!({
+            "planned": {
+                "target": { "geometry": { "width": 832, "height": 480, "batch": 1, "frames": frames } }
+            }
+        })
+    }
+
+    /// The lane is the plan's, derived exactly as `measure-memory-catalog.mjs` derives the budget
+    /// lane: more than one frame is video. Mutation that fails this: deriving the lane from the
+    /// provider id, or reading `frames >= 1` as video.
+    #[test]
+    fn the_capture_lane_is_the_plans_frame_count_and_nothing_else() {
+        assert_eq!(
+            capture_lane(&plan_with_frames(1)).unwrap(),
+            CaptureLane::Image
+        );
+        assert_eq!(
+            capture_lane(&plan_with_frames(2)).unwrap(),
+            CaptureLane::Video
+        );
+        assert_eq!(
+            capture_lane(&plan_with_frames(77)).unwrap(),
+            CaptureLane::Video
+        );
+        assert!(capture_lane(&plan_with_frames(0)).is_err());
+        assert!(capture_lane(&json!({ "planned": { "target": {} } })).is_err());
+    }
+
+    /// The decision itself: a video capture is ONE render, an image capture is three. Restoring the
+    /// warm passes on the video lane (`VIDEO_WARM_PASSES = 2`) turns this red; so does touching
+    /// the image lane's two.
+    #[test]
+    fn a_video_capture_is_one_render_and_an_image_capture_is_three() {
+        assert_eq!(VIDEO_WARM_PASSES, 0);
+        assert_eq!(IMAGE_WARM_PASSES, 2);
+        let video = capture_policy(&plan_with_frames(49)).unwrap();
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        assert_eq!(video.renders(), 1);
+        assert_eq!(image.renders(), 3);
+        assert_eq!(video.require_video("MLX Wan2.2/SCAIL-2").unwrap(), video);
+        assert!(image
+            .require_video("MLX Wan2.2/SCAIL-2")
+            .unwrap_err()
+            .contains("video arm"));
+    }
+
+    /// The driver issues exactly the lane's `generate` calls, in order: measured first, then the
+    /// warm passes. A stub render counts them, so the number and order are asserted rather than
+    /// inferred — one call for a video plan, three for an image plan.
+    #[test]
+    fn the_render_driver_issues_one_generate_for_video_and_three_for_image() {
+        for (frames, expected) in [
+            (49, vec![RenderRole::Measured]),
+            (
+                1,
+                vec![
+                    RenderRole::Measured,
+                    RenderRole::Warm(1),
+                    RenderRole::Warm(2),
+                ],
+            ),
+        ] {
+            let policy = capture_policy(&plan_with_frames(frames)).unwrap();
+            let mut calls = Vec::new();
+            let (measured, warm) = drive_renders::<_, String>(policy, |role| {
+                calls.push(role);
+                Ok(calls.len())
+            })
+            .unwrap();
+            assert_eq!(calls, expected, "{frames} frame(s)");
+            assert_eq!(measured, 1);
+            assert_eq!(warm.len(), policy.warm_passes as usize);
+            assert_eq!(calls.len() as u32, policy.renders());
+        }
+        // A failing measured render stops the capture before any warm pass is attempted.
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        let mut calls = 0;
+        let error = drive_renders::<(), _>(image, |_| {
+            calls += 1;
+            Err("render failed".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!((calls, error.as_str()), (1, "render failed"));
+    }
+
+    /// The receipt of a zero-warm-pass capture states what was not measured and writes no zero:
+    /// `warm_repeat` is `not_run` with the lane's reason, `quality` is `not_run` with `warmPasses: 0`
+    /// and the thresholds, and NO comparison figure or `identicalInputs` claim is present. An image
+    /// policy may not file its quality this way — it measured one.
+    #[test]
+    fn a_single_render_receipt_declares_its_unrun_warm_passes_instead_of_writing_zeros() {
+        let video = capture_policy(&plan_with_frames(25)).unwrap();
+        let scenario = video.not_run_warm_repeat_scenario().unwrap();
+        assert_eq!(scenario["name"], "warm_repeat");
+        assert_eq!(scenario["result"], "not_run");
+        assert_eq!(scenario["reason"], VIDEO_WARM_PASSES_NOT_RUN);
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("8,709 s"));
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("13,411 s"));
+        assert!(VIDEO_WARM_PASSES_NOT_RUN.contains("16,200 s"));
+
+        let quality = video
+            .not_run_quality("identical inputs; cold versus warm", (0.05, 0.01, 0.02))
+            .unwrap();
+        assert_eq!(quality["result"], "not_run");
+        assert_eq!(quality["warmPasses"], 0);
+        assert_eq!(quality["maximumErrorThreshold"], 0.05);
+        assert_eq!(quality["meanErrorThreshold"], 0.01);
+        assert_eq!(quality["rootMeanSquareErrorThreshold"], 0.02);
+        assert!(quality["contract"]
+            .as_str()
+            .unwrap()
+            .starts_with("identical inputs; cold versus warm; NOT MEASURED:"));
+        for absent in [
+            "maximumError",
+            "meanError",
+            "rootMeanSquareError",
+            "identicalInputs",
+            "audio",
+        ] {
+            assert!(
+                quality.get(absent).is_none(),
+                "{absent} must not be written"
+            );
+        }
+        // Files through the same response validator every adapter binary writes through.
+        validate_quality_metrics(&json!({ "status": "runtime_complete", "quality": quality }))
+            .unwrap();
+        // A measured-quality runtime_complete record still needs every figure.
+        assert!(validate_quality_metrics(&json!({
+            "status": "runtime_complete",
+            "quality": { "result": "passed", "maximumErrorThreshold": 0.05 }
+        }))
+        .is_err());
+
+        let image = capture_policy(&plan_with_frames(1)).unwrap();
+        assert!(image
+            .not_run_quality("identical inputs", (0.05, 0.01, 0.02))
+            .unwrap_err()
+            .contains("runs 2 warm passes"));
+        assert!(image.not_run_warm_repeat_scenario().is_err());
     }
 }

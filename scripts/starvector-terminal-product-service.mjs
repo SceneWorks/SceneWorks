@@ -354,10 +354,16 @@ export function validateProductServiceActiveState(active, record, output) {
   if (!active || typeof active !== "object" || Array.isArray(active) || JSON.stringify(Object.keys(active).sort()) !== JSON.stringify(ACTIVE_STATE_KEYS)) die("active product service state shape is invalid");
   if (active.schema_version !== 1 || active.kind !== "starvector_terminal_product_service_active" || !/^[a-f0-9]{64}$/.test(active.instance_token)) die("active product service sentinel is invalid");
   if (!/^[a-f0-9]{40}$/.test(active.sceneworks_revision) || !/^[a-f0-9]{40}$/.test(active.inference_revision) || !/^[a-f0-9]{64}$/.test(active.api_binary_sha256)) die("active product service identity is invalid");
-  if (!Number.isSafeInteger(active.api_pid) || active.api_pid <= 0 || !Number.isSafeInteger(active.worker_pid) || active.worker_pid <= 0 || active.api_pid === active.worker_pid) die("active product service PIDs are invalid");
+  if (!Number.isSafeInteger(active.api_pid) || active.api_pid <= 0 || (active.worker_pid !== null && (!Number.isSafeInteger(active.worker_pid) || active.worker_pid <= 0)) || active.api_pid === active.worker_pid) die("active product service PIDs are invalid");
   if (active.state_root !== path.relative(output, productServiceStateRoot(output)) || !active.api_url?.startsWith("http://127.0.0.1:")) die("active product service location is invalid");
   for (const key of ACTIVE_BINDING_KEYS) if (active[key] !== record?.[key]) die(`active product service state mismatches provenance field ${key}`);
   return active;
+}
+
+function ownedWorkerEnvironment({ gpuBinding, instanceToken, endpoint, url, stateRoot, hfHome, workerId }) {
+  const serviceEnv = { ...process.env, ...productServiceBackendEnv(), ...terminalGpuEnvironment(gpuBinding), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_TERMINAL_SERVICE_INSTANCE_TOKEN: instanceToken, SCENEWORKS_API_HOST: endpoint.host, SCENEWORKS_API_PORT: String(endpoint.port), SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_WORKER_ID: workerId, HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+  for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
+  return serviceEnv;
 }
 
 export async function startProductService({ root, output, permanentPin, url, weightsRoot, tuple }) {
@@ -387,8 +393,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
     stateCreated = true;
     await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
     const weights = await materializeOfflineWeights(weightsRoot, stateRoot), hfHome = path.join(stateRoot, "hf"), binarySha256 = await fileSha256(binary);
-    const serviceEnv = { ...process.env, ...productServiceBackendEnv(), ...terminalGpuEnvironment(gpuBinding), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_TERMINAL_SERVICE_INSTANCE_TOKEN: instanceToken, SCENEWORKS_API_HOST: endpoint.host, SCENEWORKS_API_PORT: String(endpoint.port), SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_WORKER_ID: workerId, HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
-    for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
+    const serviceEnv = ownedWorkerEnvironment({ gpuBinding, instanceToken, endpoint, url, stateRoot, hfHome, workerId });
     // The worker's registration is the routing contract, but it is not a substitute
     // for actually opening the accelerator. Run the binary's production GPU probe
     // first and treat every non-zero/timeout as terminal for this one-shot campaign.
@@ -428,6 +433,8 @@ export async function startProductService({ root, output, permanentPin, url, wei
     }
     assertRunning();
     const record = { ...identity, ...weights, tuple, gpu_binding: gpuBinding, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, worker: selectedWorker, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
+    await writeFile(path.join(output, "product-service-initial-provenance.json"), JSON.stringify(record, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    await writeFile(path.join(output, "product-service-worker-lifecycle.json"), JSON.stringify({ schema_version: 1, instance_token: instanceToken, events: [] }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
     return record;
   } catch (error) {
@@ -448,6 +455,112 @@ export async function startProductService({ root, output, permanentPin, url, wei
     throw error;
   }
 }
+async function readOwnedJson(file) {
+  const info = await lstat(file);
+  if (info.isSymbolicLink() || !info.isFile()) die("owned product service record is not a regular file");
+  return JSON.parse(await readFile(file, "utf8"));
+}
+async function validateWorkerLineage(output, record) {
+  const initial = await readOwnedJson(path.join(output, "product-service-initial-provenance.json"));
+  const stable = (value) => JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key]) => !["worker_pid", "worker"].includes(key))));
+  if (stable(initial) !== stable(record)) die("current product service differs from initial provenance");
+  const history = await readOwnedJson(path.join(output, "product-service-worker-lifecycle.json"));
+  if (history.schema_version !== 1 || history.instance_token !== initial.instance_token || !Array.isArray(history.events)) die("worker lifecycle lineage is invalid");
+  let current = { worker_pid: initial.worker_pid, worker: initial.worker };
+  for (const [index, event] of history.events.entries()) {
+    if (event.sequence !== index || event.previous_worker_pid !== current.worker_pid || event.api_pid !== initial.api_pid) die("worker lifecycle PID lineage is invalid");
+    current = event.current;
+    if (!current || (current.worker_pid !== null && (!Number.isSafeInteger(current.worker_pid) || current.worker_pid <= 0)) || !current.worker) die("worker lifecycle current identity is invalid");
+  }
+  if (current.worker_pid !== record.worker_pid || JSON.stringify(current.worker) !== JSON.stringify(record.worker)) die("worker lifecycle does not bind current provenance");
+  return history;
+}
+async function readOwnedWorker(output) {
+  const record = await readOwnedJson(path.join(output, "product-service-provenance.json"));
+  const stateRoot = path.resolve(output, record.state_root);
+  if (stateRoot !== path.resolve(productServiceStateRoot(output))) die("product service state path escaped its tuple temporary root");
+  const info = await lstat(stateRoot);
+  if (info.isSymbolicLink() || !info.isDirectory()) die("product service state root is not an owned directory");
+  const active = validateProductServiceActiveState(await readOwnedJson(productServiceActiveStatePath(output)), record, output);
+  const history = await validateWorkerLineage(output, record);
+  if (!await pidIsRunning(active.api_pid, process.kill)) die("owned product API is not running");
+  return { record, active, history, stateRoot };
+}
+async function recordWorkerTransition(output, owned, next, details) {
+  const event = { ...details, sequence: owned.history.events.length, api_pid: owned.record.api_pid, previous_worker_pid: owned.record.worker_pid, current: { worker_pid: next.worker_pid, worker: next.worker }, observed_at: new Date().toISOString() };
+  owned.history.events.push(event);
+  owned.record = next;
+  owned.active = { ...owned.active, worker_pid: next.worker_pid };
+  await writeFile(path.join(output, "product-service-worker-lifecycle.json"), JSON.stringify(owned.history, null, 2) + "\n", { mode: 0o600 });
+  await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  await writeFile(productServiceActiveStatePath(output), JSON.stringify(owned.active, null, 2) + "\n", { mode: 0o600 });
+  return event;
+}
+
+// The desktop restart endpoint only emits a sentinel. Headless acceptance owns
+// these processes directly: unload means observed process exit, while the API
+// and its imported project/database remain running across worker replacement.
+export async function unloadOwnedWorker(output, { terminate = terminateProductServicePids } = {}) {
+  const owned = await readOwnedWorker(output), pid = owned.record.worker_pid;
+  if (pid === null) die("owned worker is already unloaded");
+  if (!await pidIsRunning(pid, process.kill)) die("owned worker exited before unload observation");
+  await terminate([pid]);
+  if (await pidIsRunning(pid, process.kill)) die("owned worker did not exit after unload");
+  if (!await pidIsRunning(owned.record.api_pid, process.kill)) die("owned product API exited during worker unload");
+  const event = await recordWorkerTransition(output, owned, { ...owned.record, worker_pid: null }, { operation: "unload", status: "succeeded", exited: true, worker_id: owned.record.worker.worker_id });
+  return { ...event, worker_pid: pid, exited_at: event.observed_at };
+}
+
+export async function reloadOwnedWorker(root, output, { waitReady = waitForTerminalProductWorker } = {}) {
+  const owned = await readOwnedWorker(output);
+  if (owned.record.worker_pid !== null || owned.history.events.at(-1)?.operation !== "unload") die("worker reload requires a successful owned unload");
+  const previousPid = owned.history.events.at(-1).previous_worker_pid;
+  const identity = await serviceIdentity(root, owned.record.inference_revision);
+  if (identity.sceneworks_revision !== owned.record.sceneworks_revision) die("worker reload source revision changed");
+  const binary = path.resolve(root, owned.record.worker_binary), expectedBinary = path.join(path.resolve(root), "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  const info = await lstat(binary);
+  if (binary !== expectedBinary || info.isSymbolicLink() || !info.isFile() || await fileSha256(binary) !== owned.record.api_binary_sha256) die("worker reload binary differs from initial provenance");
+  const hfHome = path.join(owned.stateRoot, "hf");
+  if (path.resolve(output, owned.record.offline.hf_home) !== hfHome || owned.record.offline.hf_hub_offline !== "1" || owned.record.offline.transformers_offline !== "1") die("worker reload offline state differs from initial provenance");
+  const workerId = terminalProductWorkerId(owned.record.tuple, randomBytes(32).toString("hex"));
+  const serviceEnv = ownedWorkerEnvironment({ gpuBinding: owned.record.gpu_binding, instanceToken: owned.record.instance_token, endpoint: { host: owned.record.api_host, port: owned.record.api_port }, url: owned.record.api_url, stateRoot: owned.stateRoot, hfHome, workerId });
+  const handles = [], logs = productServiceLogPaths(output);
+  let worker, spawnError;
+  try {
+    for (const file of [logs.worker_stdout, logs.worker_stderr]) {
+      const logInfo = await lstat(file);
+      if (logInfo.isSymbolicLink() || !logInfo.isFile()) die("worker reload log is not an owned regular file");
+      handles.push(await open(file, "a", 0o600));
+    }
+    worker = spawn(binary, [], { cwd: root, detached: true, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", handles[0].fd, handles[1].fd] });
+    worker.once("error", (error) => { spawnError = error; });
+    if (!Number.isSafeInteger(worker.pid) || worker.pid <= 0) die("reloaded worker has no process identity");
+    worker.unref();
+    await recordWorkerTransition(output, owned, { ...owned.record, worker_pid: worker.pid }, { operation: "reload", status: "starting", worker_id: workerId });
+    const assertRunning = () => {
+      if (spawnError || worker.exitCode !== null || worker.signalCode !== null) die("reloaded worker exited before fresh registration");
+    };
+    const selectedWorker = await waitReady(owned.record.api_url, owned.record.tuple, workerId, assertRunning);
+    assertRunning();
+    if (selectedWorker.worker_id !== workerId || selectedWorker.worker_id === owned.record.worker.worker_id) die("worker reload did not produce a fresh registration");
+    if (!await pidIsRunning(owned.record.api_pid, process.kill)) die("owned API exited during worker reload");
+    const event = await recordWorkerTransition(output, owned, { ...owned.record, worker: selectedWorker }, { operation: "reload", status: "succeeded", worker_id: workerId });
+    return { ...event, previous_worker_pid: previousPid, worker_pid: worker.pid, worker: selectedWorker, ready_at: event.observed_at };
+  } catch (error) {
+    if (worker?.pid) {
+      // Retain the current PID if termination fails: final stop must still be
+      // able to clean up the newly spawned worker, never the retired PID.
+      let cleanupError;
+      try { await terminateProductServicePids([worker.pid]); } catch (failure) { cleanupError = failure; }
+      await recordWorkerTransition(output, owned, { ...owned.record, worker_pid: cleanupError ? worker.pid : null }, { operation: "reload", status: "failed", error: error.message, cleanup_error: cleanupError?.message ?? null });
+      if (cleanupError) error.message += `; worker cleanup failed: ${cleanupError.message}`;
+    }
+    throw error;
+  } finally {
+    await Promise.allSettled(handles.map((handle) => handle.close()));
+  }
+}
+
 export async function stopProductService(output, { terminate = terminateProductServicePids } = {}) {
   if (await lstat(path.join(output, "product-service-stopped.json")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("product service is already stopped");
   let record;
@@ -466,8 +579,9 @@ export async function stopProductService(output, { terminate = terminateProductS
   const activePath = productServiceActiveStatePath(output), activeInfo = await lstat(activePath);
   if (activeInfo.isSymbolicLink() || !activeInfo.isFile()) die("active product service sentinel is not a regular file");
   const active = validateProductServiceActiveState(JSON.parse(await readFile(activePath, "utf8")), record, output);
+  if (record.worker) await validateWorkerLineage(output, record);
   try {
-    await terminate([active.worker_pid, active.api_pid]);
+    await terminate([active.worker_pid, active.api_pid].filter((pid) => pid !== null));
     await assertProductServicePortFree(active.api_url);
     const logs = await writeProductServiceLogsIdentity(output);
     await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ schema_version: 1, status: "stopped", instance_token: active.instance_token, api_pid: active.api_pid, worker_pid: active.worker_pid, logs, stopped_at: new Date().toISOString() }, null, 2) + "\n");
@@ -479,5 +593,5 @@ export async function stopProductService(output, { terminate = terminateProductS
   }
 }
 if (isExecutedModule(import.meta.url)) {
-  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4], tuple: args[5] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> <tuple> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
+  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4], tuple: args[5] }) : command === "stop" ? stopProductService(args[0]) : command === "unload-worker" ? unloadOwnedWorker(args[0]) : command === "reload-worker" ? reloadOwnedWorker(args[0], args[1]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> <tuple> | stop <output> | unload-worker <output> | reload-worker <root> <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

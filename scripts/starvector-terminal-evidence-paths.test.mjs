@@ -26,7 +26,10 @@ test("route seals worker-observed raster, lifecycle, and hardware artifacts", as
   assert.match(route, /item\.sourceRasterPath/);
   assert.match(route, /runs\/\$\{tuple\}\/hardware\/raw-probe/);
   assert.match(route, /runs\/\$\{tuple\}\/lifecycle-memory/);
-  assert.match(route, /worker-owned peak accelerator memory observations/);
+  assert.match(route, /terminalHardwareFromSamples/);
+  assert.match(route, /provider_allocator_peak_bytes/);
+  assert.doesNotMatch(route, /peakAcceleratorBytes/);
+  assert.match(route, /observation = await sampler\.stop\(\)/);
   assert.match(route, /producer\/transcript/);
   assert.match(route, /STARVECTOR_TERMINAL_CONTROLLER_CONTEXT/);
 });

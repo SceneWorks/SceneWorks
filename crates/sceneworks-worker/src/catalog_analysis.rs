@@ -11,10 +11,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use sceneworks_core::catalog_store::{
     Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
+use sceneworks_core::file_lock::FileLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -451,7 +451,10 @@ struct StructuredAnalysisCheckpoint {
 
 struct CatalogAnalysisLease {
     _processing: Option<CatalogProcessingLease>,
-    _files: Vec<File>,
+    /// [`FileLock`]s, not bare handles: each releases with an explicit `LOCK_UN`, because
+    /// `close(2)` alone leaves the lock held while any forked child still references the same open
+    /// file description (sc-22738).
+    _files: Vec<FileLock>,
 }
 
 impl CatalogAnalysisLease {
@@ -489,8 +492,8 @@ impl CatalogAnalysisLease {
                 .truncate(false)
                 .open(&path)?;
             let contended = fs2::lock_contended_error().raw_os_error();
-            match file.try_lock_exclusive() {
-                Ok(()) => files.push(file),
+            match FileLock::try_exclusive(file) {
+                Ok(lock) => files.push(lock),
                 Err(error) if error.raw_os_error() == contended => {
                     return Err(CatalogAnalysisError::Busy(format!(
                         "Catalog {} already has active fetch or analysis work.",
@@ -1626,6 +1629,45 @@ mod tests {
                 .find(|record| record.id == id)
                 .expect("record exists")
         }
+    }
+
+    /// sc-22738: released analysis locks must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every
+    /// such reference is gone — and analysis forks (converters, model runners) throughout a pass,
+    /// which would leave the next pass refused as "already has active fetch or analysis work".
+    #[test]
+    fn a_released_analysis_lease_is_free_even_while_an_inherited_descriptor_survives() {
+        use fs2::FileExt as _;
+
+        let fixture = Fixture::new("analysis-lock", &["a"]);
+        let catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog opens");
+
+        let lease = CatalogAnalysisLease::acquire(&catalog).expect("lease acquires");
+        let inherited = lease
+            ._files
+            .iter()
+            .map(|lock| lock.inherited_descriptor().expect("descriptor duplicates"))
+            .collect::<Vec<_>>();
+        drop(lease);
+
+        for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
+            let probe = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(fixture.root.join(name))
+                .expect("probe opens lock file");
+            assert!(
+                probe.try_lock_exclusive().is_ok(),
+                "{name} released with the lease must not stay held by an inherited descriptor"
+            );
+        }
+        drop(inherited);
     }
 
     #[derive(Default)]

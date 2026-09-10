@@ -27,6 +27,20 @@ function assertInsideTrustedRoot(resolvedTrustedRoot, resolved, label) {
   }
 }
 
+/**
+ * Whether a directory entry is hidden, and therefore not part of the artifact (sc-22738).
+ *
+ * The engines agree with this, and one of them enforces it: `candle-gen-sdxl`'s `collect_files`
+ * REFUSES to seal a source containing any dot-prefixed file, so a snapshot's `.gitattributes` is
+ * not something the artifact "also has" — it is not loadable content at all. Hashing it made the
+ * receipt depend on how the operator obtained the snapshot (a hub fetch of the whole repo carries
+ * `.gitattributes`; a glob-scoped one does not) rather than on the weights, so two hosts holding
+ * the same artifact minted two different inventories.
+ */
+function isHidden(name) {
+  return name.startsWith(".");
+}
+
 async function inventoryFiles(
   root,
   relative = "",
@@ -39,6 +53,7 @@ async function inventoryFiles(
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (isHidden(entry.name)) continue;
     const child = path.join(relative, entry.name);
     if (entry.isDirectory()) {
       const normalized = child.split(path.sep).join("/");
@@ -157,6 +172,11 @@ export async function listCachedArtifactFiles(root, trustedRoot) {
   async function visit(directory, relative = "") {
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      // NOT filtered the way `inventoryFiles` filters (sc-22738), and the difference is deliberate.
+      // This listing is a TAMPER CHECK over a staged authority, and the CUDA harness's own Candle
+      // sidecar obstructions are dot-named files it installs inside the artifact on purpose
+      // (`.candle-device-format-v1`) and then re-verifies here. Hiding them would make the check
+      // stop seeing exactly what it was written to watch.
       const childRelative = path.join(relative, entry.name);
       const candidate = path.join(absolute, childRelative);
       if (entry.isDirectory() && !entry.isSymbolicLink()) {

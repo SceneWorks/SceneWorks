@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 1cd0e393. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision 1cd0e393 advances c6d6a4db with two landings: sc-22760 (inference PR #956) teaches the mlx-gen-flux2 Klein artifact inventory to load the FLUX.2 Klein rehosts from the symlinked HF cache shape (authorizing the owning models--*/blobs/ sibling, admitting sharded bf16 components) and pins the corrected rehost revisions whose q4/q8 text_encoder config.json no longer carries a false quantization block; and the sc-19699/sc-22261 StarVector terminal-evidence work (PRs #937-#942: bounded Candle decode streaming, native activation sampling, receipt V2 schema and evidence tooling under release/ and scripts/release/). The exact scanner records 683 provenance candidates and 97 production-Rust crate prefixes - both unchanged from c6d6a4db, with no candidate path added or removed; movement is confined to git blob hashes on three candle-llm files that were already candidates (decode/mod.rs, decode/stream.rs, llava.rs). No new include_str!/include_bytes! site and no new hand-port appeared: the embedded-artifact inventory is still the single cmudict entry, and every changed production file is first-party engine, inventory, or release-tooling code. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "1cd0e393863f7d3d880400e409519bcadfb43959",
-  "auditDigest": "02f94c3d7167a2446eee143ab5dee68cb477cd5381e220d81a63a3141a3e97be",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision e11fd9f0. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision e11fd9f0 is inference main: the merge of PR #967 (fix/sc-22738-candle-kolors-ideogram-predicates) over e34d7b46, which is its first parent - candle Kolors accepts the shipped rehost's F16 dense storage (and F16 non-packed tensors under a packed tier), candle Ideogram prices the VAE's rank-0 integer BatchNorm counter at zero and stops refusing the turbo id for the co-located unconditional_transformer/ that the turbo loader never opens, and candle Bernini's contract_for_loaded and validate_loaded_contract publish the same production calibration identity the registry closure computes (candle-gen-kolors / candle-gen-ideogram / candle-gen-bernini memory_strategy.rs, three files in total). e34d7b46 was the merge of PR #966 (SenseNova measurable) over e16c6a55, itself the merge of PR #965 (wan rehost tolerance) over #964 (wan T2V memory contract) over #963 (MLX progress boundaries) over 3b922bac, the merge of PR #962 (krea calibration-fault hooks) over 563c44e1, the synchronized merge of feature/sc-22723-memory-anchor-measurability with main at 1cd0e393. The exact scanner records 683 provenance candidates and 97 production-Rust crate prefixes - both unchanged from c6d6a4db, 8a65db2a, 1cd0e393, 563c44e1, 3b922bac, e16c6a55 and e34d7b46, with no candidate path added or removed and, this time, no blob hash moved either: none of the three files PR #967 touches is a provenance candidate, so config/inference-provenance-candidates.tsv is byte-identical to its e34d7b46 content. No new include_str!/include_bytes! site and no new hand-port appeared: the embedded-artifact inventory is still the single cmudict entry. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
+  "auditDigest": "08f9b851ed6c5d8f0b832be814d8405a32752c18d05953e994b1c57c3bfc10ad",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "1cd0e393863f7d3d880400e409519bcadfb43959",
+    "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 683,
-    "populationSha256": "95fed58224659b43ef1e1283b4e389b78b589b7d3fe1ea1e40d5eeea8abf796f"
+    "populationSha256": "bfefaf460c61273ebe4aa94e9065b0ea441ad86acbdffa1e43dec3e163c92a13"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "1cd0e393863f7d3d880400e409519bcadfb43959",
+    "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

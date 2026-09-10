@@ -14,9 +14,9 @@ const LABEL: &str = "MLX LTX-2.5";
 const EXECUTION_PATH: &str = "the MLX LTX-2.5 full-A/V text-to-video path";
 const FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
 const SEED: u64 = 18755;
-const BASE_FRAMES: u32 = 145;
+pub(super) const BASE_FRAMES: u32 = 145;
 const BASE_FPS: u32 = 24;
-const MAX_FRAMES: u32 = 449;
+pub(super) const MAX_FRAMES: u32 = 449;
 const MAX_FPS: u32 = 30;
 const ATTENTION_CHUNK_SIZE: u32 = 16_777_216;
 const TRANSFORMER_WINDOW_SIZE: u32 = 1;
@@ -279,49 +279,87 @@ fn validate_target(request: &Value) -> Result<Target, String> {
     })
 }
 
+/// The bounded-control law, mirrored from the pinned engine rather than re-spelled (sc-22738).
+///
+/// `mlx-gen-ltx/src/memory_strategy_2_5.rs::validate_request_memory` makes every bounded control
+/// **conditional on its rung engaging**, in both directions: `chunk_attention` *requires*
+/// `attention_chunk_size` and its absence *forbids* the parameter ("attention_chunk_size requires
+/// chunk_attention=true"); the decode tile pair and the transformer window are governed the same
+/// way. `begin_with_cleanup` only forwards a control at all when
+/// `contract.engages_selection(selection, rung)`, so a selection that carries a control its rung
+/// does not engage is refused by the engine before a weight is read.
+///
+/// This function used to demand the DEEPEST composition unconditionally — `attentionChunkSize`
+/// always, `bounded_transformer_residency` for distilled, `bounded_attention` for dev. That was
+/// correct while epic 18755 swept the whole ladder per plan row and the fixture named the rung.
+/// sc-22505 replaced that with ONE anchor per (model, tier, lane) planned at the lane's default
+/// composition — `resident` with no parameters on MLX, declared once in
+/// `config/anchor-lane-default-strategy.json` — which left this arm demanding a shape no anchor row
+/// can lawfully carry: the ltx_2_5 MLX rows were the only cells in the catalog whose capture could
+/// not start. The demands themselves are unchanged; only their guard is now the engine's.
+///
+/// `MemoryStrategy::engages` is the contract's own cost-order rule, so the rung a row plans decides
+/// which controls it must carry, and the deep ladder compositions this arm accepted before are
+/// still accepted with exactly the same parameter values.
 fn validate_selection_shape(selection: &MemorySelection, target: Target) -> Result<(), String> {
     let parameters = selection.parameters;
-    if parameters.attention_chunk_size != Some(ATTENTION_CHUNK_SIZE) {
+    let engages = |rung: MemoryStrategy| selection.strategy.engages(rung);
+
+    let expected_chunk = engages(MemoryStrategy::BoundedAttention).then_some(ATTENTION_CHUNK_SIZE);
+    if parameters.attention_chunk_size != expected_chunk {
+        return Err(match expected_chunk {
+            Some(size) => format!("{LABEL} requires attentionChunkSize={size}"),
+            None => format!(
+                "{LABEL} must omit attentionChunkSize unless the selection engages bounded_attention"
+            ),
+        });
+    }
+
+    // `bounded_decode` is `Missing` on the diffusion decoder — it has no tiled path to bound — so
+    // the tile pair is expected only where the conv decoder is loaded AND the rung engages it.
+    let tiled = engages(MemoryStrategy::BoundedDecode) && target.decoder == Decoder::Conv;
+    let expected_tile = tiled.then_some(DECODE_TILE_EDGE);
+    let expected_overlap = tiled.then_some(DECODE_OVERLAP);
+    if parameters.decode_tile_edge != expected_tile || parameters.decode_overlap != expected_overlap
+    {
+        return Err(if tiled {
+            format!("{LABEL} conv requires decode tile {DECODE_TILE_EDGE}/{DECODE_OVERLAP}")
+        } else if target.decoder == Decoder::DiffVae {
+            format!("{LABEL} diffvae must omit conv-only decode tile parameters")
+        } else {
+            format!(
+                "{LABEL} must omit decode tile parameters unless the selection engages bounded_decode"
+            )
+        });
+    }
+
+    // Rung 4 declares `LoadShape::DeferredMaterialization` as a prerequisite, and only the
+    // distilled variant loads deferred; the dev variant additionally installs its refinement
+    // adapter, which the engine's `streamable()` refuses outright. So dev can never plan it.
+    if target.variant == TransformerVariant::Dev
+        && (engages(MemoryStrategy::BoundedTransformerResidency)
+            || parameters.transformer_window_size.is_some()
+            || parameters.transformer_window_component.is_some())
+    {
         return Err(format!(
-            "{LABEL} requires attentionChunkSize={ATTENTION_CHUNK_SIZE}"
+            "{LABEL} dev must not claim transformer streaming while its refinement adapter is installed"
         ));
     }
-    match target.decoder {
-        Decoder::Conv
-            if parameters.decode_tile_edge == Some(DECODE_TILE_EDGE)
-                && parameters.decode_overlap == Some(DECODE_OVERLAP) => {}
-        Decoder::Conv => {
-            return Err(format!(
-                "{LABEL} conv requires decode tile {DECODE_TILE_EDGE}/{DECODE_OVERLAP}"
-            ));
-        }
-        Decoder::DiffVae
-            if parameters.decode_tile_edge.is_none() && parameters.decode_overlap.is_none() => {}
-        Decoder::DiffVae => {
-            return Err(format!(
-                "{LABEL} diffvae must omit conv-only decode tile parameters"
-            ));
-        }
-    }
-    match target.variant {
-        TransformerVariant::Distilled
-            if selection.strategy == MemoryStrategy::BoundedTransformerResidency
-                && parameters.transformer_window_size == Some(TRANSFORMER_WINDOW_SIZE)
-                && parameters.transformer_window_component == Some(TransformerComponent::Dit) => {}
-        TransformerVariant::Distilled => {
-            return Err(format!(
+    let streaming = engages(MemoryStrategy::BoundedTransformerResidency);
+    let expected_window = streaming.then_some(TRANSFORMER_WINDOW_SIZE);
+    let expected_component = streaming.then_some(TransformerComponent::Dit);
+    if parameters.transformer_window_size != expected_window
+        || parameters.transformer_window_component != expected_component
+    {
+        return Err(if streaming {
+            format!(
                 "{LABEL} distilled requires bounded_transformer_residency with DiT window {TRANSFORMER_WINDOW_SIZE}"
-            ));
-        }
-        TransformerVariant::Dev
-            if selection.strategy == MemoryStrategy::BoundedAttention
-                && parameters.transformer_window_size.is_none()
-                && parameters.transformer_window_component.is_none() => {}
-        TransformerVariant::Dev => {
-            return Err(format!(
-                "{LABEL} dev requires bounded_attention and must not claim transformer streaming while its refinement adapter is installed"
-            ));
-        }
+            )
+        } else {
+            format!(
+                "{LABEL} must omit the transformer window unless the selection engages bounded_transformer_residency"
+            )
+        });
     }
     Ok(())
 }
@@ -832,6 +870,9 @@ fn mutate_audio_pcm(audio: &AudioTrack) -> AudioTrack {
     mutated
 }
 
+/// The PCM digest a typed `quality.audio` comparison keys on. Only the tests' selected-versus-
+/// reference fixtures still compare two tracks: the capture renders one (sc-22738).
+#[cfg(test)]
 fn pcm_sha256(audio: &AudioTrack) -> String {
     let mut hasher = Sha256::new();
     for samples in audio.samples.chunks(16_384) {
@@ -982,12 +1023,15 @@ fn persist_canonical_av(
     }))
 }
 
+/// The physical source-session receipt of ONE measured render (sc-22738): the `selected_av`
+/// output only. The `reference_av` role belongs to a warm repeat, which the video lane does not
+/// run; the retained `sc-18791` / `sc-22738` LTX-2.5 sessions that carry both roles were captured
+/// under the previous two-render arm and remain valid as they are.
 fn source_capture(
     plan: &SourceCapturePlan,
     artifact: &Artifact,
     tier: &str,
     selected: &RenderedClip,
-    reference: &RenderedClip,
 ) -> Result<Value, String> {
     let mut inputs = vec![
         json!({
@@ -1025,7 +1069,6 @@ fn source_capture(
         "inputs": inputs,
         "outputs": [
             persist_canonical_av(plan, "selected_av", selected)?,
-            persist_canonical_av(plan, "reference_av", reference)?,
         ],
         "claims": [
             "memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"
@@ -1051,6 +1094,8 @@ fn complete_sweep(request: &Value) -> Result<Value, String> {
 
 pub(super) fn run(request: &Value) -> Result<Value, String> {
     let target = validate_target(request)?;
+    // The lane's render plan (sc-22738): a video capture is ONE measured render, no warm pass.
+    let capture = protocol::capture_policy(request)?.require_video(LABEL)?;
     let tier = planned_qwen_tier(request)?;
     let selection = planned_selection(request)?;
     validate_selection_shape(&selection, target)?;
@@ -1207,37 +1252,21 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         );
     }
 
-    let mut warm_context = probe_context.clone();
-    warm_context.cache_state = MemoryCacheState::Warm;
-    let repeat = render(generator.as_ref(), target, &warm_context, false)?;
-    if selected.fps != repeat.fps {
-        return Err("LTX-2.5 identical-input repeat changed A/V identity".to_owned());
-    }
-    let (maximum_error, mean_error, rms_error) =
-        video_max_mean_rms_abs(&selected.frames, &repeat.frames)?;
-    if !quality_passes(maximum_error, mean_error, rms_error) {
-        return Err(format!(
-            "LTX-2.5 warm repeat exceeded determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
-        ));
-    }
-    let (audio_maximum_error, audio_mean_error, audio_rms_error) =
-        audio_max_mean_rms_abs(&selected.audio, &repeat.audio)?;
-    if !audio_quality_passes(audio_maximum_error, audio_mean_error, audio_rms_error) {
-        return Err(format!(
-            "LTX-2.5 warm repeat exceeded PCM determinism envelope: max={audio_maximum_error:.6}, mean={audio_mean_error:.6}, rms={audio_rms_error:.6}"
-        ));
-    }
-    let selected_pcm_sha256 = pcm_sha256(&selected.audio);
-    let reference_pcm_sha256 = pcm_sha256(&repeat.audio);
+    // No warm pass: the video lane captures ONE measured render (sc-22738, `capture` above). There
+    // is no identical-input repeat to judge the video and PCM determinism envelopes against, so
+    // the receipt carries `quality.warmPasses: 0` with `result: not_run` and NO typed `audio`
+    // block (a typed audio comparison needs a `reference_av` render this capture did not make),
+    // instead of writing zeros. The falsifiability mutations below are judged against the
+    // measured render itself.
     let mutated = qwen_negative_mutation(&selected.frames[0]);
     let (mutated_maximum, mutated_mean, mutated_rms) =
-        image_max_mean_rms_abs(&mutated, &repeat.frames[0])?;
+        image_max_mean_rms_abs(&mutated, &selected.frames[0])?;
     if quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("LTX-2.5 output mutation did not breach determinism envelope".to_owned());
     }
     let mutated_audio = mutate_audio_pcm(&selected.audio);
     let (mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) =
-        audio_max_mean_rms_abs(&mutated_audio, &repeat.audio)?;
+        audio_max_mean_rms_abs(&mutated_audio, &selected.audio)?;
     if audio_quality_passes(mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) {
         return Err(
             "LTX-2.5 same-shape PCM mutation did not breach determinism envelope".to_owned(),
@@ -1251,12 +1280,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
     let sample_count = u64::try_from(selected.audio.samples.len())
         .map_err(|_| "LTX-2.5 PCM sample count must fit u64".to_owned())?;
-    let source_capture = source_capture(&capture_plan, &artifact, tier, &selected, &repeat)?;
+    let source_capture = source_capture(&capture_plan, &artifact, tier, &selected)?;
 
-    let lifecycle_reason = concat!(
-        "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity ",
-        "render per fresh process; cancellation and injected-error lifecycle cases remain explicitly ",
-        "unexecuted here and are not used as calibration currency"
+    let lifecycle_reason = format!(
+        "SC-18783 executes ONE measured full-pipeline render per fresh process and no warm pass \
+         ({}); cancellation and injected-error lifecycle cases remain explicitly unexecuted here \
+         and are not used as calibration currency",
+        protocol::VIDEO_WARM_PASSES_NOT_RUN
     );
     let fragment = json!({
         "status": "runtime_complete",
@@ -1272,7 +1302,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider rejected a zero/unknown budget" },
             { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider rejected a mutated calibration fingerprint" },
-            { "name": "warm_repeat", "result": "passed", "reason": "an identical-input full-pipeline request completed on the same loaded provider" },
+            capture.not_run_warm_repeat_scenario()?,
             { "name": "cancel", "result": "not_run", "reason": lifecycle_reason },
             { "name": "error", "result": "not_run", "reason": lifecycle_reason },
             { "name": "loadability", "result": "passed" },
@@ -1285,31 +1315,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "decode": decode.json(),
             "overall": overall.json(),
         },
-        "quality": {
-            "contract": "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus warm full-pipeline repeat",
-            "identicalInputs": true,
-            "result": "passed",
-            "maximumError": maximum_error,
-            "meanError": mean_error,
-            "rootMeanSquareError": rms_error,
-            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
-            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
-            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
-            "audio": {
-                "result": "passed",
-                "sampleRateHz": selected.audio.sample_rate,
-                "channels": selected.audio.channels,
-                "sampleCount": sample_count,
-                "selectedPcmSha256": selected_pcm_sha256,
-                "referencePcmSha256": reference_pcm_sha256,
-                "maximumAbsoluteError": audio_maximum_error,
-                "meanAbsoluteError": audio_mean_error,
-                "rootMeanSquareError": audio_rms_error,
-                "maximumAbsoluteErrorThreshold": AUDIO_MAX_THRESHOLD,
-                "meanAbsoluteErrorThreshold": AUDIO_MEAN_THRESHOLD,
-                "rootMeanSquareErrorThreshold": AUDIO_RMS_THRESHOLD,
-            },
-        },
+        // No typed `audio` block: it is a selected-versus-reference PCM comparison, and there is no
+        // reference render. The measured track's identity travels as measurements below and in the
+        // content-addressed `selected_av` receipt.
+        "quality": capture.not_run_quality(
+            "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus a warm full-pipeline repeat",
+            (LTX_MAX_THRESHOLD, LTX_MEAN_THRESHOLD, LTX_RMS_THRESHOLD),
+        )?,
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
@@ -1329,6 +1341,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 output_fps_diagnostic(target),
                 ("devVariant", "count", u64::from(target.variant == TransformerVariant::Dev)),
                 ("diffusionDecoder", "count", u64::from(target.decoder == Decoder::DiffVae)),
+                // sc-22738: the measured track's identity, where the typed `quality.audio`
+                // comparison block used to carry it; no warm pass ran (`quality.warmPasses`).
+                ("warmPasses", "count", u64::from(capture.warm_passes)),
+                ("audioTrackDecoded", "count", 1),
+                ("audioSamples", "count", sample_count),
+                ("audioSampleRate", "count", u64::from(selected.audio.sample_rate)),
+                ("audioChannels", "count", u64::from(selected.audio.channels)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
@@ -1456,6 +1475,139 @@ mod tests {
                 "modelLoadGroup": null,
             }
         })
+    }
+
+    /// sc-22738. The capture-time agreement the campaign actually needs: the request
+    /// `scripts/memory-calibration-harness.mjs#planAnchor` builds for every checked-in
+    /// `ltx_2_5:*:mlx` plan row must satisfy this arm's real validators — no hand-written sample,
+    /// and no re-spelling of the composition the harness applies.
+    ///
+    /// Both halves are read from the files that own them: the row's target, geometry, load shape,
+    /// fingerprint and fixture from `config/memory-calibration-plan.json`, and the composition from
+    /// `config/anchor-lane-default-strategy.json` — the ONE declaration of the per-lane default
+    /// that `planAnchor` applies to any row carrying no `strategy` override, and that
+    /// `sceneworks-worker`'s lane walk reads through the same `include_str!`. A row's own override
+    /// wins where it has one, exactly as `planAnchor` does. `parameters` is what `planAnchor`
+    /// emits, which is why the whole campaign refused these three cells: the arm demanded the
+    /// ladder-era deepest composition, and no anchor row can carry it.
+    #[test]
+    fn every_planned_ltx25_mlx_row_satisfies_the_arm_at_the_composition_the_harness_plans() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let lanes: Value = serde_json::from_str(include_str!(
+            "../../../../config/anchor-lane-default-strategy.json"
+        ))
+        .expect("the lane default composition parses");
+        let default = &lanes["lanes"]["mlx"];
+        assert!(
+            default["rung"].is_string(),
+            "config/anchor-lane-default-strategy.json declares no mlx rung"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":mlx") || entry["provider"].as_str() != Some(LTX25_PROVIDER) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let strategy = entry.get("strategy").unwrap_or(default);
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": entry["provider"].clone(),
+                    "modelId": "ltx_2_5",
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "transformerVariant": entry["transformerVariant"].clone(),
+                    "decoder": entry["decoder"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": {
+                    "rung": strategy["rung"].clone(),
+                    "engagedRungs": strategy["engagedRungs"].clone(),
+                    // `planAnchor` emits no parameters for a row that declares none.
+                    "parameters": strategy.get("parameters").cloned().unwrap_or_else(|| json!({})),
+                },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+                "expectedResult": "passed",
+                "negative": false,
+                "modelLoadPolicy": "fresh_per_case",
+                "modelLoadGroup": null,
+            }});
+            let target = validate_target(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let selection =
+                planned_selection(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_selection_shape(&selection, target)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+        }
+        // The exact cell set, not a count: the three shipped tiers, each named once.
+        let expected: std::collections::BTreeSet<String> = ["bf16", "q4", "q8"]
+            .iter()
+            .map(|tier| format!("ltx_2_5:{tier}:mlx"))
+            .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// The other direction of the same law: a control the planned rung does not engage is refused,
+    /// so widening the harness to volunteer parameters is not a way past this arm either. The
+    /// engine says the same thing — `attention_chunk_size requires chunk_attention=true`.
+    #[test]
+    fn a_resident_row_that_volunteers_a_bounded_control_is_refused() {
+        let mut dev = request("bf16", "dev", "conv", 768, 512, BASE_FRAMES);
+        dev["planned"]["strategy"]["rung"] = json!("resident");
+        dev["planned"]["strategy"]["engagedRungs"] = json!(["resident"]);
+        dev["planned"]["strategy"]["parameters"] = json!({});
+        let target = validate_target(&dev).unwrap();
+        validate_selection_shape(&planned_selection(&dev).unwrap(), target)
+            .expect("the lane default composition is accepted");
+
+        for (parameter, value, expected) in [
+            (
+                "attentionChunkSize",
+                json!(ATTENTION_CHUNK_SIZE),
+                "must omit attentionChunkSize",
+            ),
+            (
+                "decodeTileEdge",
+                json!(DECODE_TILE_EDGE),
+                "must omit decode tile parameters",
+            ),
+            (
+                // Dev keeps its own refusal: its refinement adapter makes the rung unreachable at
+                // any composition, so the arm names that rather than the generic omission.
+                "transformerWindowSize",
+                json!(TRANSFORMER_WINDOW_SIZE),
+                "must not claim transformer streaming",
+            ),
+        ] {
+            let mut volunteered = dev.clone();
+            volunteered["planned"]["strategy"]["parameters"][parameter] = value;
+            let selection = planned_selection(&volunteered).unwrap();
+            let error = validate_selection_shape(&selection, target)
+                .expect_err("a control no engaged rung authorizes must be refused");
+            assert!(error.contains(expected), "{parameter}: {error}");
+        }
+
+        // …and the generic omission refusal is the one a distilled row gets, where the rung is
+        // reachable but this composition does not engage it.
+        let mut distilled = request("bf16", "distilled", "conv", 768, 512, BASE_FRAMES);
+        distilled["planned"]["strategy"]["rung"] = json!("resident");
+        distilled["planned"]["strategy"]["engagedRungs"] = json!(["resident"]);
+        distilled["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowSize": TRANSFORMER_WINDOW_SIZE });
+        let distilled_target = validate_target(&distilled).unwrap();
+        let error =
+            validate_selection_shape(&planned_selection(&distilled).unwrap(), distilled_target)
+                .expect_err("a window no engaged rung authorizes must be refused");
+        assert!(
+            error.contains("must omit the transformer window"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1815,7 +1967,18 @@ mod tests {
             }),
         };
         let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
-        let receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        let receipt = source_capture(&plan, &artifact, "q4", &clip).unwrap();
+        // sc-22738: ONE measured render files ONE rendered receipt. A `reference_av` here would
+        // claim a warm repeat this capture did not make.
+        assert_eq!(
+            receipt["outputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|output| output["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["selected_av"]
+        );
         let inputs = receipt["inputs"].as_array().unwrap();
         assert_eq!(
             inputs
@@ -1835,7 +1998,7 @@ mod tests {
         );
         assert_eq!(inputs[2]["sha256"], "c".repeat(64));
         plan.dev_adapter_inventory = None;
-        let distilled_receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        let distilled_receipt = source_capture(&plan, &artifact, "q4", &clip).unwrap();
         assert_eq!(
             distilled_receipt["inputs"]
                 .as_array()

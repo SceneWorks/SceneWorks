@@ -23,7 +23,7 @@ use gen_core::{
     MemoryRunContext, MemorySelection, MemoryStrategy, Precision, Quant,
 };
 use sceneworks_core::memory_calibration::{
-    Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
+    Backend as CalibrationBackend, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
     Geometry as CalibrationGeometry, LoadShapeKey, QualityResult, RequiredNullable, StrategyRung,
 };
 use serde_json::{Map as JsonObject, Value};
@@ -1030,17 +1030,13 @@ fn verified_candidates(
     mode: &RequestModeBinding,
     overlay: &str,
     geometry: MemoryGeometry,
-    closure_digests: &mut Vec<String>,
 ) -> WorkerResult<Vec<MemoryEvidence>> {
     let evidence_provider = evidence_provider(runtime_provider);
-    let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
+    let bundle = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "packaged memory-calibration evidence is invalid: {error}"
         ))
     })?;
-    let BundleLoad::Ready(bundle) = loaded else {
-        return Ok(Vec::new());
-    };
     let Some(bindings) = manifest
         .get("candle")
         .and_then(|value| value.get("calibrations"))
@@ -1165,9 +1161,6 @@ fn verified_candidates(
                 .collect(),
             parameters: selection_parameters,
         };
-        // Index-aligned with `candidates`: `MemoryEvidenceKey` is a gen-core type without `Hash`,
-        // and the two vectors are pushed together in this one loop.
-        closure_digests.push(calibration.inference_closure_digest.clone());
         candidates.push(MemoryEvidence {
             key: evidence_key,
             conformance: MemoryConformanceState::Verified,
@@ -1731,6 +1724,9 @@ fn floor_pseudo_anchor(
         overall_allocator_envelope_bytes: staged_floor_bytes,
         underived_reason: None,
         component_bytes: None,
+        // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+        // residency structurally impossible, so it keeps the staged-only derivation law.
+        staged_residency_structurally_not_applicable: false,
     }
 }
 
@@ -1814,19 +1810,11 @@ fn candle_image_anchor<'a>(
     if anchor_load_shape != contract.load_shape {
         return None;
     }
-    // Currency (sc-22511, epic 22505 E9): the model's OWN loader closure, and nothing else. The
-    // calibration ABI and fingerprint are deliberately NOT asked here — since sc-22511 they are
-    // provenance, bound to the source record by `validate_anchor` so the anchor cannot misattribute
-    // its origin, but a new campaign no longer demotes evidence whose loader never moved. This is
-    // the same seam `video_admission::anchor_currency_matches` and `vram_gate::krea_store_anchor`
-    // grade on, so no two lanes can disagree about whether an anchor is live.
-    //
-    // It grades EVERY store since sc-22666: the per-store `AnchorStoreScope` split existed to hold
-    // the model allow-list, and with that gone a caller-supplied row is graded on exactly the
-    // conjuncts a packaged one is. `config/anchor-loader-closures.json` declares a closure for
-    // every packaged (model, lane), so a fixture row states its own model's digest or reads stale
-    // -- which is the truth about it.
-    crate::video_admission::anchor_currency_matches(anchor).then_some(anchor)
+    // No currency conjunct (sc-22738): the model's loader-closure digest (sc-22511) is what the
+    // probe tooling re-captures on, and the calibration ABI and fingerprint are provenance bound
+    // to the source record by `validate_anchor`. None of them demotes the anchor here — it prices
+    // this request whether or not the loader has moved since it was measured.
+    Some(anchor)
 }
 
 fn memory_for_selection(
@@ -2331,7 +2319,6 @@ fn evaluate_shared_image_inner(
     // `z_image_turbo`), while the runtime registers the strict-control implementation under a
     // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
     // returned candidate to the exact runtime route expected by the provider contract.
-    let mut closure_digests: Vec<String> = Vec::new();
     let mut verified = if artifact_is_certified {
         verified_candidates(
             manifest,
@@ -2341,28 +2328,25 @@ fn evaluate_shared_image_inner(
             &mode,
             exact_overlay,
             geometry,
-            &mut closure_digests,
         )?
     } else {
         Vec::new()
     };
-    // A closure digest answers whether the compiled provider code changed; the provider-owned
-    // calibration identity answers whether the measured memory semantics changed. Both have to
-    // match. FLUX.2-dev's caption-upsample lifecycle intentionally rotated v2 -> v3 while retaining
-    // the old historical records, so accepting closure-stale evidence merely because the selector
-    // can widen it would feed an obsolete prompt-conditioning peak into the live v3 contract.
+    // The provider-owned calibration identity answers whether the measured memory semantics
+    // changed, and it has to match: FLUX.2-dev's caption-upsample lifecycle intentionally rotated
+    // v2 -> v3 while retaining the old historical records, and a v2 record would feed an obsolete
+    // prompt-conditioning peak into the live v3 contract. This is a provider DECLARATION, not
+    // measurement currency — the closure digest a record was captured under is deliberately not
+    // read here (sc-22738).
     let mut current_verified = Vec::with_capacity(verified.len());
-    let mut current_closure_digests = Vec::with_capacity(closure_digests.len());
     if let Some(current_calibration) = calibration {
-        for (candidate, closure_digest) in verified.into_iter().zip(closure_digests) {
+        for candidate in verified {
             if candidate.calibration_fingerprint == current_calibration.fingerprint {
                 current_verified.push(candidate);
-                current_closure_digests.push(closure_digest);
             }
         }
     }
     verified = current_verified;
-    closure_digests = current_closure_digests;
     // Packaged bindings are looked up by the public catalog/matrix overlay above. Once admitted,
     // however, every candidate submitted to the provider selector must carry the exact provider
     // evidence identity declared by the route. Krea adapters are load identity, not a provider
@@ -2422,23 +2406,13 @@ fn evaluate_shared_image_inner(
     let capacity = verified.len() + synthesized.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
-    // The resident candidate is a live estimate, not a calibrated record, so it carries the live
-    // digest and is never staled by this gate.
-    let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-        "candle",
-        evidence_provider(engine_id),
-    )
-    .unwrap_or_default();
-    let mut candidate_digests = Vec::with_capacity(capacity);
     // Index-aligned basis axis (sc-18097): the synthesized floors carry their estimate basis;
     // the resident live estimate and every packaged record stay `Measured`.
     let mut candidate_bases = Vec::with_capacity(capacity);
     selections.push(resident_selection);
     evidence.push(&resident);
-    candidate_digests.push(live_closure_digest.clone());
     candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
-    for (index, item) in verified.iter().enumerate() {
-        candidate_digests.push(closure_digests.get(index).cloned().unwrap_or_default());
+    for item in &verified {
         selections.push(MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -2450,29 +2424,23 @@ fn evaluate_shared_image_inner(
     for candidate in &synthesized {
         selections.push(candidate.selection);
         evidence.push(&candidate.evidence);
-        // A floor — manifest-row or anchor-derived — is a declaration under the LIVE closure, not a
-        // calibrated record; there is nothing there for currency to invalidate.
-        candidate_digests.push(live_closure_digest.clone());
         candidate_bases.push(candidate.basis);
     }
     debug_assert_eq!(evidence.len(), candidate_bases.len());
     let candidates = selections
         .iter()
         .zip(evidence)
-        .zip(candidate_digests.iter().zip(&candidate_bases))
-        .map(
-            |((selection, evidence), (closure_digest, basis))| Candidate {
-                selection: *selection,
-                evidence,
-                closure_digest,
-                basis: *basis,
-                // sc-22508: the candle floors here are manifest `sequentialPeakGb`/`vramGbByTier`
-                // rows, not a weights+headroom split this lane can decompose, so no activation term
-                // is declared and the selector charges the backend's whole-peak accounting residual
-                // (`CANDLE_RECAPTURE_SPREAD`). Declaring a split is sc-22509's anchor work.
-                unmodeled_activation_bytes: None,
-            },
-        )
+        .zip(&candidate_bases)
+        .map(|((selection, evidence), basis)| Candidate {
+            selection: *selection,
+            evidence,
+            basis: *basis,
+            // sc-22508: the candle floors here are manifest `sequentialPeakGb`/`vramGbByTier`
+            // rows, not a weights+headroom split this lane can decompose, so no activation term
+            // is declared and the selector charges the backend's whole-peak accounting residual
+            // (`CANDLE_RECAPTURE_SPREAD`). Declaring a split is sc-22509's anchor work.
+            unmodeled_activation_bytes: None,
+        })
         .collect::<Vec<_>>();
     let request_scope = RequestScope {
         resolved_route: engine_id,
@@ -2481,8 +2449,6 @@ fn evaluate_shared_image_inner(
         mode: &mode.scope_key,
         overlay: provider_overlay,
         geometry,
-        // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
-        expected_closure_digest: &live_closure_digest,
     };
     // sc-22664: the operational reserve — `vram_gate::ladder_reserve_gb` of the caller's RAW probe,
     // handed in explicitly so a reclaimable-credited `budget` can never derive it — on the selector
@@ -5244,7 +5210,6 @@ mod tests {
                 &request_mode(provider, "text_to_image"),
                 "none",
                 geometry,
-                &mut Vec::new(),
             )
             .expect("packaged FLUX evidence");
             assert_eq!(candidates.len(), 5);
@@ -5280,7 +5245,6 @@ mod tests {
                         reference_count: 1,
                         ..geometry
                     },
-                    &mut Vec::new(),
                 )
                 .expect("uncertified overlay query")
                 .is_empty());
@@ -5335,7 +5299,6 @@ mod tests {
             &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
-            &mut Vec::new(),
         )
         .expect("packaged FLUX.2-dev evidence");
         assert_eq!(candidates.len(), 5);
@@ -5370,24 +5333,29 @@ mod tests {
                 .observed_peak_bytes
                 .is_some_and(|active| candidate.predicted_peak_bytes > active)
         }));
-        let mut unaudited_manifest = manifest.clone();
-        for binding in unaudited_manifest["candle"]["calibrations"]
+        let mut foreign_campaign_manifest = manifest.clone();
+        for binding in foreign_campaign_manifest["candle"]["calibrations"]
             .as_array_mut()
             .expect("mutable FLUX.2-dev calibration bindings")
         {
-            // sc-17774: as above — the deleted hatch cannot make a binding unaudited any more, so
-            // move the mutation onto the closure digest currency actually compares.
-            binding["inferenceClosureDigest"] = json!("a".repeat(64));
+            // sc-17774 retired the hand-audited `compatibleInferenceRevision` hatch, and sc-22738
+            // retired the closure-digest currency conjunct that replaced it as this test's
+            // discriminator: the runtime never demotes a measurement for a moved closure, so a
+            // rotated `inferenceClosureDigest` is served exactly as the packaged one. What still
+            // keeps a binding out is its AUDIT identity — a binding that cites a calibration
+            // campaign the packaged record was not produced under is not evidence
+            // (`EvidenceMismatchReason::CalibrationFingerprint` in `evidence_for`), whether or not
+            // any closure moved.
+            binding["fingerprint"] = json!("flux2-dev-foreign-campaign-fingerprint");
         }
         assert!(verified_candidates(
-            &unaudited_manifest,
+            &foreign_campaign_manifest,
             "flux2_dev",
             "flux2_dev",
             "q4",
             &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
-            &mut Vec::new(),
         )
         .expect("unaudited compatibility query")
         .is_empty());
@@ -5412,7 +5380,6 @@ mod tests {
             &request_mode("flux2_dev", "text_to_image"),
             "control",
             geometry,
-            &mut Vec::new(),
         )
         .expect("uncertified FLUX.2-dev control query")
         .is_empty());
@@ -5831,17 +5798,10 @@ mod tests {
                 sha256: String::new(),
                 record_id: String::new(),
                 calibration_fingerprint: "sc-18253-composition-probe-v1".to_owned(),
-                // The model's OWN live loader-closure declaration, READ rather than frozen as a
-                // literal (sc-22666): since the per-store scope split went with the model
-                // allow-list, `candle_image_anchor` grades a fixture row's currency exactly as it
-                // grades a packaged one, and a literal here would be a pin-coupled golden.
-                loader_closure_digest:
-                    sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-                        .and_then(|closures| {
-                            closures.digest_for("z_image_turbo", AnchorBackend::Candle)
-                        })
-                        .expect("z_image_turbo:candle must declare a loader closure")
-                        .to_owned(),
+                // Provenance only since sc-22738: `candle_image_anchor` has no currency conjunct,
+                // so nothing compares this field and a well-formed 64-hex literal is exactly as
+                // representative as the live declaration used to be — and cannot go stale.
+                loader_closure_digest: "a".repeat(64),
                 currency_attestation: None,
             },
             geometry: AnchorGeometry {
@@ -5855,6 +5815,9 @@ mod tests {
             overall_allocator_envelope_bytes: Z_IMAGE_Q4_STAGED_PEAKS.decode,
             underived_reason: None,
             component_bytes: None,
+            // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+            // residency structurally impossible, so it keeps the staged-only derivation law.
+            staged_residency_structurally_not_applicable: false,
         }
     }
 
@@ -5864,6 +5827,7 @@ mod tests {
             anchors: vec![z_image_q4_anchor()],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         }
     }
 
@@ -6209,11 +6173,6 @@ mod tests {
         assert!(reserve_gb < crate::vram_gate::HEADROOM_GB);
 
         let candidates = z_image_fixture_floors(z_image_ladder_anchors(&store), &contract);
-        let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-            "candle",
-            evidence_provider("z_image_turbo"),
-        )
-        .unwrap_or_default();
         // The resident live estimate the entry point submits alongside the floors: the raw
         // `vramGbByTier` row (18.4 GiB), shaped like the synthesized evidence.
         let resident_selection = MemorySelection {
@@ -6231,14 +6190,12 @@ mod tests {
         let mut selector_candidates = vec![Candidate {
             selection: resident_selection,
             evidence: &resident,
-            closure_digest: &live_closure_digest,
             basis: crate::memory_strategy::CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         }];
         selector_candidates.extend(candidates.iter().map(|candidate| Candidate {
             selection: candidate.selection,
             evidence: &candidate.evidence,
-            closure_digest: &live_closure_digest,
             basis: candidate.basis,
             unmodeled_activation_bytes: None,
         }));
@@ -6250,7 +6207,6 @@ mod tests {
                 mode: &request_mode("z_image_turbo", "text_to_image").scope_key,
                 overlay: None,
                 geometry: Z_IMAGE_FIXTURE_GEOMETRY,
-                expected_closure_digest: &live_closure_digest,
             },
             &contract,
             Some(Budget {
@@ -6301,11 +6257,6 @@ mod tests {
         reserve_gb: f64,
         resident_peak_bytes: u64,
     ) -> Selection {
-        let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-            "candle",
-            evidence_provider("z_image_turbo"),
-        )
-        .unwrap_or_default();
         let resident_selection = MemorySelection {
             strategy: MemoryStrategy::Resident,
             parameters: Default::default(),
@@ -6321,14 +6272,12 @@ mod tests {
         let mut selector_candidates = vec![Candidate {
             selection: resident_selection,
             evidence: &resident,
-            closure_digest: &live_closure_digest,
             basis: crate::memory_strategy::CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         }];
         selector_candidates.extend(candidates.iter().map(|candidate| Candidate {
             selection: candidate.selection,
             evidence: &candidate.evidence,
-            closure_digest: &live_closure_digest,
             basis: candidate.basis,
             unmodeled_activation_bytes: None,
         }));
@@ -6344,7 +6293,6 @@ mod tests {
                 mode: &request_mode("z_image_turbo", "text_to_image").scope_key,
                 overlay: None,
                 geometry: Z_IMAGE_FIXTURE_GEOMETRY,
-                expected_closure_digest: &live_closure_digest,
             },
             contract,
             Some(Budget {
@@ -6414,35 +6362,15 @@ mod tests {
         );
         assert_ne!(packaged.facts, ArchitectureFacts::default());
         assert_eq!(packaged.facts.transformer_blocks, Some(30));
-        // The anchor is the PACKAGED sc-15859 record (sc-22666) …
-        assert!(
-            packaged
-                .store
-                .expect("the packaged anchor store must load")
-                .image_anchor_for("z_image_turbo", AnchorBackend::Candle, "q4")
-                .is_some(),
-            "sc-22666 packages the sc-15859 z_image_turbo candle corpus"
-        );
-        // … UNMODIFIED, and CURRENT at this pin through the production currency seam (sc-22667
-        // review, blocker): `candle_image_anchor` refuses any anchor whose recorded loader-closure
-        // digest is not the one `config/anchor-loader-closures.json` declares, so a store this
-        // test re-stamped privately would prove nothing about what the worker ships. The row is
-        // current by attestation — `config/anchor-currency-attestations.json` records that the
-        // z_image_turbo:candle closure diff from the sc-15859 measurement (670dc1f4) to the pin
-        // is accounting-only, and `--stamp-anchors` keyed it at the pin on that reading. The
-        // next inference bump that moves this loader's closure reds this assertion, and that is
-        // the intended demand: re-read the diff (a new attestation) or re-capture, in the open.
+        // The anchor is the PACKAGED sc-15859 record (sc-22666), UNMODIFIED. The former companion
+        // assertion — that the row is CURRENT through `candle_image_anchor`'s loader-closure
+        // conjunct — is gone with that conjunct (sc-22738: the runtime always behaves as if the
+        // measurement were valid), so the row's presence is the whole precondition this test needs.
         let anchor = packaged
             .store
             .expect("the packaged anchor store must load")
             .image_anchor_for("z_image_turbo", AnchorBackend::Candle, "q4")
-            .expect("the packaged z_image_turbo q4 row");
-        assert!(
-            crate::video_admission::anchor_currency_matches(anchor),
-            "the packaged z_image_turbo:candle:q4 anchor is not current at this pin (recorded \
-             loader closure {}): production would refuse it and price from the manifest floor",
-            anchor.source.loader_closure_digest
-        );
+            .expect("sc-22666 packages the sc-15859 z_image_turbo candle corpus");
         let anchors = packaged;
 
         // The expected phases are DERIVED from the packaged anchor with the law at rung 4's own
@@ -6836,6 +6764,7 @@ mod tests {
             anchors: vec![foreign],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         };
         let absent_cell = z_image_fixture_floors(
             CandleLadderAnchors {
@@ -7307,16 +7236,8 @@ mod tests {
         // handshake (`load_memory_anchors`), which `sceneworks-core` owns and tests against the
         // retained evidence.
         //
-        // Currency is the packaged loader closure since sc-22511, and `is_current` compares against
-        // the PACKAGED declarations rather than anything injectable — so the control arm's digest
-        // is READ from those declarations rather than frozen as a literal. A literal would be a
-        // pin-coupled golden that reds on the next inference bump for no behavioural reason, and
-        // would silently stop discriminating if the declaration were dropped.
-        let live_loader_closure_digest =
-            sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-                .and_then(|closures| closures.digest_for("krea_2_turbo", AnchorBackend::Candle))
-                .expect("krea_2_turbo:candle must declare a loader closure")
-                .to_owned();
+        // sc-22738: the recorded loader closure is provenance the receipt carries and nothing
+        // compares, so a well-formed 64-hex literal is representative and cannot go stale.
         let anchor = MemoryAnchor {
             id: "krea_2_turbo:candle:q4".to_owned(),
             model_id: "krea_2_turbo".to_owned(),
@@ -7342,7 +7263,7 @@ mod tests {
                 sha256: String::new(),
                 record_id: String::new(),
                 calibration_fingerprint: "anchor-seam-v1".to_owned(),
-                loader_closure_digest: live_loader_closure_digest.clone(),
+                loader_closure_digest: "b".repeat(64),
                 currency_attestation: None,
             },
             geometry: AnchorGeometry {
@@ -7360,6 +7281,9 @@ mod tests {
             overall_allocator_envelope_bytes: 4_000_000_000,
             underived_reason: None,
             component_bytes: None,
+            // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+            // residency structurally impossible, so it keeps the staged-only derivation law.
+            staged_residency_structurally_not_applicable: false,
         };
         // Under the DEFAULT architecture facts (this pin — `architecture_facts_from_contract`)
         // every ratio the law could apply is inert, so each rung's derivation is the anchor's own
@@ -7385,10 +7309,12 @@ mod tests {
             // (sc-22510) is not read by it.
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         };
-        // Every guard of `candle_image_anchor` -- identity and loader-closure currency -- applies
-        // to whatever store it is handed since sc-22666 (the per-store scope split went with the
-        // model allow-list), so the injected store exercises all of them.
+        // Every guard of `candle_image_anchor` -- identity only, since sc-22738 retired the
+        // loader-closure currency conjunct -- applies to whatever store it is handed (the
+        // per-store scope split went with the model allow-list in sc-22666), so the injected store
+        // exercises all of them.
         let floors = |anchors: Option<&MemoryAnchorStore>| {
             synthesize_estimate_floors(
                 "krea_2_turbo",
@@ -7441,15 +7367,6 @@ mod tests {
                     anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
                 }),
             ),
-            (
-                // THE currency conjunct since sc-22511: the model's own loader closure moved, so
-                // the evidence no longer describes the code that will run. A rotated CALIBRATION
-                // FINGERPRINT is deliberately absent from this list — see the arm below.
-                "a moved loader closure",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.source.loader_closure_digest = "f".repeat(64);
-                }),
-            ),
         ] {
             let mut mutated = store.anchors[0].clone();
             mutate(&mut mutated);
@@ -7457,6 +7374,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![mutated],
             };
             for candidate in floors(Some(&mutated_store)) {
@@ -7469,19 +7387,51 @@ mod tests {
                 assert_eq!(candidate.evidence.predicted_peak_bytes, staged_floor_bytes);
             }
         }
-        // The INVERSE of the moved-closure arm, and the whole claim of sc-22511 (epic 22505 E9):
-        // the calibration campaign is PROVENANCE, not currency. A rotated fingerprint AND an ABI
-        // the runtime no longer speaks must both leave the derivation live, because neither one
-        // says anything about whether the code that loads this model has moved. Before sc-22511
-        // both of these demoted to the manifest-row floor; asserting the old behaviour here would
-        // re-key currency onto the campaign through the test suite.
+        // Everything that is PROVENANCE rather than an identity conjunct, and must therefore
+        // leave the derivation live at its derived peak.
+        //
+        // sc-22511 (epic 22505 E9) established that for the calibration campaign: a rotated
+        // fingerprint and an ABI the runtime no longer speaks both say nothing about whether the
+        // code that loads this model has moved.
+        //
+        // sc-22738 — "the App Runtime should ALWAYS continue behaving as if the measurement were
+        // valid" — moved the LOADER CLOSURE here too, out of the refusal table above. Currency is
+        // now a re-capture signal for the JS probe tooling and never changes what a live request
+        // gets, so `candle_image_anchor` has no currency conjunct left and a row whose recorded
+        // closure is nothing like the pin's still prices its own cell. MUTATION that reds it:
+        // restore a `loader_closure_digest` comparison in `candle_image_anchor` — the arm then
+        // falls back to `staged_floor_bytes` on the manifest row, a value the fixture pins as
+        // distinct from `expected_derived`.
         {
+            let mut moved_closure = store.anchors[0].clone();
+            moved_closure.source.loader_closure_digest = "f".repeat(64);
+            let moved_closure_store = MemoryAnchorStore {
+                schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                analytic_only: Vec::new(),
+                component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
+                anchors: vec![moved_closure],
+            };
+            let moved_floors = floors(Some(&moved_closure_store));
+            assert!(!moved_floors.is_empty());
+            for candidate in &moved_floors {
+                assert_eq!(
+                    candidate.basis,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
+                    "a moved loader closure must not demote the anchor (sc-22738)"
+                );
+                assert_eq!(candidate.evidence.predicted_peak_bytes, expected_derived);
+            }
+
             let mut rotated = store.anchors[0].clone();
             rotated.source.calibration_fingerprint = "anchor-seam-v2".to_owned();
             let rotated_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![rotated],
             };
             for candidate in floors(Some(&rotated_store)) {
@@ -7542,6 +7492,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![relabelled],
             };
             for candidate in floors(Some(&relabelled_store)) {
@@ -7561,22 +7512,19 @@ mod tests {
         // have been priced with borrowed empirics. The law fits nothing since sc-22663 and every
         // retained corpus is packaged since sc-22666, so the catalog-wide store answers for
         // whichever cell it measured. The row below is the control with only `(model_id, route)`
-        // moved -- the provider stays the contract's, so every other conjunct still passes -- and
-        // it carries THAT model's own live loader-closure digest, so currency is satisfied and the
-        // removed allow-list is the only thing that could have refused it.
+        // moved -- the provider stays the contract's, so every other conjunct still passes -- so
+        // the removed allow-list is the only thing that could have refused it. (It used to have to
+        // carry that model's own live loader-closure digest as well; sc-22738 retired the currency
+        // conjunct, so the inherited provenance stamp is fine.)
         {
             let mut foreign = store.anchors[0].clone();
             foreign.model_id = "qwen_image".to_owned();
             foreign.route = "qwen_image".to_owned();
-            foreign.source.loader_closure_digest =
-                sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-                    .and_then(|closures| closures.digest_for("qwen_image", AnchorBackend::Candle))
-                    .expect("qwen_image:candle must declare a loader closure")
-                    .to_owned();
             let foreign_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                exceeded_bounds: Vec::new(),
                 anchors: vec![foreign],
             };
             let foreign_floors = synthesize_estimate_floors(
@@ -8385,13 +8333,12 @@ mod tests {
         contract
     }
 
-    /// The PACKAGED store, unmodified, with `model_id`'s candle q4 row asserted CURRENT through
-    /// the production currency seam (sc-22667 review, blocker). The derivation below prices
-    /// through `synthesize_estimate_floors`, which reads anchors via `candle_image_anchor` — the
-    /// seam that refuses a row whose recorded loader-closure digest is not the pin's — so a
-    /// privately re-stamped store here would grade a path production never takes. The packaged
-    /// rows are current by attestation (`config/anchor-currency-attestations.json`); an inference
-    /// bump that moves either loader's closure reds this, on purpose.
+    /// The PACKAGED store, unmodified, with `model_id`'s candle q4 row asserted PRESENT.
+    ///
+    /// It used to additionally assert the row current through `candle_image_anchor`'s
+    /// loader-closure conjunct. sc-22738 removed that conjunct — the runtime always behaves as if
+    /// the measurement were valid — so a row's recorded closure decides nothing and presence is
+    /// the whole precondition this falsification needs.
     fn sc_22667_packaged_anchor_store(
         model_id: &str,
     ) -> &'static sceneworks_core::memory_anchor::MemoryAnchorStore {
@@ -8399,15 +8346,11 @@ mod tests {
 
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
             .expect("the packaged anchor store");
-        let anchor = store
-            .image_anchor_for(model_id, AnchorBackend::Candle, "q4")
-            .unwrap_or_else(|| panic!("{model_id}:candle:q4 must be packaged"));
         assert!(
-            crate::video_admission::anchor_currency_matches(anchor),
-            "{model_id}: the packaged candle q4 anchor is not current at this pin (recorded \
-             loader closure {}) — production refuses it, so this falsification would not be \
-             grading the shipped path",
-            anchor.source.loader_closure_digest
+            store
+                .image_anchor_for(model_id, AnchorBackend::Candle, "q4")
+                .is_some(),
+            "{model_id}:candle:q4 must be packaged"
         );
         store
     }

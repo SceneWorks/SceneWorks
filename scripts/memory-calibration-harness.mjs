@@ -63,14 +63,22 @@ const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
 const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_av", "reference_av",
 ]);
+// sc-22738: a video capture is ONE measured render, so a single-render A/V session carries the
+// `selected_av` receipt alone — there is no warm repeat to file as `reference_av`. Sessions that
+// carry both roles were captured under the previous two-render arm and stay valid as they are.
+const PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES = Object.freeze(["request", "selected_av"]);
+const PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES = Object.freeze(["selected_av"]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
 const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
 
 function physicalMlxExpectedRoles(outputs, includeRequest) {
   const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
-  return hasAv
-    ? (includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES)
-    : (includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES);
+  if (!hasAv) return includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES;
+  const hasReferenceAv = outputs.some((output) => output?.role === "reference_av");
+  if (!hasReferenceAv) {
+    return includeRequest ? PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES;
+  }
+  return includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES;
 }
 
 function stable(value) {
@@ -213,11 +221,14 @@ function validatePhysicalMlxOutputsAgainstRecord(record, session) {
       fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
   }
-  const hasAv = session.outputs.some((output) => output.role === "selected_av");
-  if (hasAv !== (record.quality.audio !== undefined)) {
-    fail(`${record.id}: physical MLX A/V receipts and typed audio quality must be present together`);
+  // A typed audio comparison is selected-versus-REFERENCE PCM, so it is coupled to the
+  // `reference_av` receipt, not to the A/V kind as such: a single-render video session (sc-22738)
+  // carries `selected_av` and no audio comparison.
+  const hasReferenceAv = session.outputs.some((output) => output.role === "reference_av");
+  if (hasReferenceAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX reference A/V receipt and typed audio quality must be present together`);
   }
-  if (hasAv) validateAudioQuality(record);
+  if (hasReferenceAv) validateAudioQuality(record);
 }
 
 function validateAudioQuality(record) {
@@ -248,13 +259,32 @@ function validateAudioQuality(record) {
 
 export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
   if (avContents.size === 0) return;
-  validateAudioQuality(record);
   const selected = avContents.get("selected_av");
   const reference = avContents.get("reference_av");
-  const audio = record.quality.audio;
   const outputFps = record.diagnostics?.measurements?.find(
     (measurement) => measurement.name === "outputFps",
   )?.value;
+  const measurement = (name) => record.diagnostics?.measurements?.find((entry) => entry.name === name)?.value;
+  if (!selected) fail(`${label}: an A/V session must carry the selected_av render`);
+  if (!reference) {
+    // sc-22738: one measured render, no reference. The track's identity is bound to the record's
+    // own `audio*` measurements instead of a selected-versus-reference `quality.audio` block.
+    if (record.quality.audio !== undefined) {
+      fail(`${label}: typed audio quality needs a reference_av render this session did not make`);
+    }
+    if (selected.width !== record.target.geometry.width
+        || selected.height !== record.target.geometry.height
+        || selected.frames !== record.target.geometry.frames
+        || selected.fps !== outputFps
+        || selected.sampleRateHz !== measurement("audioSampleRate")
+        || selected.channels !== measurement("audioChannels")
+        || selected.sampleCount !== measurement("audioSamples")) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+    return;
+  }
+  validateAudioQuality(record);
+  const audio = record.quality.audio;
   for (const content of [selected, reference]) {
     if (!content
         || content.width !== record.target.geometry.width
@@ -555,6 +585,29 @@ export function recordId(record) {
   }).slice(0, 20)}`;
 }
 
+/**
+ * One exceeded bound's content-derived id (sc-22738). Same construction and same exclusions as
+ * [`recordId`] — the derived `inference.closureDigest` is a pure function of terms already inside
+ * the identity — plus the two figures that ARE the bound's claim. A second hard stop of the same
+ * cell at the same geometry on the same host that reaches a different footprint is a DIFFERENT
+ * bound and gets a different id, because the inequality it states is different.
+ */
+export function exceededBoundId(bound) {
+  return `exc-${digest({
+    harnessVersion: bound.harnessVersion,
+    repositories: repositoriesIdentity(bound.repositories),
+    backend: bound.backend,
+    loadShape: bound.loadShape,
+    hardware: bound.hardware,
+    artifact: bound.artifact,
+    target: bound.target,
+    referenceCount: bound.referenceCount,
+    observedFootprintBytes: bound.observedFootprintBytes,
+    ceilingBytes: bound.ceilingBytes,
+    calibrationFingerprint: bound.calibrationFingerprint,
+  }).slice(0, 20)}`;
+}
+
 function validateEngagedRungs(strategy, label) {
   const engaged = strategy.engagedRungs;
   if (!Array.isArray(engaged) || engaged.length === 0) {
@@ -832,22 +885,40 @@ function validateRuntimeComplete(record) {
   if (overlay?.result !== "not_applicable") fail(`${record.id}: runtime-complete evidence must be base-only`);
   text(overlay.reason, `${record.id}.overlay.reason`);
   if (record.negativeMutation !== null) fail(`${record.id}: unexecuted negative mutation must remain null`);
-  if (
-    record.quality.result !== "passed" ||
-    record.quality.identicalInputs !== true
-  ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
   text(record.quality.contract, `${record.id}.quality.contract`);
-  for (const metric of [
-    "maximumError", "meanError", "rootMeanSquareError",
-    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
-  ]) {
-    number(record.quality[metric], `${record.id}.quality.${metric}`);
+  if (record.quality.warmPasses === 0) {
+    // sc-22738: a single-render video receipt. The determinism comparison was NOT run, so the
+    // record says `not_run` and carries no figure; it degrades to "not measured", never to a
+    // refusal and never to a synthetic number. The thresholds it would be judged by still travel.
+    if (record.quality.result !== "not_run") {
+      fail(`${record.id}: quality.warmPasses 0 declares an unrun comparison, so quality.result must be not_run`);
+    }
+    for (const metric of ["maximumError", "meanError", "rootMeanSquareError"]) {
+      if (record.quality[metric] !== undefined) {
+        fail(`${record.id}: quality.warmPasses 0 cannot carry quality.${metric}`);
+      }
+    }
+    if (record.quality.audio !== undefined) fail(`${record.id}: quality.warmPasses 0 cannot carry typed audio quality`);
+    for (const metric of ["maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold"]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+  } else {
+    if (
+      record.quality.result !== "passed" ||
+      record.quality.identicalInputs !== true
+    ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
+    for (const metric of [
+      "maximumError", "meanError", "rootMeanSquareError",
+      "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
+    ]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+    if (
+      record.quality.maximumError > record.quality.maximumErrorThreshold ||
+      record.quality.meanError > record.quality.meanErrorThreshold ||
+      record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
+    ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   }
-  if (
-    record.quality.maximumError > record.quality.maximumErrorThreshold ||
-    record.quality.meanError > record.quality.meanErrorThreshold ||
-    record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
-  ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
   // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
@@ -1114,7 +1185,41 @@ export function validateBundle(bundle) {
       }
     }
   }
+  const boundIds = new Set();
+  for (const bound of bundle.exceededBounds ?? []) {
+    validateExceededBound(bound);
+    if (boundIds.has(bound.id)) fail(`duplicate exceeded bound ${bound.id}`);
+    boundIds.add(bound.id);
+  }
   return bundle;
+}
+
+/**
+ * One exceeded bound's invariants beyond the schema's shape (sc-22738).
+ *
+ * All three are about the inequality being a real one. A footprint under the ceiling did not come
+ * from a hard stop — EQUAL is admissible and is what a `metal_submissions_ignored` bound records,
+ * because a refusal the guard never saw is witnessed only up to the sampler's own peak, and that
+ * peak is then both the reading and the highest line the run is known to have crossed; a footprint
+ * above the whole host is not a reading of that host; and an id that
+ * is not the content digest of the bound's own identity would let two different measurements share
+ * a row. The Rust loader re-checks the first two against this very file, so a bundle that passes
+ * here and a store row that passes there cannot disagree.
+ */
+export function validateExceededBound(bound) {
+  object(bound, "exceeded bound");
+  if (bound.observedFootprintBytes < bound.ceilingBytes) {
+    fail(
+      `${bound.id}: observed footprint ${bound.observedFootprintBytes} is under the hard-stop ` +
+        `ceiling ${bound.ceilingBytes} — that is not a run the guard stopped`,
+    );
+  }
+  if (bound.observedFootprintBytes > bound.hardware.memoryBytes) {
+    fail(`${bound.id}: observed footprint exceeds the whole capture host's memory`);
+  }
+  if (bound.id !== exceededBoundId(bound)) {
+    fail(`${bound.id}: id is not the digest of its own identity (expected ${exceededBoundId(bound)})`);
+  }
 }
 
 function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy) {
@@ -1157,7 +1262,8 @@ async function sha256File(file) {
   return hash.digest("hex");
 }
 
-async function resolveReceiptPath(relativePath, roots) {
+/** The receipt's physical path under the first root that holds it, or `null` when none does. */
+async function findReceiptPath(relativePath, roots) {
   for (const root of roots) {
     const physicalRoot = await realpath(root);
     const candidate = path.resolve(physicalRoot, relativePath);
@@ -1173,7 +1279,26 @@ async function resolveReceiptPath(relativePath, roots) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
-  fail(`missing immutable source receipt ${relativePath}`);
+  return null;
+}
+
+async function resolveReceiptPath(relativePath, roots) {
+  return (await findReceiptPath(relativePath, roots)) ?? fail(`missing immutable source receipt ${relativePath}`);
+}
+
+/**
+ * sc-22738: a physical MLX session's RENDERED outputs (`selected_*` / `reference_*`) are not part of
+ * the committed evidence tree — the 2026-09-07 LTX-2.5 rerun put six 165–176 MB `.avbin` renders
+ * into three anchor commits and GitHub refused the push. The bundle's `outputs[]` receipt (content
+ * digest, byte length, geometry and frames, all also spelled in the content-addressed filename) and
+ * the quality metrics derived from the bytes ARE the evidence. The bytes are verified against that
+ * receipt at capture (`capturePlannedCase`, against the provider's `localPath`) and again at ingest,
+ * where `--source-root` names the raw capture directory and `requireRenderedOutputs` makes their
+ * absence a failure. Anywhere else they are verified when present and accepted on the receipt when
+ * not. The `request` receipt and the session log are required everywhere.
+ */
+function isRenderedOutput(output) {
+  return output.role !== "request";
 }
 
 /**
@@ -1208,6 +1333,7 @@ export async function validateSourceSessionFiles(
   bundle,
   extraRoot = null,
   inferenceClosureDigests = null,
+  { requireRenderedOutputs = false } = {},
 ) {
   validateBundle(bundle);
   if (inferenceClosureDigests) {
@@ -1233,7 +1359,11 @@ export async function validateSourceSessionFiles(
     const requestOutput = session.outputs.find((output) => output.role === "request");
     const avContents = new Map();
     for (const output of session.outputs) {
-      const outputFile = await resolveReceiptPath(output.path, roots);
+      const outputFile = isRenderedOutput(output) && !requireRenderedOutputs
+        ? await findReceiptPath(output.path, roots)
+        : await resolveReceiptPath(output.path, roots);
+      // See `isRenderedOutput`: the render is not in the tree; its receipt is the evidence.
+      if (outputFile === null) continue;
       const outputBytes = await readFile(outputFile);
       if (createHash("sha256").update(outputBytes).digest("hex") !== output.sha256
           || outputBytes.length !== output.bytes) {
@@ -1391,15 +1521,55 @@ export function evidenceSemantics(record, revisions) {
  * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
  * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
  * story closed.
+ *
+ * ONE ESCAPE, and it is not an operator knob either (sc-22734): a plan row may carry its own
+ * `strategy`, and it exists for a provider whose CONTRACT refuses the lane default. SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes — it is one fused
+ * dual-path transformer with no separable conditioning component, so there is no phase boundary to
+ * release — and `contract.validate_selection` therefore rejects the candle default rung before any
+ * weight is read. The override makes those rows plan the RESIDENT rung, which the contract admits.
+ * It is derived, not chosen: a test in scripts/measure-memory-catalog.test.mjs requires a row's
+ * effective rung to be `resident` exactly when the model's manifest lane block declares a
+ * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
+ * architecture does not force.
+ *
+ * ## Where the values live (sc-22738)
+ *
+ * NOT here. `crates/sceneworks-worker/src/inference_runtime.rs` walks this same plan and asks each
+ * row's contract to `validate_selection` the rung it will be captured at, and it used to RESPELL
+ * these two defaults in Rust (`lane_default_rung`: mlx -> "resident", candle -> "staged_residency")
+ * with nothing binding the two spellings — a lane default changed here would have left the Rust
+ * walk asserting the OLD rung and still green. Both sides now read
+ * `config/anchor-lane-default-strategy.json`, the Rust one through `include_str!`, so a change to
+ * the composition is a change to one file and reds the walk unless the contracts follow.
+ *
+ * Read synchronously at module load and fail-closed: a missing lane, rung or engaged-rung list
+ * throws here rather than degrading to a default composition no law authorized.
  */
-export const ANCHOR_STRATEGY = Object.freeze({
-  mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
-  candle: Object.freeze({
-    rung: "staged_residency",
-    engagedRungs: Object.freeze(["resident", "staged_residency"]),
-    parameters: Object.freeze({}),
-  }),
-});
+export const ANCHOR_LANE_DEFAULT_STRATEGY_PATH = "config/anchor-lane-default-strategy.json";
+
+function loadAnchorStrategy() {
+  const declared = JSON.parse(
+    readFileSync(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  ).lanes;
+  const lanes = {};
+  for (const backend of ["mlx", "candle"]) {
+    const entry = declared?.[backend];
+    if (typeof entry?.rung !== "string" || !Array.isArray(entry.engagedRungs) || entry.engagedRungs.length === 0) {
+      fail(
+        `${ANCHOR_LANE_DEFAULT_STRATEGY_PATH} declares no usable default composition for the ${backend} lane`,
+      );
+    }
+    lanes[backend] = Object.freeze({
+      rung: entry.rung,
+      engagedRungs: Object.freeze([...entry.engagedRungs]),
+      parameters: Object.freeze({}),
+    });
+  }
+  return Object.freeze(lanes);
+}
+
+export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
 const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
@@ -1517,8 +1687,8 @@ export function planAnchor(plan, key) {
       geometry: anchor.geometry,
     },
     strategy: {
-      rung: ANCHOR_STRATEGY[backend].rung,
-      engagedRungs: [...ANCHOR_STRATEGY[backend].engagedRungs],
+      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
+      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
       parameters: {},
     },
     ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),
@@ -1536,6 +1706,15 @@ export function planAnchor(plan, key) {
 }
 
 const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+/**
+ * The engine provider each lane's adapter loads LTX-2.5 through — the SAME public snapshot, under
+ * two different engine ids (sc-22725). MLX's arm is `ltx_2_5` (mlx.rs); Candle's is
+ * `ltx_2_5_distilled` (candle.rs `LTX25_ID`, `candle-gen-ltx` `MODEL_25_ID`). The snapshot binding
+ * is therefore a MODEL-level fact, not an MLX-only one, and this table is what keeps the refusal
+ * honest: a lane not listed here, or a plan row naming some other provider on a listed lane, is
+ * still refused rather than silently prepared against the wrong artifact family.
+ */
+export const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
 function ltx25ArtifactKey(planned) {
   const variant = planned?.target?.transformerVariant;
   const tier = planned?.target?.tier;
@@ -1592,10 +1771,14 @@ export async function prepareLtx25CaptureArtifacts(
     fail("LTX-2.5 snapshot preparation requires at least one selected case");
   }
   if (plannedCases.some((planned) =>
-    planned.backend !== "mlx" ||
     planned.target?.modelId !== "ltx_2_5" ||
-    planned.target?.provider !== "ltx_2_5")) {
-    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+    planned.target?.provider !== LTX25_LANE_PROVIDERS[planned.backend])) {
+    fail(
+      "--ltx25-snapshot-root is valid only for the ltx_2_5 plan on a lane that loads its own " +
+        `LTX-2.5 provider (${Object.entries(LTX25_LANE_PROVIDERS)
+          .map(([backend, provider]) => `${backend}:${provider}`)
+          .join(", ")})`,
+    );
   }
 
   const requested = path.resolve(snapshotRoot);
@@ -1739,6 +1922,7 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
     "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
     "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
     "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+    "SCENEWORKS_LTX25_DISTILL_LORA_ROOT",
   ]) delete environment[name];
   environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
   environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
@@ -1755,6 +1939,16 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
       if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+      // The Candle arm resolves the official stage-two refinement LoRA from the snapshot ROOT
+      // (candle.rs `ltx25_official_dev_adapter` → `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, joined with
+      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest.
+      //
+      // Reachability, stated plainly: NO plan row is served by this line today. The variable is read
+      // only by the Candle arm, and only a `dev` anchor binds it — but every candle plan row is
+      // `distilled` and every mlx plan row is `dev` (where mlx ignores the variable). The binding is
+      // in place so that a future candle `dev` anchor is served by the same prepared, re-hashed
+      // snapshot as the mlx one; adding that plan row is what would first exercise it.
+      environment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT = prepared.snapshotRoot;
     }
   }
   return environment;
@@ -1861,6 +2055,324 @@ export async function captureAnchor({ plan, anchorKey, ...rest }) {
 }
 
 /**
+ * The `repositories` block every capture and every bound carries: both HEADs, both dirty flags, and
+ * the SceneWorks matrix source revision. Shared by [`capturePlannedCase`] and
+ * [`recordExceededBound`] so a bound's provenance is assembled by the same code a record's is.
+ */
+async function probeRepositoryState({ sceneWorksRepo, inferenceRepo }) {
+  const gitState = async (repo, sceneWorks = false) => ({
+    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
+    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
+    ...(sceneWorks
+      ? {
+          matrixSourceRevision: JSON.parse(
+            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
+          ).generatedFrom.sceneWorksRevision,
+        }
+      : {}),
+  });
+  return {
+    sceneWorks: await gitState(sceneWorksRepo, true),
+    inference: await gitState(inferenceRepo),
+  };
+}
+
+/** The lane closure digest resolver both capture arms stamp their `repositories.inference` with. */
+function laneClosureDigestFor({ sceneWorksRepo, inferenceRepo }) {
+  return async (laneKey, revision) => {
+    const declarations = JSON.parse(
+      await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
+    );
+    const crateDir = declarations.providers?.[laneKey]?.crate;
+    // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
+    // conservative answer: the record carries no currency term, so it can never read `current`
+    // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
+    // it later.
+    if (!crateDir) return undefined;
+    return providerClosureDigest({ repo: inferenceRepo, revision, provider: laneKey, crateDir })
+      .digest;
+  };
+}
+
+/**
+ * The guard's verdict, read off its own event log (sc-22738).
+ *
+ * The `hard_stop` reason is the authority for BOTH figures — the guard spells them into it as
+ * `physical_footprint_at_or_above_<ceiling>:observed_<footprint>` at the instant it fired — and the
+ * final `sample` is cross-checked against it, so a truncated or interleaved log cannot yield a
+ * bound whose footprint no sample ever saw. A log with no `hard_stop` returns `null`: the capture
+ * failed for some other reason, and inventing a bound from its last sample would state an
+ * inequality nothing measured.
+ */
+export function parseWatchdogHardStop(body) {
+  let stop = null;
+  let lastSample = null;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event === "sample") lastSample = event;
+    if (event.event === "hard_stop" && !stop) stop = event;
+  }
+  if (!stop) return null;
+  const match = /^physical_footprint_at_or_above_(\d+):observed_(\d+)$/.exec(String(stop.reason));
+  if (!match) {
+    // sc-22738: the SECOND guard against a false lower bound, behind the runner's own
+    // (`measure-memory-catalog.mjs` returns `capture_failed` for a runtime stop before it ever
+    // calls `record-exceeded`). A wall-clock stop is the case this is now most likely to see: the
+    // probe ran out of its `--max-runtime-seconds` budget wherever its footprint happened to be,
+    // which is not a line it was witnessed to cross. Anything that is not a footprint stop is
+    // refused here for the same reason, whatever put it in the log.
+    const runtime = /^runtime_at_or_above_(\d+(?:\.\d+)?)s$/.exec(String(stop.reason));
+    fail(
+      `watchdog hard stop ${JSON.stringify(stop.reason)} is not a physical-footprint stop; only a ` +
+        "footprint stop states a lower bound on the render's peak" +
+        (runtime
+          ? `. This is a WALL-CLOCK stop: the probe reached its ${runtime[1]}s budget, which measures ` +
+            "no memory at all — the capture is a failure, not an exceedance"
+          : ""),
+    );
+  }
+  const ceilingBytes = Number(match[1]);
+  const observedFootprintBytes = Number(match[2]);
+  if (!Number.isSafeInteger(ceilingBytes) || !Number.isSafeInteger(observedFootprintBytes)) {
+    fail("watchdog hard stop states figures outside the safe integer range");
+  }
+  if (lastSample && lastSample.physicalFootprintBytes !== observedFootprintBytes) {
+    fail(
+      `watchdog hard stop claims footprint ${observedFootprintBytes} but its last sample read ` +
+        `${lastSample.physicalFootprintBytes}`,
+    );
+  }
+  return { reason: stop.reason, ceilingBytes, observedFootprintBytes };
+}
+
+/**
+ * The two tokens Metal's process-scoped refusal is identified by (sc-22738, measured 2026-09-06).
+ *
+ * BOTH are required. The phrase alone appears in prose — this file, the runbook, a memory note —
+ * and a stderr that merely mentions the failure mode is not one that suffered it; the IOGPU status
+ * code is what the driver itself emits alongside it. Requiring the pair is what keeps a log line
+ * about the hazard from being mistaken for the hazard.
+ */
+export const METAL_SUBMISSIONS_IGNORED_CODE = "00000004";
+export const METAL_SUBMISSIONS_IGNORED_PHRASE = "kIOGPUCommandBufferCallbackErrorSubmissionsIgnored";
+
+/**
+ * Whether a provider's captured stderr carries Metal's submissions-ignored refusal.
+ *
+ * `[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors)
+ * (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)` — the engine surfaces it verbatim
+ * out of mlx-c, so the adapter's exit-1 stderr is the only witness there is. The guard sees nothing:
+ * it never fired, because `phys_footprint` never reached the kill line.
+ */
+export function metalSubmissionsIgnored(stderr) {
+  const text = String(stderr ?? "");
+  return text.includes(METAL_SUBMISSIONS_IGNORED_CODE) && text.includes(METAL_SUBMISSIONS_IGNORED_PHRASE);
+}
+
+/**
+ * How far BELOW the wired limit the last good sample may sit and still be read as a wired-limit
+ * refusal: 2% (sc-22738).
+ *
+ * Derived from the sampler, not chosen for comfort. The guard samples every 2 s, so the reading is
+ * always at least one interval stale by the time Metal refuses. On the `flux2_dev:bf16:mlx` refusal
+ * this rule was written from, the terminal climb was 679,821,816 bytes in 2.22 s (~306 MB/s), so one
+ * interval of lag is ~612 MB — 0.70% of this host's 87,044,670,532-byte wired limit — and the peak
+ * actually landed 56,660,196 bytes (0.065%) under it. 2% is ~2.8 intervals at that rate: loose
+ * enough that a faster terminal climb still classifies, tight enough that a refusal taken WELL below
+ * the limit is not laundered into a memory bound. A refusal outside the band is refused here and
+ * stays a `capture_failed`: it was a GPU fault of some other kind, and nothing measured a ceiling.
+ */
+export const METAL_REFUSAL_TOLERANCE = 0.02;
+
+/**
+ * The peak `phys_footprint` the guard sampled, and the number of samples behind it (sc-22738).
+ *
+ * The PEAK, not the last sample: a refused process is torn down while the sampler is still running,
+ * so the tail of the stream reads the shrinking husk (29 MB on the flux2 refusal) rather than the
+ * render. A stream with no sample states no footprint and is refused rather than defaulted.
+ */
+export function parseWatchdogPeak(body) {
+  let peak = null;
+  let samples = 0;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event !== "sample") continue;
+    samples += 1;
+    const footprint = event.physicalFootprintBytes;
+    if (!Number.isSafeInteger(footprint) || footprint <= 0) {
+      fail(`watchdog sample states a non-positive physical footprint ${JSON.stringify(footprint)}`);
+    }
+    if (peak === null || footprint > peak) peak = footprint;
+  }
+  if (peak === null) fail("the watchdog event log carries no sample, so it states no footprint at all");
+  return { observedFootprintBytes: peak, samples };
+}
+
+/**
+ * A process-scoped Metal refusal read as a measured bound (sc-22738, measured 2026-09-06).
+ *
+ * WHAT THE RUN PROVED. `flux2_dev:bf16:mlx` rendered for 775 s under the guard, reached a sampled
+ * peak of 86,988,010,336 bytes — 0.065% under this host's 87,044,670,532-byte Metal wired limit —
+ * and the adapter then exited 1 with the driver's own submissions-ignored refusal. The guard never
+ * fired (its kill line is 94,822,600,832), so `parseWatchdogHardStop` reads nothing and the run used
+ * to end as `capture_failed` with the store keeping no trace, while production went on admitting
+ * the identical request at the ladder's bf16 rung.
+ *
+ * WHICH FIGURES THE BOUND CARRIES, AND WHY NOT THE WIRED LIMIT. `observedFootprintBytes` is the peak
+ * the sampler actually read, and `ceilingBytes` is that same figure — the highest line the run is
+ * WITNESSED to have crossed. Recording the wired limit as the ceiling would state that the run got
+ * past a line it was only ever observed 56 MB short of, and `sceneworks_core::memory_anchor`'s
+ * loader refuses exactly that (`observed_footprint_bytes < ceiling_bytes`). The limit is not lost:
+ * it is carried on `hardware.wiredLimitBytes`, named in `reason`, and — as `wiredLimitBytes` — is
+ * the term the tolerance band above is measured against, so a reader sees the whole gap.
+ *
+ * The two quantities are not interchangeable for a further reason `watchdogCeilings` already states:
+ * `phys_footprint` counts every non-Metal page the group owns, the wired limit ceilings Metal
+ * buffers alone. Their near-coincidence here is corroboration that the refusal was memory pressure,
+ * which is all the tolerance band is asked to decide.
+ */
+function metalRefusalBound({ eventBody, providerStderr, wiredLimitBytes, hardware }) {
+  if (!metalSubmissionsIgnored(providerStderr)) {
+    fail(
+      "the captured provider stderr carries no Metal submissions-ignored refusal " +
+        `(${METAL_SUBMISSIONS_IGNORED_CODE}:${METAL_SUBMISSIONS_IGNORED_PHRASE}); a failure that ` +
+        "names no refusal states no bound",
+    );
+  }
+  if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) {
+    fail("--wired-limit-bytes must be a positive safe integer");
+  }
+  // The runner passes the limit its OWN probe read before the capture; the probe above read it
+  // again after. A host whose Metal policy moved between the two is a host neither reading speaks
+  // for, so the bound is refused rather than keyed on whichever figure arrived last.
+  if (hardware.wiredLimitBytes !== wiredLimitBytes) {
+    fail(
+      `--wired-limit-bytes ${wiredLimitBytes} is not the wired limit this adapter probes ` +
+        `(${hardware.wiredLimitBytes}); the host's Metal ceiling moved during the capture`,
+    );
+  }
+  const { observedFootprintBytes } = parseWatchdogPeak(eventBody);
+  if (observedFootprintBytes > hardware.memoryBytes) {
+    fail(`peak footprint ${observedFootprintBytes} exceeds the whole capture host's memory`);
+  }
+  const floor = Math.floor(wiredLimitBytes * (1 - METAL_REFUSAL_TOLERANCE));
+  if (observedFootprintBytes < floor) {
+    fail(
+      `peak footprint ${observedFootprintBytes} is more than ${METAL_REFUSAL_TOLERANCE * 100}% under ` +
+        `the ${wiredLimitBytes}-byte wired limit (floor ${floor}); this refusal was not taken at the ` +
+        "wired limit, so it bounds nothing",
+    );
+  }
+  return {
+    observedFootprintBytes,
+    ceilingBytes: observedFootprintBytes,
+    reason: `metal_submissions_ignored:observed_${observedFootprintBytes}:wired_limit_${wiredLimitBytes}`,
+  };
+}
+
+/**
+ * Turn ONE footprint hard stop into retained evidence (sc-22738, epic 22723 E4/E5).
+ *
+ * Before this arm existed a hard stop stamped NOTHING. The capture process group was killed, the
+ * runner logged `capture_failed`, and the single fact the run had established — that this cell's
+ * peak is at least the footprint the guard saw — was thrown away, leaving production admitting the
+ * request it had just had to kill. The bundle this writes goes through the same `check` → `ingest`
+ * → extract → stamp → matrix path a completed capture does, so a bound is stamped, packaged and
+ * committed by the machinery that already exists rather than by a second one.
+ *
+ * WHAT THIS ARM DOES NOT DO: it does not run the provider's render. It probes the adapter for the
+ * host's hardware — the same `action: "probe"` a capture takes first — reads the guard's event log,
+ * and binds the artifact the runner had set in the environment. There is no fragment to trust,
+ * because there is no completed run; every field is either the plan's, the repositories', the
+ * probe's, the runner's artifact binding, or the guard's.
+ */
+export async function recordExceededBound({
+  plan, anchorKey, providerCommand, sceneWorksRepo, inferenceRepo, watchdogEventFile, artifact,
+  providerStderrFile = null, wiredLimitBytes = null,
+  closureDigestFor = null, executeProvider = execute, now = () => new Date(),
+}) {
+  if (!Array.isArray(providerCommand) || !providerCommand.length) {
+    fail("provider command must be a JSON argv array");
+  }
+  const planned = planAnchor(plan, anchorKey);
+  object(artifact, "artifact");
+  for (const field of ["repository", "resolvedRevision", "variant"]) {
+    text(artifact[field], `artifact.${field}`);
+  }
+  const eventBody = await readFile(watchdogEventFile, "utf8");
+  // TWO admissible sources, in this order. The guard's own hard stop is the authoritative one: it
+  // states both figures itself. A process-scoped Metal refusal is the alternative — the guard never
+  // fired, so the run's only witnesses are the sampler's stream and the adapter's stderr — and it is
+  // consulted ONLY when there is no hard stop to read.
+  const stop = parseWatchdogHardStop(eventBody);
+  const providerStderr = providerStderrFile === null ? null : await readFile(providerStderrFile, "utf8");
+  if (!stop && providerStderr === null) {
+    fail(
+      `${watchdogEventFile} records no watchdog hard stop, and no --provider-stderr was given to ` +
+        "read a process-scoped refusal out of",
+    );
+  }
+  const repositories = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  const probeOutput = await executeProvider(
+    providerCommand[0],
+    providerCommand.slice(1),
+    canonicalJson({ action: "probe", repositories }),
+  );
+  const probe = JSON.parse(probeOutput);
+  const after = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during the probe");
+  const lane = `${planned.backend}:${planned.target.provider}`;
+  const resolveDigest = closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const digestForLane = planned.evidenceScope === "authoritative"
+    ? await resolveDigest(lane, repositories.inference.revision)
+    : undefined;
+  const measured = stop ?? metalRefusalBound({
+    eventBody, providerStderr, wiredLimitBytes, hardware: probe.hardware,
+  });
+  const bound = {
+    logicalCaseId: planned.logicalCaseId,
+    backend: planned.backend,
+    // The plan's declared shape, not a provider attestation: the run was killed before the adapter
+    // could attest anything, and the load shape is what the capture ASKED for. It is stated rather
+    // than omitted because the bound is keyed on it — a deferred-materialization run reaches a
+    // different footprint than an eager one, and neither may borrow the other's inequality.
+    loadShape: planned.loadShape,
+    repositories: digestForLane
+      ? { ...repositories, inference: { ...repositories.inference, closureDigest: digestForLane } }
+      : repositories,
+    hardware: probe.hardware,
+    artifact,
+    target: planned.target,
+    // The anchor plan has no reference axis at all (packages/schemas/memory-anchor-plan.schema.json
+    // states geometry as width/height/batch/frames), so every anchor capture — and therefore every
+    // bound one can produce — is reference-free. Stated as a field rather than assumed because the
+    // store keys on it: a reference-carrying request must not inherit a reference-free bound.
+    referenceCount: 0,
+    observedFootprintBytes: measured.observedFootprintBytes,
+    ceilingBytes: measured.ceilingBytes,
+    reason: measured.reason,
+    eventFileSha256: createHash("sha256").update(eventBody).digest("hex"),
+    // The refusal's own witness, hashed for the same reason the event log is: a bound whose stated
+    // cause cannot be re-read is a claim standing on nothing.
+    ...(stop || providerStderr === null
+      ? {}
+      : { providerStderrSha256: createHash("sha256").update(providerStderr).digest("hex") }),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    capturedAt: now().toISOString(),
+    harnessVersion: HARNESS_VERSION,
+  };
+  const bundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    records: [],
+    exceededBounds: [{ id: exceededBoundId(bound), ...bound }],
+  };
+  return validateBundle(bundle);
+}
+
+/**
  * The capture primitive: one planned case in, one single-record bundle out.
  *
  * `captureAnchor` is the only production caller and derives its `planned` from the anchor plan. This
@@ -1902,17 +2414,6 @@ export async function capturePlannedCase({
     }
   }
   object(planned, "planned case");
-  const gitState = async (repo, sceneWorks = false) => ({
-    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
-    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
-    ...(sceneWorks
-      ? {
-          matrixSourceRevision: JSON.parse(
-            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
-          ).generatedFrom.sceneWorksRevision,
-        }
-      : {}),
-  });
   // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
   // live inference checkout, so the captured half of the currency comparison is derived here rather
   // than backfilled later. The LANE decides which closure is measured, and a lane is
@@ -1920,28 +2421,8 @@ export async function capturePlannedCase({
   // `evidenceSemantics` both use.
   const lane = `${planned.backend}:${planned.target.provider}`;
   const closureDigest =
-    closureDigestFor ??
-    (async (laneKey, revision) => {
-      const declarations = JSON.parse(
-        await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
-      );
-      const crateDir = declarations.providers?.[laneKey]?.crate;
-      // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
-      // conservative answer: the record carries no currency term, so it can never read `current`
-      // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
-      // it later.
-      if (!crateDir) return undefined;
-      return providerClosureDigest({
-        repo: inferenceRepo,
-        revision,
-        provider: laneKey,
-        crateDir,
-      }).digest;
-    });
-  const probeRepositories = async () => ({
-    sceneWorks: await gitState(sceneWorksRepo, true),
-    inference: await gitState(inferenceRepo),
-  });
+    closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const probeRepositories = () => probeRepositoryState({ sceneWorksRepo, inferenceRepo });
   // The stability probe deliberately carries NO closure digest: the digest is a pure function of
   // (lane, inference revision), and the revision is compared here, so hashing it again would only
   // re-derive a value that cannot move while `revision` holds still.
@@ -2244,6 +2725,8 @@ async function main() {
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
+      // A raw capture directory must still hold every render it attested (sc-22738).
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
     );
   }
   if (command === "plan") {
@@ -2260,6 +2743,7 @@ async function main() {
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
     ));
   }
   if (command === "capture") {
@@ -2274,7 +2758,22 @@ async function main() {
       ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
     }));
   }
-  fail("usage: capture|check|ingest|plan (see docs/memory-calibration-harness.md)");
+  if (command === "record-exceeded") {
+    return void await atomicWrite(outputPath(), await recordExceededBound({
+      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+      anchorKey: value("--anchor"),
+      providerCommand: JSON.parse(value("--provider-command")),
+      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
+      inferenceRepo: path.resolve(value("--inference-repo")),
+      watchdogEventFile: path.resolve(value("--watchdog-events") ?? fail("--watchdog-events is required")),
+      artifact: JSON.parse(value("--artifact") ?? fail("--artifact is required")),
+      // Both optional and both only consulted when the guard's log carries no hard stop: the
+      // process-scoped Metal refusal arm (sc-22738).
+      providerStderrFile: value("--provider-stderr") ? path.resolve(value("--provider-stderr")) : null,
+      wiredLimitBytes: value("--wired-limit-bytes") ? Number(value("--wired-limit-bytes")) : null,
+    }));
+  }
+  fail("usage: capture|record-exceeded|check|ingest|plan (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

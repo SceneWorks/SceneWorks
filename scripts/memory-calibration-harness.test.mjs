@@ -17,6 +17,8 @@ import {
   prepareLtx25CaptureArtifacts, validateBundle, validateRecord, validatePlan,
   validatePhysicalMlxAvContentsAgainstRecord,
   validateSourceSessionFiles,
+  METAL_REFUSAL_TOLERANCE, METAL_SUBMISSIONS_IGNORED_CODE, METAL_SUBMISSIONS_IGNORED_PHRASE,
+  metalSubmissionsIgnored, parseWatchdogPeak, parseWatchdogHardStop, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
 
 /**
@@ -1082,6 +1084,52 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
 // packages/memory-anchor-plan.schema.json, not a review convention, so it is asserted against the
 // schema itself and against the checked-in plan the capture commands read.
 // -----------------------------------------------------------------------------------------------
+// sc-22734. The per-anchor `strategy` override: a plan row may name its own single composition,
+// for a provider whose contract classifies the lane default as StructurallyNotApplicable (SenseNova
+// on candle). It stays a single composition — a rung GRID is still unwritable — and a row without
+// one still takes `ANCHOR_STRATEGY[backend]`.
+test("a plan row's strategy override replaces the lane default, and is still one composition", () => {
+  const key = "fixture_model:q4:candle";
+  const defaulted = planAnchor(anchorPlanFixture(key), key);
+  assert.deepEqual(defaulted.strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+
+  const override = { rung: "resident", engagedRungs: ["resident"] };
+  const overridden = anchorPlanFixture(key, { strategy: override });
+  assert.equal(validatePlan(overridden), overridden);
+  assert.deepEqual(planAnchor(overridden, key).strategy, { ...override, parameters: {} });
+  // …and the override changes the case identity, so an overridden capture can never be mistaken
+  // for a default-composition one.
+  assert.notEqual(planAnchor(overridden, key).logicalCaseId, defaulted.logicalCaseId);
+
+  // The MLX row of the same shape is unchanged by an override that names the lane default.
+  const mlxKey = "fixture_model:q4:mlx";
+  assert.deepEqual(
+    planAnchor(anchorPlanFixture(mlxKey, { strategy: override }), mlxKey).strategy,
+    planAnchor(anchorPlanFixture(mlxKey), mlxKey).strategy,
+  );
+
+  // A grid, an unknown rung, a missing member and a stray parameter block are all unwritable.
+  for (const strategy of [
+    { rung: "resident" },
+    { engagedRungs: ["resident"] },
+    { rung: "sequential", engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident", "resident"] },
+    { rung: "resident", engagedRungs: [] },
+    { rung: ["resident", "staged_residency"], engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident"], parameters: { decodeTileEdge: 512 } },
+  ]) {
+    assert.throws(
+      () => validatePlan(anchorPlanFixture(key, { strategy })),
+      /anchor plan is invalid/,
+      JSON.stringify(strategy),
+    );
+  }
+});
+
 test("the anchor plan schema cannot express a duplicate cell or any sweep", async () => {
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   assert.equal(validatePlan(plan), plan);
@@ -1171,6 +1219,79 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   const batched = structuredClone(plan);
   batched.anchors["krea_2_turbo:q4:mlx"].geometry.batch = 2;
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
+});
+
+// sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —
+// the provider implements `Resident` alone, so the candle default `staged_residency` would fail
+// `contract.validate_selection` on every attempt — and `planAnchor` is what sends that override to
+// the adapter. Mutations this kills: `planAnchor` reading the lane default instead of
+// `anchor.strategy` (the SCAIL-2 candle rows plan `staged_residency` again); the plan losing the
+// override on any of the three rows. The rule for WHEN a row may override lives in
+// scripts/measure-memory-catalog.test.mjs (manifest exemption or capability-dump evidence) and
+// crates/sceneworks-worker/src/inference_runtime.rs (the contract itself, on both lanes).
+test("the candle SCAIL-2 rows plan the resident composition through the strategy override", async () => {
+  const video = { geometry: { width: 832, height: 480, batch: 1, frames: 77 }, mode: "animation" };
+  const resident = anchorPlanFixture("fixture_model:q4:candle", {
+    ...video,
+    strategy: { rung: "resident", engagedRungs: ["resident"] },
+  });
+  assert.equal(validatePlan(resident), resident);
+  assert.deepEqual(planAnchor(resident, "fixture_model:q4:candle").strategy, {
+    rung: "resident",
+    engagedRungs: ["resident"],
+    parameters: {},
+  });
+  // The lane default still applies when the row states nothing.
+  assert.deepEqual(planAnchor(anchorPlanFixture("fixture_model:q4:candle", video), "fixture_model:q4:candle").strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+  // The shipped plan: every candle SCAIL-2 cell plans resident, engaged set resident alone — and so
+  // does every candle LTX-2.5 cell, whose contract likewise implements no `staged_residency`
+  // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
+  // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
+  //
+  // sc-22737 adds MiniMax-H3's six candle rows (both catalog entries, three tiers each) on exactly
+  // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
+  // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
+  // contract does not implement.
+  //
+  // …and Bernini's six plus LTX-2.3's two on the THIRD derived source, because the dump cannot speak
+  // for them: both plan a `deferred_materialization` load shape and the dump publishes only
+  // `eager_materialization` surfaces for those contracts, so it has no surface to answer with. Their
+  // engine declarations do — `candle-gen-bernini` and `candle-gen-ltx`'s `memory_strategy.rs` both
+  // publish `StagedResidency` as `Missing` — and `readDeclaredStrategySupport` reads exactly that off
+  // the pinned checkout. This was invisible until sc-22737 taught the parser Bernini's declaration
+  // shape: before that the rule died on the unreadable shape instead of judging these eight rows.
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  for (const key of [
+    ...["bf16", "q4", "q8"].flatMap((tier) => [
+      `scail2_14b:${tier}:candle`,
+      `ltx_2_5:${tier}:candle`,
+      `minimax_h3:${tier}:candle`,
+      `minimax_h3_ref:${tier}:candle`,
+      `bernini:${tier}:candle`,
+      `bernini_image:${tier}:candle`,
+    ]),
+    // LTX-2.3 ships only the two quantized tiers on candle.
+    "ltx_2_3:q4:candle",
+    "ltx_2_3:q8:candle",
+  ]) {
+    assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
+  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+    "bernini:bf16:candle", "bernini:q4:candle", "bernini:q8:candle",
+    "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
+    "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
+    "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
+    "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
+    "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
+    "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
+  ]);
 });
 
 // sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE
@@ -1646,6 +1767,34 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   assert.equal(validateBundle(result), result);
   assert.equal(await validateSourceSessionFiles(result, rawLogDir), result);
 
+  // sc-22738: the rendered outputs are never committed; a tree holding only the session log and the
+  // request receipt validates on the outputs' digest receipts. The raw capture directory is held to
+  // the stricter rule at ingest (`requireRenderedOutputs`), and a render that IS present is still
+  // read and checked against its digest.
+  const receiptsOnly = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-only-"));
+  await mkdir(path.join(receiptsOnly, sourcePathPrefix), { recursive: true });
+  const committedRequest = session.outputs.find((output) => output.role === "request");
+  for (const relative of [session.sourcePath, committedRequest.path]) {
+    await writeFile(path.join(receiptsOnly, relative), await readFile(path.join(rawLogDir, relative)));
+  }
+  assert.equal(await validateSourceSessionFiles(result, receiptsOnly), result);
+  await assert.rejects(
+    validateSourceSessionFiles(result, receiptsOnly, null, { requireRenderedOutputs: true }),
+    /missing immutable source receipt .*selected_rgb/,
+  );
+  assert.equal(await validateSourceSessionFiles(result, rawLogDir, null, { requireRenderedOutputs: true }), result);
+  const renderedOutput = session.outputs.find((output) => output.role === "selected_rgb");
+  await writeFile(path.join(receiptsOnly, renderedOutput.path), "not the attested bytes");
+  await assert.rejects(
+    validateSourceSessionFiles(result, receiptsOnly),
+    /no longer matches its SHA-256 receipt/,
+  );
+  // The request receipt is never optional.
+  const noRequest = await mkdtemp(path.join(tmpdir(), "physical-mlx-no-request-"));
+  await mkdir(path.join(noRequest, sourcePathPrefix), { recursive: true });
+  await writeFile(path.join(noRequest, session.sourcePath), await readFile(path.join(rawLogDir, session.sourcePath)));
+  await assert.rejects(validateSourceSessionFiles(result, noRequest), /missing immutable source receipt .*request\.json/);
+
   const semanticTamper = structuredClone(result);
   const semanticSession = semanticTamper.sourceSessions[0];
   const semanticRecord = semanticTamper.records[0];
@@ -1806,8 +1955,15 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   missingOutput.sourceSessions[0].outputs[1].sha256 = "0".repeat(64);
   missingOutput.sourceSessions[0].outputs[1].path =
     `${sourcePathPrefix}/${record.logicalCaseId}-selected_rgb-1024x1024-${"0".repeat(64)}.rgb`;
+  // sc-22738: a rendered output's absence is no longer a failure by itself, so the re-pointed
+  // receipt is caught one check later, where the provider's own stdout attestation disagrees with
+  // it; the raw capture directory (ingest) still fails on the absence first.
   await assert.rejects(
     validateSourceSessionFiles(missingOutput, rawLogDir),
+    /provider response output attestation does not match the session receipt/,
+  );
+  await assert.rejects(
+    validateSourceSessionFiles(missingOutput, rawLogDir, null, { requireRenderedOutputs: true }),
     /missing immutable source receipt/,
   );
 
@@ -2302,9 +2458,110 @@ test("the LTX-2.5 anchor capture injects the selected root only after the hardwa
   if (capturedPlanned.target.transformerVariant === "dev") {
     assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
     assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+    // The Candle arm resolves the same adapter from the snapshot ROOT rather than by digest, so a
+    // dev anchor binds both spellings (sc-22725).
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, snapshot);
   } else {
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+// -----------------------------------------------------------------------------------------------
+// sc-22725: the SAME snapshot binding serves the CANDLE lane. LTX-2.5 reaches Candle under a
+// different engine id (`ltx_2_5_distilled`, candle.rs `LTX25_ID`), which is the only reason
+// `prepareLtx25CaptureArtifacts` used to refuse it — the artifacts, the layout and the env family
+// are identical. These cases prove the candle plan rows reach the adapter's `run` action with the
+// LTX-2.5 environment bound, and that the widened refusal is still a refusal.
+// -----------------------------------------------------------------------------------------------
+test("the LTX-2.5 candle anchors bind the same prepared snapshot and reach the adapter's run action", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const candleKeys = Object.keys(plan.anchors)
+    .filter((key) => key.startsWith("ltx_2_5:") && key.endsWith(":candle"))
+    .sort();
+  assert.deepEqual(candleKeys, ["ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle"],
+    "every shipped tier of the candle lane is planned");
+  const snapshot = await ltx25FixtureSnapshot();
+  const cleanRepo = await cleanFixtureRepo();
+  for (const anchorKey of candleKeys) {
+    let runEnvironment;
+    let runPlanned;
+    await assert.rejects(
+      captureAnchor({
+        closureDigestFor: stubClosureDigest,
+        plan,
+        anchorKey,
+        providerCommand: ["fixture-ltx25-candle-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            // The snapshot is prepared BEFORE the hardware probe, but the per-anchor root is
+            // injected only for the run — the same ordering the MLX lane keeps.
+            assert.equal(options.env.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+            assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture CUDA probe",
+                memoryBytes: 96 * 1024 ** 3,
+                deviceId: "0",
+                name: "Fixture CUDA",
+                computeCapability: "9.0",
+                driverVersion: "999.1",
+                runtimeVersion: "12.8",
+              },
+            });
+          }
+          assert.equal(request.action, "run", "the capture reaches the adapter's run action");
+          runPlanned = request.planned;
+          runEnvironment = options.env;
+          throw new Error("stop after LTX-2.5 candle invocation environment capture");
+        },
+      }),
+      /stop after LTX-2\.5 candle invocation environment capture/,
+    );
+    assert.equal(runPlanned.backend, "candle");
+    assert.equal(runPlanned.target.provider, "ltx_2_5_distilled");
+    assert.equal(runPlanned.target.transformerVariant, "distilled");
+    assert.equal(
+      runEnvironment.SCENEWORKS_LTX25_ROOT,
+      path.join(snapshot, runPlanned.target.transformerVariant, runPlanned.target.tier),
+      "the candle arm canonicalizes SCENEWORKS_LTX25_ROOT as <snapshot>/<variant>/<tier>",
+    );
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+    // candle.rs `ltx25_load_spec` reads exactly these; a missing one is a hard `required_env` error.
+    assert.match(runEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+    assert.ok(Number(runEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
+    assert.ok(Number(runEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+    // The distilled variant needs no official refinement LoRA, so its root is deliberately unbound.
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+test("the widened LTX-2.5 snapshot binding still refuses a lane that does not load LTX-2.5", async () => {
+  const snapshot = await ltx25FixtureSnapshot();
+  const planned = planAnchor(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url))),
+    "ltx_2_5:q4:candle",
+  );
+  for (const wrong of [
+    // The candle engine id on the MLX lane, and the MLX engine id on the candle lane: each is a
+    // real provider, and each would prepare this snapshot for a loader that never asked for it.
+    { ...planned, backend: "mlx" },
+    { ...planned, target: { ...planned.target, provider: "ltx_2_5" } },
+    { ...planned, target: { ...planned.target, modelId: "ltx_2_3" } },
+    { ...planned, backend: "cuda" },
+  ]) {
+    await assert.rejects(
+      prepareLtx25CaptureArtifacts(snapshot, [wrong]),
+      /--ltx25-snapshot-root is valid only for the ltx_2_5 plan/,
+    );
   }
 });
 
@@ -2525,4 +2782,466 @@ test("every checked-in capture invocation names a declared anchor", async () => 
       `${label}: names no anchor the plan declares`,
     );
   }
+});
+
+// sc-22738. The MLX catalog campaign lost a MiniMax-H3 q4 render to
+// `schema validation failed: $.records[0].output: unexpected property`: the adapter's video arms
+// had grown a top-level `output` descriptor, and `capturePlannedCase` spreads the provider fragment
+// into the record VERBATIM (`{ ...fragment }`), so every key an arm invents is a record property.
+// `$defs.record` is `additionalProperties: false`, and the render is already paid for by the time
+// the bundle is validated — the most expensive place in the system to learn the shape is wrong.
+//
+// Two tests, because there are two claims. This one drives the REAL validator over a REAL record
+// and proves the schema forbids the property rather than that some transcription of it does.
+test("the real validator refuses a record that carries an output descriptor", () => {
+  const record = runtimeComplete();
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
+
+  const withOutput = structuredClone(record);
+  withOutput.output = { frames: 121, fps: 24, firstFrameNondegenerate: true };
+  assert.throws(
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [withOutput] }),
+    /\$\.records\[0\]\.output: unexpected property/,
+  );
+});
+
+/**
+ * Every calibration record fragment the adapters build, keyed by `<bin>:<enclosing fn>`.
+ *
+ * The idiom is uniform across both adapters and is what makes this readable without a Rust parser:
+ * a record arm opens `let mut fragment = json!({` at four spaces, closes at `});` at four spaces,
+ * and its top-level keys are the eight-space `"name":` lines between. A payload that is NOT a
+ * calibration record — the LTX safety/product canaries, the campaign entries and the bounded
+ * carrier proof, which `main()` dispatches under their own actions and which legitimately carry
+ * `output` and `_campaignEntry` — is returned as `Ok(json!({…}))` and never binds `fragment`, so
+ * the idiom excludes them. The signature filter below is the belt to that suspenders: a fragment
+ * is only judged against the record schema if it carries the four keys every capture record has.
+ */
+async function adapterRecordFragments() {
+  const bins = ["mlx.rs", "mlx_ltx25.rs", "mlx_wan_scail2.rs", "candle.rs", "candle_wan_scail2.rs"];
+  const fragments = new Map();
+  for (const bin of bins) {
+    const lines = (await readFile(
+      fileURLToPath(new URL(`../crates/sceneworks-memory-adapter/src/bin/${bin}`, import.meta.url)),
+      "utf8",
+    )).split("\n");
+    let fn = null;
+    for (let i = 0; i < lines.length; i += 1) {
+      const declaration = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z0-9_]+)/.exec(lines[i]);
+      if (declaration) fn = declaration[1];
+      if (!/^ {4}let (?:mut )?fragment = json!\(\{$/.test(lines[i])) continue;
+      const keys = [];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (/^ {4}\}\);$/.test(lines[j])) break;
+        const key = /^ {8}"([A-Za-z_]+)":/.exec(lines[j]);
+        if (key) keys.push(key[1]);
+      }
+      fragments.set(`${bin}:${fn}`, keys);
+    }
+  }
+  return fragments;
+}
+
+// The second claim: no shipped arm emits such a property today, MiniMax-H3 and the four other video
+// arms included. Universally quantified over the arms the sources actually contain — a new arm is
+// covered with no edit here — with the five video arms named so the check cannot go quietly vacuous.
+test("every adapter calibration record fragment carries only properties the record schema allows", async () => {
+  const schema = JSON.parse(await readFile(
+    fileURLToPath(new URL("../packages/schemas/memory-calibration.schema.json", import.meta.url)),
+    "utf8",
+  ));
+  const record = schema.$defs.record;
+  assert.equal(record.additionalProperties, false, "an open record would make this test prove nothing");
+  // `sourceCapture` is the one fragment key that is NOT a record property by design: the harness
+  // lifts it into `sourceSessions` and deletes it before the record is assembled.
+  const allowed = new Set([...Object.keys(record.properties), "sourceCapture"]);
+  // The keys every capture record carries. A `fragment` without all four is a different payload
+  // (the InstantID arms' legacy `memory` shape), and judging it against this schema would be wrong.
+  const signature = ["status", "artifact", "observedMemory", "scenarios"];
+
+  const fragments = await adapterRecordFragments();
+  const judged = [];
+  for (const [arm, keys] of fragments) {
+    if (!signature.every((key) => keys.includes(key))) continue;
+    judged.push(arm);
+    const forbidden = keys.filter((key) => !allowed.has(key));
+    assert.deepEqual(forbidden, [], `${arm} emits record properties the schema rejects: ${forbidden}`);
+    assert.equal(new Set(keys).size, keys.length, `${arm} repeats a record property`);
+  }
+
+  for (const arm of [
+    "mlx.rs:run_minimax_h3",
+    "mlx.rs:run_bernini",
+    "mlx.rs:run_krea_realtime",
+    "mlx.rs:run_ltx_with_admission",
+    "mlx_wan_scail2.rs:run",
+    "mlx_ltx25.rs:run",
+  ]) {
+    assert.ok(judged.includes(arm), `${arm} is a video record arm this check must cover`);
+  }
+  assert.ok(judged.length >= 18, `too few record arms recognized (${judged.length}) — the idiom moved`);
+
+  // The other half of the same decision: the LTX CAMPAIGN carriers keep their `output` descriptor,
+  // because `validate_ltx_campaign_entry_fragment` cross-checks `/output/*` against the diagnostics
+  // of the same run. It is published for the campaign admissions and for nothing else.
+  const mlx = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(
+    mlx,
+    /if !matches!\(admission, LtxRunAdmission::Ordinary\) \{\n\s+fragment\["output"\] = json!\(\{/,
+    "the LTX campaign carrier must still publish the output descriptor its own validator reads",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a process-scoped Metal refusal as the SECOND admissible source of a measured bound.
+// ---------------------------------------------------------------------------------------------
+
+/** This host's figures, from the flux2_dev:bf16:mlx refusal of 2026-09-06. */
+const REFUSAL_WIRED_LIMIT_BYTES = 87_044_670_532;
+const REFUSAL_PEAK_BYTES = 86_988_010_336;
+const REFUSAL_STDERR =
+  'Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured '
+  + 'FLUX.2-dev render: "[METAL] Command buffer execution failed: Ignored (for causing '
+  + 'prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). '
+  + 'at /out/mlx-c-staged/mlx/c/transforms.cpp:73"';
+
+/** A guard event stream that never hard-stopped: the shape a refused render leaves behind. */
+function refusalEventStream(peak = REFUSAL_PEAK_BYTES) {
+  return [
+    { event: "started", pid: 1 },
+    { event: "sample", phase: "before_child_release", physicalFootprintBytes: 29_065_792 },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: Math.floor(peak / 2) },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: peak },
+    { event: "sample", phase: "runtime", physicalFootprintBytes: peak - 406_425_840 },
+    // The process is torn down while the sampler runs on: the LAST sample reads the husk.
+    { event: "sample", phase: "runtime", physicalFootprintBytes: 29_327_936 },
+  ].map((event) => JSON.stringify(event)).join("\n");
+}
+
+async function refusalFixture({ events = refusalEventStream(), stderr = REFUSAL_STDERR } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "metal-refusal-"));
+  const eventFile = path.join(dir, "watchdog.jsonl");
+  const stderrFile = path.join(dir, "provider-stderr.txt");
+  await writeFile(eventFile, `${events}\n`);
+  await writeFile(stderrFile, stderr);
+  return { dir, eventFile, stderrFile };
+}
+
+async function recordRefusal({ overrides = {}, fixture } = {}) {
+  const cleanRepo = await cleanFixtureRepo();
+  const key = "fixture_model:bf16:mlx";
+  const files = fixture ?? await refusalFixture();
+  return recordExceededBound({
+    plan: anchorPlanFixture(key),
+    anchorKey: key,
+    // A truthy first argument makes the fixture probe answer with the MLX-shaped hardware, whose
+    // `wiredLimitBytes` is this host's own 87,044,670,532.
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      files.dir,
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    watchdogEventFile: files.eventFile,
+    artifact: { repository: "SceneWorks/fixture-mlx", resolvedRevision: "d".repeat(40), variant: "bf16" },
+    providerStderrFile: files.stderrFile,
+    wiredLimitBytes: REFUSAL_WIRED_LIMIT_BYTES,
+    closureDigestFor: stubClosureDigest,
+    ...overrides,
+  });
+}
+
+test("the refusal signature needs BOTH the IOGPU status code and the phrase", () => {
+  assert.equal(metalSubmissionsIgnored(REFUSAL_STDERR), true);
+  assert.equal(metalSubmissionsIgnored(`(00000004:${METAL_SUBMISSIONS_IGNORED_PHRASE})`), true);
+  // Prose about the hazard is not the hazard: this very repository names the phrase in comments,
+  // the runbook and a memory note, and none of those stderrs suffered a refusal.
+  assert.equal(metalSubmissionsIgnored(`see ${METAL_SUBMISSIONS_IGNORED_PHRASE} in the runbook`), false);
+  assert.equal(metalSubmissionsIgnored(`status ${METAL_SUBMISSIONS_IGNORED_CODE} from the driver`), false);
+  assert.equal(metalSubmissionsIgnored(""), false);
+  assert.equal(metalSubmissionsIgnored(undefined), false);
+});
+
+test("the bound's footprint is the sampler's PEAK, never its last reading", () => {
+  assert.deepEqual(parseWatchdogPeak(refusalEventStream()), {
+    observedFootprintBytes: REFUSAL_PEAK_BYTES,
+    samples: 5,
+  });
+  // The husk the sampler reads after the teardown is the LAST sample and 29 MB; a bound built on it
+  // would state an inequality three orders of magnitude below what the render actually reached.
+  assert.notEqual(parseWatchdogPeak(refusalEventStream()).observedFootprintBytes, 29_327_936);
+  assert.throws(
+    () => parseWatchdogPeak(JSON.stringify({ event: "started" })),
+    /carries no sample/,
+  );
+  assert.throws(
+    () => parseWatchdogPeak(JSON.stringify({ event: "sample", physicalFootprintBytes: 0 })),
+    /non-positive physical footprint/,
+  );
+});
+
+test("a WALL-CLOCK stop states no bound: `record-exceeded` refuses it, whichever witness it is handed", async () => {
+  // sc-22738: every guarded probe now carries a `--max-runtime-seconds` budget, so this is the
+  // hard stop this parser is most likely to meet that is not a footprint stop. A probe that ran out
+  // of TIME was never witnessed crossing any line — `scail2_14b:bf16:mlx` sat flat at 93.5 GB under
+  // a 94.82 GB ceiling for 90 minutes — and turning the footprint it happened to be sitting at into
+  // an `exceededBounds` entry would make production refuse hosts on an inequality nothing measured.
+  const stream = (reason) => [
+    JSON.stringify({ event: "started", pid: 1 }),
+    JSON.stringify({ event: "sample", phase: "runtime", physicalFootprintBytes: 93_500_000_000 }),
+    JSON.stringify({ event: "hard_stop", reason }),
+    JSON.stringify({ event: "terminated", reason }),
+  ].join("\n");
+  for (const seconds of ["9000.0", "3600", "150.5"]) {
+    assert.throws(
+      () => parseWatchdogHardStop(stream(`runtime_at_or_above_${seconds}s`)),
+      new RegExp(`WALL-CLOCK stop: the probe reached its ${seconds.replace(".", "\\.")}s budget`),
+      seconds,
+    );
+  }
+  // ...and the refusal survives the whole command, INCLUDING the arm that reads a Metal refusal out
+  // of the adapter's stderr: a stop in the log is consulted first, so a wedged probe whose stderr
+  // happened to carry the refusal string cannot be laundered into a bound through the other door.
+  const fixture = await refusalFixture({ events: stream("runtime_at_or_above_9000.0s") });
+  await assert.rejects(recordRefusal({ fixture }), /WALL-CLOCK stop/);
+  // The control: the SAME stream with a footprint stop is exactly what does state a bound.
+  const footprint = parseWatchdogHardStop([
+    JSON.stringify({ event: "sample", phase: "runtime", physicalFootprintBytes: 94_822_600_833 }),
+    JSON.stringify({ event: "hard_stop", reason: "physical_footprint_at_or_above_94822600832:observed_94822600833" }),
+  ].join("\n"));
+  assert.deepEqual(footprint, {
+    reason: "physical_footprint_at_or_above_94822600832:observed_94822600833",
+    ceilingBytes: 94_822_600_832,
+    observedFootprintBytes: 94_822_600_833,
+  });
+});
+
+test("a process-scoped Metal refusal at the wired limit records a bound whose ceiling is its own witnessed peak", async () => {
+  const bundle = await recordRefusal();
+  assert.equal(bundle.records.length, 0);
+  const [bound] = bundle.exceededBounds;
+  assert.equal(bound.observedFootprintBytes, REFUSAL_PEAK_BYTES);
+  // NOT the wired limit. The run was observed 56,660,196 bytes short of it, and
+  // `sceneworks_core::memory_anchor` refuses a row whose footprint is under its own ceiling — so
+  // the ceiling recorded is the highest line the samples witness the run crossing. The limit
+  // itself is carried on `hardware.wiredLimitBytes` and named in the reason.
+  assert.equal(bound.ceilingBytes, REFUSAL_PEAK_BYTES);
+  assert.ok(bound.observedFootprintBytes >= bound.ceilingBytes, "the store-side inequality holds");
+  assert.equal(
+    bound.reason,
+    `metal_submissions_ignored:observed_${REFUSAL_PEAK_BYTES}:wired_limit_${REFUSAL_WIRED_LIMIT_BYTES}`,
+  );
+  assert.equal(bound.hardware.wiredLimitBytes, REFUSAL_WIRED_LIMIT_BYTES);
+  assert.match(bound.providerStderrSha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    bound.providerStderrSha256,
+    createHash("sha256").update(REFUSAL_STDERR).digest("hex"),
+    "the refusal's own witness is hashed, so a bound's stated cause can be re-read",
+  );
+  assert.match(bound.eventFileSha256, /^[0-9a-f]{64}$/);
+  assert.equal(bound.referenceCount, 0);
+  // And the whole bundle is admissible to the same validator every retained corpus is held to.
+  assert.equal(validateBundle(bundle), bundle);
+});
+
+test("only a refusal taken AT the wired limit bounds anything; the tolerance is 2% of the limit", async () => {
+  // The measured gap — 0.065% — is comfortably inside the band.
+  const inside = await recordRefusal();
+  assert.equal(inside.exceededBounds[0].observedFootprintBytes, REFUSAL_PEAK_BYTES);
+  assert.equal(METAL_REFUSAL_TOLERANCE, 0.02);
+  // One byte inside the floor still classifies…
+  const floor = Math.floor(REFUSAL_WIRED_LIMIT_BYTES * (1 - METAL_REFUSAL_TOLERANCE));
+  const atFloor = await recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(floor) }) });
+  assert.equal(atFloor.exceededBounds[0].observedFootprintBytes, floor);
+  // …and one byte outside it does not. A GPU fault taken well below the limit measured no ceiling,
+  // and laundering it into a memory bound would refuse production on evidence about the driver.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(floor - 1) }) }),
+    /more than 2% under the 87044670532-byte wired limit/,
+  );
+});
+
+test("a bound is refused unless the refusal, the wired limit and the host all corroborate", async () => {
+  // No signature: a capture that died of something else states no bound.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ stderr: "Error: adapter exited 1: out of disk" }) }),
+    /carries no Metal submissions-ignored refusal/,
+  );
+  // The phrase without the driver's status code is prose, not a refusal.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ stderr: `saw ${METAL_SUBMISSIONS_IGNORED_PHRASE}` }) }),
+    /carries no Metal submissions-ignored refusal/,
+  );
+  // A wired limit that is not the one this adapter probes: the host's Metal policy moved, and
+  // neither reading speaks for the run.
+  await assert.rejects(
+    recordRefusal({ overrides: { wiredLimitBytes: REFUSAL_WIRED_LIMIT_BYTES + 1 } }),
+    /is not the wired limit this adapter probes/,
+  );
+  await assert.rejects(
+    recordRefusal({ overrides: { wiredLimitBytes: null } }),
+    /--wired-limit-bytes must be a positive safe integer/,
+  );
+  // A peak above the whole host is not a reading of that host.
+  await assert.rejects(
+    recordRefusal({ fixture: await refusalFixture({ events: refusalEventStream(137_438_953_473) }) }),
+    /exceeds the whole capture host's memory/,
+  );
+  // And with neither a hard stop nor a stderr to read, there is nothing to record at all.
+  await assert.rejects(
+    recordRefusal({ overrides: { providerStderrFile: null } }),
+    /records no watchdog hard stop, and no --provider-stderr/,
+  );
+});
+
+test("a bound's reason is one of the two enumerated causes, never free text", async () => {
+  const bundle = await recordRefusal();
+  assert.equal(validateBundle(bundle), bundle);
+  for (const reason of [
+    "metal refused the submissions",
+    "metal_submissions_ignored",
+    `metal_submissions_ignored:observed_${REFUSAL_PEAK_BYTES}`,
+    "",
+  ]) {
+    const tampered = structuredClone(bundle);
+    tampered.exceededBounds[0].reason = reason;
+    assert.throws(
+      () => validateBundle(tampered),
+      /does not match pattern|is too short/,
+      `reason ${JSON.stringify(reason)} must be refused`,
+    );
+  }
+  // The guard's own hard-stop spelling is the other admissible cause.
+  const hardStopReason = structuredClone(bundle);
+  hardStopReason.exceededBounds[0].reason = "physical_footprint_at_or_above_94822600832:observed_97147294328";
+  hardStopReason.exceededBounds[0].id = "exc-0000000000000000dead";
+  assert.throws(() => validateBundle(hardStopReason), /id is not the digest of its own identity/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: a VIDEO capture is one measured render — the receipt declares its unrun warm passes.
+// ---------------------------------------------------------------------------------------------
+
+/** A single-render video receipt: `warmPasses: 0`, `result: not_run`, thresholds only. */
+function singleRenderVideoRuntimeComplete() {
+  const record = runtimeComplete();
+  record.backend = "mlx";
+  record.evidenceScope = "authoritative";
+  record.hardware = {
+    probe: "fixture Apple hardware probe",
+    memoryBytes: 128 * 1024 ** 3,
+    model: "Mac16,5",
+    chip: "Apple M4 Max",
+    osVersion: "15.7",
+    metalDevice: "Apple M4 Max",
+    mlxMemoryLimitBytes: 96 * 1024 ** 3,
+    wiredLimitBytes: 80 * 1024 ** 3,
+  };
+  record.target = {
+    modelId: "minimax_h3", provider: "minimax_h3", tier: "q4", mode: "text_to_video", overlay: "none",
+    geometry: { width: 1024, height: 576, batch: 1, frames: 124 },
+  };
+  record.scenarios.find((entry) => entry.name === "warm_repeat").reason =
+    "sc-22738: a video capture is ONE measured render; no warm pass was run";
+  record.quality = {
+    contract: "identical inputs; the cold measured clip versus a warm repeat; NOT MEASURED: no warm pass",
+    result: "not_run",
+    warmPasses: 0,
+    maximumErrorThreshold: 0.03, meanErrorThreshold: 0.003, rootMeanSquareErrorThreshold: 0.003,
+  };
+  record.diagnostics = {
+    adapter: "memory-mlx-adapter:minimax-h3-joint-av", execution: "executed", blockers: [],
+    measurements: [
+      { name: "conditioningActivePeak", unit: "bytes", value: 100 },
+      { name: "denoiseActivePeak", unit: "bytes", value: 200 },
+      { name: "decodeActivePeak", unit: "bytes", value: 150 },
+      { name: "overallAllocatorEnvelope", unit: "bytes", value: 200 },
+      { name: "warmPasses", unit: "count", value: 0 },
+      { name: "outputFps", unit: "count", value: 24 },
+    ],
+  };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  return record;
+}
+
+test("a single-render video receipt with warmPasses 0 degrades quality to not measured — never a refusal, never a synthetic figure (sc-22738)", () => {
+  const record = singleRenderVideoRuntimeComplete();
+  assert.equal(validateRecord(record), record);
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [record] });
+  assert.equal(evidenceSemantics(record, {
+    sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+    inference: record.repositories.inference.revision,
+    inferenceClosureDigests: { "mlx:minimax_h3": record.repositories.inference.closureDigest },
+  }), "current", "the measurement stays valid evidence");
+
+  // What the declaration does NOT permit: a pass it did not run, a figure it could not have
+  // measured, a typed audio comparison with no reference render, or missing thresholds.
+  for (const [mutate, message] of [
+    [(quality) => { quality.result = "passed"; }, /must be not_run/],
+    [(quality) => { quality.maximumError = 0; }, /cannot carry quality\.maximumError/],
+    [(quality) => { quality.rootMeanSquareError = 0; }, /cannot carry quality\.rootMeanSquareError/],
+    [(quality) => { quality.audio = audioQuality(); }, /cannot carry typed audio quality/],
+    [(quality) => { delete quality.meanErrorThreshold; }, /quality\.meanErrorThreshold must be a nonnegative finite number/],
+  ]) {
+    const doctored = structuredClone(record);
+    mutate(doctored.quality);
+    doctored.id = recordId(doctored);
+    assert.throws(() => validateRecord(doctored), message);
+    assert.throws(() => validateBundle({
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [doctored],
+    }), /schema validation failed|must be not_run|cannot carry|nonnegative finite/);
+  }
+  // Without the declaration the previous contract stands: a runtime-complete record measures its
+  // quality, and `not_run` is refused.
+  const undeclared = structuredClone(record);
+  delete undeclared.quality.warmPasses;
+  undeclared.id = recordId(undeclared);
+  assert.throws(() => validateRecord(undeclared), /must pass with identical inputs/);
+  // And an image-lane record that DID run its warm passes is untouched by the declaration.
+  const measured = runtimeComplete();
+  measured.quality.warmPasses = 2;
+  measured.id = recordId(measured);
+  assert.equal(validateRecord(measured), measured);
+});
+
+test("a single-render physical A/V session carries selected_av alone; the audio comparison is coupled to reference_av (sc-22738)", () => {
+  const { bytes } = canonicalAvFixture();
+  const content = parsePhysicalMlxAvContent(bytes);
+  const record = {
+    id: "imc-single-render-av",
+    target: { geometry: { width: 2, height: 1, frames: 1 } },
+    diagnostics: { measurements: [
+      { name: "outputFps", value: 24 },
+      { name: "audioSampleRate", value: 24000 },
+      { name: "audioChannels", value: 2 },
+      { name: "audioSamples", value: 4 },
+    ] },
+    quality: { result: "not_run", warmPasses: 0 },
+  };
+  const selectedOnly = new Map([["selected_av", content]]);
+  validatePhysicalMlxAvContentsAgainstRecord(record, selectedOnly, record.id);
+  // The measured track's identity is still bound — to the record's own audio measurements.
+  const wrongRate = structuredClone(record);
+  wrongRate.diagnostics.measurements.find((entry) => entry.name === "audioSampleRate").value = 48000;
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(wrongRate, selectedOnly, record.id),
+    /A\/V header differs from measured video\/audio identity/,
+  );
+  // A typed audio comparison needs the reference render this session did not make.
+  const claimsAudio = structuredClone(record);
+  claimsAudio.quality.audio = audioQuality({ sampleCount: 4, selectedPcmSha256: content.pcmSha256, referencePcmSha256: content.pcmSha256 });
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(claimsAudio, selectedOnly, record.id),
+    /needs a reference_av render this session did not make/,
+  );
+  // A reference without a selected render is not a session of anything.
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(record, new Map([["reference_av", content]]), record.id),
+    /must carry the selected_av render/,
+  );
 });

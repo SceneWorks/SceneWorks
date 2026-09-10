@@ -1140,24 +1140,19 @@ const KREA_LANE_FRAMES: u32 = 1;
 /// every identity conjunct that can be answered without the loaded provider contract.
 ///
 /// Fail-closed and deliberately narrow: the anchor was measured on ONE catalog model, route,
-/// provider and mode, overlay-free and reference-free, and its evidence must still be CURRENT.
-/// The remaining conjunct (materialization shape) is applied by the caller once the contract is
-/// available.
+/// provider and mode, overlay-free and reference-free. The remaining conjunct (materialization
+/// shape) is applied by the caller once the contract is available.
 ///
-/// Currency is [`MemoryAnchor::is_current`] — the model's own loader-closure digest (sc-22511,
-/// epic 22505 E9) — and nothing else. It is deliberately NOT the calibration fingerprint or ABI:
-/// since sc-22511 those are PROVENANCE, bound to the source record by `validate_anchor` so the
-/// anchor cannot misattribute its origin, but powerless to demote evidence whose loader never
-/// moved. This is the same single seam `video_admission::anchor_currency_matches` grades on, so
-/// the two lanes cannot disagree about whether an anchor is live.
+/// Currency is NOT a conjunct (sc-22738). The anchor's loader-closure digest (sc-22511) is what
+/// the probe tooling re-captures on; the calibration fingerprint and ABI are PROVENANCE bound to
+/// the source record by `validate_anchor`. None of them can demote the anchor here: it prices the
+/// request whether or not the loader has moved since it was measured.
 /// The anchor store this lane reads. Production has exactly one — the packaged, validated store.
 ///
-/// The `cfg(test)` override exists because currency is now the PACKAGED loader-closure declaration
-/// (sc-22511), which no argument can reach: whether the shipped Krea candle anchor is live is a
-/// property of the pin, not of the request. Tests that must grade the derivation ITSELF therefore
-/// inject a store stamped at the live declared digest — the same shape
-/// `candle_memory_strategy::synthesize_estimate_floors` already takes as a parameter, and the same
-/// test-seam precedent as `video_admission::admit_video_generation_with_curves`.
+/// The `cfg(test)` override lets a test grade the derivation ITSELF on a store whose contents it
+/// states — the same shape `candle_memory_strategy::synthesize_estimate_floors` already takes as
+/// a parameter, and the same test-seam precedent as
+/// `video_admission::admit_video_generation_with_curves`.
 fn krea_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
     #[cfg(test)]
     if let Some(store) = tests::injected_anchor_store() {
@@ -1189,7 +1184,6 @@ fn krea_store_anchor(
                 && anchor.mode == "text_to_image"
                 && anchor.overlay.is_none()
                 && anchor.reference_count == 0
-                && crate::video_admission::anchor_currency_matches(anchor)
         })
 }
 
@@ -1275,7 +1269,14 @@ fn krea_turbo_fit_priced(
 
     let budget = budget?;
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
-    let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
+    // sc-22735: the identity the LOADED contract publishes is keyed on the artifact-proven tier, so
+    // the fingerprint this fit is graded against has to be read per tier. The scalar remains the
+    // measured q4 string and is the fallback for a manifest that declares no per-tier map.
+    let calibration_fingerprint = turbo_fit
+        .get("calibrationFingerprintByTier")
+        .and_then(|by_tier| by_tier.get(tier))
+        .or_else(|| turbo_fit.get("calibrationFingerprint"))?
+        .as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
     // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
     // worker took the shape from the provider alone, so the axis could not detect drift here. The
@@ -1354,14 +1355,6 @@ fn krea_turbo_fit_priced(
     let facts = facts_override.unwrap_or_else(|| {
         crate::video_admission::architecture_facts_from_contract(provider_contract)
     });
-    let measured_closure_digest = turbo_fit
-        .get("inferenceClosureDigest")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let live_closure_digest =
-        sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
-            .unwrap_or_default();
     let request = RequestScope {
         resolved_route: "krea_2_turbo",
         backend: "candle",
@@ -1369,8 +1362,6 @@ fn krea_turbo_fit_priced(
         mode: "text_to_image",
         overlay: (!allow_streamed_blocks).then_some("adapter"),
         geometry,
-        // sc-17774: one mechanism, read not frozen.
-        expected_closure_digest: &live_closure_digest,
     };
     let resident_peak_gb = manifest_entry
         .get("candle")?
@@ -1504,19 +1495,11 @@ fn krea_turbo_fit_priced(
         let expected_compute_capability = loadability
             .and_then(|loadability| loadability.get("computeCapability"))
             .and_then(json_f64);
-        // sc-17774: the lane's own compile closure, not a frozen inference SHA. `inference_revision`
-        // stays parsed above as capture provenance for the receipt.
+        // `inference_revision` stays parsed above as capture provenance for the receipt, and since
+        // sc-22738 so does `turboFit.inferenceClosureDigest`: the lane's compile closure is a
+        // re-capture signal for the probe tooling, never a conjunct that can un-verify this
+        // dimension at runtime.
         let current_environment = scene_works_revision == KREA_TURBO_SCENEWORKS_REVISION
-            && turbo_fit
-                .get("inferenceClosureDigest")
-                .and_then(Value::as_str)
-                .is_some_and(|declared| {
-                    sceneworks_core::memory_calibration::packaged_closure_digest(
-                        "candle",
-                        "krea_2_turbo",
-                    )
-                    .is_some_and(|live| live == declared)
-                })
             && turbo_fit.get("measured").and_then(Value::as_bool) == Some(true)
             && runtime.is_some_and(|runtime| {
                 !runtime.gpu_id.trim().is_empty()
@@ -2030,30 +2013,25 @@ fn krea_turbo_fit_priced(
         .map(|(selection, evidence)| Candidate {
             selection: *selection,
             evidence,
-            closure_digest: &measured_closure_digest,
             basis: memory_strategy::CandidateBasis::Measured,
             unmodeled_activation_bytes: None,
         })
         .collect::<Vec<_>>();
-    // Synthesized under (and anchored to) the live closure — there is nothing for currency to
-    // invalidate, exactly like the MLX gate's synthesized candidates (sc-18096).
     candidates.extend(estimates.iter().map(|(selection, evidence)| Candidate {
         selection: *selection,
         evidence,
-        closure_digest: &live_closure_digest,
         basis: memory_strategy::CandidateBasis::EstimateFittedCurve,
         // A fitted per-phase curve carries no weights/activation split (sc-22508); its remaining
         // uncertainty is the same-cell recapture spread the policy charges on the whole peak.
         unmodeled_activation_bytes: None,
     }));
-    // sc-22509: anchor-derived rungs, on the live closure for the same reason.
+    // sc-22509: anchor-derived rungs.
     candidates.extend(
         anchor_derived
             .iter()
             .map(|(selection, evidence)| Candidate {
                 selection: *selection,
                 evidence,
-                closure_digest: &live_closure_digest,
                 basis: memory_strategy::CandidateBasis::EstimateAnchorDerived {
                     lane: memory_strategy::AnchorDerivationLane::Image,
                 },
@@ -3117,12 +3095,10 @@ mod tests {
 
     /// The shipped Krea entry with its `turboFit` closure digest overridden to the LIVE one.
     ///
-    /// sc-17774: the shipped ladder declares the digest it was actually measured under, and that is
-    /// currently behind the pin — `candle-gen-krea` itself has not moved, but `gen-core` has, so the
-    /// currency gate (correctly, for a source-level unit) reports it stale. Every test below is about
-    /// which RUNG the ladder selects, which is a different axis; leaving them to trip over currency
-    /// would stop them testing the ladder at all. Currency itself is covered by
-    /// `krea_control_fit::tests::a_stale_control_closure_falls_back_instead_of_reporting_a_fit`.
+    /// The override was load-bearing before sc-22738, when the shipped ladder's measured-under
+    /// digest sat behind the pin and the currency gate refused it. Currency no longer gates
+    /// anything at runtime, so this now only keeps the fixture's declared provenance honest and
+    /// every test below reads exactly the rung selection it means to.
     ///
     /// Read, never frozen — a literal would go stale on the next pin bump.
     fn builtin_krea_turbo_manifest_at_live_closure() -> JsonObject {
@@ -4275,16 +4251,25 @@ mod tests {
             )
         };
 
-        // sc-17774: mutate the term that DECIDES currency. This used to set
-        // `compatibleInferenceRevision`, which is deleted — leaving the mutation inert and the
-        // fail-closed assertion passing vacuously.
-        let mut stale = krea_fit_manifest();
-        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
+        // sc-22738 — "the App Runtime should ALWAYS continue behaving as if the measurement were
+        // valid". `turboFit.inferenceClosureDigest` is a re-capture signal for the JS probe
+        // tooling and is read by no production path on this lane any more, so moving it must be
+        // INERT rather than fail-closed. Kept as an arm (rather than deleted) because it is the
+        // mutation that would red if a closure conjunct were reintroduced into
+        // `current_environment` or into the estimate-basis eligibility predicate.
+        let baseline = fit(&krea_fit_manifest());
+        assert!(
+            matches!(baseline, Some(KreaTurboFit::Fits { .. })),
+            "control point: the unmutated fixture must admit this cell, or the closure arm below \
+             proves nothing: {baseline:?}"
+        );
+        let mut moved_closure = krea_fit_manifest();
+        moved_closure["candle"]["turboFit"]["inferenceClosureDigest"] =
+            Value::String("1".repeat(64));
         assert_eq!(
-            fit(&stale),
-            Some(KreaTurboFit::Unverified {
-                reason: gen_core::MemoryEvidenceVerdict::Stale,
-            })
+            fit(&moved_closure),
+            baseline,
+            "a moved lane closure must not change what a live request gets (sc-22738)"
         );
 
         let mut unloadable = krea_fit_manifest();
@@ -4691,17 +4676,21 @@ mod tests {
         }
     }
 
-    /// sc-18097: the estimate bases obey the sc-18096 restrictions — a stale-closure manifest may
-    /// not seed fitted extrapolation (its measured cells keep serving their OWN geometry behind
-    /// the stale margin, but the estimate margin was derived over same-closure re-capture variance
-    /// and cannot also absorb closure drift), and a calibration fingerprint that drifted from the
-    /// loaded provider's identity loses the bases entirely. Both mutations are WELL-FORMED (the
-    /// digest is a valid 64-hex string, the fingerprint keeps the shipped token grammar), so the
-    /// refusals below are the anchor-eligibility gate's work, not a parse failure — and the
-    /// registered contract is asserted conformance-CLEAN so the fingerprint arm cannot pass by a
-    /// grammar-conformance accident (the sc-18096 finding).
+    /// The estimate bases obey ONE of the two sc-18096 restrictions now.
+    ///
+    /// * **Calibration identity — still a gate.** A fingerprint drifted from the loaded provider's
+    ///   identity loses the fitted bases entirely. The mutation keeps the shipped token grammar
+    ///   and the registered contract is asserted conformance-CLEAN, so the refusal is the
+    ///   anchor-eligibility gate's work and not a format rejection (the sc-18096 finding).
+    /// * **Lane closure — no longer a gate (sc-22738).** "The App Runtime should ALWAYS continue
+    ///   behaving as if the measurement were valid": `turboFit.inferenceClosureDigest` is a
+    ///   re-capture signal for the JS probe tooling and is read by no production path, so a
+    ///   record whose closure moved seeds the fitted extrapolation exactly as a matching one does.
+    ///   The mutation stays WELL-FORMED (a valid 64-hex string) so this arm keeps its power as the
+    ///   mutation check: reintroduce a closure conjunct anywhere in the estimate-basis eligibility
+    ///   predicate and the equality below turns red.
     #[test]
-    fn krea_turbo_estimate_bases_require_current_closure_and_loaded_identity() {
+    fn krea_turbo_estimate_bases_ignore_the_lane_closure_and_require_the_loaded_identity() {
         let admit = |manifest: &JsonObject| {
             krea_turbo_fit(
                 manifest,
@@ -4716,16 +4705,20 @@ mod tests {
             )
         };
         // Control point: the unmutated manifest admits this cell by fitted estimate.
+        let baseline = admit(&krea_fit_manifest());
         assert!(
-            matches!(admit(&krea_fit_manifest()), Some(KreaTurboFit::Fits { .. })),
+            matches!(baseline, Some(KreaTurboFit::Fits { .. })),
             "the unmutated fixture must admit 896² by estimate, or the arms below prove nothing"
         );
 
-        let mut stale = krea_fit_manifest();
-        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
-        assert!(
-            matches!(admit(&stale), Some(KreaTurboFit::Unverified { .. })),
-            "a stale-closure record must not seed a fitted extrapolation"
+        let mut moved_closure = krea_fit_manifest();
+        moved_closure["candle"]["turboFit"]["inferenceClosureDigest"] =
+            Value::String("1".repeat(64));
+        assert_eq!(
+            admit(&moved_closure),
+            baseline,
+            "sc-22738: a record whose lane closure moved seeds the fitted extrapolation exactly \
+             as a matching one does — same rung, same phases, same quoted need"
         );
 
         let provider_contract = krea_test_provider_contract("q4");
@@ -4743,6 +4736,129 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
             }),
             "a fingerprint drifted from the loaded identity loses the fitted bases"
+        );
+    }
+
+    /// sc-22735. The turbo fit is graded against the identity for the tier it is PRICING, read out
+    /// of `turboFit.calibrationFingerprintByTier`, not against the single scalar three times.
+    ///
+    /// The engine keys `krea_2_turbo`'s calibration identity on the artifact-proven tier now, so a
+    /// bf16 or q8 fit graded against the measured q4 string would compare two different cells: it
+    /// would either refuse every non-q4 admission or — the direction that actually costs something —
+    /// accept a bf16 load whose curves were measured at q4. The scalar is deliberately still the
+    /// measured q4 identity and is still the fallback, so a manifest that declares no map keeps its
+    /// previous meaning exactly.
+    ///
+    /// Graded through the real `krea_turbo_fit` against the real loaded contract per tier: a drifted
+    /// entry for the tier under test must lose the fitted bases, and a drifted entry for a DIFFERENT
+    /// tier must not — that second half is what fails if the lookup ignores the tier and reads any
+    /// entry, or the scalar, regardless.
+    #[test]
+    fn the_turbo_fit_grades_each_tier_against_its_own_declared_identity() {
+        // (a) The cross-source binding, over the SHIPPED manifest: at every tier the declared
+        // per-tier identity is exactly the one the pinned contract publishes for that tier. This is
+        // the claim a capture cannot re-derive, and it needs no fit to state.
+        let shipped = builtin_krea_turbo_manifest_at_live_closure();
+        let by_tier = shipped["candle"]["turboFit"]["calibrationFingerprintByTier"]
+            .as_object()
+            .expect("the shipped turbo fit declares a per-tier identity map");
+        let mut declared_identities = std::collections::BTreeSet::new();
+        for tier in ["q4", "q8", "bf16"] {
+            let declared = by_tier
+                .get(tier)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{tier}: no declared per-tier identity"));
+            let loaded = krea_test_provider_contract(tier)
+                .calibration
+                .as_ref()
+                .unwrap_or_else(|| panic!("{tier}: the loaded contract declares no calibration"))
+                .fingerprint
+                .as_str();
+            assert_eq!(
+                declared, loaded,
+                "{tier}: the manifest must declare the identity the pinned contract publishes"
+            );
+            assert!(
+                declared_identities.insert(declared.to_owned()),
+                "{tier}: reuses another tier's identity ({declared})"
+            );
+        }
+        // The scalar stays the MEASURED q4 cell, so a manifest with no map keeps its old meaning.
+        assert_eq!(
+            shipped["candle"]["turboFit"]["calibrationFingerprint"].as_str(),
+            Some("krea-turbo-cuda-phase-curves-v1")
+        );
+
+        // (b) The lookup semantics, over the synthetic q4 ladder fixture: the entry read is the one
+        // for the tier being priced, and the scalar is the fallback.
+        let admit = |manifest: &JsonObject| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                896,
+                896,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            )
+        };
+        let mut mapped = krea_fit_manifest();
+        mapped["candle"]["turboFit"]["calibrationFingerprintByTier"] = json!({
+            "bf16": "krea-2-turbo-bf16-cuda-phase-curves-v1",
+            "q4": "krea-turbo-cuda-phase-curves-v1",
+            "q8": "krea-2-turbo-q8-cuda-phase-curves-v1",
+        });
+        assert!(
+            matches!(admit(&mapped), Some(KreaTurboFit::Fits { .. })),
+            "the mapped fixture must admit q4, or the arms below prove nothing"
+        );
+
+        // Drifting the q4 entry — the tier being priced — loses the fitted bases.
+        let mut drifted_q4 = mapped.clone();
+        drifted_q4["candle"]["turboFit"]["calibrationFingerprintByTier"]["q4"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&drifted_q4),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "a q4 identity drifted from the loaded contract must lose the fitted bases"
+        );
+
+        // Drifting the OTHER tiers' entries does not disturb the q4 fit. A lookup that ignored the
+        // tier and took any entry would refuse here.
+        for other in ["q8", "bf16"] {
+            let mut crossed = mapped.clone();
+            crossed["candle"]["turboFit"]["calibrationFingerprintByTier"][other] =
+                Value::String(format!("krea-2-turbo-{other}-cuda-phase-curves-v99"));
+            assert!(
+                matches!(admit(&crossed), Some(KreaTurboFit::Fits { .. })),
+                "a drifted {other} identity must not disturb the q4 fit"
+            );
+        }
+
+        // With no map at all the scalar is the fallback, so the pre-sc-22735 manifest shape keeps
+        // grading exactly as it did.
+        let mut unmapped = mapped.clone();
+        unmapped["candle"]["turboFit"]
+            .as_object_mut()
+            .expect("turbo fit")
+            .remove("calibrationFingerprintByTier");
+        assert!(
+            matches!(admit(&unmapped), Some(KreaTurboFit::Fits { .. })),
+            "a manifest declaring no per-tier map must fall back to the scalar"
+        );
+        let mut unmapped_drifted = unmapped.clone();
+        unmapped_drifted["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&unmapped_drifted),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "the scalar fallback is still graded, not merely accepted"
         );
     }
 
@@ -7044,34 +7160,25 @@ mod tests {
         outcome
     }
 
-    /// The PACKAGED store, unmodified, with its Krea candle q4 row asserted CURRENT through the
-    /// production currency seam (sc-22667 review, blocker).
+    /// The PACKAGED store, unmodified, with its Krea candle q4 row asserted PRESENT.
     ///
-    /// This used to re-stamp the row at the pin's declared digest so the gate's derivation could
-    /// be graded whether or not the shipped row happened to be current. That graded a path
-    /// production never takes: `krea_store_anchor` refuses a row whose recorded loader-closure
-    /// digest is not the pin's, so a stale packaged row prices from the manifest floor, not from
-    /// the anchor. The shipped row is current at this pin by attestation
-    /// (`config/anchor-currency-attestations.json`: the Krea loader did move between the
-    /// measurement revision and the pin, and the E6 re-measure at a5f643ae witnessed the anchor
-    /// reproduced per phase). An inference bump that moves the Krea closure reds this, and the
-    /// answer is a new attestation or a re-capture — never a private re-stamp here.
+    /// This used to additionally assert the row current through the retired currency seam, on the
+    /// grounds that `krea_store_anchor` refused a row whose recorded loader-closure digest was not
+    /// the pin's. sc-22738 removed that conjunct: the runtime always behaves as if the measurement
+    /// were valid, so a row's recorded closure no longer decides whether it prices anything and
+    /// the only precondition these tests need is that the row exists.
     fn krea_packaged_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
             .expect("the packaged anchor store");
-        let anchor = store
-            .image_anchor_for(
-                "krea_2_turbo",
-                sceneworks_core::memory_anchor::AnchorBackend::Candle,
-                "q4",
-            )
-            .expect("the packaged krea_2_turbo:candle:q4 row");
         assert!(
-            crate::video_admission::anchor_currency_matches(anchor),
-            "the packaged krea_2_turbo:candle:q4 anchor is not current at this pin (recorded \
-             loader closure {}) — the gate would refuse it, so these tests would not be grading \
-             the shipped path",
-            anchor.source.loader_closure_digest
+            store
+                .image_anchor_for(
+                    "krea_2_turbo",
+                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                    "q4",
+                )
+                .is_some(),
+            "the packaged krea_2_turbo:candle:q4 row must exist, or these tests grade nothing"
         );
         store.clone()
     }
@@ -7277,11 +7384,20 @@ mod tests {
     /// geometry under the SAME budget goes back to refusing for measurement absence. Without this
     /// the test above could pass on a curve that quietly grew an envelope.
     ///
-    /// The moved-loader-closure arm is the CLEAN control — it moves exactly one axis, the only
-    /// currency term there is since sc-22511. The adapter arm is deliberately over-determined
-    /// (`allow_streamed_blocks: false` also sets the request overlay and drops a rung), so it is
-    /// scoped to the coarser claim it can actually support: adapter-bearing jobs stay off the
-    /// anchor path entirely. The third arm is the SHIPPED state at this pin.
+    /// The one arm that still refuses is the adapter arm: `allow_streamed_blocks: false` is
+    /// deliberately over-determined (it also sets the request overlay and drops a rung), so it is
+    /// scoped to the coarser claim it can actually support — adapter-bearing jobs stay off the
+    /// anchor path entirely.
+    ///
+    /// sc-22738 — "the App Runtime should ALWAYS continue behaving as if the measurement were
+    /// valid" — turned the former SECOND control (a moved loader closure) into its opposite, and
+    /// it is kept here in that inverted form because it is still the sharpest single-axis probe of
+    /// the anchor path. `krea_store_anchor` no longer has a currency conjunct, so a row whose
+    /// recorded `loader_closure_digest` is nothing like the pin's prices the request through the
+    /// identical derivation. MUTATION that reds it: restore any comparison of
+    /// `anchor.source.loader_closure_digest` against the pin's declared closure inside
+    /// `krea_store_anchor` — the moved store then falls back to the manifest floor, whose resident
+    /// row this fixture makes unfittable, and the arm lands on `OutOfEnvelope` instead.
     #[test]
     fn without_a_usable_anchor_the_same_unmeasured_geometry_is_still_out_of_envelope() {
         let manifest = krea_fit_manifest_with_unfittable_resident();
@@ -7311,8 +7427,27 @@ mod tests {
             "adapter-bearing jobs stay off the anchor path"
         );
 
-        // The clean control: the model's own loader closure moved, so the evidence no longer
-        // describes the code that will run and the hull refusal stands.
+        // sc-22738: the single-axis probe, now asserting the opposite outcome. The model's own
+        // loader closure is driven to a value that cannot be any pin's, and the request must be
+        // priced by exactly the same anchor derivation as the unmodified store — same variant,
+        // same phases, same quoted need.
+        let unmodified = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
+        });
+        assert!(
+            matches!(unmodified, Some(KreaTurboFit::Fits { .. })),
+            "control point: the unmodified store must price this geometry from the anchor, or the \
+             equality below proves nothing: {unmodified:?}"
+        );
         let mut moved = krea_packaged_anchor_store();
         for anchor in &mut moved.anchors {
             if anchor.model_id == "krea_2_turbo"
@@ -7334,18 +7469,18 @@ mod tests {
                     Some(&runtime),
                 )
             }),
-            Some(KreaTurboFit::Unverified {
-                reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
-            }),
-            "an anchor whose loader closure moved must not price a request"
+            unmodified,
+            "sc-22738: a moved loader closure is a re-capture signal for the probe tooling only — \
+             the anchor must price the request identically"
         );
 
-        // The SHIPPED state, asserted rather than assumed: at this pin the packaged Krea candle
-        // anchor is stale — it was measured before the Krea candle loader moved — so production
-        // takes exactly this refusal today. Written against `krea_store_anchor` rather than a
-        // frozen verdict so a future pin that makes the row live turns this into a green
-        // observation of the OTHER branch instead of a red test nobody can act on.
-        let shipped_anchor_is_live = krea_store_anchor("q4", true).is_some();
+        // The SHIPPED state, asserted rather than assumed. `krea_store_anchor` now selects on
+        // route/provider/mode/overlay/reference-count alone, so the packaged row is usable and the
+        // uninjected call must reach the same admitted fit as the injected control above.
+        assert!(
+            krea_store_anchor("q4", true).is_some(),
+            "the shipped Krea candle q4 row must be selectable by the production seam"
+        );
         assert_eq!(
             krea_turbo_fit_with_runtime(
                 &manifest,
@@ -7356,10 +7491,9 @@ mod tests {
                 reserve_for(budget),
                 true,
                 Some(&runtime)
-            )
-            .is_some_and(|fit| matches!(fit, KreaTurboFit::Fits { .. })),
-            shipped_anchor_is_live,
-            "the shipped anchor prices this geometry exactly when its loader closure is current"
+            ),
+            unmodified,
+            "the shipped anchor prices this geometry the same way the injected packaged store does"
         );
     }
 

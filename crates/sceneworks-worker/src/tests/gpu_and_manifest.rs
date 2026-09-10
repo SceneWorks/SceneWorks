@@ -1,4 +1,6 @@
-/// sc-17774: the live closure digest for the candle Krea control lane, read rather than frozen.
+/// The live closure digest for the candle Krea control lane, read rather than frozen. Since
+/// sc-22738 this is the PROVENANCE string `fit_ladder`/`fit_ladder_for_tier` copy into the evidence
+/// receipt's `inference_revision`; nothing compares it, so it cannot change any fit below.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn krea_control_closure_digest() -> String {
     sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo_control")

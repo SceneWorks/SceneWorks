@@ -834,25 +834,21 @@ fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
-/// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
-/// 5B route therefore resolves the lane key `mlx:wan2_2_ti2v_5b`; the generated closure catalog is
-/// stamped only after the final inference head is frozen.
+/// The shared video funnel resolves NO closure currency (sc-22738): a packaged curve, anchor or
+/// bound matches a request on its identity alone, so the funnel must not read the provider
+/// closure ledger at all — the lookup this test used to pin (keyed on the active lane and the
+/// resolved provider id) is what made a moved closure floor a live request. The lane key itself
+/// is still the resolved provider id, not the catalog alias: on macOS the Wan 5B route resolves
+/// `mlx:wan2_2_ti2v_5b`.
 #[cfg(target_os = "macos")]
 #[test]
-fn video_admission_closure_currency_uses_lane_and_resolved_provider() {
+fn video_admission_resolves_no_closure_currency_and_keys_the_lane_on_the_resolved_provider() {
     const WAN: &str = include_str!("wan.rs");
-    let lookup = WAN
-        .split_once("let admission_closure_digest =")
-        .expect("shared video funnel resolves closure currency")
-        .1
-        .split_once(";")
-        .expect("closure lookup statement closes")
-        .0;
     assert!(
-        lookup.contains("packaged_closure_digest(")
-            && lookup.contains("crate::video_admission::LANE.as_key()")
-            && lookup.contains("input.engine_id"),
-        "closure lookup must key the active lane and resolved provider: {lookup}"
+        !WAN.contains("admission_closure_digest")
+            && !WAN.contains("packaged_closure_digest(")
+            && !WAN.contains("expected_closure_digest"),
+        "the shared video funnel must not resolve or thread a closure digest (sc-22738)"
     );
     assert_eq!(
         format!(

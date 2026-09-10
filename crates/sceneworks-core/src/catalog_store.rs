@@ -624,7 +624,32 @@ pub struct CatalogFacet {
 /// acquire the same lease before changing registry or disk state.
 #[derive(Debug)]
 pub struct CatalogProcessingLease {
-    _file: File,
+    file: File,
+}
+
+impl Drop for CatalogProcessingLease {
+    /// Releases the advisory lock EXPLICITLY rather than letting `close(2)` do it.
+    ///
+    /// `flock(2)` locks belong to the OPEN FILE DESCRIPTION, not to the descriptor
+    /// or to this process, and `fork(2)` hands a child a reference to that same
+    /// description. Closing our descriptor only drops one reference: while any
+    /// concurrently forked child still holds the inherited one — the window between
+    /// `fork` and `exec` for every `Command` this process spawns (ffmpeg, sips, the
+    /// worker binaries) — the lease keeps reading as HELD to everyone else.
+    ///
+    /// Control routes treat that as "a processor is still running" and refuse
+    /// pause/resume/detach/delete with a 409, so a lease released cleanly by its
+    /// owner could still refuse the very next request (sc-22738: the CI flake in
+    /// `catalog_pause_and_resume_persist_desired_processing_state`, where an
+    /// unrelated concurrent test's child spawn straddled the lease release).
+    ///
+    /// `LOCK_UN` releases the lock on the open file description itself, so it takes
+    /// effect immediately no matter who else references it.
+    fn drop(&mut self) {
+        // Released through the same crate that took the lock, not through std's
+        // inherent `File::unlock`, so acquisition and release cannot drift apart.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 impl CatalogProcessingLease {
@@ -647,12 +672,21 @@ impl CatalogProcessingLease {
             .open(lock_path)?;
         let contended = fs2::lock_contended_error().raw_os_error();
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self { file }),
             Err(error) if error.raw_os_error() == contended => Err(CatalogError::Conflict(
                 "Catalog processing is active".to_owned(),
             )),
             Err(error) => Err(CatalogError::Io(error)),
         }
+    }
+
+    /// Reproduces, in-process and deterministically, the descriptor a `fork(2)`
+    /// hands a child: a second file descriptor over the SAME open file
+    /// description, and therefore over the same `flock` lock.
+    #[cfg(test)]
+    fn inherited_descriptor(&self) -> File {
+        use fs2::FileExt as _;
+        self.file.duplicate().expect("descriptor duplicates")
     }
 
     pub fn is_active(catalog: &Catalog) -> CatalogResult<bool> {
@@ -6439,6 +6473,44 @@ mod tests {
             .delete_on_disk(&id)
             .expect("reconciled catalog deletes safely");
         assert!(!detached.path.exists());
+    }
+
+    /// A released lease must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description.
+    ///
+    /// `flock(2)` locks live on the open file description, and `fork(2)` gives the
+    /// child a reference to it, so releasing by `close(2)` alone only takes effect
+    /// once every such reference is gone. `duplicate` reproduces exactly that
+    /// sharing without a child process, so the interleaving is injected rather than
+    /// waited for. Before sc-22738 this asserted `Err(Conflict)`: a pause/resume
+    /// issued while any unrelated `Command` sat between `fork` and `exec` was
+    /// refused with `catalog_processing_conflict` even though the processor had
+    /// stopped.
+    #[test]
+    fn a_released_lease_is_free_even_while_an_inherited_descriptor_survives() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Inherited descriptor")
+            .unwrap();
+
+        let lease = CatalogProcessingLease::try_acquire(&catalog).unwrap();
+        let inherited = lease.inherited_descriptor();
+        drop(lease);
+
+        let reacquired = CatalogProcessingLease::try_acquire(&catalog);
+        assert!(
+            reacquired.is_ok(),
+            "a lease released by its owner must not stay held by an inherited \
+             descriptor: {:?}",
+            reacquired.err()
+        );
+        drop(reacquired);
+        assert!(
+            !CatalogProcessingLease::is_active(&catalog).unwrap(),
+            "an inherited descriptor must not make the catalog read as actively processing"
+        );
+        drop(inherited);
     }
 
     #[test]

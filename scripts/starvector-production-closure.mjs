@@ -36,6 +36,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "scripts/lib/file-sha256.mjs",
   "scripts/lib/starvector-terminal-attempt.mjs",
   "scripts/lib/starvector-terminal-gpu.mjs",
+  "scripts/lib/starvector-terminal-memory.mjs",
   "scripts/lib/starvector-terminal-upstream-reference.mjs",
   "scripts/lib/starvector-terminal-pin-paths.mjs",
   "scripts/lib/terminal-tree-identity.mjs",
