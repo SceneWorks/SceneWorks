@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:bf4c0768b7fa0b4784600a32d3eecb0c3770544c9296d2a5ad623a0d72d68552",
+    "sceneWorksRevision": "source-tree:1eae5e8cc352885d463495174c0bc0581a1faa86cc8a991b7bafab73b8b83128",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "d33187f7ca34b6ad491c78b97f5897181b58a08cdf20326f232d5c8140d4b7f0"
+        "sha256": "e364a149c467779a17b13694bda530447455df93f14b25dcc674a8a9deba60cb"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "2462e5a36121d6407cc5c723be9775f6fb7524f50102533abf428191967aeb32"
+        "sha256": "06611f7ab65e7db94ef3879df575bacaaf9e6488cffbf9e21f8a25d140848c98"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 2785,
-    "elidedCells": 6605,
+    "publishedCells": 2790,
+    "elidedCells": 6600,
     "elidedByState": {
-      "Implemented": 2189,
+      "Implemented": 2184,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 167,
-    "analyticOnlyCells": 176,
-    "anchoredCells": 2547,
+    "anchors": 168,
+    "analyticOnlyCells": 175,
+    "anchoredCells": 2554,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -6586,6 +6586,24 @@
       "current": true,
       "currencyAttestation": null,
       "cells": 5
+    },
+    {
+      "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+      "modelId": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 7
     },
     {
       "id": "mage_flow_turbo:mlx:bf16:base:base:mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1:imc-c96ca295ccfb9b0ce96f",
@@ -13561,11 +13579,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 1,
+      "elided": 5,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 3
       },
       "implementedBy": {
@@ -13600,11 +13619,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 1,
+      "elided": 5,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 3
       },
       "implementedBy": {
@@ -13627,11 +13647,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 2,
+      "elided": 4,
       "implemented": 6,
       "states": {
-        "Implemented": 6
+        "Anchored": 2,
+        "Implemented": 4
       }
     },
     {
@@ -13639,11 +13660,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 1,
+      "elided": 5,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 3
       },
       "implementedBy": {
@@ -120951,7 +120973,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15813,
@@ -120972,7 +121001,125 @@
             "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:lora:resident",
+      "modelId": "mage_flow_turbo",
+      "resolvedRoute": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "512x512",
+          "768x768",
+          "1024x1024",
+          "1536x1536",
+          "2048x2048",
+          "1280x720",
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15813,
+      "owningModelStory": 15856,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:bounded_attention",
+      "modelId": "mage_flow_turbo",
+      "resolvedRoute": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "512x512",
+          "768x768",
+          "1024x1024",
+          "1536x1536",
+          "2048x2048",
+          "1280x720",
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15813,
+      "owningModelStory": 15856,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
       }
     },
     {
@@ -121005,7 +121152,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15813,
@@ -121026,7 +121180,188 @@
             "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "mage_flow_turbo",
+      "resolvedRoute": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "512x512",
+          "768x768",
+          "1024x1024",
+          "1536x1536",
+          "2048x2048",
+          "1280x720",
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15813,
+      "owningModelStory": 15856,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:resident",
+      "modelId": "mage_flow_turbo",
+      "resolvedRoute": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "512x512",
+          "768x768",
+          "1024x1024",
+          "1536x1536",
+          "2048x2048",
+          "1280x720",
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15813,
+      "owningModelStory": 15856,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:staged_residency",
+      "modelId": "mage_flow_turbo",
+      "resolvedRoute": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "512x512",
+          "768x768",
+          "1024x1024",
+          "1536x1536",
+          "2048x2048",
+          "1280x720",
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15813,
+      "owningModelStory": 15856,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1"
+          }
+        ]
       }
     },
     {
@@ -180578,7 +180913,12 @@
     ],
     "mage_flow_turbo": [
       "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:lora:bounded_decode",
+      "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:lora:resident",
+      "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:bounded_attention",
       "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:bounded_decode",
+      "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:resident",
+      "mage_flow_turbo:mage_flow_turbo:candle:bf16:text_to_image:none:staged_residency",
       "mage_flow_turbo:mage_flow_turbo:candle:q4:text_to_image:lora:bounded_decode",
       "mage_flow_turbo:mage_flow_turbo:candle:q4:text_to_image:none:bounded_decode",
       "mage_flow_turbo:mage_flow_turbo:candle:q8:text_to_image:lora:bounded_decode",
