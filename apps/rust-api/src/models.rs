@@ -4096,6 +4096,9 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     // Re-read under the lock: a concurrent backfill may have rewritten the file.
     let kept = receipt_entries(managed_path)
         .into_iter()
@@ -4112,9 +4115,70 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     if let Some(object) = receipt.as_object_mut() {
         object.insert("receipts".to_owned(), Value::Array(kept));
     }
-    let _ = serde_json::to_vec_pretty(&receipt)
-        .ok()
-        .and_then(|bytes| std::fs::write(&receipt_path, bytes).ok());
+    let _ = sceneworks_core::download_receipt::write(&receipt_path, &receipt);
+}
+
+/// Heal legacy install identity before the catalog and local-cache eligibility read it.
+fn repair_missing_snapshot_revisions(managed: &FsPath, model: &Value, data_dir: &FsPath) {
+    use sceneworks_core::download_receipt;
+    let marker = managed.join(".sceneworks-download-complete.json");
+    if !marker.is_file() {
+        return;
+    }
+    let Ok(_lock) = download_receipt::lock(managed) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&marker) else {
+        return;
+    };
+    let Ok(mut receipt) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let family_complete = model_family_tier_predicate(model);
+    let repair = |entry: &mut Value| {
+        if entry
+            .get("modelId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| Some(id) != model.get("id").and_then(Value::as_str))
+        {
+            return false;
+        }
+        let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+            return false;
+        };
+        let Some(revision) = download_receipt::recover_revision(entry, &root) else {
+            return false;
+        };
+        let Ok((_, snapshot)) = sceneworks_core::hf_home::model_source_library(data_dir)
+            .discover_snapshot(repo, Some(&revision))
+        else {
+            return false;
+        };
+        let files = string_array_field(entry, "resolvedFiles");
+        if !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+            || !listed_shard_indexes_are_complete(&snapshot, &files)
+        {
+            return false;
+        }
+        entry["snapshotRevision"] = Value::String(revision);
+        true
+    };
+    // The newest receipt is mirrored at the top level. Repair both representations without
+    // rebuilding the envelope or dropping unrelated variants and fields.
+    let mut changed = repair(&mut receipt);
+    if let Some(entries) = receipt.get_mut("receipts").and_then(Value::as_array_mut) {
+        for entry in entries {
+            changed |= repair(entry);
+        }
+    }
+    if changed {
+        if let Err(error) = download_receipt::write(&marker, &receipt) {
+            tracing::warn!(%error, path = %marker.display(), "could not repair missing snapshot revisions");
+        }
+    }
 }
 
 fn backfill_current_receipt(
@@ -4188,9 +4252,15 @@ fn backfill_current_receipt(
     if receipts.is_empty() {
         return;
     }
+    if std::fs::create_dir_all(managed_path).is_err() {
+        return;
+    }
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
@@ -4218,14 +4288,10 @@ fn backfill_current_receipt(
         .as_object_mut()
         .unwrap()
         .insert("receipts".to_owned(), Value::Array(merged));
-    let _ = std::fs::create_dir_all(managed_path);
-    let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
-        std::fs::write(
-            managed_path.join(".sceneworks-download-complete.json"),
-            bytes,
-        )
-        .ok()
-    });
+    let _ = sceneworks_core::download_receipt::write(
+        &managed_path.join(".sceneworks-download-complete.json"),
+        &receipt,
+    );
 }
 
 #[cfg(test)]
@@ -4487,6 +4553,88 @@ mod download_receipt_tests {
     // env-first `huggingface_repo_cache_path`, so without this they would resolve into a developer's
     // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
     use crate::tests::support::isolate_hf_cache;
+
+    #[test]
+    fn discovery_repairs_legacy_snapshot_revisions_and_restores_cache_eligibility() {
+        use sceneworks_core::model_artifacts::artifact_selection::{
+            local_cache_eligibility_for_model, LocalCacheCoverage,
+        };
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let repo = "owner/receipt-repair";
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = huggingface_repo_cache_path(data, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rev);
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        // A newer catalog pin must never be substituted for the snapshot actually installed.
+        let model = json!({"id":"repair", "downloads":[{"provider":"huggingface", "repo":repo,
+            "revision":"2222222222222222222222222222222222222222", "variant":"q4", "default":true, "files":["q4/*"]}]});
+        for revision in [None, Some(Value::Null), Some(json!("")), Some(json!("  "))] {
+            let mut entry = json!({"repo":repo, "modelId":"repair", "variant":"q4", "backfilled":true,
+                "resolvedFiles":["q4/model.safetensors"], "customField":"preserved"});
+            if let Some(revision) = revision {
+                entry["snapshotRevision"] = revision;
+            }
+            let sibling = json!({"repo":repo,"modelId":"other","variant":"q8", "snapshotRevision":rev,
+                "resolvedFiles":["q8/model.safetensors"]});
+            let mut top = entry.clone();
+            top["receipts"] = json!([entry, sibling]);
+            std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::None
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            let bytes = std::fs::read(&marker).unwrap();
+            let after: Value = serde_json::from_slice(&bytes).unwrap();
+            top["snapshotRevision"] = json!(rev);
+            top["receipts"][0]["snapshotRevision"] = json!(rev);
+            assert_eq!(
+                after, top,
+                "only missing revisions change, including the mirrored top-level receipt"
+            );
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::Full
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            assert_eq!(
+                std::fs::read(&marker).unwrap(),
+                bytes,
+                "repeat discovery is idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_revision_repair_does_not_pin_a_torn_shard_set() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = "owner/torn-repair";
+        let root = huggingface_repo_cache_path(temp.path(), repo).unwrap();
+        let snapshot = root.join("snapshots/1111111111111111111111111111111111111111");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let managed = temp.path().join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":repo,"modelId":"repair", "resolvedFiles":["model.safetensors.index.json"]});
+        let before = serde_json::to_vec(&receipt).unwrap();
+        std::fs::write(&marker, &before).unwrap();
+        repair_missing_snapshot_revisions(&managed, &json!({"id":"repair"}), temp.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
 
     fn builtin_models_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -6526,6 +6674,7 @@ fn install_state_for(
         // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
         // manual delete — and so the backfill below can re-record the tier honestly.
         repair_torn_backfilled_receipts(&managed_path, data_dir);
+        repair_missing_snapshot_revisions(&managed_path, model, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,

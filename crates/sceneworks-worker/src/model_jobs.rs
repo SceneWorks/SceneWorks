@@ -2509,31 +2509,7 @@ fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn update_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) {
-    digest.update(metadata.len().to_le_bytes());
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-    digest.update(
-        modified
-            .map_or(0, |duration| duration.as_secs())
-            .to_le_bytes(),
-    );
-    digest.update(
-        modified
-            .map_or(0, |duration| duration.subsec_nanos())
-            .to_le_bytes(),
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.dev().to_le_bytes());
-        digest.update(metadata.ino().to_le_bytes());
-        digest.update(metadata.ctime().to_le_bytes());
-        digest.update(metadata.ctime_nsec().to_le_bytes());
-    }
-}
+use sceneworks_core::download_receipt::update_metadata_stamp;
 
 fn artifact_tree_stamp(root: &Path) -> WorkerResult<String> {
     let mut digest = Sha256::new();
@@ -2563,33 +2539,7 @@ pub(crate) fn resolved_files_tree_stamp(
     root: &Path,
     files: &[impl AsRef<str>],
 ) -> WorkerResult<String> {
-    let mut names = files.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-    names.sort_unstable();
-    let mut digest = Sha256::new();
-    for name in names {
-        let relative = Path::new(name);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "artifact receipt contains unsafe resolved file {name:?}"
-            )));
-        }
-        let path = root.join(relative);
-        let metadata = std::fs::symlink_metadata(&path)?;
-        digest.update(name.as_bytes());
-        digest.update([0]);
-        update_metadata_stamp(&mut digest, &metadata);
-        if metadata.file_type().is_symlink() {
-            digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
-            digest.update(b"followed-target");
-            update_metadata_stamp(&mut digest, &std::fs::metadata(&path)?);
-        }
-        digest.update([0xff]);
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
+    Ok(sceneworks_core::download_receipt::resolved_files_tree_stamp(root, files)?)
 }
 
 fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
@@ -2733,6 +2683,30 @@ pub(crate) fn app_managed_artifact_provenance(
 mod artifact_provenance_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tree_stamp_repair_fills_null_revision_and_refuses_a_replaced_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = temp.path().join(rev);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let marker = temp.path().join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":"owner/model","variant":"q4","snapshotRevision":null,"resolvedFiles":["model.safetensors"]});
+        let mut top = receipt.clone();
+        top["receipts"] = json!([receipt]);
+        std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+        establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"]).unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(after["snapshotRevision"], rev);
+        assert_eq!(after["receipts"][0]["snapshotRevision"], rev);
+        let before = std::fs::read(&marker).unwrap();
+        assert!(
+            establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"])
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
 
     #[test]
     fn app_managed_receipt_detects_same_path_mutation_and_rejects_bad_identity() {
@@ -3234,6 +3208,11 @@ fn establish_receipt_tree_stamp(
     snapshot: &Path,
     files: &[&str],
 ) -> WorkerResult<String> {
+    let _receipt_lock = sceneworks_core::download_receipt::lock(
+        marker
+            .parent()
+            .ok_or_else(|| WorkerError::InvalidPayload("receipt has no parent".to_owned()))?,
+    )?;
     let stamp = resolved_files_tree_stamp(snapshot, files)?;
     let revision = snapshot
         .file_name()
@@ -3257,9 +3236,17 @@ fn establish_receipt_tree_stamp(
         );
         // A backfilled receipt carries no revision, so resolution leans on the exact file set
         // identifying exactly one snapshot. Record what we just resolved to remove that ambiguity.
-        object
-            .entry("snapshotRevision".to_owned())
-            .or_insert_with(|| Value::String(revision.to_owned()));
+        if object.get("snapshotRevision").is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|revision| revision.trim().is_empty())
+        }) {
+            object.insert(
+                "snapshotRevision".to_owned(),
+                Value::String(revision.to_owned()),
+            );
+        }
     };
 
     let mut top = serde_json::from_slice::<Value>(&std::fs::read(marker)?).map_err(|error| {
@@ -3268,6 +3255,24 @@ fn establish_receipt_tree_stamp(
             marker.display()
         ))
     })?;
+    // The caller read before acquiring the write lock. A concurrent download or discovery
+    // repair may have replaced that identity; never stamp the replacement with the old tree.
+    let current = top
+        .get("receipts")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![&top]);
+    if !current.iter().any(|entry| identity(entry))
+        || current.iter().filter(|entry| identity(entry)).any(|entry| {
+            ["resolvedFiles", "snapshotRevision", "artifactTreeStamp"]
+                .iter()
+                .any(|key| entry.get(*key) != receipt.get(*key))
+        })
+    {
+        return Err(WorkerError::InvalidPayload(
+            "install receipt changed during provenance repair".to_owned(),
+        ));
+    }
     // `write_model_download_receipt` mirrors the newest receipt at the top level AND in `receipts`.
     // Patch both when they name the same artifact, so neither copy contradicts the other.
     if identity(&top) {
@@ -3278,9 +3283,7 @@ fn establish_receipt_tree_stamp(
             patch(entry);
         }
     }
-    let temporary = marker.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&top)?)?;
-    std::fs::rename(temporary, marker)?;
+    sceneworks_core::download_receipt::write(marker, &top)?;
     Ok(stamp)
 }
 

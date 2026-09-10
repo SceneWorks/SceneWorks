@@ -307,6 +307,7 @@ fn receipt_file_sets(
             let revision = entry
                 .get("snapshotRevision")
                 .and_then(Value::as_str)
+                .filter(|revision| !revision.trim().is_empty())
                 .map(str::to_owned);
             let variant = entry
                 .get("variant")
