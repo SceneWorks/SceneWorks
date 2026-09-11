@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ebdbb36632ddbbdcdbdc5b0b1310f5d312aa63c3cf6ca2937661adecc7f6cdef",
+    "sceneWorksRevision": "source-tree:53c49f5609cfada48bd54a78f85a74bcd07e4a4283a3a4685863e9582fefcba4",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "e3ee9752647f8dc9710570e3d472091c61053c3357edff931d2f93693e11d06e"
+        "sha256": "1e635191795a616fee314026763ad767bd7eab3b785dcdf04fa2b768677131ae"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "1f70493ede4cb9af292e9f2216c20ec9ef1375a29f70d20f8b21b95161027614"
+        "sha256": "40359ef4daca8c0695e6441c0be80f295bd3c5821f499b7835d789c2314d37c0"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3001,
-    "elidedCells": 6389,
+    "publishedCells": 3056,
+    "elidedCells": 6334,
     "elidedByState": {
-      "Implemented": 1973,
+      "Implemented": 1918,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 178,
-    "analyticOnlyCells": 165,
-    "anchoredCells": 2765,
+    "anchors": 179,
+    "analyticOnlyCells": 164,
+    "anchoredCells": 2820,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -7342,6 +7342,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 4
+    },
+    {
+      "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+      "modelId": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sdxl-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 55
     },
     {
       "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
@@ -16076,11 +16094,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 45,
-      "published": 0,
-      "elided": 45,
+      "published": 15,
+      "elided": 30,
       "implemented": 45,
       "states": {
-        "Implemented": 45
+        "Anchored": 15,
+        "Implemented": 30
       }
     },
     {
@@ -16088,11 +16107,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 45,
-      "published": 0,
-      "elided": 45,
+      "published": 15,
+      "elided": 30,
       "implemented": 45,
       "states": {
-        "Implemented": 45
+        "Anchored": 15,
+        "Implemented": 30
       }
     },
     {
@@ -16112,11 +16132,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 45,
-      "published": 0,
-      "elided": 45,
+      "published": 15,
+      "elided": 30,
       "implemented": 45,
       "states": {
-        "Implemented": 45
+        "Anchored": 15,
+        "Implemented": 30
       }
     },
     {
@@ -16124,11 +16145,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 45,
-      "published": 0,
-      "elided": 45,
+      "published": 10,
+      "elided": 35,
       "implemented": 30,
       "states": {
-        "Implemented": 30,
+        "Anchored": 10,
+        "Implemented": 20,
         "Missing": 15
       },
       "implementedBy": {
@@ -152130,6 +152152,3228 @@
       }
     },
     {
+      "id": "sdxl:sdxl:candle:bf16:character_image:identity:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:identity:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:identity:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:lora:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:lora:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:lora:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:lora:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:none:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:none:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:character_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:identity:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:identity:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:identity:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:lora:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:lora:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:lora:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:lora:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:none:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:none:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:edit_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:identity:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:identity:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:identity:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:lora:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:lora:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:lora:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:lora:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:none:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:none:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_detail:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:identity:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:identity:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:identity:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:lora:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:lora:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:lora:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:lora:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:none:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:none:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:image_inpaint:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/sdxl/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:identity:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:identity:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:identity:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:lora:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:lora:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:lora:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:lora:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:none:bounded_attention",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:none:bounded_decode",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sdxl:sdxl:candle:bf16:text_to_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17413,
+      "owningModelStory": 17494,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98"
+          }
+        ]
+      }
+    },
+    {
       "id": "sensenova_u1_8b_fast:sensenova_u1_8b_fast:candle:bf16:character_image:identity:bounded_decode",
       "modelId": "sensenova_u1_8b_fast",
       "resolvedRoute": "sensenova_u1_8b_fast",
@@ -193811,7 +197055,63 @@
       "sd3_5_medium:sd3_5_medium:mlx:q8:text_to_image:none:resident",
       "sd3_5_medium:sd3_5_medium:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "sdxl": [],
+    "sdxl": [
+      "sdxl:sdxl:candle:bf16:character_image:identity:bounded_attention",
+      "sdxl:sdxl:candle:bf16:character_image:identity:bounded_decode",
+      "sdxl:sdxl:candle:bf16:character_image:identity:resident",
+      "sdxl:sdxl:candle:bf16:character_image:lora:bounded_attention",
+      "sdxl:sdxl:candle:bf16:character_image:lora:bounded_decode",
+      "sdxl:sdxl:candle:bf16:character_image:lora:resident",
+      "sdxl:sdxl:candle:bf16:character_image:lora:staged_residency",
+      "sdxl:sdxl:candle:bf16:character_image:none:bounded_attention",
+      "sdxl:sdxl:candle:bf16:character_image:none:bounded_decode",
+      "sdxl:sdxl:candle:bf16:character_image:none:resident",
+      "sdxl:sdxl:candle:bf16:character_image:none:staged_residency",
+      "sdxl:sdxl:candle:bf16:edit_image:identity:bounded_attention",
+      "sdxl:sdxl:candle:bf16:edit_image:identity:bounded_decode",
+      "sdxl:sdxl:candle:bf16:edit_image:identity:resident",
+      "sdxl:sdxl:candle:bf16:edit_image:lora:bounded_attention",
+      "sdxl:sdxl:candle:bf16:edit_image:lora:bounded_decode",
+      "sdxl:sdxl:candle:bf16:edit_image:lora:resident",
+      "sdxl:sdxl:candle:bf16:edit_image:lora:staged_residency",
+      "sdxl:sdxl:candle:bf16:edit_image:none:bounded_attention",
+      "sdxl:sdxl:candle:bf16:edit_image:none:bounded_decode",
+      "sdxl:sdxl:candle:bf16:edit_image:none:resident",
+      "sdxl:sdxl:candle:bf16:edit_image:none:staged_residency",
+      "sdxl:sdxl:candle:bf16:image_detail:identity:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_detail:identity:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_detail:identity:resident",
+      "sdxl:sdxl:candle:bf16:image_detail:lora:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_detail:lora:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_detail:lora:resident",
+      "sdxl:sdxl:candle:bf16:image_detail:lora:staged_residency",
+      "sdxl:sdxl:candle:bf16:image_detail:none:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_detail:none:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_detail:none:resident",
+      "sdxl:sdxl:candle:bf16:image_detail:none:staged_residency",
+      "sdxl:sdxl:candle:bf16:image_inpaint:identity:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_inpaint:identity:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_inpaint:identity:resident",
+      "sdxl:sdxl:candle:bf16:image_inpaint:lora:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_inpaint:lora:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_inpaint:lora:resident",
+      "sdxl:sdxl:candle:bf16:image_inpaint:lora:staged_residency",
+      "sdxl:sdxl:candle:bf16:image_inpaint:none:bounded_attention",
+      "sdxl:sdxl:candle:bf16:image_inpaint:none:bounded_decode",
+      "sdxl:sdxl:candle:bf16:image_inpaint:none:resident",
+      "sdxl:sdxl:candle:bf16:image_inpaint:none:staged_residency",
+      "sdxl:sdxl:candle:bf16:text_to_image:identity:bounded_attention",
+      "sdxl:sdxl:candle:bf16:text_to_image:identity:bounded_decode",
+      "sdxl:sdxl:candle:bf16:text_to_image:identity:resident",
+      "sdxl:sdxl:candle:bf16:text_to_image:lora:bounded_attention",
+      "sdxl:sdxl:candle:bf16:text_to_image:lora:bounded_decode",
+      "sdxl:sdxl:candle:bf16:text_to_image:lora:resident",
+      "sdxl:sdxl:candle:bf16:text_to_image:lora:staged_residency",
+      "sdxl:sdxl:candle:bf16:text_to_image:none:bounded_attention",
+      "sdxl:sdxl:candle:bf16:text_to_image:none:bounded_decode",
+      "sdxl:sdxl:candle:bf16:text_to_image:none:resident",
+      "sdxl:sdxl:candle:bf16:text_to_image:none:staged_residency"
+    ],
     "sensenova_u1_8b": [
       "sensenova_u1_8b:sensenova_u1_8b:candle:bf16:character_image:identity:bounded_decode",
       "sensenova_u1_8b:sensenova_u1_8b:candle:bf16:character_image:identity:staged_residency",
