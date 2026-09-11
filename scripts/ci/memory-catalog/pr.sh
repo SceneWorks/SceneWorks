@@ -47,7 +47,13 @@ BODY_FILE="${WORK_DIR}/pr-body.md"
   echo "- workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
   echo "- runner: \`${RUNNER_NAME}\`"
   echo "- pinned inference revision: \`${INFERENCE_PIN:-unknown}\`"
-  echo "- cut from \`${BASE_REF}\` at \`${BASE_SHA}\`"
+  # REF_SHA is the dispatched ref's tip. On a fresh cut it IS BASE_SHA, which is why the fallback
+  # is exact rather than approximate; on a RESUMED re-run the two differ, and saying "cut from the
+  # ref at the resumed tip" would be a plain untruth. See scripts/ci/memory-catalog/branch.sh.
+  echo "- cut from \`${BASE_REF}\` at \`${REF_SHA:-$BASE_SHA}\`"
+  if [[ -n "${RESUMED_FROM:-}" ]]; then
+    echo "- run attempt \`${GITHUB_RUN_ATTEMPT:-?}\` RESUMED this branch at \`${RESUMED_FROM}\`; every commit up to that point was measured by an earlier attempt of the same run"
+  fi
   echo
   echo "Each commit is one \`capture -> check -> ingest -> extract -> stamp -> matrix\` pass from"
   echo "\`scripts/measure-memory-catalog.mjs\`. The run's summary JSON and per-anchor logs are attached"

@@ -334,6 +334,134 @@ test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit f
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+// sc-22738 (run 34490358777). The memory-catalog campaign's candle job builds the SAME dependency
+// graph on the SAME shared box as the lane above -- candle-core, candle-transformers, the vendored
+// inference tree, the CUDA kernels -- and it had simply never been given that lane's treatment. It
+// died four minutes into "Build the candle memory adapter" with no rustc diagnostic at all:
+//
+//   sccache: caused by: An existing connection was forcibly closed by the remote host. (os error 10054)
+//   error: could not compile `candle-transformers`
+//
+// The two lanes must read as ONE decision, so this pins the campaign's step to the sibling's
+// spelling AND to the sibling's position: after the toolchain is resolved (the prep action is what
+// clears a MISSING wrapper) and before the first cargo invocation, so both the `bash` fetch step and
+// the `shell: cmd` vcvars build inherit the cleared variable.
+const CAMPAIGN_WORKFLOW = ".github/workflows/memory-catalog-campaign.yml";
+const CAMPAIGN_WRAPPER_STEP = [
+  "      - name: Disable unstable sccache wrapper for the heavy Candle lane",
+  "        shell: powershell",
+  "        run: |",
+  "          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='",
+  "          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue",
+  "",
+].join("\n");
+
+function assertCampaignCandleWrapperDisabled(workflow) {
+  const candle = workflowJob(workflow, "candle");
+  const mlx = workflowJob(workflow, "mlx");
+
+  const prepare = candle.indexOf("uses: ./.github/actions/prepare-rust-runner");
+  const disableWrapper = candle.indexOf(
+    "name: Disable unstable sccache wrapper for the heavy Candle lane",
+  );
+  const fetch = candle.indexOf("run: cargo fetch --locked");
+  const build = candle.indexOf("--features candle --bin memory-candle-adapter");
+  assert.ok(prepare >= 0, "the campaign's candle job resolves the toolchain with the shared action");
+  assert.ok(disableWrapper >= 0, "and disables the unstable sccache wrapper");
+  assert.ok(fetch >= 0 && build >= 0, "and then fetches and builds the adapter");
+  assert.ok(prepare < disableWrapper, "the wrapper is cleared AFTER the toolchain is resolved");
+  assert.ok(disableWrapper < fetch && fetch < build, "and BEFORE any cargo invocation");
+
+  // Both halves, individually: GITHUB_ENV clears it for every LATER step (including the
+  // `shell: cmd` build), Remove-Item clears it for this step's own process.
+  const step = workflowStep(candle, "Disable unstable sccache wrapper for the heavy Candle lane");
+  assert.match(step, /^ {8}shell: powershell$/m);
+  assert.match(step, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
+  assert.match(step, /Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/);
+
+  // The mlx lane is deliberately NOT given this: os error 10054 is a Windows socket reset, and no
+  // macOS runner service exports the wrapper -- docs/rust-mlx-build.md offers sccache to a
+  // developer, and scripts/setup-nax-runner.sh only points at that note.
+  assert.doesNotMatch(mlx, /RUSTC_WRAPPER/, "the mlx lane keeps whatever wrapper its Mac has");
+
+  // And NO job-local CARGO_HOME, which is the other half of windows-candle.yml's block and the half
+  // this lane deliberately does not take: each runner service already pins its own dependency cache
+  // (D:\cargo-home-N, sc-17614) and runs one job at a time, while a $RUNNER_TEMP CARGO_HOME is
+  // re-downloaded every run on the box whose slow link this campaign's whole fetch design exists to
+  // work around. Delete this assertion only alongside the rationale in the workflow.
+  assert.doesNotMatch(
+    candle,
+    /CARGO_HOME=/,
+    "the campaign lane relies on the per-runner CARGO_HOME rather than a re-downloaded job-local one",
+  );
+}
+
+test("the campaign's candle build gets the heavy-Candle-lane sccache treatment", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  assertCampaignCandleWrapperDisabled(workflow);
+  assert.ok(
+    workflow.includes(CAMPAIGN_WRAPPER_STEP),
+    "the campaign step is spelled exactly as windows-candle.yml's, so the two read as one decision",
+  );
+});
+
+test("the campaign sccache contract rejects removal, reordering and half-measures", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  for (const [why, mutation] of [
+    ["the step is deleted outright", workflow.replace(CAMPAIGN_WRAPPER_STEP, "")],
+    [
+      "only the process-local half survives",
+      workflow.replace(
+        "          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='\n",
+        "",
+      ),
+    ],
+    [
+      "only the GITHUB_ENV half survives",
+      workflow.replace(
+        "          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue\n",
+        "",
+      ),
+    ],
+    [
+      "it slips after the first cargo invocation",
+      workflow
+        .replace(CAMPAIGN_WRAPPER_STEP, "")
+        .replace(
+          "      - name: Build the candle memory adapter\n",
+          `${CAMPAIGN_WRAPPER_STEP}      - name: Build the candle memory adapter\n`,
+        ),
+    ],
+    [
+      "it lands before the toolchain is resolved",
+      workflow
+        .replace(CAMPAIGN_WRAPPER_STEP, "")
+        .replace(
+          "      - name: Prepare the Rust toolchain\n",
+          `${CAMPAIGN_WRAPPER_STEP}      - name: Prepare the Rust toolchain\n`,
+        ),
+    ],
+    [
+      "the mlx lane picks it up too",
+      workflow.replace(
+        "      - name: Fetch prebuilt MLX (sc-21382)\n",
+        `${CAMPAIGN_WRAPPER_STEP}      - name: Fetch prebuilt MLX (sc-21382)\n`,
+      ),
+    ],
+    [
+      "a redundant job-local CARGO_HOME is added back",
+      workflow.replace(
+        "      - name: Census the profiled GPU\n",
+        "      - name: Isolate Cargo dependency checkout\n        shell: powershell\n        run: |\n"
+          + '          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"\n'
+          + "      - name: Census the profiled GPU\n",
+      ),
+    ],
+  ]) {
+    assert.throws(() => assertCampaignCandleWrapperDisabled(mutation), undefined, why);
+  }
+});
+
 test("Windows Krea provisioning accepts supported newer Python 3 runtimes", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(workflow, /Python 3\.12 or newer/);
@@ -1743,7 +1871,8 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
-  // `not_run`. Two arms build their fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // `not_run`. Bespoke arms build their fragment by hand for a real reason — InstantID's measured
+  // identity ladder, sc-22726's bespoke PuLID
   // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
   // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
   // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
@@ -1755,7 +1884,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     .map(([name]) => name);
   assert.deepEqual(
     handRolled.sort(),
-    ["run_pulid_flux_capture", "run_sensenova_capture"],
+    ["instantid_measured_fragment", "run_pulid_flux_capture", "run_sensenova_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
   for (const name of handRolled) {
@@ -1766,6 +1895,11 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
     );
   }
+  assert.match(candleFunctions.get("validate_instantid_candle_target"),
+    /validate_exact_overlay_target\(request, "identity", INSTANTID_EXECUTION_PATH\)/);
+  const instantid = candleFunctions.get("run_instantid_candle");
+  assert.ok(instantid.indexOf("validate_instantid_candle_target(request)?") <
+    instantid.indexOf("instantid_candle_binding(tier)?"));
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,

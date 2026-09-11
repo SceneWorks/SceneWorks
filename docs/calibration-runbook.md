@@ -1646,7 +1646,8 @@ not fail the dispatch: the job queues silently until the run is cancelled.
 
 **What the job does.** Checks out `ref` shallowly (`fetch-depth: 1` — nothing in the campaign reads
 history beyond HEAD, and a full clone of this repo's 2+ GiB pack was costing 27+ minutes on the
-Windows box), cuts a NEW branch `story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on
+Windows box), cuts (or, on a re-run, RESUMES — see below) the branch
+`story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on
 the current branch and refuses a detached HEAD, and this keeps it off `feature/*` and `main`),
 prepares the inference clone, builds the release adapter (`--features mlx --bin memory-mlx-adapter`,
 or `--features candle --bin memory-candle-adapter` under `vcvars64`), prints the `--list` table as
@@ -1704,6 +1705,19 @@ work dir (summary JSON, per-anchor logs, retained raw bundles) is uploaded as a 
 every outcome, and a final step opens `chore(<campaign>): <backend> catalog campaign results` into
 `ref` when the branch has commits. Nothing is merged automatically.
 
+**Re-running a failed dispatch is the recovery, and it resumes (sc-22738, run 34490358777).**
+`gh run rerun --failed` reuses the RUN ID — `github.run_attempt` is the counter that moves — so the
+new attempt lands on the SAME `story/<campaign>-<backend>-campaign-<run_id>` branch. It continues
+that branch instead of colliding with it: anchors an earlier attempt pushed are fetched back (their
+tree is what `--skip-current` reads, so they plan as `current` and are skipped), the walk appends
+the rest, and the PR that is already open picks up the new commits. Nothing measured is discarded —
+even commits an attempt made but never managed to push are kept and go up with the next push. Before
+this, `git switch -c` hit `fatal: a branch named 'story/…-<run_id>' already exists` twelve seconds
+in, so the documented recovery for a transient infra fault produced a second, different failure that
+looked like the first. The three arms and the reasoning live in
+`scripts/ci/memory-catalog/branch.sh`; a re-run served by a DIFFERENT runner listener is fine, since
+the decision reads the remote rather than the box.
+
 🔴 **If the repository forbids Actions from opening PRs, that final step WARNS rather than failing
 (sc-22738, run 34356681566).** `gh pr create` returns
 
@@ -1731,6 +1745,22 @@ candle), not a measured budget — and since sc-22738 each anchor is separately 
 on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a warning, not an
 error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
 snapshot is under none of them plans as `weights_missing` rather than failing the run.
+
+**The candle job builds with rustc DIRECT, not through sccache (sc-22738, run 34490358777).** The
+shared Windows runner exports `RUSTC_WRAPPER=sccache`, and an installed daemon can reset its own
+local connection mid-build: *"An existing connection was forcibly closed by the remote host. (os
+error 10054)"*, followed by `error: could not compile candle-transformers` and **no rustc diagnostic
+at all** — the wrapper drops the socket, so there is nothing to attribute the failure to. Run
+34490358777 died that way four minutes into *Build the candle memory adapter*.
+`windows-candle.yml` had already met this twice (the backend-candle test and the sidecar check) and
+answered it by clearing the wrapper for those jobs; this lane compiles the same candle + CUDA graph
+on the same box, cold on every dispatch (`actions/checkout`'s `clean` takes `target/` with it), so
+it now carries the identical step in the identical position — after
+`prepare-rust-runner` (which only clears a *missing* wrapper) and before the first `cargo`
+invocation. It does **not** take that block's second step, the job-local `CARGO_HOME`: each runner
+service already pins its own `D:\cargo-home-N` (sc-17614) and serves one job at a time, while a
+`$RUNNER_TEMP` `CARGO_HOME` is re-downloaded every run — the wrong trade on the box whose slow link
+this lane's whole fetch design exists to work around.
 
 **The candle job censuses the GPU before it walks (sc-22738).** Run 34272596969 spent 51 guarded
 renders — roughly an hour of GPU time — producing 51 copies of one sentence: *"untrustworthy stable

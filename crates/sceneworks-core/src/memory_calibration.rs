@@ -401,6 +401,8 @@ pub struct Target {
     pub provider: String,
     pub tier: String,
     pub mode: String,
+    /// Explicit conditioning cardinality for new reference-bearing captures. Older records omit it.
+    pub reference_count: Option<u32>,
     pub overlay: String,
     /// LTX-2.5's two transformer checkpoints are different memory workloads. Required for
     /// `ltx_2_5` records; absent for older families whose target identity predates this axis.
@@ -4474,6 +4476,20 @@ mod tests {
                 "{expected}"
             );
         }
+    }
+
+    #[test]
+    fn reference_cardinality_is_an_optional_typed_capture_identity() {
+        use super::Target;
+        let raw: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).unwrap();
+        let mut target = raw["records"][0]["target"].clone();
+        let original: Target = serde_json::from_value(target.clone()).unwrap();
+        assert_eq!(original.reference_count, None);
+        target["referenceCount"] = json!(1);
+        let reference: Target = serde_json::from_value(target.clone()).unwrap();
+        assert_eq!(reference.reference_count, Some(1));
+        target["referenceCount"] = json!(-1);
+        assert!(serde_json::from_value::<Target>(target).is_err());
     }
 
     /// sc-22738: a physical A/V session of ONE render carries `selected_av` alone, and the typed

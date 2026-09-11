@@ -1261,6 +1261,7 @@ export function ModelManagerScreen() {
     const installed = model.installState === "installed";
     const cleanupOnly = model.platformCleanupOnly === true;
     const incomplete = model.cacheState === "incomplete" || model.repairAvailable;
+    const repairVariant = model.variants?.find((variant) => !variant.installed && variant.cacheState === "incomplete");
     const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
     const localDownloadJob = cleanupOnly || installed ? null : downloadJobs.find((job) => job.status !== "completed");
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
@@ -1668,7 +1669,7 @@ export function ModelManagerScreen() {
             {cleanupOnly ? null : hasTierMatrix ? (
               // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
               // affordance here for an incomplete cache or soft co-requisite update; otherwise
-              // there's no single-tier button. The default-tier job fetches every co-requisite.
+              // there's no single-tier button. Repair the torn tier, including its companions.
               incomplete || model.updateAvailable ? (
                 <button
                   className="model-card-primary"
@@ -1677,7 +1678,9 @@ export function ModelManagerScreen() {
                   onClick={() =>
                     failedDownload
                       ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
-                      : onDownloadModel(model)
+                      : repairVariant
+                        ? onDownloadVariant(model, repairVariant.variant)
+                        : onDownloadModel(model)
                   }
                   type="button"
                 >

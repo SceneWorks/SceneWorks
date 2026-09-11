@@ -2311,7 +2311,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
     let record_overlay = str_at(target, "overlay")
         .filter(|overlay| overlay != "none")
         .filter(|overlay| !overlay.is_empty());
-    let record_reference_count = geometry
+    let record_reference_count = target
         .get("referenceCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);

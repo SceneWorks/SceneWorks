@@ -31,17 +31,17 @@ on:
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
-        default: e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8
+        default: 81fda3bd5a9d5920ad9cdc62796df3305be96742
         type: string
       inference_preflight_run_id:
         description: Exact inference preflight workflow run id.
         required: false
-        default: "34478405706"
+        default: "34589876485"
         type: string
       inference_preflight_artifact:
         description: Complete inference preflight artifact name.
         required: false
-        default: starvector-terminal-preflight-e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8-34478405706-1
+        default: starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1
         type: string
       mac_app_data_source:
         description: Absolute macOS source-produced app-data root.
@@ -62,7 +62,7 @@ on:
       permanent_pin:
         description: Exact permanent inference pin for the one terminal campaign.
         required: false
-        default: e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8
+        default: 81fda3bd5a9d5920ad9cdc62796df3305be96742
         type: string
       campaign_run_id:
         description: Unique terminal campaign identity.

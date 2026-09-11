@@ -4096,6 +4096,9 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     // Re-read under the lock: a concurrent backfill may have rewritten the file.
     let kept = receipt_entries(managed_path)
         .into_iter()
@@ -4112,9 +4115,70 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     if let Some(object) = receipt.as_object_mut() {
         object.insert("receipts".to_owned(), Value::Array(kept));
     }
-    let _ = serde_json::to_vec_pretty(&receipt)
-        .ok()
-        .and_then(|bytes| std::fs::write(&receipt_path, bytes).ok());
+    let _ = sceneworks_core::download_receipt::write(&receipt_path, &receipt);
+}
+
+/// Heal legacy install identity before the catalog and local-cache eligibility read it.
+fn repair_missing_snapshot_revisions(managed: &FsPath, model: &Value, data_dir: &FsPath) {
+    use sceneworks_core::download_receipt;
+    let marker = managed.join(".sceneworks-download-complete.json");
+    if !marker.is_file() {
+        return;
+    }
+    let Ok(_lock) = download_receipt::lock(managed) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&marker) else {
+        return;
+    };
+    let Ok(mut receipt) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let family_complete = model_family_tier_predicate(model);
+    let repair = |entry: &mut Value| {
+        if entry
+            .get("modelId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| Some(id) != model.get("id").and_then(Value::as_str))
+        {
+            return false;
+        }
+        let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+            return false;
+        };
+        let Some(revision) = download_receipt::recover_revision(entry, &root) else {
+            return false;
+        };
+        let Ok((_, snapshot)) = sceneworks_core::hf_home::model_source_library(data_dir)
+            .discover_snapshot(repo, Some(&revision))
+        else {
+            return false;
+        };
+        let files = string_array_field(entry, "resolvedFiles");
+        if !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+            || !listed_shard_indexes_are_complete(&snapshot, &files)
+        {
+            return false;
+        }
+        entry["snapshotRevision"] = Value::String(revision);
+        true
+    };
+    // The newest receipt is mirrored at the top level. Repair both representations without
+    // rebuilding the envelope or dropping unrelated variants and fields.
+    let mut changed = repair(&mut receipt);
+    if let Some(entries) = receipt.get_mut("receipts").and_then(Value::as_array_mut) {
+        for entry in entries {
+            changed |= repair(entry);
+        }
+    }
+    if changed {
+        if let Err(error) = download_receipt::write(&marker, &receipt) {
+            tracing::warn!(%error, path = %marker.display(), "could not repair missing snapshot revisions");
+        }
+    }
 }
 
 fn backfill_current_receipt(
@@ -4188,9 +4252,15 @@ fn backfill_current_receipt(
     if receipts.is_empty() {
         return;
     }
+    if std::fs::create_dir_all(managed_path).is_err() {
+        return;
+    }
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
@@ -4218,14 +4288,10 @@ fn backfill_current_receipt(
         .as_object_mut()
         .unwrap()
         .insert("receipts".to_owned(), Value::Array(merged));
-    let _ = std::fs::create_dir_all(managed_path);
-    let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
-        std::fs::write(
-            managed_path.join(".sceneworks-download-complete.json"),
-            bytes,
-        )
-        .ok()
-    });
+    let _ = sceneworks_core::download_receipt::write(
+        &managed_path.join(".sceneworks-download-complete.json"),
+        &receipt,
+    );
 }
 
 #[cfg(test)]
@@ -4487,6 +4553,88 @@ mod download_receipt_tests {
     // env-first `huggingface_repo_cache_path`, so without this they would resolve into a developer's
     // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
     use crate::tests::support::isolate_hf_cache;
+
+    #[test]
+    fn discovery_repairs_legacy_snapshot_revisions_and_restores_cache_eligibility() {
+        use sceneworks_core::model_artifacts::artifact_selection::{
+            local_cache_eligibility_for_model, LocalCacheCoverage,
+        };
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let repo = "owner/receipt-repair";
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = huggingface_repo_cache_path(data, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rev);
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        // A newer catalog pin must never be substituted for the snapshot actually installed.
+        let model = json!({"id":"repair", "downloads":[{"provider":"huggingface", "repo":repo,
+            "revision":"2222222222222222222222222222222222222222", "variant":"q4", "default":true, "files":["q4/*"]}]});
+        for revision in [None, Some(Value::Null), Some(json!("")), Some(json!("  "))] {
+            let mut entry = json!({"repo":repo, "modelId":"repair", "variant":"q4", "backfilled":true,
+                "resolvedFiles":["q4/model.safetensors"], "customField":"preserved"});
+            if let Some(revision) = revision {
+                entry["snapshotRevision"] = revision;
+            }
+            let sibling = json!({"repo":repo,"modelId":"other","variant":"q8", "snapshotRevision":rev,
+                "resolvedFiles":["q8/model.safetensors"]});
+            let mut top = entry.clone();
+            top["receipts"] = json!([entry, sibling]);
+            std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::None
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            let bytes = std::fs::read(&marker).unwrap();
+            let after: Value = serde_json::from_slice(&bytes).unwrap();
+            top["snapshotRevision"] = json!(rev);
+            top["receipts"][0]["snapshotRevision"] = json!(rev);
+            assert_eq!(
+                after, top,
+                "only missing revisions change, including the mirrored top-level receipt"
+            );
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::Full
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            assert_eq!(
+                std::fs::read(&marker).unwrap(),
+                bytes,
+                "repeat discovery is idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_revision_repair_does_not_pin_a_torn_shard_set() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = "owner/torn-repair";
+        let root = huggingface_repo_cache_path(temp.path(), repo).unwrap();
+        let snapshot = root.join("snapshots/1111111111111111111111111111111111111111");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let managed = temp.path().join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":repo,"modelId":"repair", "resolvedFiles":["model.safetensors.index.json"]});
+        let before = serde_json::to_vec(&receipt).unwrap();
+        std::fs::write(&marker, &before).unwrap();
+        repair_missing_snapshot_revisions(&managed, &json!({"id":"repair"}), temp.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
 
     fn builtin_models_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -6455,9 +6603,12 @@ fn install_state_for(
         // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
+        let mut tier_dependencies_missing = false;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
+                tier_dependencies_missing =
+                    variants.iter().any(|variant| variant.dependencies_missing);
                 let any_installed = variants.iter().any(|variant| variant.installed);
                 // A TORN tier — some of its files present but not all — is a genuine repair candidate:
                 // it will fail to load, and re-downloading that tier fixes it. A never-fetched tier is
@@ -6523,6 +6674,7 @@ fn install_state_for(
         // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
         // manual delete — and so the backfill below can re-record the tier honestly.
         repair_torn_backfilled_receipts(&managed_path, data_dir);
+        repair_missing_snapshot_revisions(&managed_path, model, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
@@ -6562,7 +6714,10 @@ fn install_state_for(
                             .and_then(Value::as_bool)
                             .unwrap_or(false)
                 });
-        let usable_stale = stale_files_present && !breaking_update;
+        // A receipt proves the primary files exist, not that their dependencies still do.
+        // Do not let it override missing dependencies. A partial nonbreaking primary update
+        // may still use its complete older receipt.
+        let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
@@ -6586,8 +6741,11 @@ fn install_state_for(
         let tier_scoped: Vec<Value> = model_co_requisite_downloads(model)
             .into_iter()
             .filter(|download| co_requisite_variant(download).is_some())
+            .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
             .collect();
-        if !tier_scoped.is_empty() {
+        // Current matrix variants already check their matching dependency sets with the primary.
+        // Retain the dependency floor when a receipt is supplying an older primary instead.
+        if (!model_has_variant_matrix(model) || usable_stale) && !tier_scoped.is_empty() {
             let tiers: std::collections::BTreeSet<String> = tier_scoped
                 .iter()
                 .filter_map(co_requisite_variant)
@@ -6789,6 +6947,8 @@ struct ModelVariantState {
     installed_path: Option<String>,
     /// This tier's incomplete-cache signal (some but not all `files` present).
     cache_incomplete: bool,
+    /// A present primary is missing required companions; primary-only receipts cannot repair this.
+    dependencies_missing: bool,
     /// Files this tier is missing from the cache (empty when complete or absent).
     missing_required_files: Vec<String>,
     /// This tier's estimated download size (from `downloads[].estimatedSizeBytes` /
@@ -6847,13 +7007,11 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
-        // sc-19078: the MiniMax-H3 tiers ship two DiT partition dirs (`{tier}/transformer` and
-        // `{tier}/transformer_ref`) and NO `model_index.json` at either level, so the coarse
-        // `q4/transformer/*` glob is satisfied by a single landed file out of fourteen shards. Like
-        // SenseNova the id — not the family — picks the predicate: the two catalog entries share the
-        // `minimax-h3` family but own DIFFERENT partitions of one repo, so a family-only predicate
-        // would have to demand both and report a reference-only install as torn forever.
-        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
+        // Both MiniMax-H3 entries load both DiT partitions. Each partition's glob can match
+        // an interrupted download, so require both indexed shard sets before advertising a tier.
+        "minimax-h3" if tc::minimax_h3_tier_predicate(model_id).is_some() => {
+            Some(|dir| tc::minimax_h3_tier_complete(dir) && tc::minimax_h3_ref_tier_complete(dir))
+        }
         _ => None,
     }
 }
@@ -6989,6 +7147,42 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // A tier is usable only with its own required companions. Checking these only at
+            // model level let a complete q4 encoder certify bf16 and hid its repair action.
+            // An absent primary remains absent even if shared files from another tier exist.
+            let mut dependencies_missing = false;
+            if installed || cache_incomplete {
+                for download in model_co_requisite_downloads_for_variant(
+                    model,
+                    entry.get("variant").and_then(Value::as_str),
+                )
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+                {
+                    let health = co_requisite_cache_health(data_dir, &download);
+                    if health.as_ref().is_some_and(|health| health.installed) {
+                        continue;
+                    }
+                    installed = false;
+                    cache_incomplete = true;
+                    dependencies_missing = true;
+                    let repo = download
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let missing = health
+                        .map(|health| health.missing_files)
+                        .filter(|files| !files.is_empty())
+                        .unwrap_or_else(|| string_array_field(&download, "files"));
+                    if missing.is_empty() {
+                        missing_required_files.push(repo.to_owned());
+                    } else {
+                        missing_required_files
+                            .extend(missing.iter().map(|file| format!("{repo}/{file}")));
+                    }
+                }
+            }
+
             let installed_path = if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -7006,6 +7200,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
                 cache_incomplete,
+                dependencies_missing,
                 missing_required_files,
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
@@ -10296,6 +10491,78 @@ mod variant_install_tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn tier_dependencies_cannot_be_borrowed_from_a_sibling_or_a_receipt() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let components = "SceneWorks/encoders";
+        let mut model = quant_matrix_model(repo);
+        for tier in ["q4", "q8", "bf16"] {
+            model["downloads"].as_array_mut().unwrap().push(json!({
+                "provider": "huggingface", "repo": components, "coRequisite": true,
+                "variant": tier, "files": [format!("{tier}/encoder.bin")]
+            }));
+        }
+        seed_cache(data.path(), repo, &["bf16/model.safetensors"]);
+        seed_cache(
+            data.path(),
+            components,
+            &["q4/encoder.bin", "bf16/encoder.bin"],
+        );
+        let state =
+            || install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state().installed); // Also backfills the primary receipt.
+        let receipt = data.path().join("models").join(safe_download_dir(repo));
+        assert!(!receipt_file_sets(&receipt, repo, Some("matrix_model")).is_empty());
+
+        std::fs::remove_file(
+            huggingface_repo_cache_path(data.path(), components)
+                .unwrap()
+                .join("snapshots/abc123/bf16/encoder.bin"),
+        )
+        .unwrap();
+        let broken = state();
+        assert!(
+            !broken.installed,
+            "q4's encoder and the bf16 primary receipt cannot certify bf16"
+        );
+        assert!(broken.cache_incomplete);
+        assert!(broken
+            .missing_required_files
+            .contains(&format!("{components}/bf16/encoder.bin")));
+        let variants = model_variant_states(&model, data.path());
+        for tier in ["q4", "q8"] {
+            let variant = variants.iter().find(|v| v.variant == tier).unwrap();
+            assert!(
+                !variant.installed && !variant.cache_incomplete,
+                "absent primary {tier}"
+            );
+        }
+
+        seed_cache(data.path(), components, &["bf16/encoder.bin"]);
+        assert!(state().installed);
+        assert!(!state().cache_incomplete);
+    }
+
+    #[test]
+    fn optional_tier_dependencies_do_not_block_an_installed_primary() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let mut model = quant_matrix_model(repo);
+        model["downloads"].as_array_mut().unwrap().push(json!({
+            "provider": "huggingface", "repo": "SceneWorks/optional", "coRequisite": true,
+            "variant": "q4", "required": "soft", "files": ["optional.bin"]
+        }));
+        seed_cache(data.path(), repo, &["q4/model.safetensors"]);
+        let variants = model_variant_states(&model, data.path());
+        let q4 = variants.iter().find(|v| v.variant == "q4").unwrap();
+        assert!(q4.installed && !q4.cache_incomplete);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state.installed && !state.cache_incomplete);
     }
 
     #[test]

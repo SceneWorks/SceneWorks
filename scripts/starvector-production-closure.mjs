@@ -16,6 +16,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "Cargo.lock",
   "Cargo.toml",
   "apps/rust-api/src/main.rs",
+  "crates/sceneworks-core/src/download_receipt.rs",
   "crates/sceneworks-worker/Cargo.toml",
   "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
   "crates/sceneworks-worker/src/bin/starvector_terminal_sanitize.rs",

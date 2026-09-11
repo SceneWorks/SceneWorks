@@ -759,6 +759,44 @@ describe("ModelManagerScreen gated-model notice", () => {
       { variant: "q8" },
     );
   });
+
+  it("repairs MiniMax-H3 bf16's missing encoder while q4 remains installed", async () => {
+    const model = {
+      ...TORN_TIER_MODEL,
+      id: "minimax_h3",
+      name: "MiniMax-H3",
+      family: "minimax-h3",
+      cacheState: "incomplete",
+      repairAvailable: true,
+      variants: [
+        {
+          variant: "bf16",
+          installed: false,
+          installState: "missing",
+          cacheState: "incomplete",
+          missingRequiredFiles: ["MiniMaxAI/MiniMax-H3/text_encoder/config.json"],
+        },
+        { variant: "q8", installed: false, installState: "missing", cacheState: "missing" },
+        { variant: "q4", installed: true, installState: "installed", cacheState: "complete" },
+      ],
+    };
+    await render([model]);
+    const rows = [...container.querySelectorAll(".model-tier-row")];
+    const bf16 = rows[0]; // Tier order is bf16, q8, q4.
+    expect(bf16.querySelector(".status-badge").textContent).toBe("incomplete");
+    const fix = [...bf16.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fix.title).toContain("text_encoder/config.json");
+    expect(fix.disabled).toBe(false);
+    await click(fix);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "minimax_h3" }), { variant: "bf16" });
+    createModelDownloadJob.mockClear();
+    await click(container.querySelector(".model-card-primary"));
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "minimax_h3" }), { variant: "bf16" });
+    for (const tier of ["Q4", "Q8"]) {
+      const row = rows.find((candidate) => candidate.textContent.includes(tier));
+      expect([...row.querySelectorAll("button")].some((button) => button.textContent === "Fix")).toBe(false);
+    }
+  });
 });
 
 const WAN_MOE_MODEL = {

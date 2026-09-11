@@ -17,6 +17,12 @@
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
 # back into the dispatched `ref` when the branch has commits. Nothing is merged automatically.
 #
+# RE-RUNNING A FAILED DISPATCH IS SUPPORTED, AND IS THE RECOVERY FOR A TRANSIENT INFRA FAULT.
+# `gh run rerun --failed` reuses the RUN ID, so the branch name is the same one -- and the new
+# attempt RESUMES that branch rather than colliding with it or re-cutting it. Anchors an earlier
+# attempt already committed stay put, plan as `current`, and are skipped; the walk appends the rest.
+# See the header of `scripts/ci/memory-catalog/branch.sh` for the three arms and why they exist.
+#
 # FETCHING THE WEIGHTS IT NEEDS (`download_missing`, default false, sc-22738). Neither box holds the
 # whole catalog, and an anchor whose pinned snapshot is under none of the hub roots plans as
 # `weights_missing` and is skipped. Downloading the missing snapshots on the Windows box is faster
@@ -433,6 +439,61 @@ jobs:
       # %USERPROFILE%\.cargo\bin proxies (sc-13166). Same composite action every candle lane uses.
       - name: Prepare the Rust toolchain
         uses: ./.github/actions/prepare-rust-runner
+
+      # THE SAME DECISION windows-candle.yml ALREADY MADE, FOR THE SAME REASON (sc-22738).
+      # ------------------------------------------------------------------------------------------
+      # The shared runner exports RUSTC_WRAPPER=sccache. The prep action above correctly clears a
+      # wrapper that is MISSING, but an INSTALLED daemon can still reset its local connection
+      # mid-build -- Windows os error 10054, "an existing connection was forcibly closed by the
+      # remote host". windows-candle.yml records that failure twice (the backend-candle test and the
+      # sidecar check) and disables the wrapper for both. This job hit it a third time: run
+      # 34490358777 died four minutes into "Build the candle memory adapter" with ZERO rustc
+      # diagnostics --
+      #
+      #   sccache: error: failed to execute compile
+      #   sccache: caused by: error reading compile response from server
+      #   sccache: caused by: An existing connection was forcibly closed by the remote host.
+      #                       (os error 10054)
+      #   error: could not compile `candle-transformers` / `candle-gen`
+      #
+      # -- because a wrapper that drops its socket reports no compiler error to attribute the
+      # failure to. That is also why this is a DISABLE and not a retry-with-fallback: a retry would
+      # spend a second cold candle build to learn exactly as little.
+      #
+      # This job compiles candle-core, candle-transformers, the whole vendored inference tree and
+      # the CUDA kernels on that same box, and does it COLD every dispatch (actions/checkout's
+      # `clean: true` runs `git clean -ffdx`, which takes `target/` with it). It is the heavy Candle
+      # lane by every property the sibling comment names, so rustc is made direct and deterministic
+      # FOR THIS JOB ONLY. Cargo's registry/git caches are untouched and every sibling workflow keeps
+      # its sccache.
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+
+      # NO "Isolate Cargo dependency checkout" STEP HERE, AND THAT IS DELIBERATE (sc-22738).
+      # ------------------------------------------------------------------------------------------
+      # windows-candle.yml pairs the step above with one that repoints CARGO_HOME at
+      # $RUNNER_TEMP\cargo-home, because a sibling runner service could replace the SHARED
+      # %USERPROFILE%\.cargo git checkout while rustc was still reading vendored inference sources
+      # (surfacing as an unrelated missing-path / os error 267). That premise does not hold for this
+      # job: sc-17614 established -- and .github/actions/prepare-rust-runner/action.yml documents at
+      # its "CARGO_HOME IS NOT RUSTUP'S HOME HERE" header -- that each runner service pins CARGO_HOME
+      # in its OWN .env to a PER-RUNNER dependency cache (D:\cargo-home-N: registry\, git\,
+      # config.toml, no bin\). A runner service executes one job at a time, so the cargo git checkout
+      # this job reads is already private to it and a second copy would buy nothing.
+      #
+      # It would also cost something measured. windows-candle.yml's own header states the price of
+      # its step: "a job-local CARGO_HOME under RUNNER_TEMP is re-downloaded every run". This is the
+      # lane whose entire fetch design exists because this box's link is slow -- the persistent
+      # shallow inference clone below was cut after a 70-minute 150 KB/s cargo fetch died mid-pack --
+      # so discarding the per-runner crates.io registry on every dispatch is the wrong trade here.
+      #
+      # If a runner service is ever registered WITHOUT that CARGO_HOME pin, the result is a loud
+      # failure in the build step below rather than silent corruption, and re-running the failed job
+      # is now a supported recovery: scripts/ci/memory-catalog/branch.sh resumes the campaign branch
+      # instead of colliding with it.
 
       # BEFORE `cargo fetch`, ON PURPOSE -- and this lane is why. Run 34044786385 spent 70 minutes at
       # ~150 KB/s in cargo's git fetch of the inference repo, died with `fetch-pack: unexpected

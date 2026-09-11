@@ -52,6 +52,10 @@ require_campaign() {
   fi
 }
 
+# The campaign branch, keyed on the RUN ID and deliberately NOT on $GITHUB_RUN_ATTEMPT: every
+# attempt of one run must land on ONE branch, so a re-run continues the anchors the previous attempt
+# committed instead of splitting them across two branches and two pull requests. branch.sh is where
+# the collision that keying implies is resolved -- read its header before changing this name.
 campaign_branch() {
   printf 'story/%s-%s-campaign-%s' "$CAMPAIGN" "$BACKEND" "$GITHUB_RUN_ID"
 }

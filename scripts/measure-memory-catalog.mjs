@@ -1222,10 +1222,10 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // The engine id equals the catalog model id for all five, so the family key, the plan row's
   // `provider` and the anchor key's modelId are the same token.
   kolors: { env: "KOLORS", repo: "SceneWorks/kolors-mlx", arms: ["mlx", "candle"] },
-  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"] },
+  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"], requiredTensorComponents: ["text_encoder", "transformer", "vae"] },
   // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split from
   // `flux1_dev`: a turbo plan satisfied by base weights would re-label the base model's peaks.
-  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"] },
+  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"], requiredTensorComponents: ["text_encoder", "transformer", "vae"] },
   // Ideogram is the only shipped family whose tiers do NOT all come from one repository, which is
   // what `tiers` exists for: `q4`/`q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and
   // `bf16` is the separate `SceneWorks/ideogram-4` repo at a separate revision (worker
@@ -1877,6 +1877,16 @@ export async function directoryHasFiles(directory) {
  *  `model.safetensors.index.fp16.json`): its `weight_map` names every shard the loader opens. */
 export const SAFETENSORS_INDEX_PATTERN = /\.safetensors\.index(?:\.[^.]+)?\.json$/;
 
+async function hasComponentWeights(root) {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".safetensors")) continue;
+    const info = await stat(path.join(root, entry.name)).catch(() => null);
+    if (info?.isFile() && info.size > 0) return true;
+  }
+  return false;
+}
+
 /**
  * The shards a tier root's own safetensors indexes name but the root does not hold, as paths
  * relative to `tierRoot` (sc-22738).
@@ -2087,6 +2097,11 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // so which file a root must carry depends on the tier being classified.
   const requiredTierFiles = requiredFilesFor(artifact.requiredTierFiles ?? family.requiredTierFiles, parts.tier);
   const missingTierFiles = [];
+  for (const component of family.requiredTensorComponents ?? []) {
+    if (!(await hasComponentWeights(path.join(resolved.root, component)))) {
+      missingTierFiles.push(`${component}/*.safetensors`);
+    }
+  }
   for (const file of requiredTierFiles) {
     try {
       if (!(await stat(path.join(resolved.root, file))).isFile()) missingTierFiles.push(file);
@@ -2235,8 +2250,14 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     // `runnable` would send an operator to book a capture that cannot open its text encoder.
     const missing = [];
     for (const component of MAGE_COMPONENT_IDS) {
-      if (!(await firstExistingDirectory([path.join(root, parts.tier, component)]))) {
+      const componentRoot = path.join(root, parts.tier, component);
+      // A config-only directory is not a staged encoder/VAE. The loader opens
+      // safetensors directly here; otherwise --download-missing never repairs it.
+      if (!(await hasComponentWeights(componentRoot))) {
         missing.push(`${parts.tier}/${component}`);
+      }
+      for (const shard of await missingIndexedShards(componentRoot)) {
+        missing.push(`${parts.tier}/${component}/${shard}`);
       }
     }
     if (missing.length > 0) {

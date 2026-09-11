@@ -21,8 +21,11 @@ if [[ -n "$(git status --porcelain)" ]]; then
   git status --porcelain
 fi
 
+# $BASE_SHA is the newest commit of this branch the REMOTE already has (branch.sh), so this counts
+# what is NOT up there yet. On a resumed re-run that excludes the anchors an earlier attempt pushed
+# and includes any it committed but failed to push.
 COUNT="$(git rev-list --count "${BASE_SHA}..HEAD")"
-echo "${COUNT} anchor commit(s) on ${CAMPAIGN_BRANCH}"
+echo "${COUNT} anchor commit(s) not yet on the remote ${CAMPAIGN_BRANCH}"
 if [[ "$COUNT" == "0" ]]; then
   echo "nothing landed; not pushing an empty branch"
   exit 0
@@ -33,6 +36,6 @@ git push --set-upstream --force-with-lease origin "HEAD:${CAMPAIGN_BRANCH}"
 {
   echo "#### Pushed"
   echo
-  echo "\`${COUNT}\` anchor commit(s) on \`${CAMPAIGN_BRANCH}\`."
+  echo "\`${COUNT}\` new anchor commit(s) pushed to \`${CAMPAIGN_BRANCH}\`."
   echo
 } >> "$GITHUB_STEP_SUMMARY"
