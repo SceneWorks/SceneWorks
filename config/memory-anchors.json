@@ -7033,6 +7033,51 @@
       "overallAllocatorEnvelopeBytes": 11675893760
     },
     {
+      "id": "sdxl:candle:q8:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-9b702b220ed72ac402e5",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sdxl-q8-candle-evidence.json",
+        "sha256": "f93a3b24e6c586baf54a04a39eb01dfbdbd4c6cfe73ee48f1b6fc98ab9787790",
+        "recordId": "imc-9b702b220ed72ac402e5",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "d255bf5acbd4a403b49f519be008fcdc14f2061a0071f67287dd80dc48b46293"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4023386112,
+        "denoise": 9964617728,
+        "decode": 14796455936
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4023386112,
+        "denoise": 9964617728,
+        "decode": 14796455936
+      },
+      "overallAllocatorEnvelopeBytes": 14796455936
+    },
+    {
       "id": "sensenova_u1_8b:mlx:bf16:base:base:sensenova-u1-quality-bf16-mlx-shared-ladder-v1:imc-989847820f3a5dcbe171",
       "modelId": "sensenova_u1_8b",
       "modelFamily": "sensenova-u1",
@@ -9921,30 +9966,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sdxl:candle:q8",
-      "modelId": "sdxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:sdxl:mlx:bf16",
