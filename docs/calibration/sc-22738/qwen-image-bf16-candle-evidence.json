@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/qwen-image-mlx",
+        "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-09-10T18:08:37Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:qwen_image-five-rung-reference",
+        "blockers": [
+          "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 29699866624
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 45101350912
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 55975084032
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 55975084032
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "qwen-image-candle-bf16-seed15817-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-42edaceeb6d5f29dc2ce",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ddde47f603a85f3b5b04",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 29699866624,
+          "allocatorBytes": 29699866624,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 55975084032,
+          "allocatorBytes": 55975084032,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 45101350912,
+          "allocatorBytes": 45101350912,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 55975084032,
+          "allocatorBytes": 55975084032,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "b94f8358c5c4a5e7e501abe8f1384b5a5c1684056e7f6b05f7b719692b39bc83",
+          "dirty": false,
+          "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1eae5e8cc352885d463495174c0bc0581a1faa86cc8a991b7bafab73b8b83128",
+          "revision": "e4549da2961c9a29fa00081f8f3f8bdb88256de8"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, and loadability; it intentionally remains gated because this run does not repeat each sibling story's promotion-quality, negative-mutation, and lifecycle suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Qwen-Image base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "qwen_image",
+        "overlay": "none",
+        "provider": "qwen_image",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

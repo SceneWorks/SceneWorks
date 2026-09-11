@@ -2,6 +2,141 @@
   "schemaVersion": 1,
   "anchors": [
     {
+      "id": "chroma1_base:candle:bf16:base:base:chroma1-base-bf16-cuda-request-scoped-staged-residency-v1:imc-b1813ea0729c95602205",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "provider": "chroma1_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-base-bf16-candle-evidence.json",
+        "sha256": "745019b6dd9a05bb60601ac6553dd14887fb8397c5567c4fd9a8453f29247e8f",
+        "recordId": "imc-b1813ea0729c95602205",
+        "calibrationFingerprint": "chroma1-base-bf16-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "346e29ba7b74b6ebca91811a776a92a07e404a14a664aadc5c461322b77671c5"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "overallAllocatorEnvelopeBytes": 46174044160
+    },
+    {
+      "id": "chroma1_base:candle:q4:base:base:chroma1-base-q4-cuda-request-scoped-staged-residency-v1:imc-dc4d1874e41a8751a4ae",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "provider": "chroma1_base",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-base-q4-candle-evidence.json",
+        "sha256": "3a472eb9da14fe985e8129bdd2aafb4f4ab0155ccd31ff253916fc1d2717767a",
+        "recordId": "imc-dc4d1874e41a8751a4ae",
+        "calibrationFingerprint": "chroma1-base-q4-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "346e29ba7b74b6ebca91811a776a92a07e404a14a664aadc5c461322b77671c5"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10203693056,
+        "denoise": 13424918528,
+        "decode": 12151947264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10203693056,
+        "denoise": 13424918528,
+        "decode": 12151947264
+      },
+      "overallAllocatorEnvelopeBytes": 13424918528
+    },
+    {
+      "id": "chroma1_base:candle:q8:base:base:chroma1-base-q8-cuda-request-scoped-staged-residency-v1:imc-976731fea4f6f7de20f7",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "provider": "chroma1_base",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-base-q8-candle-evidence.json",
+        "sha256": "92eee9b3922d65bb3e2a888ecb01b5139ff90f3e6c288844d04092da77b714a6",
+        "recordId": "imc-976731fea4f6f7de20f7",
+        "calibrationFingerprint": "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "346e29ba7b74b6ebca91811a776a92a07e404a14a664aadc5c461322b77671c5"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 29708255232,
+        "denoise": 42291167232,
+        "decode": 37595643904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 29708255232,
+        "denoise": 42291167232,
+        "decode": 37595643904
+      },
+      "overallAllocatorEnvelopeBytes": 42291167232
+    },
+    {
       "id": "chroma1_base:mlx:bf16:base:base:chroma1-base-bf16-mlx-shared-ladder-v1:imc-443609035e88f1ee5bf9",
       "modelId": "chroma1_base",
       "modelFamily": "chroma",
@@ -140,6 +275,141 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "chroma1_flash:candle:bf16:base:base:chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1:imc-3b6de030147fb4e44a37",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-bf16-candle-evidence.json",
+        "sha256": "dc69ae46af2efa9303fcb867fbf9a24c26867a34caaef4269df649ddb3e955e2",
+        "recordId": "imc-3b6de030147fb4e44a37",
+        "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "89e183da4ef22b7dd38e4c4315080ad8b9659bc1c2fabea71d3dd7203e392d16"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 41073770496,
+        "denoise": 46375370752,
+        "decode": 41040216064
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 41073770496,
+        "denoise": 46375370752,
+        "decode": 41040216064
+      },
+      "overallAllocatorEnvelopeBytes": 46375370752
+    },
+    {
+      "id": "chroma1_flash:candle:q4:base:base:chroma1-flash-q4-cuda-request-scoped-staged-residency-v1:imc-81f803a5c15aa8b6f421",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-q4-candle-evidence.json",
+        "sha256": "8584ef09cc4dd2f6e68512c287dabc2d927cea5e2ecfaba80b17e23d7b538a91",
+        "recordId": "imc-81f803a5c15aa8b6f421",
+        "calibrationFingerprint": "chroma1-flash-q4-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "89e183da4ef22b7dd38e4c4315080ad8b9659bc1c2fabea71d3dd7203e392d16"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10170138624,
+        "denoise": 13424918528,
+        "decode": 12116295680
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10170138624,
+        "denoise": 13424918528,
+        "decode": 12116295680
+      },
+      "overallAllocatorEnvelopeBytes": 13424918528
+    },
+    {
+      "id": "chroma1_flash:candle:q8:base:base:chroma1-flash-q8-cuda-request-scoped-staged-residency-v1:imc-25b65ae124dc5818c8c3",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-q8-candle-evidence.json",
+        "sha256": "1faa5204e962ce4f8eecc66d49566a249fc56d47def70ba9f4ec2af2d5525dec",
+        "recordId": "imc-25b65ae124dc5818c8c3",
+        "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "89e183da4ef22b7dd38e4c4315080ad8b9659bc1c2fabea71d3dd7203e392d16"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12082741248,
+        "denoise": 17183014912,
+        "decode": 12049186816
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12082741248,
+        "denoise": 17183014912,
+        "decode": 12049186816
+      },
+      "overallAllocatorEnvelopeBytes": 17183014912
+    },
+    {
       "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
       "modelId": "chroma1_flash",
       "modelFamily": "chroma",
@@ -276,6 +546,141 @@
       },
       "overallAllocatorEnvelopeBytes": 75229232692,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "chroma1_hd:candle:bf16:base:base:chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1:imc-7c225de3c2a22a6491a2",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-hd-bf16-candle-evidence.json",
+        "sha256": "bd54ac5ab50a43b18386109fcdfe5ead0c80bda6569735fbceb67a0d5b9dfffe",
+        "recordId": "imc-7c225de3c2a22a6491a2",
+        "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "a4318addc11b0e42102e96aaeaa91988ed7867ae81c851df41b37798a2e9bd89"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40939552768,
+        "denoise": 46174044160,
+        "decode": 40908095488
+      },
+      "overallAllocatorEnvelopeBytes": 46174044160
+    },
+    {
+      "id": "chroma1_hd:candle:q4:base:base:chroma1-hd-q4-cuda-request-scoped-staged-residency-v1:imc-434f5169608ee2d91f4b",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-hd-q4-candle-evidence.json",
+        "sha256": "3205feac6f39d113f27b72e7ebe92e1977e557845b7f86be054b9711d75a2212",
+        "recordId": "imc-434f5169608ee2d91f4b",
+        "calibrationFingerprint": "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "a4318addc11b0e42102e96aaeaa91988ed7867ae81c851df41b37798a2e9bd89"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10203693056,
+        "denoise": 13424918528,
+        "decode": 12151947264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10203693056,
+        "denoise": 13424918528,
+        "decode": 12151947264
+      },
+      "overallAllocatorEnvelopeBytes": 13424918528
+    },
+    {
+      "id": "chroma1_hd:candle:q8:base:base:chroma1-hd-q8-cuda-request-scoped-staged-residency-v1:imc-c5e1913f5ba8d889cccc",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-hd-q8-candle-evidence.json",
+        "sha256": "3667de3a79f4418c5659d384f271798daa1387129d8ec2d1c2979d5a4910b40b",
+        "recordId": "imc-c5e1913f5ba8d889cccc",
+        "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
+        "loaderClosureDigest": "a4318addc11b0e42102e96aaeaa91988ed7867ae81c851df41b37798a2e9bd89"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12116295680,
+        "denoise": 17317232640,
+        "decode": 12084838400
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12116295680,
+        "denoise": 17317232640,
+        "decode": 12084838400
+      },
+      "overallAllocatorEnvelopeBytes": 17317232640
     },
     {
       "id": "chroma1_hd:mlx:bf16:base:base:chroma1-hd-bf16-mlx-shared-ladder-v1:imc-460e14ea1de207325719",
@@ -1322,6 +1727,141 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "ideogram_4:candle:bf16:base:base:ideogram4-candle-request-scoped-staged-residency-v1-base-bf16:imc-78e4bffde30c168cc4f4",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-bf16-candle-evidence.json",
+        "sha256": "a503c05a692d74f7d3066fe3756d3c7e05a96b8e0ccb464ed4571737a0abc6ca",
+        "recordId": "imc-78e4bffde30c168cc4f4",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-bf16",
+        "loaderClosureDigest": "079dd79ff08c35aa9f364423f6a6febad350c1090b1e577b10b88605c41df665"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 43187699712,
+        "denoise": 43187699712,
+        "decode": 37821087744
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 43187699712,
+        "denoise": 43187699712,
+        "decode": 37821087744
+      },
+      "overallAllocatorEnvelopeBytes": 43187699712
+    },
+    {
+      "id": "ideogram_4:candle:q4:base:base:ideogram4-candle-request-scoped-staged-residency-v1-base-q4:imc-3d1870dc3811d9c25893",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-q4-candle-evidence.json",
+        "sha256": "1a5ca83c2f78f873ff7bd05a155ec8456135310c6c3fa7d4d520f02f3579af43",
+        "recordId": "imc-3d1870dc3811d9c25893",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-q4",
+        "loaderClosureDigest": "079dd79ff08c35aa9f364423f6a6febad350c1090b1e577b10b88605c41df665"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 19229835264,
+        "denoise": 19229835264,
+        "decode": 20507000832
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 19229835264,
+        "denoise": 19229835264,
+        "decode": 20507000832
+      },
+      "overallAllocatorEnvelopeBytes": 20507000832
+    },
+    {
+      "id": "ideogram_4:candle:q8:base:base:ideogram4-candle-request-scoped-staged-residency-v1-base-q8:imc-8c2a56f0a73600e4cda8",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-q8-candle-evidence.json",
+        "sha256": "8db2631664b253de610f5334b2c84f7f972ec5b51c992a44b201ce132bc5740c",
+        "recordId": "imc-8c2a56f0a73600e4cda8",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-q8",
+        "loaderClosureDigest": "079dd79ff08c35aa9f364423f6a6febad350c1090b1e577b10b88605c41df665"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32517390336,
+        "denoise": 32517390336,
+        "decode": 27452768256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 32517390336,
+        "denoise": 32517390336,
+        "decode": 27452768256
+      },
+      "overallAllocatorEnvelopeBytes": 32517390336
+    },
+    {
       "id": "ideogram_4:mlx:bf16:base:base:ideogram-4-bf16-mlx-shared-ladder-v1:imc-4a7972af13364c485a83",
       "modelId": "ideogram_4",
       "modelFamily": "ideogram",
@@ -1457,6 +1997,141 @@
       "overallAllocatorEnvelopeBytes": 98638379712
     },
     {
+      "id": "ideogram_4_turbo:candle:bf16:base:base:ideogram4-candle-request-scoped-staged-residency-v1-turbo-bf16:imc-a62eb72cac14b45b459b",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "provider": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-turbo-bf16-candle-evidence.json",
+        "sha256": "0fc38ce940c12863714f32c9ac160d158ecdbcb0b4363f5a5189e7d4229b996d",
+        "recordId": "imc-a62eb72cac14b45b459b",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-bf16",
+        "loaderClosureDigest": "be3a7a75fabbd48cc6e0ae91cd7b9583829278217aa52d502a4a2baabd4334ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26009927680,
+        "denoise": 26009927680,
+        "decode": 24432869376
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26009927680,
+        "denoise": 26009927680,
+        "decode": 24432869376
+      },
+      "overallAllocatorEnvelopeBytes": 26009927680
+    },
+    {
+      "id": "ideogram_4_turbo:candle:q4:base:base:ideogram4-candle-request-scoped-staged-residency-v1-turbo-q4:imc-6a0df4c79434321d05ad",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "provider": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-turbo-q4-candle-evidence.json",
+        "sha256": "a7c80b90bb84a76e66ccd3150c06f6404c1d635535bee28717aeabf220db4bef",
+        "recordId": "imc-6a0df4c79434321d05ad",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q4",
+        "loaderClosureDigest": "be3a7a75fabbd48cc6e0ae91cd7b9583829278217aa52d502a4a2baabd4334ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12957253632,
+        "denoise": 12957253632,
+        "decode": 20574109696
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12957253632,
+        "denoise": 12957253632,
+        "decode": 20574109696
+      },
+      "overallAllocatorEnvelopeBytes": 20574109696
+    },
+    {
+      "id": "ideogram_4_turbo:candle:q8:base:base:ideogram4-candle-request-scoped-staged-residency-v1-turbo-q8:imc-c3b2a4acae398db01b30",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "provider": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-turbo-q8-candle-evidence.json",
+        "sha256": "c23f30aa19637aee44bb81531955a4c935a73566a9ae04f8c011739ff462a82a",
+        "recordId": "imc-c3b2a4acae398db01b30",
+        "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q8",
+        "loaderClosureDigest": "be3a7a75fabbd48cc6e0ae91cd7b9583829278217aa52d502a4a2baabd4334ea"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18728615936,
+        "denoise": 18728615936,
+        "decode": 20976762880
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18728615936,
+        "denoise": 18728615936,
+        "decode": 20976762880
+      },
+      "overallAllocatorEnvelopeBytes": 20976762880
+    },
+    {
       "id": "ideogram_4_turbo:mlx:bf16:base:base:ideogram-4-turbo-bf16-mlx-shared-ladder-v1:imc-2ef16c0183bf798a1c32",
       "modelId": "ideogram_4_turbo",
       "modelFamily": "ideogram",
@@ -1590,6 +2265,276 @@
         "decode": 86684652600
       },
       "overallAllocatorEnvelopeBytes": 86684652600
+    },
+    {
+      "id": "illustrious_xl_v1:candle:bf16:base:base:sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1:imc-d857e44d98a4191596ca",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v1-bf16-candle-evidence.json",
+        "sha256": "b2704207e06f647b119e55f5405611edc8fbdc153a3ce414e670eb2cea6cddd2",
+        "recordId": "imc-d857e44d98a4191596ca",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+        "loaderClosureDigest": "4f95b6c78d17d9e94bedea9fe29a03a2b84a6672dc9d75f9de200a262b6cdfe8"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "overallAllocatorEnvelopeBytes": 17923309568
+    },
+    {
+      "id": "illustrious_xl_v1:candle:q4:base:base:sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1:imc-e20f537076bb310986c9",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v1-q4-candle-evidence.json",
+        "sha256": "4be295c4b72b6e5bf1b2e9a2491cde9a2c8861f07d6b51e390f1a83e4df00531",
+        "recordId": "imc-e20f537076bb310986c9",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+        "loaderClosureDigest": "4f95b6c78d17d9e94bedea9fe29a03a2b84a6672dc9d75f9de200a262b6cdfe8"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 8964276224
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 8964276224
+      },
+      "overallAllocatorEnvelopeBytes": 8964276224
+    },
+    {
+      "id": "illustrious_xl_v1:candle:q8:base:base:sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1:imc-a7fd72a2b1a51734974d",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v1-q8-candle-evidence.json",
+        "sha256": "0b1fab18c80b3bdd75d717e895009790d5a3bbb48e7e725efe5518ce3a72516b",
+        "recordId": "imc-a7fd72a2b1a51734974d",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+        "loaderClosureDigest": "4f95b6c78d17d9e94bedea9fe29a03a2b84a6672dc9d75f9de200a262b6cdfe8"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 19701694464
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 19701694464
+      },
+      "overallAllocatorEnvelopeBytes": 19701694464
+    },
+    {
+      "id": "illustrious_xl_v2:candle:bf16:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-8958081a4b8e5ce60301",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v2-bf16-candle-evidence.json",
+        "sha256": "ab16d08c7fa01918efd3e5deb0e3ac20971e3e66d88adcda6718cffb3da07ce3",
+        "recordId": "imc-8958081a4b8e5ce60301",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+        "loaderClosureDigest": "9e7134cf5a6ea30b6909938a63ca97690be0870a1eaf65eb25a136cabf7968d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "overallAllocatorEnvelopeBytes": 17923309568
+    },
+    {
+      "id": "illustrious_xl_v2:candle:q4:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-c2031094222aeded7e8d",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v2-q4-candle-evidence.json",
+        "sha256": "bc6486c1fd5d3fab11f876af21fdb04407b80fe5ad901ef397b805f5160afd1f",
+        "recordId": "imc-c2031094222aeded7e8d",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+        "loaderClosureDigest": "9e7134cf5a6ea30b6909938a63ca97690be0870a1eaf65eb25a136cabf7968d2"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 11682185216
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 11682185216
+      },
+      "overallAllocatorEnvelopeBytes": 11682185216
+    },
+    {
+      "id": "illustrious_xl_v2:candle:q8:base:base:sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1:imc-e74ad31cbf883327fa1f",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/illustrious-xl-v2-q8-candle-evidence.json",
+        "sha256": "885c375502fa3f344fce1f6475e790bbfad6e981b0017ae91d38a734fb279cc6",
+        "recordId": "imc-e74ad31cbf883327fa1f",
+        "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+        "loaderClosureDigest": "9e7134cf5a6ea30b6909938a63ca97690be0870a1eaf65eb25a136cabf7968d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 14903410688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4096786432,
+        "denoise": 10071572480,
+        "decode": 14903410688
+      },
+      "overallAllocatorEnvelopeBytes": 14903410688
     },
     {
       "id": "kolors:mlx:bf16:base:base:kolors-bf16-mlx-shared-ladder-v1:imc-95a91671619b4e40f246",
@@ -2277,6 +3222,51 @@
       },
       "overallAllocatorEnvelopeBytes": 30855486356,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "lens:candle:bf16:base:base:lens-base-bf16-candle-cuda-shared-ladder-v1:imc-f45e652534dca735ff92",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "provider": "lens",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-bf16-candle-evidence.json",
+        "sha256": "e4201ad025eccd3313215442d4e858647b864a523ecf722533542991191debc0",
+        "recordId": "imc-f45e652534dca735ff92",
+        "calibrationFingerprint": "lens-base-bf16-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "6cb7e2495825a645e51092ea22b4d6c4342126f2c4efa74e4ffca917e666b7fb"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 42550165504,
+        "denoise": 14465105920,
+        "decode": 28962717696
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 42550165504,
+        "denoise": 14465105920,
+        "decode": 28962717696
+      },
+      "overallAllocatorEnvelopeBytes": 42550165504
     },
     {
       "id": "lens:candle:q8:base:base:lens-base-q8-candle-cuda-shared-ladder-v1:imc-655115630dbc30f5e5d4",
@@ -3455,6 +4445,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "mage_flow_base:candle:bf16:base:base:mage-flow-cuda-mage-flow-base-bf16-shared-ladder-v3:imc-add9f340cd90b0a2ffc8",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-bf16-candle-evidence.json",
+        "sha256": "7403fe29acbe5e29550ca6e8f935d8bf7522a6b9cf5f16537d4f4e0c53476919",
+        "recordId": "imc-add9f340cd90b0a2ffc8",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "b8f496fb345366eea1da1ebb1c823da64d3fdcae840b8219978f5745710bd526"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8895070208,
+        "denoise": 10371465216,
+        "decode": 10373562368
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8895070208,
+        "denoise": 10371465216,
+        "decode": 10373562368
+      },
+      "overallAllocatorEnvelopeBytes": 10373562368
+    },
+    {
       "id": "mage_flow_base:mlx:bf16:base:base:mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1:imc-5ca11acafd1ccc6ba6b1",
       "modelId": "mage_flow_base",
       "modelFamily": "mage-flow",
@@ -3591,6 +4626,51 @@
       },
       "overallAllocatorEnvelopeBytes": 11836632548,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit:candle:bf16:base:base:mage-flow-cuda-mage-flow-edit-bf16-shared-ladder-v3:imc-08f6174ba59756fe6d96",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-bf16-candle-evidence.json",
+        "sha256": "40d835f7ba84a6fec11d81fc8995fe42070c6b2aabf67fa9af16ecac3cd31ec2",
+        "recordId": "imc-08f6174ba59756fe6d96",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "5be81d5ac62b4fe641df7e393305064d90726aaed1140649852276b538e989d4"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13863223296,
+        "decode": 13863223296
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13863223296,
+        "decode": 13863223296
+      },
+      "overallAllocatorEnvelopeBytes": 13863223296
     },
     {
       "id": "mage_flow_edit:mlx:bf16:base:base:mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1:imc-8590e420672347a08d21",
@@ -3731,6 +4811,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "mage_flow_edit_base:candle:bf16:base:base:mage-flow-cuda-mage-flow-edit-base-bf16-shared-ladder-v3:imc-b5d468fb1c822b6a4ea2",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-bf16-candle-evidence.json",
+        "sha256": "65887a809d64853972eeb16063003460def9fe5f1af840f5207f62ddaa711b0b",
+        "recordId": "imc-b5d468fb1c822b6a4ea2",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "c4075046618b3d5da5cd641cbaa3de4d06977f53364cfb683ef9dc30f1a47f8e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13863223296,
+        "decode": 13863223296
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13863223296,
+        "decode": 13863223296
+      },
+      "overallAllocatorEnvelopeBytes": 13863223296
+    },
+    {
       "id": "mage_flow_edit_base:mlx:bf16:base:base:mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1:imc-e636cbaf2675e9012486",
       "modelId": "mage_flow_edit_base",
       "modelFamily": "mage-flow",
@@ -3867,6 +4992,51 @@
       },
       "overallAllocatorEnvelopeBytes": 14613796664,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "mage_flow_edit_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3:imc-b8617211f88b35dcd7ba",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-candle-evidence.json",
+        "sha256": "b3a026c3d7f8433ee672fb06c56f694181c3705c7f5cd08d4bdce74db51b01af",
+        "recordId": "imc-b8617211f88b35dcd7ba",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "7ad5085184b4f8af6d855c662bc695859ea22692b66bb6a12016a7a9251794e0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13527678976,
+        "decode": 13192134656
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 10977542144,
+        "denoise": 13527678976,
+        "decode": 13192134656
+      },
+      "overallAllocatorEnvelopeBytes": 13527678976
     },
     {
       "id": "mage_flow_edit_turbo:mlx:bf16:base:base:mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1:imc-e745d017ddf6fafc0f3d",
@@ -4007,6 +5177,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "mage_flow_turbo:candle:bf16:base:base:mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3:imc-141c7668b06e81542fc1",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json",
+        "sha256": "7c61124867aa0b7cd3339153dc3abf857ea01fe8c90d7981fde47bee07d97b85",
+        "recordId": "imc-141c7668b06e81542fc1",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "e030ead287abb9adab2c26f160159668e39276c05238a0cf9cafcd24d70e7e6e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8727298048,
+        "denoise": 10136584192,
+        "decode": 10138681344
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8727298048,
+        "denoise": 10136584192,
+        "decode": 10138681344
+      },
+      "overallAllocatorEnvelopeBytes": 10138681344
+    },
+    {
       "id": "mage_flow_turbo:mlx:bf16:base:base:mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1:imc-c96ca295ccfb9b0ce96f",
       "modelId": "mage_flow_turbo",
       "modelFamily": "mage-flow",
@@ -4145,6 +5360,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json",
+        "sha256": "aaf7f71c7b90a97af94101f9f793aef74266d365198cde4b7ac0916d49313a09",
+        "recordId": "imc-42edaceeb6d5f29dc2ce",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "5f1135bb07164900859142b2262e76d623dc89310ccbdd277b0d8ea7d8065a84"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 29699866624,
+        "denoise": 45101350912,
+        "decode": 55975084032
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 29699866624,
+        "denoise": 45101350912,
+        "decode": 55975084032
+      },
+      "overallAllocatorEnvelopeBytes": 55975084032
+    },
+    {
       "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -4188,6 +5448,51 @@
         "decode": 33526120448
       },
       "overallAllocatorEnvelopeBytes": 42048946176
+    },
+    {
+      "id": "qwen_image:candle:q8:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-58db77f4920399c974f7",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-q8-candle-evidence.json",
+        "sha256": "c04821d4e6d493d2b91ba578b925642436760a384a2cb482ddcd3dd155075f7a",
+        "recordId": "imc-58db77f4920399c974f7",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "5f1135bb07164900859142b2262e76d623dc89310ccbdd277b0d8ea7d8065a84"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 29698818048,
+        "denoise": 29708255232,
+        "decode": 40463499264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 29698818048,
+        "denoise": 29708255232,
+        "decode": 40463499264
+      },
+      "overallAllocatorEnvelopeBytes": 40463499264
     },
     {
       "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-73a0ce2270695ffa49e6",
@@ -4601,6 +5906,276 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "realvisxl:candle:bf16:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d9140dd24bd6d78372b4",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-bf16-candle-evidence.json",
+        "sha256": "bfd22dff9fc9b695105f0186e9ac653cfcd233f2b2bf87945e1771df5f4e8b5f",
+        "recordId": "imc-d9140dd24bd6d78372b4",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "2bb264f768f90b84fac735df6954ae879016c11f76cc152f6f26da856ad071d0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6177161216,
+        "denoise": 13192134656,
+        "decode": 17923309568
+      },
+      "overallAllocatorEnvelopeBytes": 17923309568
+    },
+    {
+      "id": "realvisxl:candle:q4:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-d0b1d678b079bd7bf56a",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-q4-candle-evidence.json",
+        "sha256": "3b033bbb448146a62a505701491e9ac45de69a2a2a1379d507ce647bda806742",
+        "recordId": "imc-d0b1d678b079bd7bf56a",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "2bb264f768f90b84fac735df6954ae879016c11f76cc152f6f26da856ad071d0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 11682185216
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2855272448,
+        "denoise": 4904189952,
+        "decode": 11682185216
+      },
+      "overallAllocatorEnvelopeBytes": 11682185216
+    },
+    {
+      "id": "realvisxl:candle:q8:base:base:sdxl-candle-realvisxl-staged-decode-attention-v1:imc-3f86f4606793cf7b116f",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-q8-candle-evidence.json",
+        "sha256": "7a8c40827abeed07fa876945e5fe26985b3671b06172bace6440c1c1a30d5715",
+        "recordId": "imc-3f86f4606793cf7b116f",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "2bb264f768f90b84fac735df6954ae879016c11f76cc152f6f26da856ad071d0"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4084203520,
+        "denoise": 10061086720,
+        "decode": 14892924928
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4084203520,
+        "denoise": 10061086720,
+        "decode": 14892924928
+      },
+      "overallAllocatorEnvelopeBytes": 14892924928
+    },
+    {
+      "id": "realvisxl_lightning:candle:bf16:base:base:sdxl-candle-realvisxl-lightning-staged-decode-attention-v1:imc-6b8ab2b385dfb725ee3c",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-lightning-bf16-candle-evidence.json",
+        "sha256": "6fdacdc5a7a85ab4ba7ea543e052b0167352b4c013b9f41305cd200b2ae96675",
+        "recordId": "imc-6b8ab2b385dfb725ee3c",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+        "loaderClosureDigest": "6bd247e956a8487884ffce3269d98718aca6423d207eba90b0210d26fce3c904"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6179258368,
+        "denoise": 13194231808,
+        "decode": 17924358144
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6179258368,
+        "denoise": 13194231808,
+        "decode": 17924358144
+      },
+      "overallAllocatorEnvelopeBytes": 17924358144
+    },
+    {
+      "id": "realvisxl_lightning:candle:q4:base:base:sdxl-candle-realvisxl-lightning-staged-decode-attention-v1:imc-7f88e920563960a05e21",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-lightning-q4-candle-evidence.json",
+        "sha256": "357f1706ad5301b26ce4e21473998667b8dda71048bcb71dc22fb7b473425517",
+        "recordId": "imc-7f88e920563960a05e21",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+        "loaderClosureDigest": "6bd247e956a8487884ffce3269d98718aca6423d207eba90b0210d26fce3c904"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2883584000,
+        "denoise": 4898947072,
+        "decode": 11710496768
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2883584000,
+        "denoise": 4898947072,
+        "decode": 11710496768
+      },
+      "overallAllocatorEnvelopeBytes": 11710496768
+    },
+    {
+      "id": "realvisxl_lightning:candle:q8:base:base:sdxl-candle-realvisxl-lightning-staged-decode-attention-v1:imc-15631749f3a60486ddd0",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/realvisxl-lightning-q8-candle-evidence.json",
+        "sha256": "39d038fbab136ebd5b34559a1b236688b6b3284f813aaa2275dc466c064797fd",
+        "recordId": "imc-15631749f3a60486ddd0",
+        "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+        "loaderClosureDigest": "6bd247e956a8487884ffce3269d98718aca6423d207eba90b0210d26fce3c904"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4096786432,
+        "denoise": 11111759872,
+        "decode": 15842934784
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4096786432,
+        "denoise": 11111759872,
+        "decode": 15842934784
+      },
+      "overallAllocatorEnvelopeBytes": 15842934784
+    },
+    {
       "id": "sana_1600m:mlx:bf16:base:base:sana-base-bf16-mlx-full-ladder-v1-resident:imc-a4e0c62f15d4334a8a35",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -4869,6 +6444,98 @@
         "decode": 53746387904
       },
       "overallAllocatorEnvelopeBytes": 53746387904
+    },
+    {
+      "id": "scail2_14b:candle:q4:base:base:scail2-14b-q4-candle-resident-eager-v1:imc-52dbe1e4f3d3466265dc",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q4-candle-evidence.json",
+        "sha256": "6842e2e8e5424d6328c661b4758095d66caa208704060c3b49e301ca8bfa7cee",
+        "recordId": "imc-52dbe1e4f3d3466265dc",
+        "calibrationFingerprint": "scail2-14b-q4-candle-resident-eager-v1",
+        "loaderClosureDigest": "9f9cf0723b20193e0d70159454891dcea838d728bca67da719828f87d8353f88"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 59432239104,
+        "denoise": 85531295744,
+        "decode": 58957234176
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 59432239104,
+        "denoise": 85531295744,
+        "decode": 58957234176
+      },
+      "overallAllocatorEnvelopeBytes": 85531295744,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "scail2_14b:candle:q8:base:base:scail2-14b-q8-candle-resident-eager-v1:imc-bb4ca06550046e7ffbb8",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "provider": "scail2_14b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "animation",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/scail2-14b-q8-candle-evidence.json",
+        "sha256": "63934ca93230fc9ec41708c2413af6413f00fdd9a0a8e337fa905cc7de13d066",
+        "recordId": "imc-bb4ca06550046e7ffbb8",
+        "calibrationFingerprint": "scail2-14b-q8-candle-resident-eager-v1",
+        "loaderClosureDigest": "9f9cf0723b20193e0d70159454891dcea838d728bca67da719828f87d8353f88"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 77,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 67650977792,
+        "denoise": 67692920832,
+        "decode": 67642589184
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 67650977792,
+        "denoise": 67692920832,
+        "decode": 67642589184
+      },
+      "overallAllocatorEnvelopeBytes": 67692920832,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
@@ -5274,6 +6941,141 @@
         "decode": 24534365536
       },
       "overallAllocatorEnvelopeBytes": 30648094704
+    },
+    {
+      "id": "sdxl:candle:bf16:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-cda64646109c3a9bae98",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sdxl-bf16-candle-evidence.json",
+        "sha256": "3895e3a26ddb2e247345c1c916c276d799f595a2be5bbeb89b72bacf37710d96",
+        "recordId": "imc-cda64646109c3a9bae98",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "d255bf5acbd4a403b49f519be008fcdc14f2061a0071f67287dd80dc48b46293"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 6169821184,
+        "denoise": 13184794624,
+        "decode": 17915969536
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 6169821184,
+        "denoise": 13184794624,
+        "decode": 17915969536
+      },
+      "overallAllocatorEnvelopeBytes": 17915969536
+    },
+    {
+      "id": "sdxl:candle:q4:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-9947eef659d23d6abb9d",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sdxl-q4-candle-evidence.json",
+        "sha256": "dce90d7ae1546fdbd66bfcc37acb56aa7f32a20f3b39948f25b687b02bf1712a",
+        "recordId": "imc-9947eef659d23d6abb9d",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "d255bf5acbd4a403b49f519be008fcdc14f2061a0071f67287dd80dc48b46293"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2848980992,
+        "denoise": 4897898496,
+        "decode": 11675893760
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2848980992,
+        "denoise": 4897898496,
+        "decode": 11675893760
+      },
+      "overallAllocatorEnvelopeBytes": 11675893760
+    },
+    {
+      "id": "sdxl:candle:q8:base:base:sdxl-candle-sdxl-staged-decode-attention-v1:imc-9b702b220ed72ac402e5",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sdxl-q8-candle-evidence.json",
+        "sha256": "f93a3b24e6c586baf54a04a39eb01dfbdbd4c6cfe73ee48f1b6fc98ab9787790",
+        "recordId": "imc-9b702b220ed72ac402e5",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+        "loaderClosureDigest": "d255bf5acbd4a403b49f519be008fcdc14f2061a0071f67287dd80dc48b46293"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4023386112,
+        "denoise": 9964617728,
+        "decode": 14796455936
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4023386112,
+        "denoise": 9964617728,
+        "decode": 14796455936
+      },
+      "overallAllocatorEnvelopeBytes": 14796455936
     },
     {
       "id": "sensenova_u1_8b:mlx:bf16:base:base:sensenova-u1-quality-bf16-mlx-shared-ladder-v1:imc-989847820f3a5dcbe171",
@@ -6104,6 +7906,141 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "z_image:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-0b154783eee307ac1ad8",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-bf16-candle-evidence.json",
+        "sha256": "9350602c4b9895a5bd98666b19308cb28127a5cc1db8b1105958a3c8d059ab52",
+        "recordId": "imc-0b154783eee307ac1ad8",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "875f85c97ad82545ab4202e4814b1a1c84cad7efbbec2e233ba3165c3f7f5193"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8721006592,
+        "denoise": 16539189248,
+        "decode": 12982419456
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8721006592,
+        "denoise": 16539189248,
+        "decode": 12982419456
+      },
+      "overallAllocatorEnvelopeBytes": 16539189248
+    },
+    {
+      "id": "z_image:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-53b507fb824fcaf6988e",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-q4-candle-evidence.json",
+        "sha256": "fbb8cefc27555ddf16e1194bd53e0a367e3220e40e65234d29b571dbd56bfea3",
+        "recordId": "imc-53b507fb824fcaf6988e",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "875f85c97ad82545ab4202e4814b1a1c84cad7efbbec2e233ba3165c3f7f5193"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2983198720,
+        "denoise": 8049917952,
+        "decode": 11774459904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2983198720,
+        "denoise": 8049917952,
+        "decode": 11774459904
+      },
+      "overallAllocatorEnvelopeBytes": 11774459904
+    },
+    {
+      "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-q8-candle-evidence.json",
+        "sha256": "3866e1c2135b0e579f2258c94e827fa8a0df9a15735b29b8a1bc6640140eada5",
+        "recordId": "imc-664322fc9429876590f4",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "875f85c97ad82545ab4202e4814b1a1c84cad7efbbec2e233ba3165c3f7f5193"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11204034560,
+        "decode": 10096738304
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11204034560,
+        "decode": 10096738304
+      },
+      "overallAllocatorEnvelopeBytes": 11204034560
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -6237,6 +8174,141 @@
         "decode": 19549071064
       },
       "overallAllocatorEnvelopeBytes": 24474049676
+    },
+    {
+      "id": "z_image_edit:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-dee3a878c25d4157317f",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-bf16-candle-evidence.json",
+        "sha256": "41c11645e5ab4d06dc994ff9d644699458168416c370856d747a933cd4a1c5ff",
+        "recordId": "imc-dee3a878c25d4157317f",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "662e94f38b19b80fc62f28bf26a5dd5cb4f876cb18563103f4a091fe16c0fdc7"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 510656512,
+        "denoise": 13088325632,
+        "decode": 16538140672
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 510656512,
+        "denoise": 13088325632,
+        "decode": 16538140672
+      },
+      "overallAllocatorEnvelopeBytes": 16538140672
+    },
+    {
+      "id": "z_image_edit:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8106384a2874406acfe9",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-q4-candle-evidence.json",
+        "sha256": "5ec975cfc6e827baa28a996757bc792728a4b52fcd4e389b4e7a2f93c0a44c18",
+        "recordId": "imc-8106384a2874406acfe9",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "662e94f38b19b80fc62f28bf26a5dd5cb4f876cb18563103f4a091fe16c0fdc7"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 512753664,
+        "denoise": 13296992256,
+        "decode": 13420724224
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 512753664,
+        "denoise": 13296992256,
+        "decode": 13420724224
+      },
+      "overallAllocatorEnvelopeBytes": 13420724224
+    },
+    {
+      "id": "z_image_edit:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-e331f361edcabbd304c0",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-q8-candle-evidence.json",
+        "sha256": "fc1a41db270572c149fb0b2dd6da20d8176ba88d80779e6d399d452d0d4ae8b4",
+        "recordId": "imc-e331f361edcabbd304c0",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "662e94f38b19b80fc62f28bf26a5dd5cb4f876cb18563103f4a091fe16c0fdc7"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 512753664,
+        "denoise": 13296992256,
+        "decode": 14158921728
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 512753664,
+        "denoise": 13296992256,
+        "decode": 14158921728
+      },
+      "overallAllocatorEnvelopeBytes": 14158921728
     },
     {
       "id": "z_image_edit:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-3581ee9d281f4b49a4b2",
@@ -7107,105 +9179,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:chroma1_base:candle:bf16",
-      "modelId": "chroma1_base",
-      "modelFamily": "chroma",
-      "route": "chroma1_base",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_base:candle:q4",
-      "modelId": "chroma1_base",
-      "modelFamily": "chroma",
-      "route": "chroma1_base",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_base:candle:q8",
-      "modelId": "chroma1_base",
-      "modelFamily": "chroma",
-      "route": "chroma1_base",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:candle:bf16",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:candle:q4",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:candle:q8",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_hd:candle:bf16",
-      "modelId": "chroma1_hd",
-      "modelFamily": "chroma",
-      "route": "chroma1_hd",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_hd:candle:q4",
-      "modelId": "chroma1_hd",
-      "modelFamily": "chroma",
-      "route": "chroma1_hd",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_hd:candle:q8",
-      "modelId": "chroma1_hd",
-      "modelFamily": "chroma",
-      "route": "chroma1_hd",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:flux2_dev:candle:bf16",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -7406,210 +9379,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:ideogram_4:candle:bf16",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "74.1",
-          "sequentialPeakGb": "67"
-        }
-      }
-    },
-    {
-      "id": "analytic:ideogram_4:candle:q4",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "38.5",
-          "sequentialPeakGb": "34"
-        }
-      }
-    },
-    {
-      "id": "analytic:ideogram_4:candle:q8",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "55.3",
-          "sequentialPeakGb": "50"
-        }
-      }
-    },
-    {
-      "id": "analytic:ideogram_4_turbo:candle:bf16",
-      "modelId": "ideogram_4_turbo",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "56.3",
-          "sequentialPeakGb": "51"
-        }
-      }
-    },
-    {
-      "id": "analytic:ideogram_4_turbo:candle:q4",
-      "modelId": "ideogram_4_turbo",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "33.5",
-          "sequentialPeakGb": "29"
-        }
-      }
-    },
-    {
-      "id": "analytic:ideogram_4_turbo:candle:q8",
-      "modelId": "ideogram_4_turbo",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "43.9",
-          "sequentialPeakGb": "39"
-        }
-      }
-    },
-    {
-      "id": "analytic:illustrious_xl_v1:candle:bf16",
-      "modelId": "illustrious_xl_v1",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:illustrious_xl_v1:candle:q4",
-      "modelId": "illustrious_xl_v1",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "8",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:illustrious_xl_v1:candle:q8",
-      "modelId": "illustrious_xl_v1",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
       "id": "analytic:illustrious_xl_v1:mlx:bf16",
       "modelId": "illustrious_xl_v1",
       "modelFamily": "sdxl",
@@ -7641,78 +9410,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:illustrious_xl_v2:candle:bf16",
-      "modelId": "illustrious_xl_v2",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:illustrious_xl_v2:candle:q4",
-      "modelId": "illustrious_xl_v2",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "8",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:illustrious_xl_v2:candle:q8",
-      "modelId": "illustrious_xl_v2",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:illustrious_xl_v2:mlx:bf16",
@@ -7888,17 +9585,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:lens:candle:bf16",
-      "modelId": "lens",
-      "modelFamily": "lens",
-      "route": "lens",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:lens:candle:q4",
       "modelId": "lens",
       "modelFamily": "lens",
@@ -7998,17 +9684,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_base:candle:bf16",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_base:candle:q4",
       "modelId": "mage_flow_base",
       "modelFamily": "mage-flow",
@@ -8026,17 +9701,6 @@
       "route": "mage_flow_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:candle:bf16",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -8064,17 +9728,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit_base:candle:bf16",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_edit_base:candle:q4",
       "modelId": "mage_flow_edit_base",
       "modelFamily": "mage-flow",
@@ -8097,17 +9750,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit_turbo:candle:bf16",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_edit_turbo:candle:q4",
       "modelId": "mage_flow_edit_turbo",
       "modelFamily": "mage-flow",
@@ -8125,17 +9767,6 @@
       "route": "mage_flow_edit_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:candle:bf16",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -8227,56 +9858,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:qwen_image:candle:bf16",
-      "modelId": "qwen_image",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "71.7",
-          "provider": "qwen_image",
-          "abi": "1",
-          "vramGbByTier": "82.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image:candle:q8",
-      "modelId": "qwen_image",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "38.7",
-          "provider": "qwen_image",
-          "abi": "1",
-          "vramGbByTier": "65.3"
-        }
-      }
     },
     {
       "id": "analytic:qwen_image_edit_2511_lightning:candle:bf16",
@@ -8387,78 +9968,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:realvisxl:candle:bf16",
-      "modelId": "realvisxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:realvisxl:candle:q4",
-      "modelId": "realvisxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "8",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:realvisxl:candle:q8",
-      "modelId": "realvisxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
       "id": "analytic:realvisxl:mlx:bf16",
       "modelId": "realvisxl",
       "modelFamily": "sdxl",
@@ -8490,78 +9999,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:realvisxl_lightning:candle:bf16",
-      "modelId": "realvisxl_lightning",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:realvisxl_lightning:candle:q4",
-      "modelId": "realvisxl_lightning",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "8",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:realvisxl_lightning:candle:q8",
-      "modelId": "realvisxl_lightning",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:realvisxl_lightning:mlx:bf16",
@@ -8636,48 +10073,6 @@
         "envelopeBytes": null,
         "values": {
           "vramGbByTier": "102.115"
-        }
-      }
-    },
-    {
-      "id": "analytic:scail2_14b:candle:q4",
-      "modelId": "scail2_14b",
-      "modelFamily": "scail2",
-      "route": "scail2_14b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "61.26"
-        }
-      }
-    },
-    {
-      "id": "analytic:scail2_14b:candle:q8",
-      "modelId": "scail2_14b",
-      "modelFamily": "scail2",
-      "route": "scail2_14b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "64.928"
         }
       }
     },
@@ -8832,78 +10227,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sdxl:candle:bf16",
-      "modelId": "sdxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "16",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:sdxl:candle:q4",
-      "modelId": "sdxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "8",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:sdxl:candle:q8",
-      "modelId": "sdxl",
-      "modelFamily": "sdxl",
-      "route": "sdxl",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "11",
-          "provider": "sdxl",
-          "abi": "1"
-        }
-      }
     },
     {
       "id": "analytic:sdxl:mlx:bf16",
@@ -9633,114 +10956,6 @@
       "route": "wan2_2_vace_fun_14b",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image:candle:bf16",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "25.4",
-          "provider": "z_image",
-          "abi": "1",
-          "vramGbByTier": "40.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:z_image:candle:q4",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "16.9",
-          "provider": "z_image",
-          "abi": "1",
-          "vramGbByTier": "27.2"
-        }
-      }
-    },
-    {
-      "id": "analytic:z_image:candle:q8",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "19.9",
-          "provider": "z_image",
-          "abi": "1",
-          "vramGbByTier": "32.1"
-        }
-      }
-    },
-    {
-      "id": "analytic:z_image_edit:candle:bf16",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:candle:q4",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:candle:q8",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
