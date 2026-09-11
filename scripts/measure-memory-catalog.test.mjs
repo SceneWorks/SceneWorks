@@ -35,6 +35,7 @@ import {
   RUSTFMT_EDITION,
   capturedInCampaign,
   classifyAnchor,
+  incompleteTierWeights,
   compiledInferencePin,
   familyFor,
   hubRoots,
@@ -323,10 +324,44 @@ async function fakeHub(layout, { empty = false } = {}) {
   for (const [repo, revision, ...rest] of layout) {
     const root = snapshotPath(hub, repo, revision, ...rest);
     await mkdir(root, { recursive: true });
-    if (!empty) await writeFile(path.join(root, "weights.safetensors"), "w");
+    if (!empty) await writeFile(path.join(root, "weights.safetensors"), repo.includes("sensenova") ? tinySafetensors() : "w");
   }
   return hub;
 }
+
+function tinySafetensors() {
+  const header = Buffer.from(JSON.stringify({ weight: { dtype: "F32", shape: [1], data_offsets: [0, 4] } }));
+  const prefix = Buffer.alloc(8);
+  prefix.writeBigUInt64LE(BigInt(header.length));
+  return Buffer.concat([prefix, header, Buffer.alloc(4)]);
+}
+
+test("SenseNova preflight detects config-only and truncated weights before capture", async () => {
+  const modelId = "sensenova_u1_8b";
+  const repo = PROVIDER_FAMILIES[modelId].repo;
+  const hub = await fakeHub([[repo, REVISION, "q4"]], { empty: true });
+  const root = snapshotPath(hub, repo, REVISION, "q4");
+  await writeFile(path.join(root, "config.json"), "{}");
+  const models = [{ id: modelId, downloads: [{ repo, revision: REVISION, variant: "q4", files: ["q4/*"] }] }];
+  const classify = (backend) => classifyAnchor(`${modelId}:q4:${backend}`, { provider: modelId },
+    { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+  for (const backend of ["candle", "mlx"]) assert.equal((await classify(backend)).status, "weights_missing");
+  const tensor = path.join(root, "model.safetensors");
+  const valid = tinySafetensors();
+  for (const bytes of [valid.subarray(0, 4), valid.subarray(0, valid.length - 1)]) {
+    await writeFile(tensor, bytes);
+    for (const backend of ["candle", "mlx"]) {
+      const row = await classify(backend);
+      assert.equal(row.status, "weights_missing");
+      assert.match(row.reason, /incomplete weights.*model.safetensors/);
+    }
+  }
+  await writeFile(tensor, valid);
+  assert.deepEqual(await incompleteTierWeights(root), []);
+  for (const backend of ["candle", "mlx"]) assert.equal((await classify(backend)).status, "runnable");
+  await rm(tensor);
+  assert.match((await incompleteTierWeights(root))[0], /no weights/);
+});
 
 test("anchor keys parse into their three parts and slug without separators", () => {
   assert.deepEqual(anchorParts("qwen_image:q4:mlx"), { modelId: "qwen_image", tier: "q4", backend: "mlx" });

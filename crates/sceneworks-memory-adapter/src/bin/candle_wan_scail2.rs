@@ -563,7 +563,8 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
     }
 }
 
-/// The request receipt this render will present, minted by the ENGINE's own public helper.
+/// Use sealed engine receipts for A14B/SCAIL-2. TI2V uses the standard memory contract
+/// and records the adapter revision, just like the other standard-contract capture arms.
 fn evidence_revision(
     arm: Arm,
     spec: &LoadSpec,
@@ -571,12 +572,16 @@ fn evidence_revision(
     selection: MemorySelection,
 ) -> Result<String, String> {
     match arm.route {
-        Some(_) => {
+        Some(WanI2vRoute::Ti2v5b) => {
+            Ok(format!("sc-23026-ti2v-adapter@{}", protocol::INFERENCE_PIN))
+        }
+        Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b) => {
             let prepared = candle_gen_wan::i2v_memory_strategy::prepare(spec, arm.provider)
                 .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
             candle_gen_wan::i2v_memory_strategy::request_evidence_revision(&prepared, request)
                 .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))
         }
+        Some(_) => Err(format!("{} has no capture receipt arm", arm.provider)),
         None => {
             let evidence =
                 candle_gen_scail2::memory_strategy::structural_resident_evidence(spec)
@@ -1003,6 +1008,26 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ti2v_evidence_does_not_open_the_a14b_receipt_inventory() {
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("absent-ti2v-fixture")));
+        let request = GenerationRequest::default();
+        for tier in ["bf16", "q4", "q8"] {
+            let selection = MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: MemoryStrategyParameters::default(),
+                tier: numeric_tier(tier).unwrap(),
+            };
+            assert_eq!(
+                evidence_revision(TI2V_5B, &spec, &request, selection).unwrap(),
+                format!("sc-23026-ti2v-adapter@{}", protocol::INFERENCE_PIN)
+            );
+            for arm in [T2V_A14B, I2V_A14B] {
+                assert!(evidence_revision(arm, &spec, &request, selection).is_err());
+            }
+        }
+    }
 
     /// Only the A14B routes seal a receipt before the load; TI2V-5B and SCAIL-2 load unprepared,
     /// exactly as production loads them (sc-22738). Mutation that fails this: guarding the
