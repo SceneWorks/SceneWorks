@@ -8176,6 +8176,51 @@
       "overallAllocatorEnvelopeBytes": 24474049676
     },
     {
+      "id": "z_image_edit:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-dee3a878c25d4157317f",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-edit-bf16-candle-evidence.json",
+        "sha256": "41c11645e5ab4d06dc994ff9d644699458168416c370856d747a933cd4a1c5ff",
+        "recordId": "imc-dee3a878c25d4157317f",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "662e94f38b19b80fc62f28bf26a5dd5cb4f876cb18563103f4a091fe16c0fdc7"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 510656512,
+        "denoise": 13088325632,
+        "decode": 16538140672
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 510656512,
+        "denoise": 13088325632,
+        "decode": 16538140672
+      },
+      "overallAllocatorEnvelopeBytes": 16538140672
+    },
+    {
       "id": "z_image_edit:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-3581ee9d281f4b49a4b2",
       "modelId": "z_image_edit",
       "modelFamily": "z-image",
@@ -10830,17 +10875,6 @@
       "route": "wan2_2_vace_fun_14b",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:z_image_edit:candle:bf16",
-      "modelId": "z_image_edit",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
