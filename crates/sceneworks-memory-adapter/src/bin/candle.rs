@@ -3645,6 +3645,11 @@ fn mage_generation_request(
 fn five_rung_evidence_revision(provider: &str) -> String {
     if matches!(provider, SANA_ID | SANA_SPRINT_ID) {
         runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else if matches!(
+        provider,
+        SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID
+    ) {
+        runtime_cuda::providers::sd3::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else {
         format!(
             "{}@{}",
@@ -8134,6 +8139,40 @@ fn main() {
 #[cfg(test)]
 mod sdxl_family_tests {
     use super::*;
+
+    #[test]
+    fn sd3_capture_revision_passes_real_provider_admission() {
+        use runtime_cuda::providers::sd3::memory_strategy as sd3;
+
+        for provider in [SD3_5_LARGE_ID, SD3_5_LARGE_TURBO_ID, SD3_5_MEDIUM_ID] {
+            for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+                let mut spec = LoadSpec::new(WeightsSource::Dir("/__unused_sd3_fixture__".into()));
+                spec.quantize = quant;
+                let contract = sd3::weights_free_contract(provider, &spec).unwrap();
+                let fixtures = sd3::registered_valid_fixture(
+                    &spec,
+                    &contract,
+                    MemoryStrategy::StagedResidency,
+                )
+                .unwrap();
+                assert!(!fixtures.is_empty());
+                for fixture in fixtures {
+                    let exact = fixture.load_spec.as_ref().unwrap();
+                    let mut context = fixture.context;
+                    context.evidence_revision = five_rung_evidence_revision(provider);
+                    assert!(matches!(
+                        sd3::registered_safety_check(exact, &contract, &context),
+                        MemorySafetyDecision::Accept
+                    ));
+                    context.evidence_revision = format!("sc-22730@{}", protocol::INFERENCE_PIN);
+                    assert!(matches!(
+                        sd3::registered_safety_check(exact, &contract, &context),
+                        MemorySafetyDecision::Reject { .. }
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn sana_requests_carry_the_providers_evidence_token() {
