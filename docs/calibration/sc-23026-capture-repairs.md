@@ -57,6 +57,7 @@ retained as backups.
 | Failure class | Cells | Repair / disposition |
 | --- | ---: | --- |
 | SD3.5 component storage dtype rejected | 9 | Accept F16/BF16/F32 component storage that the loader converts, while pricing the realized dtype. Integer components and crossed packed transformer tiers remain refused. |
+| SD3.5 adapter evidence revision rejected | All three routes | A physical smoke exposed this after the dtype repair. Pass the provider's public request-contract token; regression checks real provider admission at all three tiers and rejects the old story/pin token. |
 | SenseNova reports no decode phase | 13 | Emit the decode boundary before pixel-space output is converted to RGB8 and transferred to the host. No completion requirement is relaxed. |
 | SenseNova missing or truncated weights | 5 | Restore the exact pinned artifacts; detect config-only roots and safetensors header/length mismatches during preflight. Base BF16 also lacked its shard index and tokenizer files. |
 | Wan TI2V uses A14B receipt inventory | 3 | Use TI2V's standard memory contract and an adapter revision token, rather than opening the unrelated A14B receipt inventory. |
