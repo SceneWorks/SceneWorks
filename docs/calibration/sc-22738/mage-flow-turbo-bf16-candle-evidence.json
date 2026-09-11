@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/Mage-Flow-Turbo",
+        "resolvedRevision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3",
+      "capturedAt": "2026-09-10T17:45:03Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:mage_flow_turbo-five-rung-reference",
+        "blockers": [
+          "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 8727298048
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 10136584192
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 10138681344
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 10138681344
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "mage-flow-turbo-candle-bf16-768-seed22733-step4",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-141c7668b06e81542fc1",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/Mage-Flow-Turbo@79016f10f96b441bebb6e6f461838adb8fb3ff5c:bf16+SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-2079ffebfe43cbbedfae",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 8727298048,
+          "allocatorBytes": 8727298048,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 10138681344,
+          "allocatorBytes": 10138681344,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 10136584192,
+          "allocatorBytes": 10136584192,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 10138681344,
+          "allocatorBytes": 10138681344,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "e588148378b397733b4de57afb4d7e7f3d6c554a1af1e848f382db8ae215d774",
+          "dirty": false,
+          "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:bf4c0768b7fa0b4784600a32d3eecb0c3770544c9296d2a5ad623a0d72d68552",
+          "revision": "14a7a45be31f50ad06c60e08f1a3191c534eb925"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22733 anchor capture measures exact per-phase memory and strategy identity for the Candle Mage-Flow lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Mage-Flow-Turbo distilled text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "mage_flow_turbo",
+        "overlay": "none",
+        "provider": "mage_flow_turbo",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}
