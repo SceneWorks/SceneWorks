@@ -20,41 +20,41 @@ sceneworks-core = { path = "../sceneworks-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-krea-realtime = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-krea-realtime = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
 # sc-22738: the Mage arm reads the pinned provider's OWN fit model
 # (`mlx_gen_mage::memory::generation_peak_gb`) to build the admission budget that provider requires
 # a caller to present, rather than restating the engine's measured anchors in the adapter — the
 # same reason sc-22736 added the Wan/SCAIL-2 crates to the candle lane.
-mlx-gen-mage = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-instantid = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
-mlx-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
+mlx-gen-mage = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-instantid = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
+mlx-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "d5a7fc018d713a37091e1cd102873eab355a00c6", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 image = { workspace = true, optional = true }
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", features = ["cuda", "testkit"], optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", features = ["cuda", "testkit"], optional = true }
 # sc-22736: the Wan 2.2 and SCAIL-2 capture arms read these crates' OWN public envelopes
 # (`PUBLIC_BUCKETS` / `PUBLIC_FRAMES`) and mint the request receipt admission demands through their
 # own `request_evidence_revision`, rather than restating either in the adapter.
-candle-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", features = ["cuda"], optional = true }
-candle-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", features = ["cuda"], optional = true }
+candle-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", features = ["cuda"], optional = true }
+candle-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", features = ["cuda"], optional = true }
 # sc-22738: the SDXL family's route revisions are READ from the engine's own `SDXL_ROUTES` rather
 # than transcribed into the adapter. The transcription is what broke CUDA run 34272596969 -- the
 # sc-22729 repair moved both Illustrious routes and the copies here did not follow, so six cells
 # were refused for a drift that did not exist at the pin. Same reasoning as the two crates above.
-candle-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", features = ["cuda"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78", optional = true }
+candle-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", features = ["cuda"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f", optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "8fb95eb05cee4cf1e482aa050874fae98ccb3f78" }
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "e3de348f4ddef232acfe8d48156ab2651443581f" }
 
 [features]
 default = []
