@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cd27d31f142fb73074dd6ff4866d19927dd5682be10374fe16204546645c65db",
+    "sceneWorksRevision": "source-tree:80a47191bc991d98568913d5242c264c9a77dce23dbd5bfa0f1ef87d16347a75",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "25de82aad2feaf77f8e1e73fbc5805900bbaed7201a3ed155aed63ce0e44ed59"
+        "sha256": "75efcc0c30507c55bbe1bfdc9f15e85c235b6b5337c894a7a1fcbbfd64c4c6f5"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "421d812f129dfe0fe6af84aac437ff57e7382c1d587fd9b285b1a7836e3e4fec"
+        "sha256": "7764d81b502fbb989abd6c184a9d9e8044326d3bc9af67118c509be489b71dd8"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3196,
-    "elidedCells": 6194,
+    "publishedCells": 3211,
+    "elidedCells": 6179,
     "elidedByState": {
-      "Implemented": 1778,
+      "Implemented": 1763,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 183,
-    "analyticOnlyCells": 160,
-    "anchoredCells": 2960,
+    "anchors": 184,
+    "analyticOnlyCells": 159,
+    "anchoredCells": 2975,
     "staleAnchors": 76,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -7947,6 +7947,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/z-image-q4-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 15
+    },
+    {
+      "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+      "modelId": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/z-image-q8-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 15
@@ -17846,12 +17864,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 9,
-      "published": 6,
-      "elided": 3,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3
+        "Anchored": 9
       }
     },
     {
@@ -17859,12 +17876,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 9,
-      "published": 6,
-      "elided": 3,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3
+        "Anchored": 9
       }
     },
     {
@@ -17872,12 +17888,11 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 9,
-      "published": 6,
-      "elided": 3,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3
+        "Anchored": 9
       }
     },
     {
@@ -17885,12 +17900,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 9,
-      "published": 6,
-      "elided": 3,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3
+        "Anchored": 9
       }
     },
     {
@@ -17898,12 +17912,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 9,
-      "published": 6,
-      "elided": 3,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored": 6,
-        "Implemented": 3
+        "Anchored": 9
       }
     },
     {
@@ -198957,6 +198970,296 @@
       }
     },
     {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image_control:candle:q8:text_to_image:control:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image_control",
+      "provider": "z_image_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
       "id": "z_image:z_image_control:mlx:bf16:text_to_image:control:bounded_attention",
       "modelId": "z_image",
       "resolvedRoute": "z_image_control",
@@ -201060,6 +201363,586 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#z_image:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-53b507fb824fcaf6988e"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:lora:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:lora:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:lora:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:lora:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:none:bounded_attention",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:none:bounded_decode",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:none:resident",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image:z_image:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "z_image",
+      "resolvedRoute": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 16170,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4"
           }
         ]
       }
@@ -206047,6 +206930,11 @@
       "z_image:z_image_control:candle:q4:text_to_image:control:bounded_transformer_residency",
       "z_image:z_image_control:candle:q4:text_to_image:control:resident",
       "z_image:z_image_control:candle:q4:text_to_image:control:staged_residency",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_attention",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_decode",
+      "z_image:z_image_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "z_image:z_image_control:candle:q8:text_to_image:control:resident",
+      "z_image:z_image_control:candle:q8:text_to_image:control:staged_residency",
       "z_image:z_image_control:mlx:bf16:text_to_image:control:bounded_attention",
       "z_image:z_image_control:mlx:bf16:text_to_image:control:bounded_decode",
       "z_image:z_image_control:mlx:bf16:text_to_image:control:bounded_transformer_residency",
@@ -206082,6 +206970,16 @@
       "z_image:z_image:candle:q4:text_to_image:none:bounded_transformer_residency",
       "z_image:z_image:candle:q4:text_to_image:none:resident",
       "z_image:z_image:candle:q4:text_to_image:none:staged_residency",
+      "z_image:z_image:candle:q8:text_to_image:lora:bounded_attention",
+      "z_image:z_image:candle:q8:text_to_image:lora:bounded_decode",
+      "z_image:z_image:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "z_image:z_image:candle:q8:text_to_image:lora:resident",
+      "z_image:z_image:candle:q8:text_to_image:lora:staged_residency",
+      "z_image:z_image:candle:q8:text_to_image:none:bounded_attention",
+      "z_image:z_image:candle:q8:text_to_image:none:bounded_decode",
+      "z_image:z_image:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "z_image:z_image:candle:q8:text_to_image:none:resident",
+      "z_image:z_image:candle:q8:text_to_image:none:staged_residency",
       "z_image:z_image:mlx:bf16:text_to_image:lora:bounded_attention",
       "z_image:z_image:mlx:bf16:text_to_image:lora:bounded_decode",
       "z_image:z_image:mlx:bf16:text_to_image:lora:bounded_transformer_residency",

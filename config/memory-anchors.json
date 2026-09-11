@@ -7996,6 +7996,51 @@
       "overallAllocatorEnvelopeBytes": 11774459904
     },
     {
+      "id": "z_image:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-664322fc9429876590f4",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "provider": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/z-image-q8-candle-evidence.json",
+        "sha256": "3866e1c2135b0e579f2258c94e827fa8a0df9a15735b29b8a1bc6640140eada5",
+        "recordId": "imc-664322fc9429876590f4",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "875f85c97ad82545ab4202e4814b1a1c84cad7efbbec2e233ba3165c3f7f5193"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11204034560,
+        "decode": 10096738304
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11204034560,
+        "decode": 10096738304
+      },
+      "overallAllocatorEnvelopeBytes": 11204034560
+    },
+    {
       "id": "z_image:mlx:bf16:base:base:z-image-mlx-independent-materialization-v4:imc-68608ccc1b400583f721",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -10788,31 +10833,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:z_image:candle:q8",
-      "modelId": "z_image",
-      "modelFamily": "z-image",
-      "route": "z_image",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "19.9",
-          "provider": "z_image",
-          "abi": "1",
-          "vramGbByTier": "32.1"
-        }
-      }
     },
     {
       "id": "analytic:z_image_edit:candle:bf16",
