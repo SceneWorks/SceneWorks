@@ -2,6 +2,52 @@
   "schemaVersion": 1,
   "anchors": [
     {
+      "id": "bernini:candle:q4:base:base:bernini-image-q4-candle-dual-expert-ladder-v1:imc-381734b3298d63f89009",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "reference_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q4-candle-evidence.json",
+        "sha256": "3a5d6a5975807f018a5ea828ee7b33ae94c78d2f2154f675e8a65ffdeb2a64d9",
+        "recordId": "imc-381734b3298d63f89009",
+        "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
+        "loaderClosureDigest": "7b13f566f52377c18c61df0af84b64b367fa84fe903d2fcfb92c28d4b70ca4cf"
+      },
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 54422142976,
+        "denoise": 54450454528,
+        "decode": 54423191552
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 54422142976,
+        "denoise": 54450454528,
+        "decode": 54423191552
+      },
+      "overallAllocatorEnvelopeBytes": 54450454528,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "chroma1_base:candle:bf16:base:base:chroma1-base-bf16-cuda-request-scoped-staged-residency-v1:imc-b1813ea0729c95602205",
       "modelId": "chroma1_base",
       "modelFamily": "chroma",
@@ -8883,17 +8929,6 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini:candle:q4",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

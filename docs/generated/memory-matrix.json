@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f9dd62a94ffc3c81adc2018480ac035b112dd113f5714ef9de75b2eed50de9e7",
+    "sceneWorksRevision": "source-tree:7a47e6818beb369f5311257f25fc881aaa1312385b3ca8513d9f8b3632cbbb6c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "2072fbee8f1048aa02e185b45a77981c9b632f05d1b61b8815ed35bb11f13af4"
+        "sha256": "fd62802bec658a7ecd95b88e87b329f1067ff692f1c0b3bce9f172619692f623"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "8b220902693e9cfc2db83909dbbc88bbaf1afb96aa27e30b4c662f36e662969a"
+        "sha256": "be4fe15e44ac02eb6ece5ef1a5482440fcf61ad910c2e93c1f48dbf868a35e9d"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -162,8 +162,8 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 187,
-    "analyticOnlyCells": 156,
+    "anchors": 188,
+    "analyticOnlyCells": 155,
     "anchoredCells": 3035,
     "staleAnchors": 82,
     "attestedAnchors": 4,
@@ -4671,6 +4671,24 @@
     }
   ],
   "anchors": [
+    {
+      "id": "bernini:candle:q4:base:base:bernini-image-q4-candle-dual-expert-ladder-v1:imc-381734b3298d63f89009",
+      "modelId": "bernini",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "bernini",
+      "mode": "reference_to_video",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/bernini-q4-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 0
+    },
     {
       "id": "chroma1_base:candle:bf16:base:base:chroma1-base-bf16-cuda-request-scoped-staged-residency-v1:imc-b1813ea0729c95602205",
       "modelId": "chroma1_base",
