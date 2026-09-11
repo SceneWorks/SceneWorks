@@ -78,7 +78,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir, open } from "node:fs/promises";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
@@ -1364,28 +1364,34 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // id, and `tierDownload` would be asked for a base-repo download the finetune's manifest entry
   // does not ship.
   sensenova_u1_8b: {
+    validateTierWeights: true,
     provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B",
     repo: "SceneWorks/sensenova-u1-8b-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v2: {
+    validateTierWeights: true,
     provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v3: {
+    validateTierWeights: true,
     provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_fast: {
+    validateTierWeights: true,
     requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_FAST",
     repo: "SceneWorks/sensenova-u1-8b-fast-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v2_fast: {
+    validateTierWeights: true,
     requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v3_fast: {
+    validateTierWeights: true,
     requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx", arms: ["mlx", "candle"],
@@ -1887,6 +1893,46 @@ async function hasComponentWeights(root) {
   return false;
 }
 
+// SenseNova can have a config-only tier or a finalized but truncated blob. Read only
+// the tensor header here: this is an inexpensive completeness check, not a content hash.
+export async function incompleteTierWeights(root) {
+  const entries = await readdir(root).catch(() => []);
+  const weights = entries.filter((name) => name.endsWith(".safetensors"));
+  if (weights.length === 0) return ["*.safetensors (no weights)"];
+  const incomplete = [];
+  for (const name of weights) {
+    let file;
+    try {
+      file = await open(path.join(root, name), "r");
+      const size = (await file.stat()).size;
+      const prefix = Buffer.alloc(8);
+      if ((await file.read(prefix, 0, 8, 0)).bytesRead !== 8) throw new Error("missing header");
+      const length = Number(prefix.readBigUInt64LE());
+      if (!Number.isSafeInteger(length) || length < 2 || length > 16 * 1024 * 1024 || length + 8 > size) {
+        throw new Error("invalid header length");
+      }
+      const bytes = Buffer.alloc(length);
+      if ((await file.read(bytes, 0, length, 8)).bytesRead !== length) throw new Error("truncated header");
+      const header = JSON.parse(bytes.toString("utf8"));
+      const tensors = Object.entries(header).filter(([key]) => key !== "__metadata__");
+      if (tensors.length === 0) throw new Error("no tensors");
+      let end = 0;
+      for (const [, tensor] of tensors) {
+        const offsets = tensor?.data_offsets;
+        if (!Array.isArray(offsets) || offsets.length !== 2 || !offsets.every(Number.isSafeInteger)
+            || offsets[0] < 0 || offsets[1] < offsets[0]) throw new Error("invalid tensor offsets");
+        end = Math.max(end, offsets[1]);
+      }
+      if (8 + length + end !== size) throw new Error(`declares ${8 + length + end} bytes, found ${size}`);
+    } catch (error) {
+      incomplete.push(`${name} (${error.message})`);
+    } finally {
+      await file?.close();
+    }
+  }
+  return incomplete;
+}
+
 /**
  * The shards a tier root's own safetensors indexes name but the root does not hold, as paths
  * relative to `tierRoot` (sc-22738).
@@ -2112,6 +2158,15 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       ...row, status: "weights_missing",
       reason: `tier root ${resolved.root} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
     };
+  }
+  if (family.validateTierWeights) {
+    const incomplete = await incompleteTierWeights(tierRoot);
+    if (incomplete.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `tier root ${tierRoot} has incomplete weights: ${incomplete.join(", ")}; existing corrupt blobs require repair before capture`,
+      };
+    }
   }
   // sc-22738: a sharded component whose own index names a shard the root does not hold is a partial
   // mirror the engine's contract will refuse hours later (see `missingIndexedShards`).
