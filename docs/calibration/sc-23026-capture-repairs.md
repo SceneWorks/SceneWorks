@@ -65,16 +65,36 @@ retained as backups.
 | A14B receipt/context incomplete | Both A14B routes | Derive the explicit memory carrier from the provider's mode contract before minting its receipt, and carry the provider's sealed adapter identity into admission. Tests enter the actual request scope at every tier and reject mutated requests and missing identities. |
 | SCAIL2 BF16 runtime budget | 1 | The q4/q8 cells completed in 6,244/6,365 seconds. This recipe uses 20 steps with CFG, 832×480, 77 frames and no Lightning. Follow the story's explicit `video=330` budget on the next BF16 attempt; another full render is not required to diagnose this stop. |
 
-These repairs do not establish complete new captures. The header preflight checks
+This repair pass does not publish new memory anchors. The header preflight checks
 file completeness, not content hashes; a corrupt existing blob is named explicitly
 and still requires repair if the normal Hugging Face fetch treats it as cached.
 Host replacements are verified separately against publisher SHA-256 values.
 
+All five SenseNova installs were repaired at their manifest revisions on
+2026-09-11: base BF16 (eight shards plus missing tokenizer/index files), Fast q8,
+Infographic v2 q4, and Infographic v2 Fast BF16/q4. All twelve replacement weight
+files passed publisher SHA-256 and safetensors length checks, including hash
+readback through their installed snapshot symlinks. The last two were recovered
+by copying the existing prefixes into separate staging files and fetching their
+missing tails; both complete-file hashes matched. Their original 28,333,502,721-
+and 5,222,604,064-byte blobs remain as `.corrupt-sc23026-late` backups. The live
+preflight now classifies all eighteen SenseNova Candle cells as runnable.
+
+The Windows q4 I2V diagnostic used the existing inference pin `81fda3bd` and
+the adapter's verified 33,554,432-byte PE stack reserve. After the receipt repair
+it passed actual admission, text encoding and renderer loading, with GPU execution
+observed, then hit the diagnostic's ten-minute bound before a completed denoise
+step. This verifies progress beyond the original crash, not a complete render or
+a new memory anchor. The diagnostic executable and logs are separate from the
+campaign's original executable and evidence.
+
 ## Integration order
 
-The inference fixes landed in [inference PR #968](https://github.com/SceneWorks/inference/pull/968).
+The first inference fixes landed in [inference PR #968](https://github.com/SceneWorks/inference/pull/968),
+followed by the SD3.5, SenseNova and Wan T2V repairs in
+[inference PR #969](https://github.com/SceneWorks/inference/pull/969).
 SceneWorks pins their merged main revision
-`81fda3bd5a9d5920ad9cdc62796df3305be96742` together with these adapter fixes.
-The two truncated Mage artifacts are repaired and verified. Resume measurements
+`8168c4b52243863655e1e62ffc2bdf14cea42bdb` together with these adapter fixes.
+The two truncated Mage artifacts and all five SenseNova installs are repaired and verified. Resume measurements
 using the successful evidence already collected. These patches do not themselves
 establish new GPU measurements or close sc-23026.
