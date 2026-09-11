@@ -3,7 +3,7 @@
 These changes address individual captures in
 [run 34493340342](https://github.com/SceneWorks/SceneWorks/actions/runs/34493340342),
 which started on SceneWorks `fc3c6dc81` with inference `e11fd9f0f`.
-The running checkout, executable and evidence branch are unchanged. The two
+The campaign checkout, executable and evidence branch were left unchanged. The two
 truncated Mage cache blobs are repaired separately, with their original bytes
 retained as backups.
 
@@ -46,8 +46,29 @@ retained as backups.
   distinct from the old rejected T2V requests. They still need real captures.
 - The shared LTX loader change makes three older LTX-2.5 Candle anchors stale
   in the regenerated matrix; this patch does not extend those measurements.
-- The campaign is still running. This is an interim failure inventory, not the
-  story's final residue enumeration or evidence closeout.
+- The campaign finished all 133 scheduled cells: 47 committed, 85 capture failures,
+  and one runtime-budget stop. All 47 commits reached
+  `story/sc-22738-candle-campaign-34493340342` at `76807148c1ff30889764adeaeaa0810566c3fa02`.
+  The missing results PR was a repository Actions-permission warning; the capture
+  failures caused the final nonzero exit. The evidence fold remains separate.
+
+## Late failures and follow-up repairs
+
+| Failure class | Cells | Repair / disposition |
+| --- | ---: | --- |
+| SD3.5 component storage dtype rejected | 9 | Accept F16/BF16/F32 component storage that the loader converts, while pricing the realized dtype. Integer components and crossed packed transformer tiers remain refused. |
+| SenseNova reports no decode phase | 13 | Emit the decode boundary before pixel-space output is converted to RGB8 and transferred to the host. No completion requirement is relaxed. |
+| SenseNova missing or truncated weights | 5 | Restore the exact pinned artifacts; detect config-only roots and safetensors header/length mismatches during preflight. Base BF16 also lacked its shard index and tokenizer files. |
+| Wan TI2V uses A14B receipt inventory | 3 | Use TI2V's standard memory contract and an adapter revision token, rather than opening the unrelated A14B receipt inventory. |
+| Wan T2V omits prepared memory contract | 2 | Publish the sealed contract from both A14B public loaders. Regression covers BF16/q4/q8 on both routes. |
+| Wan I2V stack overflow | 3 | The existing 32 MiB reserve gets past the previous crash. A bounded physical probe then exposed the next A14B adapter defect: missing request memory carrier and sealed adapter identity in the admission context. |
+| A14B receipt/context incomplete | Both A14B routes | Derive the explicit memory carrier from the provider's mode contract before minting its receipt, and carry the provider's sealed adapter identity into admission. Tests enter the actual request scope at every tier and reject mutated requests and missing identities. |
+| SCAIL2 BF16 runtime budget | 1 | The q4/q8 cells completed in 6,244/6,365 seconds. This recipe uses 20 steps with CFG, 832×480, 77 frames and no Lightning. Follow the story's explicit `video=330` budget on the next BF16 attempt; another full render is not required to diagnose this stop. |
+
+These repairs do not establish complete new captures. The header preflight checks
+file completeness, not content hashes; a corrupt existing blob is named explicitly
+and still requires repair if the normal Hugging Face fetch treats it as cached.
+Host replacements are verified separately against publisher SHA-256 values.
 
 ## Integration order
 
