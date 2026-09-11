@@ -153,7 +153,8 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_interleave_job, create_video_job, create_vqa_job,
+    create_audio_job, create_image_job, create_interleave_job, create_vector_job,
+    create_vector_prompt_workflow, create_video_job, create_vqa_job,
     parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
@@ -191,8 +192,8 @@ use dto::{
     PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
     PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
     SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
-    VideoJobRequest, VqaJobRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
+    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -1373,6 +1374,7 @@ fn create_app_with_state_mode(
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
+    generation::spawn_vector_prompt_workflow_recovery(state.clone());
 
     // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
     // nested at `/mcp` INSIDE this router, so the `access_control` layer below
@@ -1711,6 +1713,11 @@ fn create_app_with_state_mode(
             post(save_person_track_corrections),
         )
         .route("/api/v1/image/jobs", post(create_image_job))
+        .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
+        .route(
+            "/api/v1/image/vectorize/prompt/jobs",
+            post(create_vector_prompt_workflow),
+        )
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
@@ -2113,6 +2120,16 @@ async fn get_project_file(
     // One fixed representation prevents unbounded cache variants. Derivatives
     // are generated on first use, so assets written before this route existed
     // backfill without a migration.
+    let force_download = project_file
+        .content_type
+        .eq_ignore_ascii_case("image/svg+xml");
+    if force_download && query.thumbnail.is_some() {
+        // Do not let the generic thumbnail branch become a second inline SVG preview route. Vector
+        // sidecars point at the worker-rendered PNG instead.
+        return Err(ApiError::bad_request(
+            "SVG thumbnails are not supported; use the vector PNG preview",
+        ));
+    }
     let (served_path, content_type) = if let Some(size) = query.thumbnail {
         if size != GRID_THUMBNAIL_SIZE {
             return Err(ApiError::bad_request(format!(
@@ -2509,6 +2526,17 @@ fn project_file_response_headers(
     last_modified: Option<SystemTime>,
 ) -> Result<HeaderMap, ApiError> {
     let mut headers = HeaderMap::new();
+    // Every representation, including stripWorkflow, ranges and 304 responses, shares this
+    // boundary. SVG source is download-only; only the worker-rendered PNG is inline media.
+    let content_type = if content_type.eq_ignore_ascii_case("image/svg+xml") {
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+        "application/octet-stream"
+    } else {
+        content_type
+    };
     for (name, value) in [
         (header::CONTENT_TYPE, content_type.to_owned()),
         (header::ACCEPT_RANGES, "bytes".to_owned()),

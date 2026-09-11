@@ -29,6 +29,41 @@ export const VIDEO_MODES = [
 // Audio generation modes the Audio Studio exposes (epic 13400 C0/C1 mirror these keys).
 export const AUDIO_MODES = ["speech", "music", "sfx", "voiceclone"];
 
+// Vector Studio modes. A manifest must declare the mode and the selected native backend provider;
+// install state is evaluated separately so a missing-but-eligible model can be offered for download.
+export const VECTOR_MODES = ["image_to_svg", "text_to_svg"];
+
+export function vectorModelServesMode(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return false;
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  return model?.vector?.providers?.[backend]?.available === true;
+}
+
+export function vectorModelAvailability(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return { available: false, reason: "unsupported_mode" };
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  const provider = model?.vector?.providers?.[backend];
+  if (provider?.available !== true) {
+    return { available: false, reason: provider?.reason ?? "provider_not_linked", backend };
+  }
+  if (model?.installState !== "installed" || model?.cacheState !== "complete") {
+    return {
+      available: false,
+      reason: model?.cacheState === "incomplete" ? "model_incomplete" : "model_missing",
+      backend,
+    };
+  }
+  return { available: true, reason: null, backend, providerId: provider.id };
+}
+
+export function vectorModelUsable(model, caps) {
+  return model?.type === "vector" && VECTOR_MODES.some((mode) => vectorModelServesMode(model, mode, caps));
+}
+
 // Conditioning kinds that mark a voice-clone (voice-conversion / speaker-embedding) model —
 // distinct from ACE-Step's "AudioEdit" conditioning, which is a music-editing signal, not a
 // reference/identity signal. Compared case-insensitively so manifest casing never matters.

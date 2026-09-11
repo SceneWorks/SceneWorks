@@ -394,6 +394,7 @@ pub(crate) async fn cancel_job(
         store.cancel_job(&job_id)
     })
     .await?;
+    crate::generation::cascade_cancel_vector_prompt_workflow(&state, &job).await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok(Json(public_job_snapshot(job)))
@@ -405,6 +406,17 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    if let Some(job) = crate::generation::replay_vector_prompt_workflow(
+        state.clone(),
+        &job_id,
+        false,
+        None,
+        !payload.payload_changes.is_empty(),
+    )
+    .await?
+    {
+        return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
+    }
     payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
         &state,
         &job_id,
@@ -443,6 +455,17 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if let Some(job) = crate::generation::replay_vector_prompt_workflow(
+        state.clone(),
+        &job_id,
+        true,
+        payload.requested_gpu.clone(),
+        !payload.payload_changes.is_empty(),
+    )
+    .await?
+    {
+        return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
+    }
     payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
         &state,
         &job_id,
@@ -1123,7 +1146,7 @@ pub(crate) async fn clear_jobs(
 }
 
 /// Cancel every pending (not-yet-started) item in the queue (sc-13448) — the bulk
-/// analog of the per-job cancel fast path. A `queued` / `pending_caption` job has no
+/// analog of the per-job cancel fast path. A `queued`, `pending_caption`, or `pending_workflow` job has no
 /// worker to acknowledge the cancel, so each is flipped straight to terminal
 /// `canceled` in one pass (see `JobsStore::cancel_pending_jobs`), optionally scoped
 /// to one project via the request body (matching the queue's project filter). Active
@@ -1139,14 +1162,23 @@ pub(crate) async fn cancel_pending_jobs(
         store.cancel_pending_jobs(payload.project_id.as_deref())
     })
     .await?;
+    let mut cascade_error = None;
     // Per-job `job.updated` so every subscriber's card flips to Cancelled (the queue
     // summary alone only updates counts, not individual cards), then one queue refresh
     // for the status counts. The pending set is bounded by what a user queued, so the
     // fan-out is small.
     for job in &jobs {
+        if let Err(error) =
+            crate::generation::cascade_cancel_vector_prompt_workflow(&state, job).await
+        {
+            cascade_error.get_or_insert(error);
+        }
         publish(&state, "job.updated", job);
     }
     publish_queue(&state).await?;
+    if let Some(error) = cascade_error {
+        return Err(error);
+    }
     Ok(Json(CancelPendingJobsResponse {
         canceled: jobs.len(),
         jobs: public_job_snapshots(jobs),
@@ -1586,7 +1618,7 @@ pub(crate) async fn persist_reported_assets(
     if asset_writes.is_empty() {
         return Ok(());
     }
-    let asset_writes = asset_writes.clone();
+    let mut asset_writes = asset_writes.clone();
     let generation_set_id = result
         .get("generationSetId")
         .and_then(Value::as_str)
@@ -1599,6 +1631,7 @@ pub(crate) async fn persist_reported_assets(
         move |store, _timeout| store.get_job(&job_id)
     })
     .await?;
+    stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
@@ -1633,6 +1666,62 @@ pub(crate) async fn persist_reported_assets(
     result.remove("assetWrites");
     result.remove("generationSet");
     Ok(())
+}
+
+/// Replace any worker-authored ownership marker with the server-authored relationship persisted
+/// on the ordinary raster child. This makes the intermediate hidden and cleanup-owned in its first
+/// sidecar write, rather than exposing it until the workflow coordinator's next poll.
+pub(crate) fn stamp_vector_workflow_asset_writes(
+    job_type: &JobType,
+    payload: &JsonObject,
+    job_id: &str,
+    asset_writes: &mut [Value],
+) {
+    const OWNERSHIP_KEY: &str = "vectorWorkflowOwnership";
+    for fact in asset_writes.iter_mut() {
+        if let Some(object) = fact.as_object_mut() {
+            object.remove(OWNERSHIP_KEY);
+        }
+    }
+    if !matches!(job_type, JobType::ImageGenerate) {
+        return;
+    }
+    let Some(parent_job_id) = payload
+        .get("workflowParentId")
+        .and_then(Value::as_str)
+        .filter(|id| valid_server_workflow_id(id, "job_"))
+    else {
+        return;
+    };
+    let Some(workflow_id) = payload
+        .get("workflowId")
+        .and_then(Value::as_str)
+        .filter(|id| valid_server_workflow_id(id, "vwf_"))
+    else {
+        return;
+    };
+    if !valid_server_workflow_id(job_id, "job_") {
+        return;
+    }
+    let ownership = json!({
+        "role": "retained_intermediate",
+        "publication": "unpublished",
+        "workflowId": workflow_id,
+        "parentJobId": parent_job_id,
+        "childJobId": job_id,
+        "hidden": true,
+    });
+    for fact in asset_writes {
+        if let Some(object) = fact.as_object_mut() {
+            object.insert(OWNERSHIP_KEY.to_owned(), ownership.clone());
+        }
+    }
+}
+
+fn valid_server_workflow_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 /// Attempts LoRA registration for a job reporting completion, returning result

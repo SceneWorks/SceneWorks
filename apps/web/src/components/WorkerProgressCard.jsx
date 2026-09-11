@@ -92,6 +92,7 @@ const STATUS_LABEL = {
   // Accepted but awaiting the API-side async prompt rewrite (Ideogram 4 auto-caption, sc-9120)
   // before it becomes claimable. Non-terminal, so the card renders it as an in-flight job.
   pending_caption: "Preparing prompt",
+  pending_workflow: "Creating source image",
   running: "Running",
   completed: "Complete",
   canceled: "Cancelled",

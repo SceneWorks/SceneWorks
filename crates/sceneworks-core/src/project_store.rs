@@ -854,6 +854,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/") {
             return Err(ProjectStoreError::BadRequest(
                 "Only image dataset uploads are supported".to_owned(),
@@ -1448,8 +1461,8 @@ impl ProjectStore {
         // with a null origin (should not occur after the schema-bump reindex)
         // fail open and stay visible.
         let origin_filter = match scope {
-            AssetScope::All => "",
-            AssetScope::Library => " and (origin is null or origin != 'character_studio')",
+            AssetScope::All => " and (origin is null or origin != 'vector_workflow_intermediate')",
+            AssetScope::Library => " and (origin is null or origin not in ('character_studio', 'vector_workflow_intermediate'))",
         };
         let mut statement = connection.prepare(&format!(
             "
@@ -1936,6 +1949,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/")
             && !content_type.starts_with("video/")
             && !content_type.starts_with("audio/")
@@ -3067,6 +3093,101 @@ impl ProjectStore {
         let project_path = self.find_project_path(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
         normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
+    /// Mark the raster produced by a disclosed prompt-to-vector workflow as hidden but retained.
+    /// The exact workflow and parent ids are the deletion authority used by cleanup; callers can
+    /// never turn an arbitrary project asset into a cleanup target by naming only its id.
+    pub fn mark_vector_workflow_intermediate(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        workflow_id: &str,
+        parent_job_id: &str,
+        child_job_id: &str,
+    ) -> ProjectStoreResult<Value> {
+        if !is_safe_id(workflow_id) || !is_safe_id(parent_job_id) || !is_safe_id(child_job_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid vector workflow ownership id".to_owned(),
+            ));
+        }
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let mut asset = read_json(&sidecar_path)?;
+        let object = asset.as_object_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+        })?;
+        if object.get("type").and_then(Value::as_str) != Some("image") {
+            return Err(ProjectStoreError::BadRequest(
+                "Vector workflow intermediate must be a raster image".to_owned(),
+            ));
+        }
+        object.insert(
+            "origin".to_owned(),
+            Value::String("vector_workflow_intermediate".to_owned()),
+        );
+        let extra = object
+            .entry("extra")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("Asset extra must be an object".to_owned())
+            })?;
+        extra.insert(
+            "vectorWorkflow".to_owned(),
+            json!({
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": workflow_id,
+                "parentJobId": parent_job_id,
+                "childJobId": child_job_id,
+                "hidden": true,
+            }),
+        );
+        let index_mutation = AssetIndexMutation::begin(&project_path)?;
+        write_json(&sidecar_path, &asset)?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
+        index_mutation.commit();
+        normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
+    /// Permanently purge a workflow-owned intermediate only when every ownership fact matches.
+    /// Returns false for a user asset, another workflow's asset, or an already-cleaned id.
+    pub fn purge_vector_workflow_intermediate(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        workflow_id: &str,
+        parent_job_id: &str,
+    ) -> ProjectStoreResult<bool> {
+        let asset = match self.get_asset(project_id, asset_id) {
+            Ok(asset) => asset,
+            Err(ProjectStoreError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let owned = asset.get("origin").and_then(Value::as_str)
+            == Some("vector_workflow_intermediate")
+            && asset
+                .pointer("/extra/vectorWorkflow/workflowId")
+                .and_then(Value::as_str)
+                == Some(workflow_id)
+            && asset
+                .pointer("/extra/vectorWorkflow/parentJobId")
+                .and_then(Value::as_str)
+                == Some(parent_job_id)
+            && asset
+                .pointer("/extra/vectorWorkflow/role")
+                .and_then(Value::as_str)
+                == Some("retained_intermediate")
+            && asset
+                .pointer("/extra/vectorWorkflow/publication")
+                .and_then(Value::as_str)
+                == Some("unpublished");
+        if !owned {
+            return Ok(false);
+        }
+        self.purge_asset(project_id, asset_id, true)?;
+        Ok(true)
     }
 
     pub fn get_asset_poster(
@@ -4869,6 +4990,7 @@ fn build_generated_asset_sidecar(
         "video" => build_video_sidecar_parts(job_id, fact),
         "audio" => build_audio_sidecar_parts(job_id, fact),
         "document" => build_document_sidecar_parts(job_id, fact),
+        "vector" => build_vector_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
     let mut asset = json!({
@@ -4893,6 +5015,53 @@ fn build_generated_asset_sidecar(
     if let Some(extra) = fact.get("extra") {
         if let Some(object) = asset.as_object_mut() {
             object.insert("extra".to_owned(), extra.clone());
+        }
+    }
+    // The API strips this field from every worker report and restores it only from the persisted
+    // server-owned child relationship. Applying it during sidecar construction closes the window
+    // in which a composed workflow's unpublished raster could appear in the Asset Library.
+    if media_type == "image" {
+        if let Some(ownership) = fact
+            .get("vectorWorkflowOwnership")
+            .and_then(Value::as_object)
+        {
+            let workflow_id = ownership.get("workflowId").and_then(Value::as_str);
+            let parent_job_id = ownership.get("parentJobId").and_then(Value::as_str);
+            let child_job_id = ownership.get("childJobId").and_then(Value::as_str);
+            let valid = [workflow_id, parent_job_id, child_job_id]
+                .into_iter()
+                .all(|id| id.is_some_and(is_safe_id))
+                && ownership.get("role").and_then(Value::as_str) == Some("retained_intermediate")
+                && ownership.get("publication").and_then(Value::as_str) == Some("unpublished")
+                && ownership.get("hidden").and_then(Value::as_bool) == Some(true);
+            if valid {
+                let object = asset.as_object_mut().expect("generated asset is an object");
+                object.insert(
+                    "origin".to_owned(),
+                    Value::String("vector_workflow_intermediate".to_owned()),
+                );
+                let extra = object.entry("extra").or_insert_with(|| json!({}));
+                if !extra.is_object() {
+                    *extra = json!({});
+                }
+                extra
+                    .as_object_mut()
+                    .expect("workflow asset extra is an object")
+                    .insert(
+                        "vectorWorkflow".to_owned(),
+                        Value::Object(ownership.clone()),
+                    );
+            }
+        }
+    }
+    // SVG is never a browser-previewable media type. The worker supplies a separately stored,
+    // bounded PNG fact after sanitizing/rasterizing the SVG; keep it on the vector sidecar rather
+    // than asking clients to infer a sibling filename or to fetch the active source document.
+    if media_type == "vector" {
+        if let Some(preview) = fact.get("preview") {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("preview".to_owned(), preview.clone());
+            }
         }
     }
     asset
@@ -4944,6 +5113,47 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "sourceAssetId": get("sourceAssetId"),
         "sourceTimestamp": Value::Null,
         "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// Vector Studio replay is intentionally explicit rather than inheriting the image recipe's
+/// width/height/LoRA shape. These are the complete generation inputs and the two versioned
+/// post-processing boundaries required to reproduce or explain a stored SVG.
+fn build_vector_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let source_asset_id = get("sourceAssetId");
+    let parents = source_asset_id
+        .as_str()
+        .map(|source| vec![Value::String(source.to_owned())])
+        .unwrap_or_default();
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "sampling": get("sampling"),
+        "detailBudget": get("detailBudget"),
+        "sanitizerVersion": get("sanitizerVersion"),
+        "rendererVersion": get("rendererVersion"),
+        "workflow": get("workflow"),
+    });
+    let workflow_id = fact.pointer("/workflow/id").cloned().unwrap_or(Value::Null);
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": source_asset_id,
+        "sourceTimestamp": Value::Null,
+        "jobId": job_id,
+        "workflowId": workflow_id,
+        "intermediateAssetId": get("sourceAssetId"),
     });
     (file, recipe, lineage)
 }
@@ -6882,6 +7092,135 @@ mod tests {
             json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    #[test]
+    fn generated_workflow_intermediate_is_hidden_on_its_first_sidecar_write() {
+        let mut fact = json!({
+            "assetId": "asset_intermediate",
+            "mediaPath": "assets/images/genset_workflow/intermediate.png",
+            "mimeType": "image/png",
+            "width": 1024,
+            "height": 1024,
+            "displayName": "workflow raster",
+            "createdAt": "2026-08-29T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "raster_model",
+            "prompt": "mark",
+            "vectorWorkflowOwnership": {
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": "vwf_workflow1",
+                "parentJobId": "job_parent1",
+                "childJobId": "job_child1",
+                "hidden": true
+            }
+        });
+        let asset =
+            build_generated_asset_sidecar("project-1", "job_child1", "genset_workflow", &fact);
+        assert_eq!(asset["origin"], json!("vector_workflow_intermediate"));
+        assert_eq!(
+            asset["extra"]["vectorWorkflow"],
+            fact["vectorWorkflowOwnership"]
+        );
+
+        fact["vectorWorkflowOwnership"]
+            .as_object_mut()
+            .expect("ownership object")
+            .remove("publication");
+        let untrusted =
+            build_generated_asset_sidecar("project-1", "job_child1", "genset_workflow", &fact);
+        assert_ne!(untrusted["origin"], json!("vector_workflow_intermediate"));
+        assert!(untrusted.get("extra").is_none());
+    }
+
+    #[test]
+    fn build_generated_vector_sidecar_keeps_svg_source_and_png_preview_distinct() {
+        let fact = json!({
+            "assetId": "asset_vector",
+            "type": "vector",
+            "mediaPath": "assets/images/genset_v/asset_vector/vector.svg",
+            "mimeType": "image/svg+xml",
+            "width": 12,
+            "height": 8,
+            "createdAt": "2026-08-29T00:00:00Z",
+            "mode": "image_to_svg",
+            "model": "starvector_1b",
+            "adapter": "starvector",
+            "prompt": "preserve the bold silhouette",
+            "sourceAssetId": "asset_source",
+            "sampling": {
+                "temperature": 0.2,
+                "topP": 0.9,
+                "topK": 0,
+                "repetitionPenalty": 1.0,
+                "repetitionContext": 0,
+                "seed": 17,
+            },
+            "detailBudget": {
+                "maxNewTokens": 4096,
+                "maxSvgBytes": 262144,
+                "maxWallTimeMs": 120000,
+            },
+            "sanitizerVersion": "sceneworks-inert-svg-v1",
+            "rendererVersion": "resvg-0.45",
+            "workflow": {
+                "kind": "create_from_prompt",
+                "id": "vwf_1",
+                "parentJobId": "job-1",
+                "childJobId": "job-raster",
+                "intermediateAssetId": "asset_source",
+                "rasterStage": {
+                    "model": "flux_schnell",
+                    "revision": "1111111111111111111111111111111111111111"
+                },
+                "vectorStage": {
+                    "model": "starvector_1b",
+                    "revision": "2222222222222222222222222222222222222222"
+                }
+            },
+            "count": 1,
+            "normalizedWidth": 12,
+            "normalizedHeight": 8,
+            "preview": {
+                "path": "assets/images/genset_v/asset_vector/preview.png",
+                "mimeType": "image/png",
+                "width": 12,
+                "height": 8,
+            },
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_v", &fact);
+        assert_eq!(asset["type"], "vector");
+        assert_eq!(asset["file"]["path"], fact["mediaPath"]);
+        assert_eq!(asset["file"]["mimeType"], "image/svg+xml");
+        assert_eq!(asset["preview"]["mimeType"], "image/png");
+        assert_ne!(asset["file"]["path"], asset["preview"]["path"]);
+        assert_eq!(asset["recipe"]["mode"], "image_to_svg");
+        assert_eq!(asset["recipe"]["model"], "starvector_1b");
+        assert_eq!(asset["recipe"]["sampling"]["seed"], 17);
+        assert_eq!(asset["recipe"]["detailBudget"]["maxNewTokens"], 4096);
+        assert_eq!(
+            asset["recipe"]["sanitizerVersion"],
+            "sceneworks-inert-svg-v1"
+        );
+        assert_eq!(asset["recipe"]["rendererVersion"], "resvg-0.45");
+        assert_eq!(
+            asset["recipe"]["workflow"]["rasterStage"]["revision"],
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            asset["recipe"]["workflow"]["vectorStage"]["revision"],
+            "2222222222222222222222222222222222222222"
+        );
+        assert_eq!(asset["lineage"]["sourceAssetId"], "asset_source");
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_source"]));
+        assert_eq!(asset["lineage"]["workflowId"], "vwf_1");
+        assert_eq!(asset["lineage"]["intermediateAssetId"], "asset_source");
+
+        let encoded = serde_json::to_vec(&asset).expect("vector sidecar serializes");
+        let replayed: Value = serde_json::from_slice(&encoded).expect("vector sidecar parses");
+        assert_eq!(replayed["recipe"], asset["recipe"]);
+        assert_eq!(replayed["lineage"], asset["lineage"]);
     }
 
     /// sc-4408: a scored generation's `rawAdapterSettings.faceLikeness` block (attached worker-side by
@@ -11690,6 +12029,46 @@ mod tests {
         assert!(!is_safe_upload_extension("html"));
     }
 
+    #[test]
+    fn import_asset_refuses_svg_even_when_the_client_claims_png() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("No raw SVG").expect("project creates");
+        let source = temp_dir.path().join("untrusted.svg");
+        std::fs::write(
+            &source,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+        )
+        .expect("fixture writes");
+
+        let error = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "untrusted.svg".to_owned(),
+                    // The filename check must still win when the client lies about the MIME type.
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect_err("generic SVG import is forbidden");
+        assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+        assert!(store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list")
+            .is_empty());
+        assert!(
+            !Path::new(&project.path)
+                .join("assets/uploads")
+                .read_dir()
+                .expect("upload dir")
+                .any(|entry| entry.is_ok()),
+            "rejected SVG leaves neither asset nor sidecar"
+        );
+    }
+
     /// sc-8872 (F-070): end-to-end — a `video/mp4` upload named `evil.html` is stored with a `.mp4`
     /// extension and `project_file` serves it as `video/mp4`, never `text/html`. A legitimate
     /// `.webm` upload still round-trips. This pins the content-type-confusion fix through the exact
@@ -13357,6 +13736,102 @@ mod tests {
             .and_then(Value::as_array)
             .expect("looks array");
         assert_eq!(looks.len(), threads * per_thread);
+    }
+
+    #[test]
+    fn vector_workflow_intermediate_is_hidden_and_cleanup_requires_exact_ownership() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test-app");
+        let project = store.create_project("Vector workflow").expect("project");
+        let import = |name: &str| {
+            let source = temp.path().join(name);
+            std::fs::write(&source, b"\x89PNG\r\n\x1a\n fixture").expect("source writes");
+            store
+                .import_asset(
+                    &project.id,
+                    UploadAsset {
+                        filename: name.to_owned(),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: source,
+                        source_asset_id: None,
+                        provenance: None,
+                    },
+                )
+                .expect("asset imports")
+        };
+        let intermediate = import("intermediate.png");
+        let user_asset = import("user.png");
+        let intermediate_id = intermediate["id"].as_str().expect("id").to_owned();
+        let user_asset_id = user_asset["id"].as_str().expect("id").to_owned();
+
+        let marked = store
+            .mark_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+                "job_child",
+            )
+            .expect("intermediate marked");
+        assert_eq!(marked["origin"], json!("vector_workflow_intermediate"));
+        assert_eq!(
+            marked["extra"]["vectorWorkflow"],
+            json!({
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": "vwf_owned",
+                "parentJobId": "job_parent",
+                "childJobId": "job_child",
+                "hidden": true
+            })
+        );
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("assets list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], json!(user_asset_id));
+        assert!(store.get_asset(&project.id, &intermediate_id).is_ok());
+
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_other",
+                "job_parent",
+            )
+            .expect("foreign workflow refuses"));
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &user_asset_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("user asset refuses"));
+        assert!(store.get_asset(&project.id, &intermediate_id).is_ok());
+        assert!(store.get_asset(&project.id, &user_asset_id).is_ok());
+
+        assert!(store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("owned cleanup"));
+        assert!(matches!(
+            store.get_asset(&project.id, &intermediate_id),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+        assert!(store.get_asset(&project.id, &user_asset_id).is_ok());
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("cleanup is idempotent"));
     }
 
     /// issue #1435 / sc-11855: a workspace folder that rejects writes must fail

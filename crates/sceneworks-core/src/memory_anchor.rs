@@ -4808,6 +4808,70 @@ mod tests {
     /// not read current on the strength of it. Read off the packaged closure file's own
     /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
     #[test]
+    fn attested_anchor_currency_follows_loader_changes_not_unrelated_pin_changes() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let attested: Vec<&MemoryAnchor> = store
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.source.currency_attestation.is_some())
+            .collect();
+        assert!(
+            !attested.is_empty(),
+            "packaged attestations exercise this contract"
+        );
+        for anchor in &attested {
+            let attestation = anchor.source.currency_attestation.as_ref().unwrap();
+            // Exercise the tooling's source-currency comparison independently of runtime
+            // admission, which preserves measured anchors despite source drift.
+            let mut closures = packaged_closures();
+            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
+            closures
+                .models
+                .get_mut(&key)
+                .expect("loader declared")
+                .digest = anchor.source.loader_closure_digest.clone();
+            closures.inference_revision = attestation.attested_revision.clone();
+            assert!(
+                anchor_is_current(anchor, &closures),
+                "{}: reviewed loader",
+                anchor.id
+            );
+
+            closures.inference_revision = if attestation.attested_revision == "0".repeat(40) {
+                "1".repeat(40)
+            } else {
+                "0".repeat(40)
+            };
+            assert!(
+                anchor_is_current(anchor, &closures),
+                "{}: unchanged loader at a later pin",
+                anchor.id
+            );
+
+            closures.models.get_mut(&key).unwrap().digest =
+                if anchor.source.loader_closure_digest == "0".repeat(64) {
+                    "1".repeat(64)
+                } else {
+                    "0".repeat(64)
+                };
+            assert!(
+                !anchor_is_current(anchor, &closures),
+                "{}: changed loader",
+                anchor.id
+            );
+            assert!(
+                matches!(
+                    attestation.class.as_str(),
+                    "accounting-only" | "witnessed-unchanged"
+                ),
+                "{}: attestation class {:?} is not one the doctrine names",
+                anchor.id,
+                attestation.class
+            );
+        }
+    }
+
+    #[test]
     fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
         let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
         let closures = packaged_closures();

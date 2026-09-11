@@ -26,6 +26,7 @@ const MIME_EXTENSIONS = {
   "image/avif": "avif",
   "image/bmp": "bmp",
   "image/tiff": "tiff",
+  "image/svg+xml": "svg",
   "video/mp4": "mp4",
   "video/webm": "webm",
   "video/quicktime": "mov",

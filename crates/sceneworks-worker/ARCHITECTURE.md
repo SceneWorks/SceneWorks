@@ -79,6 +79,7 @@ conditional/partial.
 | `image_edit` | ⚠️ MLX / candle, eligible edit models only | `run_utility_job` → `run_image_generate_job`; `job_is_mlx_eligible`; `image_job_is_candle_eligible` |
 | `image_vqa` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_vqa_job`; `understanding_job_is_mlx_eligible` |
 | `image_interleave` | ⚠️ MLX / candle, SenseNova-U1 only | `run_utility_job` → `run_interleave_job`; `understanding_job_is_mlx_eligible` |
+| `vector_generate` | ✅ CPU utility, fixture-backed `image_to_svg` only | `run_utility_job` → `run_image_to_svg_job`; `vector_jobs::run_image_to_svg_job` |
 | `video_generate` | ⚠️ MLX / candle, eligible models and modes only | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
 | `video_extend` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |
 | `video_bridge` | ⚠️ MLX LTX/Wan eligible paths; candle Wan-VACE eligible path | `run_utility_job` → `run_video_generate_job`; `video_job_is_mlx_eligible`; `video_job_is_candle_eligible` |

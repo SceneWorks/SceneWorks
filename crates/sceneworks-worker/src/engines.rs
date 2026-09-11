@@ -978,6 +978,29 @@ fn registry_capabilities_from(
         }
     };
 
+    // StarVector is registered in the ordinary core-llm catalog because its bounded SVG stream is
+    // a typed extension of TextLlm. The generic descriptor cannot advertise that extension, so keep
+    // this projection deliberately narrow: only the four exact native registrations admitted by
+    // the paired inference bundle can light up image_to_svg, and no registration can infer direct
+    // text_to_svg. A structurally similar vision LLM, a misspelled id, or a provider registered under
+    // the wrong backend contributes nothing.
+    const STARVECTOR_IMAGE_TO_SVG: &[(&str, &str)] = &[
+        ("mlx-starvector-1b", "mlx"),
+        ("mlx-starvector-8b", "mlx"),
+        ("candle-starvector-1b", "candle"),
+        ("candle-starvector-8b", "candle"),
+    ];
+    if text.registrations().any(|registration| {
+        let descriptor = (registration.descriptor)();
+        backends.contains(&descriptor.backend.as_str())
+            && descriptor.family == "starvector"
+            && descriptor.capabilities.supports_vision
+            && STARVECTOR_IMAGE_TO_SVG
+                .contains(&(descriptor.id.as_str(), descriptor.backend.as_str()))
+    }) {
+        push(Cap::VectorImageToSvg, &mut caps);
+    }
+
     for reg in media.generators() {
         let d = (reg.descriptor)();
         if !backends.contains(&d.backend) {
@@ -2312,6 +2335,46 @@ mod tests {
             weightless_audio: None,
         };
 
+    fn stub_mlx_starvector_descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+        gen_core::core_llm::TextLlmDescriptor {
+            id: "mlx-starvector-1b".to_string(),
+            family: "starvector".to_string(),
+            backend: "mlx".to_string(),
+            capabilities: gen_core::core_llm::TextLlmCapabilities {
+                supports_vision: true,
+                ..Default::default()
+            },
+        }
+    }
+    const STUB_MLX_STARVECTOR: gen_core::core_llm::TextLlmRegistration =
+        gen_core::core_llm::TextLlmRegistration {
+            descriptor: stub_mlx_starvector_descriptor,
+            load: stub_textllm_load,
+            can_load: stub_textllm_can_load,
+            weightless_vision: None,
+            weightless_audio: None,
+        };
+
+    fn stub_candle_starvector_descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+        gen_core::core_llm::TextLlmDescriptor {
+            id: "candle-starvector-8b".to_string(),
+            family: "starvector".to_string(),
+            backend: "candle".to_string(),
+            capabilities: gen_core::core_llm::TextLlmCapabilities {
+                supports_vision: true,
+                ..Default::default()
+            },
+        }
+    }
+    const STUB_CANDLE_STARVECTOR: gen_core::core_llm::TextLlmRegistration =
+        gen_core::core_llm::TextLlmRegistration {
+            descriptor: stub_candle_starvector_descriptor,
+            load: stub_textllm_load,
+            can_load: stub_textllm_can_load,
+            weightless_vision: None,
+            weightless_audio: None,
+        };
+
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
     // (`sdxl`): proves a Windows/candle backend lights up `lora_train` + `lora_train_execute` from a
     // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the CI lane exercises the
@@ -2356,6 +2419,8 @@ mod tests {
         let media = media.build().expect("test media registry");
         let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
             .register(STUB_TEXT_LLM)
+            .register(STUB_MLX_STARVECTOR)
+            .register(STUB_CANDLE_STARVECTOR)
             .build()
             .expect("test LLM registry");
         registry_capabilities_from(settings, &media, &text)
@@ -2489,6 +2554,53 @@ mod tests {
         // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
         let off = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::PromptRefine));
+    }
+
+    #[test]
+    fn exact_enabled_starvector_registrations_project_image_to_svg_only() {
+        let mlx = registry_capabilities_with_stubs(&settings_with_backends(true, false));
+        assert!(mlx.contains(&Cap::VectorImageToSvg));
+        assert!(!mlx.contains(&Cap::VectorTextToSvg));
+
+        let candle = registry_capabilities_with_stubs(&settings_with_backends(false, true));
+        assert!(candle.contains(&Cap::VectorImageToSvg));
+        assert!(!candle.contains(&Cap::VectorTextToSvg));
+
+        let disabled = registry_capabilities_with_stubs(&settings_with_backends(false, false));
+        assert!(!disabled.contains(&Cap::VectorImageToSvg));
+        assert!(!disabled.contains(&Cap::VectorTextToSvg));
+    }
+
+    #[test]
+    fn starvector_projection_rejects_wrong_id_family_backend_and_nonvision_descriptors() {
+        fn descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+            gen_core::core_llm::TextLlmDescriptor {
+                // Exact id for Candle, but deliberately registered as MLX and without the typed
+                // family's vision surface. No individual condition may be enough to claim.
+                id: "candle-starvector-1b".to_string(),
+                family: "llama".to_string(),
+                backend: "mlx".to_string(),
+                capabilities: Default::default(),
+            }
+        }
+        const WRONG: gen_core::core_llm::TextLlmRegistration =
+            gen_core::core_llm::TextLlmRegistration {
+                descriptor,
+                load: stub_textllm_load,
+                can_load: stub_textllm_can_load,
+                weightless_vision: None,
+                weightless_audio: None,
+            };
+        let media = gen_core::ProviderRegistryBuilder::new()
+            .build()
+            .expect("empty media registry");
+        let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
+            .register(WRONG)
+            .build()
+            .expect("hostile text registry");
+        let caps = registry_capabilities_from(&settings_with_backends(true, true), &media, &text);
+        assert!(!caps.contains(&Cap::VectorImageToSvg));
+        assert!(!caps.contains(&Cap::VectorTextToSvg));
     }
 
     #[test]

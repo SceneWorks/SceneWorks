@@ -18,6 +18,8 @@ export const CAPABILITY_LABELS = {
   // chip fell to the humanized fallback ("video to video") — visibly out of style beside the two
   // title-cased siblings on the same card.
   video_to_video: "Video to Video",
+  image_to_svg: "Image to SVG",
+  text_to_svg: "Text to SVG",
   first_last_frame: "First / Last Frame",
   extend_clip: "Extend Clip",
   video_bridge: "Video Bridge",

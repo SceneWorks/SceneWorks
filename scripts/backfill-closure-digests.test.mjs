@@ -335,6 +335,25 @@ test("a revision with no provider in its object is reported, not silently skippe
   assert.match(result.skipped[0], /a4f409ae has no provider/);
 });
 
+test("a provenance-only inferenceRevision is outside the closure-binding population", () => {
+  const body = [
+    '      "vector": {',
+    '        "terminalCandidate": {',
+    `          "inferenceRevision": "${REVISION}",`,
+    '          "corpusSha256": "f"',
+    "        }",
+    "      }",
+  ].join("\n");
+
+  const result = stamp(body);
+
+  assert.equal(result.body, body);
+  assert.deepEqual(result.stamped, []);
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(result.orphans, []);
+  assert.deepEqual(result.located, []);
+});
+
 test("a revision outside any mlx/candle block is reported rather than stamped under a guess", () => {
   const body = [
     '      "somethingElse": {',

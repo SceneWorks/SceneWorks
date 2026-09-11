@@ -791,6 +791,127 @@ pub(crate) struct ImageJobRequest {
     pub(crate) upscale: ImageUpscaleRequest,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
+    /// Server-authored link for a disclosed composed workflow. Public callers cannot use this to
+    /// influence routing; the workflow route creates it after selecting the parent id.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_parent_id: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VectorMode {
+    ImageToSvg,
+    TextToSvg,
+}
+
+impl VectorMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImageToSvg => "image_to_svg",
+            Self::TextToSvg => "text_to_svg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorSampling {
+    pub(crate) temperature: f32,
+    pub(crate) top_p: f32,
+    pub(crate) top_k: u32,
+    pub(crate) repetition_penalty: f32,
+    pub(crate) repetition_context: u32,
+    pub(crate) seed: Option<u64>,
+}
+
+impl Default for VectorSampling {
+    fn default() -> Self {
+        Self {
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            repetition_context: 0,
+            seed: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorDetailBudget {
+    pub(crate) max_new_tokens: u32,
+    pub(crate) max_svg_bytes: u32,
+    pub(crate) max_wall_time_ms: u64,
+}
+
+impl Default for VectorDetailBudget {
+    fn default() -> Self {
+        Self {
+            // Common limit of both registered StarVector-1B providers (MLX: 4000, Candle: 4096).
+            max_new_tokens: 4_000,
+            max_svg_bytes: 256 * 1_024,
+            max_wall_time_ms: 120_000,
+        }
+    }
+}
+
+/// Typed Vector Studio request. SVG source is provider output only; callers can supply raster and
+/// text conditioning, but never raw SVG for the worker to publish.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) mode: VectorMode,
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) source_asset_id: Option<String>,
+    #[serde(default)]
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+}
+
+/// Disclosed prompt-to-vector composition. This never means native text-to-SVG: the prompt is
+/// rendered by an ordinary text-to-image model and the resulting retained raster is submitted to
+/// the vector model in image_to_svg mode.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorPromptWorkflowRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) negative_prompt: String,
+    pub(crate) raster_model: String,
+    pub(crate) vector_model: String,
+    #[serde(default)]
+    pub(crate) seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Optional immutable identities used only by replay. Fresh requests omit them; the API stamps
+    /// authoritative revisions. Replay supplies them and fails typed if the catalog has moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_raster_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_vector_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

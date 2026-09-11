@@ -54,7 +54,19 @@ function withThumbnailRequest(url) {
 }
 
 export function assetCanRenderAsImage(asset) {
-  return asset?.type === "image" || asset?.file?.mimeType?.startsWith("image/");
+  return !isVectorAsset(asset) && (asset?.type === "image" || asset?.file?.mimeType?.startsWith("image/"));
+}
+
+// The canonical SVG is never rendered by the browser. Vector jobs publish a
+// worker-rasterized PNG preview specifically for every visual UI surface.
+export function isVectorAsset(asset) {
+  return asset?.type === "vector" || asset?.file?.mimeType === "image/svg+xml";
+}
+
+export function vectorPreviewUrl(asset) {
+  if (!isVectorAsset(asset) || !asset?.projectId || !asset?.preview?.path) return "";
+  const path = asset.preview.path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${path}`);
 }
 
 export function assetCanRenderAsVideo(asset) {
@@ -152,6 +164,7 @@ export function posterUrl(asset) {
 }
 
 export function thumbnailUrl(asset) {
+  if (isVectorAsset(asset)) return vectorPreviewUrl(asset);
   const source = assetCanRenderAsVideo(asset) ? barePosterUrl(asset) : bareAssetUrl(asset);
   return withThumbnailRequest(source);
 }
@@ -259,9 +272,12 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
   if (!asset) {
     return null;
   }
-  const src = assetUrl(asset);
+  const src = isVectorAsset(asset) ? vectorPreviewUrl(asset) : assetUrl(asset);
   if (!src) {
     return <span className={className}>{asset.type ?? "asset"}</span>;
+  }
+  if (isVectorAsset(asset)) {
+    return <ImageThumb src={src} className={className} />;
   }
   if (assetCanRenderAsVideo(asset)) {
     return (
