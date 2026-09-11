@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { acquireStableLease, claimTupleMarker, verifyPermanentPin, inventory } from "./starvector-terminal-producer.mjs";
 import { claimTerminalAttempt } from "./lib/starvector-terminal-attempt.mjs";
-import { verifyRecovery } from "./starvector-terminal-recovery.mjs";
+import { verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 import { readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { terminalGpuBinding, terminalGpuEnvironment } from "./lib/starvector-terminal-gpu.mjs";
 import { loadUpstreamReference } from "./lib/starvector-terminal-upstream-reference.mjs";
@@ -33,7 +33,9 @@ export async function runUpstream(sceneWorksRoot, output) {
   const validated = await validateUpstreamInputs(options, output);
   const binding = await terminalGpuBinding();
   if (binding.backend !== "candle") throw new Error("upstream reference requires the qualified CUDA lane");
-  const predecessor = await verifyRecovery(await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP, "starvector-recovery"), { campaignRunId: campaign, permanentPin: pin });
+  const recovery = await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), recoveryRoot = process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP, "starvector-recovery");
+  const nativePredecessor = await verifyRecovery(recovery, recoveryRoot, { campaignRunId: campaign, permanentPin: pin });
+  const predecessor = await verifyExecutionPredecessor(recovery, recoveryRoot, nativePredecessor);
   const release = await acquireStableLease(process.env.STARVECTOR_TERMINAL_LEASE_ROOT, process.env.STARVECTOR_TERMINAL_LEASE_HELPER, pin, campaign);
   try {
     await claimTerminalAttempt(process.env.STARVECTOR_TERMINAL_LEASE_ROOT, pin, campaign, { workflowRunId: process.env.GITHUB_RUN_ID, workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), predecessor });

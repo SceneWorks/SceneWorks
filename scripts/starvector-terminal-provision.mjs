@@ -688,6 +688,17 @@ export async function installUpstreamPackages(python, lock, execute = runUpstrea
 }
 
 // Provisioning may acquire dependencies; the campaign validation/execution is offline.
+export async function provisionUpstreamCairo({ sceneWorksRoot, hostRoot, python, lock }, acquire = downloadExact, execute = execFile) {
+  const cache = path.join(hostRoot, "upstream-native-archives");
+  await ensureTerminalPhysicalDirectory(hostRoot, cache);
+  for (const entry of lock.windows_cairo.packages) {
+    const archive = path.join(cache, `${entry.sha256}.pkg.tar.zst`);
+    await acquire(entry.url, archive, entry.sha256, (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(120_000) }));
+    if ((await lstat(archive)).size !== entry.byte_size) die("native Cairo archive size differs");
+  }
+  return execute(python, [path.join(sceneWorksRoot, "scripts/starvector-terminal-upstream-oracle.py"), "provision-cairo", path.join(hostRoot, "upstream-native-cairo"), cache], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+}
+
 export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, assetsRoot, sanitizer }) {
   const lock = await json(path.join(sceneWorksRoot, "release/starvector-terminal-upstream-lock-v1.json"));
   const source = path.join(hostRoot, "upstream-source"), environment = path.join(hostRoot, "upstream-env");
@@ -699,6 +710,7 @@ export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, asse
   console.log(JSON.stringify({ kind: "upstream-package-installer", pip_version: pipVersion, resume_configured: false }));
   if (lock.required_packages.torch !== "2.7.1+cu128") die("persistent wheel must match the exact locked Torch version");
   await installUpstreamPackages(oraclePython, lock, runUpstreamPip, { acquireWheel: timeoutMs => acquireResumableWheel(hostRoot, UPSTREAM_TORCH_WHEEL, { timeoutMs }) });
+  if (process.platform === "win32") await provisionUpstreamCairo({ sceneWorksRoot, hostRoot, python: oraclePython, lock });
   const { validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
   // Authenticated component configs are provisioned separately with immutable
   // repository/revision/hash metadata; never synthesize missing backbone defaults.

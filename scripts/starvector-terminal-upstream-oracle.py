@@ -45,12 +45,128 @@ import shutil
 import subprocess
 import struct
 import sys
+import tarfile
+import tempfile
 import time
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 LOCK = HERE.parent / 'release/starvector-terminal-upstream-lock-v1.json'
 SOURCE_INDICES = [base + i for base in (0, 30, 60, 90) for i in range(5)]
+_CAIRO_HANDLES = []
+
+
+def native_cairo_files(lock):
+    files = {}
+    for package in lock['windows_cairo']['packages']:
+        for entry in package['files']:
+            name = entry['path']
+            if not re.fullmatch(r'ucrt64/(?:bin/[^/]+\.dll|share/licenses/[A-Za-z0-9._/+\-]+)', name) or '..' in name.split('/') or name in files:
+                fail('invalid native Cairo file path')
+            files[name] = entry
+    return files
+
+
+def native_directory(root):
+    root = Path(root)
+    if not root.is_absolute():
+        fail('native Cairo root must be absolute')
+    for item in [root, *root.parents]:
+        if item.is_symlink() or getattr(item, 'is_junction', lambda: False)():
+            fail('native Cairo directory must not traverse links')
+        if item.exists() and not item.is_dir():
+            fail('native Cairo directory is not regular')
+    return root
+
+
+def verify_native_cairo(root, lock):
+    root = native_directory(root)
+    files = native_cairo_files(lock)
+    observed = set()
+    for item in root.rglob('*'):
+        if item.is_symlink() or getattr(item, 'is_junction', lambda: False)():
+            fail('native Cairo runtime contains links')
+        if item.is_file():
+            observed.add(item.relative_to(root).as_posix())
+    if observed != set(files):
+        fail('native Cairo runtime file inventory differs')
+    for name, entry in files.items():
+        file = verified_file(root, name, entry['sha256'])
+        if file.stat().st_size != entry['byte_size']:
+            fail('native Cairo runtime file size differs')
+    return root
+
+
+def provision_native_cairo(root, archives, lock):
+    """Extract only pinned DLLs/licenses from authenticated MSYS2 archives."""
+    import zstandard
+    root = native_directory(root)
+    native_directory(archives)
+    if root.exists():
+        verify_native_cairo(root, lock)
+        return {'status': 'reused', 'version': lock['windows_cairo']['version']}
+    files = native_cairo_files(lock)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=root.name + '.staging-', dir=root.parent))
+    try:
+        for package in lock['windows_cairo']['packages']:
+            archive = verified_file(archives, package['sha256'] + '.pkg.tar.zst', package['sha256'])
+            if archive.stat().st_size != package['byte_size']:
+                fail('native Cairo archive size differs')
+            selected = {entry['path'] for entry in package['files']}
+            seen = set()
+            with archive.open('rb') as source, zstandard.ZstdDecompressor().stream_reader(source) as stream, tarfile.open(fileobj=stream, mode='r|') as bundle:
+                for member in bundle:
+                    if member.name not in selected:
+                        continue
+                    entry = files[member.name]
+                    if member.name in seen or not member.isfile() or member.size != entry['byte_size']:
+                        fail('native Cairo archive entry differs')
+                    data = bundle.extractfile(member).read(member.size + 1)
+                    if len(data) != member.size or hashlib.sha256(data).hexdigest() != entry['sha256']:
+                        fail('native Cairo archive entry digest differs')
+                    output = staging / member.name
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with output.open('xb') as target:
+                        target.write(data)
+                    seen.add(member.name)
+            if seen != selected:
+                fail('native Cairo archive is incomplete')
+        verify_native_cairo(staging, lock)
+        # Never replace an existing runtime; concurrent or corrupt setup fails closed.
+        if root.exists():
+            fail('native Cairo runtime appeared during provisioning')
+        staging.rename(root)
+        return {'status': 'provisioned', 'version': lock['windows_cairo']['version']}
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def import_upstream_runtime(upstream_root, lock):
+    """Exercise both lazy constructor import paths without constructing a model."""
+    if sys.platform == 'win32':
+        import ctypes
+        runtime = verify_native_cairo(Path(upstream_root).parent / 'upstream-native-cairo', lock)
+        dll = runtime / lock['windows_cairo']['entrypoint']
+        # LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        # neither the current directory nor ambient PATH can supply dependencies.
+        _CAIRO_HANDLES.append(os.add_dll_directory(str(dll.parent)))
+        _CAIRO_HANDLES.append(ctypes.WinDLL(str(dll), winmode=0x00001100))
+        os.environ['CAIROCFFI_DLL_DIRECTORIES'] = str(dll.parent)
+    sys.path.insert(0, str(Path(upstream_root).resolve()))
+    for module in ['starvector.model.models.starvector_v1', 'starvector.model.models.starvector_v2']:
+        importlib.import_module(module)
+    cairo = importlib.import_module('cairocffi')
+    version = cairo.cairo_version_string()
+    if sys.platform == 'win32' and version != lock['windows_cairo']['version']:
+        fail('loaded native Cairo version differs: ' + version)
+    # Check the native rendering path as well as dlopen/version resolution. This
+    # tiny setup probe does not replace the production resvg acceptance renderer.
+    png = importlib.import_module('cairosvg').svg2png(bytestring=b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>')
+    if len(png) < 24 or png[:8] != b'\x89PNG\r\n\x1a\n' or png[12:16] != b'IHDR' or struct.unpack('>II', png[16:24]) != (2, 2):
+        fail('native Cairo render probe did not produce a 2x2 PNG')
+    return {'constructor_imports': ['starvector_v1', 'starvector_v2'], 'cairo_version': version, 'cairo_probe_sha256': hashlib.sha256(png).hexdigest()}
 
 
 def fail(message):
@@ -244,9 +360,10 @@ def validate(args, packages=True):
     if not Path(args.sanitizer).is_file():
         fail('production sanitizer binary is missing')
     rows = select_rows(args.assets_root)
+    runtime = import_upstream_runtime(args.upstream_root, lock) if packages else None
     return {'lock': lock, 'source_sha256': source_hash, 'model_root': str(model_root), 'model_inventory_sha256': model_hash,
             'config_path': str(config_path), 'processor_path': str(processor_path), 'components': components,
-            'component_configs': configs, 'rows': rows, 'weight_map': mapping}
+            'component_configs': configs, 'rows': rows, 'weight_map': mapping, 'runtime': runtime}
 
 
 @contextlib.contextmanager
@@ -415,7 +532,7 @@ def worker(args, facts):
             transcript.write(json.dumps(event, separators=(',', ':')) + '\n'); transcript.flush(); os.fsync(transcript.fileno())
         record({'event': 'start', 'implementation_revision': facts['lock']['implementation_revision'],
                 'source_sha256': facts['source_sha256'], 'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
-                'components': facts['components'], 'attention_implementation': 'eager', 'embedding_initialization': 'exact-local-tokenizer-size-before-strict-checkpoint-load',
+                'components': facts['components'], 'runtime': facts['runtime'], 'attention_implementation': 'eager', 'embedding_initialization': 'exact-local-tokenizer-size-before-strict-checkpoint-load',
                 'max_rss_gib': args.max_rss_gib, 'max_vram_gib': args.max_vram_gib, 'timeout_seconds': args.timeout_seconds})
         try:
             model, coverage = load_model(facts, device)
@@ -511,6 +628,9 @@ def supervise(args):
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == 'provision-cairo':
+        print(json.dumps(provision_native_cairo(sys.argv[2], sys.argv[3], json.loads(LOCK.read_text()))))
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['validate', 'prepare', '_worker'])
     for key in ['upstream-root', 'weights-root', 'assets-root', 'output', 'components-root', 'sanitizer']:
@@ -530,7 +650,7 @@ def main():
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     facts = validate(args)
     if args.command == 'validate':
-        print(json.dumps({'status': 'validated', 'tier': args.tier, 'model_inventory_sha256': facts['model_inventory_sha256'], 'source_sha256': facts['source_sha256'], 'cases': len(facts['rows'])}))
+        print(json.dumps({'status': 'validated', 'tier': args.tier, 'model_inventory_sha256': facts['model_inventory_sha256'], 'source_sha256': facts['source_sha256'], 'cases': len(facts['rows']), 'runtime': facts['runtime']}))
     elif args.command == '_worker':
         worker(args, facts)
     else:

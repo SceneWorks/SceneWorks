@@ -50,10 +50,10 @@ async function treeInventory(root) {
 // Invoked in a hosted preparation job, before the first hardware job. ZIPs are
 // GitHub artifacts, not model downloads. A local archive directory supports the
 // same production path for a CPU-only integration dry run.
-export async function prepareRecovery(config, output, { archiveRoot, token = process.env.GH_TOKEN } = {}) {
+export async function prepareRecovery(config, output, { archiveRoot, token = process.env.GH_TOKEN, fetchImpl = fetch } = {}) {
   if (config.schema_version !== 1) fail("unsupported recovery configuration");
   const predecessor = structuredClone(config);
-  delete predecessor.schema_version; delete predecessor.authority;
+  delete predecessor.schema_version; delete predecessor.authority; delete predecessor.execution_predecessor;
   const root = `quarantine/${safeRecoveryPath(predecessor.campaign_id)}`, entries = [];
   for (const [role, marker] of Object.entries(predecessor.markers)) {
     const bytes = Buffer.from(marker.content); delete marker.content;
@@ -83,7 +83,57 @@ export async function prepareRecovery(config, output, { archiveRoot, token = pro
   predecessor.quarantine = { root, entries, aggregate_sha256: sha(stable({ root, entries })) };
   await put(output, `${root}/aggregate.json`, stable({ root, entries }));
   await put(output, "recovery-predecessor.json", stable(predecessor));
+  if (config.execution_predecessor) await prepareExecutionPredecessor(config, output, { archiveRoot, token, fetchImpl });
   return predecessor;
+}
+
+// Execution claims and historical native acceptance evidence have different
+// scopes. An upstream-only failure has no native tuple receipt to quarantine.
+export function validateExecutionPredecessor(config, run, artifact, jobs) {
+  const value = config.execution_predecessor, workflow = value?.workflow, input = value?.source_artifact;
+  if (!value || value.stage !== "upstream-reference" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.campaign_id ?? "") || value.campaign_id === config.campaign_id || !/^[a-f0-9]{40}$/.test(value.inference_revision ?? "") || !/^[a-f0-9]{40}$/.test(value.sceneworks_revision ?? "")) fail("invalid execution predecessor identity");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.predecessor_campaign_id ?? "") || value.predecessor_campaign_id === value.campaign_id) fail("failed execution lacks its original claim predecessor");
+  if (workflow?.repository !== "SceneWorks/SceneWorks" || ![".github/workflows/starvector-terminal.yml", ".github/workflows/server-candle-linux.yml"].includes(workflow.path) || !/^[1-9][0-9]*$/.test(workflow.run_id ?? "") || !Number.isSafeInteger(workflow.run_attempt) || workflow.run_attempt < 1 || workflow.head_sha !== value.sceneworks_revision || !["failure", "cancelled", "timed_out"].includes(workflow.conclusion)) fail("invalid failed execution workflow");
+  if (String(run?.id) !== workflow.run_id || run.run_attempt !== workflow.run_attempt || run.head_sha !== workflow.head_sha || run.path !== workflow.path || run.event !== "workflow_dispatch" || run.status !== "completed" || run.conclusion !== workflow.conclusion) fail("authenticated failed execution workflow differs");
+  if (!/^[1-9][0-9]*$/.test(input?.id ?? "") || input.name !== `starvector-upstream-${value.campaign_id}` || !Number.isSafeInteger(input.size) || input.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(input.digest ?? "") || String(artifact?.id) !== input.id || artifact.name !== input.name || artifact.size_in_bytes !== input.size || artifact.digest !== input.digest || artifact.expired !== false || String(artifact.workflow_run?.id) !== workflow.run_id || artifact.workflow_run?.head_sha !== workflow.head_sha) fail("authenticated upstream artifact differs");
+  if (!Array.isArray(jobs?.jobs) || jobs.total_count !== jobs.jobs.length) fail("failed execution job census is incomplete");
+  for (const stage of ["upstream-reference", "mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"]) {
+    const matches = jobs.jobs.filter(job => job.name === stage || job.name.endsWith(` / ${stage}`));
+    if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || (stage === "upstream-reference" ? !["failure", "cancelled", "timed_out"].includes(matches[0].conclusion) : matches[0].conclusion !== "skipped")) fail(`execution predecessor did not leave ${stage} in the required state`);
+  }
+  return value;
+}
+
+async function prepareExecutionPredecessor(config, output, { archiveRoot, token, fetchImpl }) {
+  const value = config.execution_predecessor, workflow = value.workflow, input = value.source_artifact;
+  if (!token) fail("Actions read token required for failed execution verification");
+  const get = async (endpoint, binary = false) => {
+    const response = await fetchImpl(`https://api.github.com/repos/SceneWorks/SceneWorks/${endpoint}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(60000) });
+    if (!response.ok) fail(`failed execution metadata: HTTP ${response.status}`);
+    return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
+  };
+  // The attempt-specific endpoint never substitutes a newer re-run's outcome.
+  const base = `actions/runs/${workflow.run_id}/attempts/${workflow.run_attempt}`;
+  const run = await get(base), artifact = await get(`actions/artifacts/${input.id}`), jobs = await get(`${base}/jobs?per_page=100`);
+  validateExecutionPredecessor(config, run, artifact, jobs);
+  const bytes = archiveRoot ? await readFile(path.join(archiveRoot, `${input.id}.zip`)) : await get(`actions/artifacts/${input.id}/zip`, true);
+  if (bytes.length !== input.size || `sha256:${sha(bytes)}` !== input.digest) fail("failed execution archive identity differs");
+  const root = `execution-attempts/${value.campaign_id}`;
+  await put(output, `${root}/upstream.zip`, bytes);
+  await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, artifact, jobs }));
+}
+
+export async function verifyExecutionPredecessor(config, root, nativePredecessor) {
+  const value = config.execution_predecessor;
+  if (!value) return nativePredecessor;
+  const relative = `execution-attempts/${safeRecoveryPath(value.campaign_id)}`;
+  const metadataPath = `${relative}/metadata.json`, info = await lstat(path.join(root, metadataPath));
+  const bytes = await checkedRecoveryFile(root, metadataPath, { size: info.size, sha256: sha(await readFile(path.join(root, metadataPath))) });
+  const metadata = JSON.parse(bytes);
+  if (stable(metadata.predecessor) !== stable(value)) fail("failed execution declaration differs from prepared evidence");
+  validateExecutionPredecessor(config, metadata.run, metadata.artifact, metadata.jobs);
+  await checkedRecoveryFile(root, `${relative}/upstream.zip`, { size: value.source_artifact.size, sha256: value.source_artifact.digest.slice(7) });
+  return value;
 }
 
 export async function verifyRecovery(config, root, { campaignRunId, permanentPin, leaseRoot } = {}) {

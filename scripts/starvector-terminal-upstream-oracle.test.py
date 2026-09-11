@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """CPU-only contract/failure-path tests; no model weights, network, or GPU."""
 import hashlib
+import contextlib
+import io
 import importlib.util
 import json
 from pathlib import Path
 import struct
 import tempfile
+import tarfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -22,6 +25,126 @@ class OracleTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def cairo_fixture(self, *, member_type=tarfile.REGTYPE, duplicate=False, corrupt=False):
+        # Real tar parsing/extraction; the codec seam keeps this CPU fixture
+        # independent of optional installed packages. Real MSYS2 archive hashes
+        # and PE dependency inventories are locked separately.
+        payload = b'fixture DLL bytes'
+        name = 'ucrt64/bin/libcairo-2.dll'
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode='w') as archive:
+            for _ in range(2 if duplicate else 1):
+                entry = tarfile.TarInfo(name); entry.type = member_type
+                entry.size = len(payload) if member_type == tarfile.REGTYPE else 0
+                entry.linkname = '/outside.dll'
+                archive.addfile(entry, io.BytesIO(b'x' * len(payload) if corrupt else payload))
+        contents = data.getvalue(); checksum = hashlib.sha256(contents).hexdigest()
+        cache = self.root.resolve() / 'archives'; cache.mkdir(exist_ok=True)
+        (cache / (checksum + '.pkg.tar.zst')).write_bytes(contents)
+        lock = {'windows_cairo': {'version': '1.18.4', 'entrypoint': name, 'packages': [{
+            'sha256': checksum, 'byte_size': len(contents), 'files': [{
+                'path': name, 'sha256': hashlib.sha256(payload).hexdigest(), 'byte_size': len(payload)}]}]}}
+        decoder = SimpleNamespace(ZstdDecompressor=lambda: SimpleNamespace(stream_reader=lambda source: contextlib.nullcontext(source)))
+        return cache, lock, decoder
+
+    def test_native_cairo_materialization_reuse_and_tamper_rejection(self):
+        cache, lock, decoder = self.cairo_fixture()
+        runtime = self.root.resolve() / 'runtime'
+        with patch.dict(oracle.sys.modules, {'zstandard': decoder}):
+            self.assertEqual(oracle.provision_native_cairo(runtime, cache, lock)['status'], 'provisioned')
+            self.assertEqual(oracle.provision_native_cairo(runtime, cache, lock)['status'], 'reused')
+            (runtime / lock['windows_cairo']['entrypoint']).write_bytes(b'tamper')
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                oracle.provision_native_cairo(runtime, cache, lock)
+            self.assertEqual((runtime / lock['windows_cairo']['entrypoint']).read_bytes(), b'tamper')
+
+    def test_native_cairo_rejects_bad_archive_members_and_cleans_owned_staging(self):
+        for kwargs in [{'member_type': tarfile.SYMTYPE}, {'duplicate': True}, {'corrupt': True}]:
+            with self.subTest(kwargs=kwargs):
+                cache, lock, decoder = self.cairo_fixture(**kwargs)
+                runtime = self.root.resolve() / 'runtime'
+                with patch.dict(oracle.sys.modules, {'zstandard': decoder}), self.assertRaisesRegex(ValueError, 'archive entry'):
+                    oracle.provision_native_cairo(runtime, cache, lock)
+                self.assertFalse(runtime.exists())
+                self.assertEqual(list(runtime.parent.glob('runtime.staging-*')), [])
+
+    def test_native_cairo_rejects_archive_tamper_unsafe_lock_and_extra_runtime_dll(self):
+        cache, lock, decoder = self.cairo_fixture(); runtime = self.root.resolve() / 'runtime'
+        with patch.dict(oracle.sys.modules, {'zstandard': decoder}):
+            archive = next(cache.iterdir()); archive.write_bytes(b'tamper')
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                oracle.provision_native_cairo(runtime, cache, lock)
+        lock['windows_cairo']['packages'][0]['files'][0]['path'] = 'ucrt64/bin/../../outside.dll'
+        with self.assertRaisesRegex(ValueError, 'file path'):
+            oracle.native_cairo_files(lock)
+        cache, lock, decoder = self.cairo_fixture()
+        with patch.dict(oracle.sys.modules, {'zstandard': decoder}):
+            oracle.provision_native_cairo(runtime, cache, lock)
+        (runtime / 'ucrt64/bin/untrusted.dll').write_bytes(b'extra')
+        with self.assertRaisesRegex(ValueError, 'file inventory'):
+            oracle.verify_native_cairo(runtime, lock)
+
+    def test_native_cairo_rejects_linked_runtime_parent(self):
+        linked = self.root.resolve() / 'linked'
+        try:
+            linked.symlink_to(self.root.resolve(), target_is_directory=True)
+        except OSError:
+            self.skipTest('filesystem cannot create symlinks')
+        with self.assertRaisesRegex(ValueError, 'traverse links'):
+            oracle.native_directory(linked / 'runtime')
+
+    def test_readiness_imports_both_lazy_constructor_paths_and_propagates_dll_failure(self):
+        imported = []
+        def load(name):
+            imported.append(name)
+            if name.endswith('starvector_v2'):
+                raise OSError('libcairo-2.dll unavailable')
+            return SimpleNamespace()
+        with patch.object(oracle.sys, 'platform', 'darwin'), patch.object(oracle.sys, 'path', []), patch.object(oracle.importlib, 'import_module', side_effect=load):
+            with self.assertRaisesRegex(OSError, 'libcairo-2.dll'):
+                oracle.import_upstream_runtime(self.root, {})
+        self.assertEqual(imported, ['starvector.model.models.starvector_v1', 'starvector.model.models.starvector_v2'])
+        with patch.object(oracle.sys, 'platform', 'darwin'), patch.object(oracle.sys, 'path', []), patch.object(oracle.importlib, 'import_module', return_value=SimpleNamespace(cairo_version_string=lambda: '1.18.4', svg2png=lambda **kw: b'\x89PNG\r\n\x1a\n' + struct.pack('>I', 13) + b'IHDR' + struct.pack('>II', 2, 2))):
+            self.assertEqual(oracle.import_upstream_runtime(self.root, {})['constructor_imports'], ['starvector_v1', 'starvector_v2'])
+
+    def test_windows_native_cairo_missing_fails_before_upstream_import(self):
+        _, lock, _ = self.cairo_fixture()
+        with patch.object(oracle.sys, 'platform', 'win32'), patch.object(oracle.importlib, 'import_module') as importer:
+            with self.assertRaisesRegex(ValueError, 'file inventory'):
+                oracle.import_upstream_runtime(self.root.resolve() / 'source', lock)
+            importer.assert_not_called()
+
+    def test_readiness_rejects_a_loaded_cairo_that_cannot_render(self):
+        for result in [b'', b'not PNG', b'\x89PNG\r\n\x1a\n' + struct.pack('>I', 13) + b'IHDR' + struct.pack('>II', 4, 4)]:
+            with self.subTest(result=result), patch.object(oracle.sys, 'platform', 'darwin'), patch.object(oracle.sys, 'path', []), \
+                 patch.object(oracle.importlib, 'import_module', return_value=SimpleNamespace(cairo_version_string=lambda: '1.18.4', svg2png=lambda **kw: result)):
+                with self.assertRaisesRegex(ValueError, 'render probe'):
+                    oracle.import_upstream_runtime(self.root, {})
+
+    def test_windows_native_cairo_uses_restricted_absolute_dll_load_and_version(self):
+        import ctypes
+        cache, lock, decoder = self.cairo_fixture()
+        runtime = self.root.resolve() / 'upstream-native-cairo'
+        with patch.dict(oracle.sys.modules, {'zstandard': decoder}):
+            oracle.provision_native_cairo(runtime, cache, lock)
+        with patch.object(oracle.sys, 'platform', 'win32'), patch.object(oracle.sys, 'path', []), \
+             patch.dict(oracle.os.environ, {}), patch.object(oracle, '_CAIRO_HANDLES', []), \
+             patch.object(oracle.os, 'add_dll_directory', create=True) as directory, \
+             patch.object(ctypes, 'WinDLL', create=True) as library, \
+             patch.object(oracle.importlib, 'import_module', return_value=SimpleNamespace(cairo_version_string=lambda: '1.18.4', svg2png=lambda **kw: b'\x89PNG\r\n\x1a\n' + struct.pack('>I', 13) + b'IHDR' + struct.pack('>II', 2, 2))):
+            ambient = oracle.os.environ.get('PATH')
+            oracle.import_upstream_runtime(self.root.resolve() / 'source', lock)
+            library.assert_called_once_with(str(runtime / 'ucrt64/bin/libcairo-2.dll'), winmode=0x1100)
+            directory.assert_called_once_with(str(runtime / 'ucrt64/bin'))
+            self.assertEqual(oracle.os.environ.get('PATH'), ambient)
+            self.assertEqual(oracle.os.environ['CAIROCFFI_DLL_DIRECTORIES'], str(runtime / 'ucrt64/bin'))
+        with patch.object(oracle.sys, 'platform', 'win32'), patch.object(oracle.sys, 'path', []), \
+             patch.dict(oracle.os.environ, {}), patch.object(oracle, '_CAIRO_HANDLES', []), \
+             patch.object(oracle.os, 'add_dll_directory', create=True), patch.object(ctypes, 'WinDLL', create=True), \
+             patch.object(oracle.importlib, 'import_module', return_value=SimpleNamespace(cairo_version_string=lambda: '1.16.0')):
+            with self.assertRaisesRegex(ValueError, 'version differs'):
+                oracle.import_upstream_runtime(self.root.resolve() / 'source', lock)
 
     def test_actual_lock_metadata_matches_v2_consumer_contract(self):
         lock = json.loads((Path(__file__).parent.parent / 'release/starvector-terminal-upstream-lock-v1.json').read_text())

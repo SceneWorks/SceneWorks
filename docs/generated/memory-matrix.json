@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9cbc396e1d9ab577d6e8d287b29cec7dfd3e8d4b76a5f23a900203bcfce4b53f",
+    "sceneWorksRevision": "source-tree:ac319ca88e5859b66218dee2e6d802d0a6bac342956dfb764c76c07cb8340e44",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "24ef15a1a14a027fc7a74cea65da5319436620aad301af0222274dad1c26e822"
+        "sha256": "e84c063aaa9daa4865e612a53f06af747eaab67477b2ef79cc49f62a006e5e79"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",

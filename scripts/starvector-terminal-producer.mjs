@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
-import { bindRecoveryLineage, verifyRecovery } from "./starvector-terminal-recovery.mjs";
+import { bindRecoveryLineage, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 import { assertTerminalProductWorkerReady } from "./starvector-terminal-product-service.mjs";
 import { claimTerminalAttempt } from "./lib/starvector-terminal-attempt.mjs";
 
@@ -246,7 +246,9 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
   try {
     if (!TUPLES.includes(tuple)) die("unsupported tuple");
     const pre = await preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output, tuple });
-    const predecessor = await verifyRecovery(await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), (process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP ?? "", "starvector-recovery")), { campaignRunId, permanentPin, leaseRoot: tuple.startsWith("mlx:") ? leaseRoot : undefined });
+    const recovery = await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), recoveryRoot = process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP ?? "", "starvector-recovery");
+    const nativePredecessor = await verifyRecovery(recovery, recoveryRoot, { campaignRunId, permanentPin, leaseRoot: tuple.startsWith("mlx:") ? leaseRoot : undefined });
+    const predecessor = await verifyExecutionPredecessor(recovery, recoveryRoot, nativePredecessor);
     release = await acquireStableLease(leaseRoot, leaseHelper, permanentPin, campaignRunId);
     await claimTerminalAttempt(leaseRoot, permanentPin, campaignRunId, { workflowRunId: process.env.GITHUB_RUN_ID, workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), predecessor });
     await claimTupleMarker(leaseRoot, permanentPin, campaignRunId, tuple);

@@ -54,7 +54,705 @@
     "svgpathtools": "1.6.1",
     "CairoSVG": "2.7.1",
     "psutil": "7.0.0",
-    "huggingface-hub": "0.28.1"
+    "huggingface-hub": "0.28.1",
+    "cairocffi": "1.7.1",
+    "zstandard": "0.23.0"
   },
-  "torch_index_url": "https://download.pytorch.org/whl/cu128"
+  "torch_index_url": "https://download.pytorch.org/whl/cu128",
+  "windows_cairo": {
+    "version": "1.18.4",
+    "distribution": "MSYS2 UCRT64",
+    "source": "https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-cairo",
+    "entrypoint": "ucrt64/bin/libcairo-2.dll",
+    "system_imports": [
+      "advapi32.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-multibyte-l1-1-0.dll",
+      "api-ms-win-crt-private-l1-1-0.dll",
+      "api-ms-win-crt-process-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll",
+      "dwrite.dll",
+      "gdi32.dll",
+      "kernel32.dll",
+      "msimg32.dll",
+      "ole32.dll",
+      "rpcrt4.dll",
+      "shell32.dll",
+      "user32.dll",
+      "usp10.dll",
+      "ws2_32.dll"
+    ],
+    "packages": [
+      {
+        "package": "cairo",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-cairo-1.18.4-4-any.pkg.tar.zst",
+        "sha256": "05acf11b3dcb32467ca5b79a881aae8e7d8a0fba60dd2431462c46366d667506",
+        "byte_size": 894237,
+        "files": [
+          {
+            "path": "ucrt64/bin/libcairo-2.dll",
+            "sha256": "10cb3ddfb67ef352365d5cdf1fce0376693d2d6e90aefefee41b3c0c5ce363e4",
+            "byte_size": 1241396,
+            "imports": [
+              "libgcc_s_seh-1.dll",
+              "GDI32.dll",
+              "KERNEL32.dll",
+              "MSIMG32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-time-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "ole32.dll",
+              "libstdc++-6.dll",
+              "USER32.dll",
+              "libfontconfig-1.dll",
+              "libfreetype-6.dll",
+              "libpixman-1-0.dll",
+              "libpng16-16.dll",
+              "zlib1.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/cairo/COPYING",
+            "sha256": "67228a9f7c5f9b67c58f556f1be178f62da4d9e2e6285318d8c74d567255abdf",
+            "byte_size": 1576
+          },
+          {
+            "path": "ucrt64/share/licenses/cairo/COPYING-LGPL-2.1",
+            "sha256": "9e9e8608c4cdda51a78cc3a385f4ec9a2e4c96d5ecad74ac8bca5fca3e563b7d",
+            "byte_size": 26533
+          },
+          {
+            "path": "ucrt64/share/licenses/cairo/COPYING-MPL-1.1",
+            "sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f",
+            "byte_size": 25755
+          }
+        ]
+      },
+      {
+        "package": "gcc-libs",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gcc-libs-16.2.0-3-any.pkg.tar.zst",
+        "sha256": "5763fabf86fa13a4449ee765006d3446384ed66af7bf827459710eb777e0b11c",
+        "byte_size": 1147919,
+        "files": [
+          {
+            "path": "ucrt64/bin/libgcc_s_seh-1.dll",
+            "sha256": "80940372431cc76224dfda06e2d33f01e49af3b4e7c499c535be856ebcadd273",
+            "byte_size": 151654,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "libwinpthread-1.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/bin/libstdc++-6.dll",
+            "sha256": "69200d6d96b903dac4c873031813485a0455828be8101479efc56008862420cc",
+            "byte_size": 2661272,
+            "imports": [
+              "libgcc_s_seh-1.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-time-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "libwinpthread-1.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/gcc-libs/COPYING.LIB",
+            "sha256": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861",
+            "byte_size": 26527
+          },
+          {
+            "path": "ucrt64/share/licenses/gcc-libs/COPYING.RUNTIME",
+            "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+            "byte_size": 3324
+          },
+          {
+            "path": "ucrt64/share/licenses/gcc-libs/COPYING3",
+            "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+            "byte_size": 35147
+          },
+          {
+            "path": "ucrt64/share/licenses/gcc-libs/README",
+            "sha256": "33400d067fa3e2bd670a0868dcdb60c9486e8f559b675cf9ff1ff55d4e0d06ab",
+            "byte_size": 236
+          }
+        ]
+      },
+      {
+        "package": "fontconfig",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-fontconfig-2.18.3-1-any.pkg.tar.zst",
+        "sha256": "d0b364f3ee37e3b6f6c136688ce8fa909bb6d8a69df7e08de1aa40870d9e1d60",
+        "byte_size": 302429,
+        "files": [
+          {
+            "path": "ucrt64/bin/libfontconfig-1.dll",
+            "sha256": "be30a200fa4000d0a7a1d3911391969627440148f01d0028a319bcb9fa112202",
+            "byte_size": 505833,
+            "imports": [
+              "libgcc_s_seh-1.dll",
+              "libintl-8.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-multibyte-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-time-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "libexpat-1.dll",
+              "libfreetype-6.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/fontconfig/COPYING",
+            "sha256": "51a51aa9823704fd90bccc616cdd17ebabb5b2b3e9cbde886ca02c7002288067",
+            "byte_size": 8616
+          }
+        ]
+      },
+      {
+        "package": "freetype",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-freetype-2.14.3-1-any.pkg.tar.zst",
+        "sha256": "f502bdf9ed07aa95e223e1aba17ce8cb2d975aab5066eec17a2d7dc4fb8a1c20",
+        "byte_size": 630262,
+        "files": [
+          {
+            "path": "ucrt64/bin/libfreetype-6.dll",
+            "sha256": "a3271784f8366b3c6412e0c35474884fa12899c392bacb08bc8eac00f4be7e64",
+            "byte_size": 791593,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "libbrotlidec.dll",
+              "libbz2-1.dll",
+              "libharfbuzz-0.dll",
+              "libpng16-16.dll",
+              "zlib1.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/freetype/FTL.TXT",
+            "sha256": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f",
+            "byte_size": 6743
+          },
+          {
+            "path": "ucrt64/share/licenses/freetype/GPLv2.TXT",
+            "sha256": "c4120c6752c910c299e3bd9cb3a46ff262c268303ca2069b61f92f10a5656c18",
+            "byte_size": 17994
+          }
+        ]
+      },
+      {
+        "package": "pixman",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-pixman-0.46.4-3-any.pkg.tar.zst",
+        "sha256": "4c01b986563d2b5f7ad6fcec2d0ec9915d2f242ddac5eacddc19971964241cc5",
+        "byte_size": 356199,
+        "files": [
+          {
+            "path": "ucrt64/bin/libpixman-1-0.dll",
+            "sha256": "12e693d94829f013e0bd7c042b30998b20e91ece7b6f4d5f075ddbb58b373c92",
+            "byte_size": 737775,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/pixman/COPYING",
+            "sha256": "fac9270f0987b96ff4533fca3548c633e02083cbba4a0172a3b149b2e4019793",
+            "byte_size": 2087
+          }
+        ]
+      },
+      {
+        "package": "libpng",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libpng-1.6.58-1-any.pkg.tar.zst",
+        "sha256": "bbfb6eb6246b01df90d82d6cff84f0a4e98dad029a4a2753898c96fcaadb66c7",
+        "byte_size": 406891,
+        "files": [
+          {
+            "path": "ucrt64/bin/libpng16-16.dll",
+            "sha256": "5c1dd5410af563f4a3c4aee10d1f749aa71e0d7fb3b4fac240eb9e96cadebd26",
+            "byte_size": 258972,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-time-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "zlib1.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/libpng/LICENSE",
+            "sha256": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526",
+            "byte_size": 5345
+          }
+        ]
+      },
+      {
+        "package": "zlib",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zlib-1.3.2-2-any.pkg.tar.zst",
+        "sha256": "841401182976d2f9e17e5c0ebaac51f2a8014140ea53d67625e91c8fb3c85ea0",
+        "byte_size": 111475,
+        "files": [
+          {
+            "path": "ucrt64/bin/zlib1.dll",
+            "sha256": "11cd91171765cd65f1c3362e3df67e5f5a618a6b88c8cdec899b802eaf1c7b0d",
+            "byte_size": 127291,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/zlib/LICENSE",
+            "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2",
+            "byte_size": 1002
+          }
+        ]
+      },
+      {
+        "package": "bzip2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-bzip2-1.0.8-4-any.pkg.tar.zst",
+        "sha256": "f03a2174034ddd2d96cecd34f617c5f8e2ef86c812b8d2bb3b8875257f2c8bfa",
+        "byte_size": 94396,
+        "files": [
+          {
+            "path": "ucrt64/bin/libbz2-1.dll",
+            "sha256": "1790bf6473c9d48db14c1f0ee8124142327556d281299ea2a72ee361118ee01a",
+            "byte_size": 107741,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/bzip2/LICENSE",
+            "sha256": "c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3",
+            "byte_size": 1896
+          }
+        ]
+      },
+      {
+        "package": "brotli",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-brotli-1.2.0-1-any.pkg.tar.zst",
+        "sha256": "9cc89665496ea504751476eafba15c71c554aaf3004babc2004f7c07ffd60514",
+        "byte_size": 453708,
+        "files": [
+          {
+            "path": "ucrt64/bin/libbrotlicommon.dll",
+            "sha256": "c62c08223e450dfc2fff33c752cc228505ffd9d755201958ba800d5d30481a2c",
+            "byte_size": 144565,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/bin/libbrotlidec.dll",
+            "sha256": "e270b6e576594ee8ee6e33ccc54e34a54304616dd6225652e11e49d6f17ef896",
+            "byte_size": 62619,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "libbrotlicommon.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/brotli/LICENSE",
+            "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94",
+            "byte_size": 1084
+          }
+        ]
+      },
+      {
+        "package": "harfbuzz",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-harfbuzz-14.4.0-1-any.pkg.tar.zst",
+        "sha256": "911121fa488f6783a583bee00826086816c6e71e8c776294fa4e7dce9a8c2491",
+        "byte_size": 2346312,
+        "files": [
+          {
+            "path": "ucrt64/bin/libharfbuzz-0.dll",
+            "sha256": "b862f499e35f335a8428e29834788d0e1dbee97c3f8691f64b3e61dfc923ad8c",
+            "byte_size": 1561272,
+            "imports": [
+              "DWrite.dll",
+              "libgcc_s_seh-1.dll",
+              "GDI32.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "RPCRT4.dll",
+              "USER32.dll",
+              "USP10.dll",
+              "libfreetype-6.dll",
+              "libglib-2.0-0.dll",
+              "libgraphite2.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/harfbuzz/COPYING",
+            "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+            "byte_size": 1971
+          }
+        ]
+      },
+      {
+        "package": "graphite2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-graphite2-1.3.15-1-any.pkg.tar.zst",
+        "sha256": "34ca1f88bff10ef182a6b1c8e5622d5029f13b05748e361af13b552b422ea849",
+        "byte_size": 152553,
+        "files": [
+          {
+            "path": "ucrt64/bin/libgraphite2.dll",
+            "sha256": "93953e4744bcfce9a7bc439b956544bc213095cb1349c3602a58370f32b25c18",
+            "byte_size": 167857,
+            "imports": [
+              "libgcc_s_seh-1.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "libstdc++-6.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/graphite2/COPYING",
+            "sha256": "2c272829ff23f182c8bf7ea12fedea69b0ae148663123ed5240c117cb129c9c1",
+            "byte_size": 1235
+          },
+          {
+            "path": "ucrt64/share/licenses/graphite2/LICENSE",
+            "sha256": "cab46cd45adbfea4b1d0f14b033c70062c73074fa0b56532c2f351576ddf455e",
+            "byte_size": 29228
+          }
+        ]
+      },
+      {
+        "package": "expat",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-expat-2.8.4-2-any.pkg.tar.zst",
+        "sha256": "d7464e17da7be080847c6115b332318174116e7e614e12acd76b490be01a6844",
+        "byte_size": 193737,
+        "files": [
+          {
+            "path": "ucrt64/bin/libexpat-1.dll",
+            "sha256": "3331b4d4a77cd21edc26518cbb818e17b49b2c1de34a79d2ef4dca4013670f19",
+            "byte_size": 236660,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/expat/COPYING",
+            "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87",
+            "byte_size": 1144
+          }
+        ]
+      },
+      {
+        "package": "libwinpthread",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libwinpthread-14.0.0.r353.g6df76fa52-2-any.pkg.tar.zst",
+        "sha256": "ec1a46e63d424a90992a14c0996c0b5bb17370af6044380b590d05f725eeb43f",
+        "byte_size": 29657,
+        "files": [
+          {
+            "path": "ucrt64/bin/libwinpthread-1.dll",
+            "sha256": "cd5fc7573f1ecf9a157bb62fbc35f8b97862dde6057ffabd6cebb3fc9fe6ff1d",
+            "byte_size": 63105,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/libwinpthread/COPYING",
+            "sha256": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177",
+            "byte_size": 2883
+          }
+        ]
+      },
+      {
+        "package": "glib2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-glib2-2.90.0-1-any.pkg.tar.zst",
+        "sha256": "877259a47d98b73473c5ea0729ad8297ca31a545c41de2b372e726ebed314b1c",
+        "byte_size": 5438759,
+        "files": [
+          {
+            "path": "ucrt64/bin/libglib-2.0-0.dll",
+            "sha256": "642d4da7a378374a84b1edc30100b9e9c7b798e53347853aadd1c86691a81468",
+            "byte_size": 1568604,
+            "imports": [
+              "ADVAPI32.dll",
+              "libintl-8.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-process-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-time-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll",
+              "ole32.dll",
+              "SHELL32.dll",
+              "USER32.dll",
+              "WS2_32.dll",
+              "libpcre2-8-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/glib2/COPYING",
+            "sha256": "fa6f36630bb1e0c571d34b2bbdf188d08495c9dbf58f28cac112f303fc1f58fb",
+            "byte_size": 25967
+          }
+        ]
+      },
+      {
+        "package": "gettext-runtime",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gettext-runtime-1.0-1-any.pkg.tar.zst",
+        "sha256": "ba693dda4ac375af76ce481ff3a6e7481286546cc7dc6d56c7021dae34084157",
+        "byte_size": 417977,
+        "files": [
+          {
+            "path": "ucrt64/bin/libintl-8.dll",
+            "sha256": "0e5a178731e6be6d115442a6ade3df7f03265cd1fc4338f8b6f86a8001cbf582",
+            "byte_size": 298164,
+            "imports": [
+              "ADVAPI32.dll",
+              "libiconv-2.dll",
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-environment-l1-1-0.dll",
+              "api-ms-win-crt-filesystem-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-math-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/gettext-runtime/COPYING",
+            "sha256": "7ef2cdfe58e0c0460657b6598b49af29d4e03c1e41cbaf0e1da1eb8ad74b95d0",
+            "byte_size": 495
+          },
+          {
+            "path": "ucrt64/share/licenses/gettext-runtime/intl/COPYING.LIB",
+            "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+            "byte_size": 26419
+          },
+          {
+            "path": "ucrt64/share/licenses/gettext-runtime/libasprintf/COPYING",
+            "sha256": "03133addae5b99a6148c538300e6d97074453089be1423b741bd081f18e2b298",
+            "byte_size": 65
+          },
+          {
+            "path": "ucrt64/share/licenses/gettext-runtime/libasprintf/COPYING.LIB",
+            "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+            "byte_size": 26419
+          }
+        ]
+      },
+      {
+        "package": "pcre2",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-pcre2-10.48-3-any.pkg.tar.zst",
+        "sha256": "f1aae310be1c65ec0e2265d283ba01fcf322208bc19c96cfa52801fcc1c11746",
+        "byte_size": 1446434,
+        "files": [
+          {
+            "path": "ucrt64/bin/libpcre2-8-0.dll",
+            "sha256": "752f04bb7a60d2a049788ffaec14b45602c4dec4c29534001dfcf434d26da19c",
+            "byte_size": 706534,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/pcre2/COPYING",
+            "sha256": "99272c55f3dcfa07a8a7e15a5c1a33096e4727de74241d65fa049fccfdd59507",
+            "byte_size": 97
+          },
+          {
+            "path": "ucrt64/share/licenses/pcre2/LICENCE.md",
+            "sha256": "197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811",
+            "byte_size": 4011
+          }
+        ]
+      },
+      {
+        "package": "libiconv",
+        "url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libiconv-1.19-1-any.pkg.tar.zst",
+        "sha256": "9a500f38c2b91808741c62fae746b3e9110b33a1ecf5c30fa0c66dbedddf7e16",
+        "byte_size": 744750,
+        "files": [
+          {
+            "path": "ucrt64/bin/libiconv-2.dll",
+            "sha256": "94ec68fb8d342b6c91b6b48a8d95092819cdcd006a7166e0b68062f946afd08a",
+            "byte_size": 1141951,
+            "imports": [
+              "KERNEL32.dll",
+              "api-ms-win-crt-convert-l1-1-0.dll",
+              "api-ms-win-crt-heap-l1-1-0.dll",
+              "api-ms-win-crt-locale-l1-1-0.dll",
+              "api-ms-win-crt-private-l1-1-0.dll",
+              "api-ms-win-crt-runtime-l1-1-0.dll",
+              "api-ms-win-crt-stdio-l1-1-0.dll",
+              "api-ms-win-crt-string-l1-1-0.dll",
+              "api-ms-win-crt-utility-l1-1-0.dll"
+            ]
+          },
+          {
+            "path": "ucrt64/share/licenses/libiconv/COPYING",
+            "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+            "byte_size": 35147
+          },
+          {
+            "path": "ucrt64/share/licenses/libiconv/COPYING.LIB",
+            "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+            "byte_size": 26419
+          },
+          {
+            "path": "ucrt64/share/licenses/libiconv/README",
+            "sha256": "4ae66e61d1c6593c84c47105b368d579bcee1af566dbb959ec63a0c48425dcf4",
+            "byte_size": 5741
+          },
+          {
+            "path": "ucrt64/share/licenses/libiconv/libcharset/COPYING.LIB",
+            "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+            "byte_size": 26419
+          }
+        ]
+      }
+    ]
+  }
 }

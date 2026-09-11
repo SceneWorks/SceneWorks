@@ -66,5 +66,26 @@
     "story": "https://app.shortcut.com/trefry/story/22261",
     "handoff": "https://app.shortcut.com/trefry/epic/19699#activity-22703",
     "reason": "Retired campaign selected CPU worker; require corrected GPU identity and four fresh measured tuples. Historical evidence is quarantined only."
+  },
+  "execution_predecessor": {
+    "stage": "upstream-reference",
+    "predecessor_campaign_id": "sc-22261-f4c46bb-c6d6a4db-terminal-1",
+    "campaign_id": "sc22261-81fda3-20260911-bae2c71aa3594f4b",
+    "inference_revision": "81fda3bd5a9d5920ad9cdc62796df3305be96742",
+    "sceneworks_revision": "a75f35b4e548d56672db51acbc192b0b193c7986",
+    "workflow": {
+      "repository": "SceneWorks/SceneWorks",
+      "path": ".github/workflows/server-candle-linux.yml",
+      "run_id": "34592737836",
+      "run_attempt": 1,
+      "head_sha": "a75f35b4e548d56672db51acbc192b0b193c7986",
+      "conclusion": "failure"
+    },
+    "source_artifact": {
+      "id": "10196366113",
+      "name": "starvector-upstream-sc22261-81fda3-20260911-bae2c71aa3594f4b",
+      "size": 1256,
+      "digest": "sha256:56838051a9bd578a0f87bd5688e78b4b8414bfa609872a8603aeeb1e031761ab"
+    }
   }
 }

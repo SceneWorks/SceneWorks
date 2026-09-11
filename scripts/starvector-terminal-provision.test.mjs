@@ -12,7 +12,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { acquireResumableWheel, UPSTREAM_TORCH_WHEEL, assemblePreflight, assembleWeights, downloadExact, downloadTransportCodes, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { acquireResumableWheel, UPSTREAM_TORCH_WHEEL, assemblePreflight, assembleWeights, downloadExact, downloadTransportCodes, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, provisionUpstreamCairo, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1403,4 +1403,36 @@ test("Windows provisioning selects the reviewed persistent listener cache before
   assert.match(await readFile(".cargo/config.toml", "utf8"), /git-fetch-with-cli = true/);
   const { PRODUCTION_CLOSURE_PATHS } = await import("./starvector-production-closure.mjs");
   assert.ok(PRODUCTION_CLOSURE_PATHS.includes("scripts/select-windows-cargo-cache.mjs"));
+});
+
+test("native Cairo provisioning acquires exact cached archives before isolated extraction", async () => {
+  const hostRoot = await realpath(await mkdtemp(path.join(tmpdir(), "starvector-cairo-")));
+  try {
+    const payload = Buffer.from("bounded native archive fixture"), checksum = digest(payload), calls = [];
+    const lock = { windows_cairo: { packages: [{ url: "https://mirror.msys2.org/mingw/ucrt64/fixture.pkg.tar.zst", sha256: checksum, byte_size: payload.length }] } };
+    const acquire = async (url, file, hash) => {
+      calls.push("download"); assert.equal(url, lock.windows_cairo.packages[0].url); assert.equal(hash, checksum);
+      return downloadExact(url, file, hash, async () => ({ ok: true, arrayBuffer: async () => payload }));
+    };
+    const execute = async (python, args, bounds) => {
+      calls.push("extract"); assert.equal(python, "fixture-python"); assert.equal(args[1], "provision-cairo");
+      assert.equal(args[2], path.join(hostRoot, "upstream-native-cairo"));
+      assert.equal(args[3], path.join(hostRoot, "upstream-native-archives")); assert.equal(bounds.timeout, 120000);
+    };
+    const options = { sceneWorksRoot: hostRoot, hostRoot, python: "fixture-python", lock };
+    await provisionUpstreamCairo(options, acquire, execute);
+    await provisionUpstreamCairo(options, acquire, execute);
+    assert.deepEqual(calls, ["download", "extract", "download", "extract"]);
+    await writeFile(path.join(hostRoot, "upstream-native-archives", `${checksum}.pkg.tar.zst`), "tamper");
+    let extracted = false;
+    await assert.rejects(() => provisionUpstreamCairo(options, acquire, async () => { extracted = true; }), /existing download differs/);
+    assert.equal(extracted, false);
+  } finally { await rm(hostRoot, { recursive: true, force: true }); }
+});
+
+test("native Cairo provisioning is ordered after Python dependencies and before exact upstream validation", async () => {
+  const source = await readFile("scripts/starvector-terminal-provision.mjs", "utf8");
+  const body = source.slice(source.indexOf("export async function provisionUpstream({"));
+  assert.ok(body.indexOf("await installUpstreamPackages(") < body.indexOf("await provisionUpstreamCairo("));
+  assert.ok(body.indexOf("await provisionUpstreamCairo(") < body.indexOf("return validateUpstreamInputs("));
 });
