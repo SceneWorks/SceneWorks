@@ -3650,6 +3650,8 @@ fn five_rung_evidence_revision(provider: &str) -> String {
         SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID
     ) {
         runtime_cuda::providers::sd3::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else if provider == KOLORS_ID {
+        runtime_cuda::providers::kolors::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else {
         format!(
             "{}@{}",
@@ -3737,10 +3739,10 @@ impl PulidFluxBinding {
         )
     }
 
-    /// The record's `artifact`: the backbone snapshot plus every bundle file's digest.
+    /// The backbone snapshot plus the content digest of the ordered identity-file inventory.
     fn artifact_json(&self) -> Value {
         let mut artifact = artifact(&self.repository, &self.revision, self.tier);
-        artifact["identityBundle"] = self.bundle.artifact_json();
+        artifact["inventorySha256"] = json!(self.bundle.composite_sha256);
         artifact
     }
 }
@@ -8142,6 +8144,36 @@ mod sdxl_family_tests {
     use super::*;
 
     #[test]
+    fn kolors_capture_revision_passes_real_provider_admission() {
+        use runtime_cuda::providers::kolors::memory_strategy as kolors;
+        for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+            let mut spec = LoadSpec::new(WeightsSource::Dir("/__unused_kolors_fixture__".into()));
+            spec.quantize = quant;
+            let contract = kolors::weights_free_contract(&spec).unwrap();
+            let fixtures = kolors::registered_valid_fixtures(
+                &spec,
+                &contract,
+                MemoryStrategy::StagedResidency,
+            )
+            .unwrap();
+            assert!(!fixtures.is_empty());
+            for fixture in fixtures {
+                let mut context = fixture.context;
+                context.evidence_revision = five_rung_evidence_revision(KOLORS_ID);
+                assert!(matches!(
+                    kolors::registered_safety_check(&spec, &contract, &context),
+                    MemorySafetyDecision::Accept
+                ));
+                context.evidence_revision = format!("sc-22732@{}", protocol::INFERENCE_PIN);
+                assert!(matches!(
+                    kolors::registered_safety_check(&spec, &contract, &context),
+                    MemorySafetyDecision::Reject { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn sd3_capture_revision_passes_real_provider_admission() {
         use runtime_cuda::providers::sd3::memory_strategy as sd3;
 
@@ -10292,17 +10324,15 @@ mod tests {
                 .loadability_fingerprint()
                 .contains(&bundle.root.display().to_string()));
             let artifact = binding.artifact_json();
+            serde_json::from_value::<sceneworks_core::memory_calibration::Artifact>(
+                artifact.clone(),
+            )
+            .expect("PuLID capture artifact must pass the production reader");
             assert_eq!(artifact["variant"].as_str(), Some(tier));
             assert_eq!(
-                artifact["identityBundle"]["compositeSha256"].as_str(),
+                artifact["inventorySha256"].as_str(),
                 Some(bundle.composite_sha256.as_str())
             );
-            for (file, sha256) in &bundle.file_sha256 {
-                assert_eq!(
-                    artifact["identityBundle"]["files"][*file].as_str(),
-                    Some(sha256.as_str())
-                );
-            }
         }
         // A fixture naming the five-rung seed is refused: PuLID renders at FLUX1_SEED.
         let mut wrong_seed = pulid_case("q4");

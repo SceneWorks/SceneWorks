@@ -4473,8 +4473,7 @@ impl FluxOneArtifact {
         }
     }
 
-    /// The record's `artifact`: the backbone snapshot, plus on the identity route the per-file
-    /// SHA-256 of the staged bundle, so the record carries the identity stack it measured.
+    /// The backbone snapshot plus, on the identity route, the ordered identity-file inventory digest.
     fn artifact_json(&self) -> Value {
         let mut artifact = json!({
             "repository": self.repository,
@@ -4482,7 +4481,7 @@ impl FluxOneArtifact {
             "variant": self.tier,
         });
         if let Some(bundle) = &self.identity {
-            artifact["identityBundle"] = bundle.artifact_json();
+            artifact["inventorySha256"] = json!(bundle.composite_sha256);
         }
         artifact
     }
@@ -22975,18 +22974,14 @@ mod flux_one_tests {
         assert!(!artifact
             .loadability_fingerprint()
             .contains(&bundle.root.display().to_string()));
-        // ...and the record's artifact carries every file's digest.
-        let identity_bundle = &artifact.artifact_json()["identityBundle"];
+        // ...and the schema-compatible inventory digest binds every file's content.
+        let captured = artifact.artifact_json();
+        serde_json::from_value::<sceneworks_core::memory_calibration::Artifact>(captured.clone())
+            .expect("PuLID capture artifact must pass the production reader");
         assert_eq!(
-            identity_bundle["compositeSha256"].as_str(),
+            captured["inventorySha256"].as_str(),
             Some(bundle.composite_sha256.as_str())
         );
-        for (file, sha256) in &bundle.file_sha256 {
-            assert_eq!(
-                identity_bundle["files"][*file].as_str(),
-                Some(sha256.as_str())
-            );
-        }
         // Same bytes at another path: the same identity. Different bytes: a different one.
         let restaged = staged_pulid_bundle();
         assert_ne!(restaged.root, bundle.root);

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "9fd1f98ca8083fa8552066f40e4f10257090b2ff",
+    "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {

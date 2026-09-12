@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 9fd1f98c (PRs #973 and #975, sc-23207 and sc-23234). The pin repairs Flux2 request-scoped materialization and SenseNova calibration identifiers; it adds no dependency or embedded asset. Scanner and crate inventories were regenerated at this pin. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
-  "inferenceRevision": "9fd1f98ca8083fa8552066f40e4f10257090b2ff",
-  "auditDigest": "582dd04c8f68a20861b4ca970f03f675befe372b55008718be738eca3240f34a",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision fff98b05 (merged PRs #973, #974 and #975). This pin combines the reviewed Flux2 deferred-materialization, Qwen Edit admission/accounting and SenseNova calibration-identity repairs. The advance from the previous app pin 290fa1f3 adds only the SenseNova source changes and diagnostic document; no dependency or embedded asset was added. Scanner and crate inventories were regenerated. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
+  "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
+  "auditDigest": "b970d2091c0ff16c0a71c6068f052d97cd1fa3625e0af2e05895fc90cf7308a8",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "9fd1f98ca8083fa8552066f40e4f10257090b2ff",
+    "revision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "9fd1f98ca8083fa8552066f40e4f10257090b2ff",
+    "revision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
