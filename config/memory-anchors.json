@@ -2,6 +2,98 @@
   "schemaVersion": 1,
   "anchors": [
     {
+      "id": "bernini:candle:q4:base:base:bernini-image-q4-candle-dual-expert-ladder-v1:imc-381734b3298d63f89009",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "reference_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q4-candle-evidence.json",
+        "sha256": "3a5d6a5975807f018a5ea828ee7b33ae94c78d2f2154f675e8a65ffdeb2a64d9",
+        "recordId": "imc-381734b3298d63f89009",
+        "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
+        "loaderClosureDigest": "7b13f566f52377c18c61df0af84b64b367fa84fe903d2fcfb92c28d4b70ca4cf"
+      },
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 54422142976,
+        "denoise": 54450454528,
+        "decode": 54423191552
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 54422142976,
+        "denoise": 54450454528,
+        "decode": 54423191552
+      },
+      "overallAllocatorEnvelopeBytes": 54450454528,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "bernini:candle:q8:base:base:bernini-image-q8-candle-dual-expert-ladder-v1:imc-6eca4025670f1679a6a6",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "reference_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q8-candle-evidence.json",
+        "sha256": "3827ada663ec39091f36ca6c08656a2d4634881f33ab230b814d63a6479c90d7",
+        "recordId": "imc-6eca4025670f1679a6a6",
+        "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
+        "loaderClosureDigest": "7b13f566f52377c18c61df0af84b64b367fa84fe903d2fcfb92c28d4b70ca4cf"
+      },
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 77709967360,
+        "denoise": 77860962304,
+        "decode": 77715210240
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 77709967360,
+        "denoise": 77860962304,
+        "decode": 77715210240
+      },
+      "overallAllocatorEnvelopeBytes": 77860962304,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "chroma1_base:candle:bf16:base:base:chroma1-base-bf16-cuda-request-scoped-staged-residency-v1:imc-b1813ea0729c95602205",
       "modelId": "chroma1_base",
       "modelFamily": "chroma",
@@ -821,6 +913,141 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux2_dev:candle:bf16:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-dd87c66f8fb1b72583bd",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-dev-bf16-candle-evidence.json",
+        "sha256": "23935070385b884f4a00f6f28d9efc4b80ff9b5c5a4ff3f5ab2ef51666a80980",
+        "recordId": "imc-dd87c66f8fb1b72583bd",
+        "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+        "loaderClosureDigest": "48e4c090def2c20e97cc1d878bdc90129236791c767aabeced568fe8a28358d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 99988013056,
+        "denoise": 101623791616,
+        "decode": 101607014400
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 99988013056,
+        "denoise": 101623791616,
+        "decode": 101607014400
+      },
+      "overallAllocatorEnvelopeBytes": 101623791616
+    },
+    {
+      "id": "flux2_dev:candle:q4:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-50771a51b6b9c4e93cdc",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-dev-q4-candle-evidence.json",
+        "sha256": "dda999f86f4c5a4efda879305e8eabc31f13487235a8c02eee745037872bc2d7",
+        "recordId": "imc-50771a51b6b9c4e93cdc",
+        "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+        "loaderClosureDigest": "48e4c090def2c20e97cc1d878bdc90129236791c767aabeced568fe8a28358d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18583912448,
+        "denoise": 34757148672,
+        "decode": 36904632320
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18583912448,
+        "denoise": 34757148672,
+        "decode": 36904632320
+      },
+      "overallAllocatorEnvelopeBytes": 36904632320
+    },
+    {
+      "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-dev-q8-candle-evidence.json",
+        "sha256": "30feda4b6b2728a2b155a21c75f38a88b5a3c80b77130a8b06c04b0d259a7c1d",
+        "recordId": "imc-4d4acee9ac99ba7ecfbd",
+        "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+        "loaderClosureDigest": "48e4c090def2c20e97cc1d878bdc90129236791c767aabeced568fe8a28358d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 31133270016,
+        "denoise": 51869908992,
+        "decode": 61432922112
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 31133270016,
+        "denoise": 51869908992,
+        "decode": 61432922112
+      },
+      "overallAllocatorEnvelopeBytes": 61432922112
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -909,6 +1136,141 @@
         "decode": 113150645436
       },
       "overallAllocatorEnvelopeBytes": 113150645436
+    },
+    {
+      "id": "flux2_klein_9b:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-11684b48bf42c7321ae1",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json",
+        "sha256": "472624a06e2a884c58ea9843a7be074d0baffeec2e4e1391e731d3de8d511e67",
+        "recordId": "imc-11684b48bf42c7321ae1",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24726470656,
+        "denoise": 48013246464,
+        "decode": 57207160832
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24726470656,
+        "denoise": 48013246464,
+        "decode": 57207160832
+      },
+      "overallAllocatorEnvelopeBytes": 57207160832
+    },
+    {
+      "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-q4-candle-evidence.json",
+        "sha256": "e059a9a9409473fae65580c217775c9e81e8104356a21039a73b90e086117466",
+        "recordId": "imc-68e0955b91a86829e91c",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 26537361408
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 26537361408
+      },
+      "overallAllocatorEnvelopeBytes": 26537361408
+    },
+    {
+      "id": "flux2_klein_9b:candle:q8:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-94d74201e78d88d2d73d",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-q8-candle-evidence.json",
+        "sha256": "eae45089b68c61812563e8faf06f063a99d7c64851c0d1e2b5259b39119cf65f",
+        "recordId": "imc-94d74201e78d88d2d73d",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24726470656,
+        "denoise": 24625807360,
+        "decode": 30900486144
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24726470656,
+        "denoise": 24625807360,
+        "decode": 30900486144
+      },
+      "overallAllocatorEnvelopeBytes": 30900486144
     },
     {
       "id": "flux2_klein_9b:mlx:bf16:base:base:flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1:imc-674fc134cc94d24ef3a3",
@@ -1044,6 +1406,141 @@
         "decode": 66623825544
       },
       "overallAllocatorEnvelopeBytes": 66623825544
+    },
+    {
+      "id": "flux2_klein_9b_kv:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-d0f4f5d27d14f0ffbffc",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-candle-evidence.json",
+        "sha256": "b0154a60b2e6a749c8ab91d2a350b01bf6c7e8a1fce850fcc06f6a9ed9a5276a",
+        "recordId": "imc-d0f4f5d27d14f0ffbffc",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "a0a7abc22eddf0a4189389e3417461c145398187a219dd37dde15d2e792dff65"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24725422080,
+        "denoise": 48012197888,
+        "decode": 57206112256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24725422080,
+        "denoise": 48012197888,
+        "decode": 57206112256
+      },
+      "overallAllocatorEnvelopeBytes": 57206112256
+    },
+    {
+      "id": "flux2_klein_9b_kv:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-7a072289ecba26a39eec",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-candle-evidence.json",
+        "sha256": "bb53d574cf8bdef15e84acfd9d86db6e23ea87a8a1d5196093c241765e562ac2",
+        "recordId": "imc-7a072289ecba26a39eec",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "a0a7abc22eddf0a4189389e3417461c145398187a219dd37dde15d2e792dff65"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 26537361408
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 26537361408
+      },
+      "overallAllocatorEnvelopeBytes": 26537361408
+    },
+    {
+      "id": "flux2_klein_9b_kv:candle:q8:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-8f4d73cbe867c54205cc",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-candle-evidence.json",
+        "sha256": "83d674c1c37471c2c5bc394fd2add8f1813015a2ff01ab678f23daad970e60f8",
+        "recordId": "imc-8f4d73cbe867c54205cc",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "a0a7abc22eddf0a4189389e3417461c145398187a219dd37dde15d2e792dff65"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 30899437568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24725422080,
+        "denoise": 24624758784,
+        "decode": 30899437568
+      },
+      "overallAllocatorEnvelopeBytes": 30899437568
     },
     {
       "id": "flux2_klein_9b_kv:mlx:bf16:base:base:flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1:imc-c441fee704d9060e69eb",
@@ -3269,6 +3766,51 @@
       "overallAllocatorEnvelopeBytes": 42550165504
     },
     {
+      "id": "lens:candle:q4:base:base:lens-base-q4-candle-cuda-shared-ladder-v1:imc-8f336148eb60d2a069b4",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "provider": "lens",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-q4-candle-evidence.json",
+        "sha256": "abb93d2efab76f36aab1592cc830ffe36c4bd13a7c2d83d9dce879f550406315",
+        "recordId": "imc-8f336148eb60d2a069b4",
+        "calibrationFingerprint": "lens-base-q4-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "6cb7e2495825a645e51092ea22b4d6c4342126f2c4efa74e4ffca917e666b7fb"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5297405952,
+        "denoise": 10634657792,
+        "decode": 25130172416
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5297405952,
+        "denoise": 10634657792,
+        "decode": 25130172416
+      },
+      "overallAllocatorEnvelopeBytes": 25130172416
+    },
+    {
       "id": "lens:candle:q8:base:base:lens-base-q8-candle-cuda-shared-ladder-v1:imc-655115630dbc30f5e5d4",
       "modelId": "lens",
       "modelFamily": "lens",
@@ -3539,6 +4081,51 @@
       "overallAllocatorEnvelopeBytes": 22486712320
     },
     {
+      "id": "lens_turbo:candle:q8:base:base:lens-turbo-q8-candle-cuda-shared-ladder-v1:imc-de684a8abaaa8f5d3a2b",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "provider": "lens_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-turbo-q8-candle-evidence.json",
+        "sha256": "6ba72a925535a6f5966b2aab26d90cab9209798124b73b06cd54bfa099bb35e7",
+        "recordId": "imc-de684a8abaaa8f5d3a2b",
+        "calibrationFingerprint": "lens-turbo-q8-candle-cuda-shared-ladder-v1",
+        "loaderClosureDigest": "beb6a10994052580052d69b9788f63285fa57ff8c5135aa1ba655456d478a607"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 7176454144,
+        "denoise": 9795796992,
+        "decode": 24291311616
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 7176454144,
+        "denoise": 9795796992,
+        "decode": 24291311616
+      },
+      "overallAllocatorEnvelopeBytes": 24291311616
+    },
+    {
       "id": "lens_turbo:mlx:bf16:base:base:lens-turbo-bf16-mlx-shared-ladder-v1:imc-9faaaa1095d39acaba6f",
       "modelId": "lens_turbo",
       "modelFamily": "lens",
@@ -3672,6 +4259,98 @@
         "decode": 91802773474
       },
       "overallAllocatorEnvelopeBytes": 91802773474
+    },
+    {
+      "id": "ltx_2_3:candle:q4:base:base:sc-20772-ltx-2-3-candle-q4-i2v-v1:imc-8e42c3a1c155f14dd720",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "provider": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json",
+        "sha256": "ceaa82f879f92d88bc21b754e31c42af70e5c2264e6c13a3fa75ee64e329fcf7",
+        "recordId": "imc-8e42c3a1c155f14dd720",
+        "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
+        "loaderClosureDigest": "cca2c0922a4311657494dc3c4f2a4d63c0eec0b9b1506ae4d9d9a30f32a8b35e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 97,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 49826234368,
+        "denoise": 56939773952,
+        "decode": 61805166592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 49826234368,
+        "denoise": 56939773952,
+        "decode": 61805166592
+      },
+      "overallAllocatorEnvelopeBytes": 61805166592,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "ltx_2_3:candle:q8:base:base:sc-20772-ltx-2-3-candle-q8-i2v-v1:imc-ff2535e81c4225acd0f6",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "provider": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-3-q8-candle-evidence.json",
+        "sha256": "aa8ddf7ea780fca91b6d695f415162cb5af9a9d53f703f58ca19ce353d96bbf4",
+        "recordId": "imc-ff2535e81c4225acd0f6",
+        "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q8-i2v-v1",
+        "loaderClosureDigest": "cca2c0922a4311657494dc3c4f2a4d63c0eec0b9b1506ae4d9d9a30f32a8b35e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 97,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 62711136256,
+        "denoise": 69858230272,
+        "decode": 72307703808
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 62711136256,
+        "denoise": 69858230272,
+        "decode": 72307703808
+      },
+      "overallAllocatorEnvelopeBytes": 72307703808,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "ltx_2_3:mlx:bf16:base:base:sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2:imc-480f79e0b28dc695828b",
@@ -4307,6 +4986,96 @@
       "overallAllocatorEnvelopeBytes": 69260977594
     },
     {
+      "id": "mage_flow:candle:bf16:base:base:mage-flow-cuda-mage-flow-bf16-shared-ladder-v3:imc-4f886f33664553d85700",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json",
+        "sha256": "a15d27c002eae8ec082d72887b4db31d7d923e3ecf4a828d8ac65322e58da533",
+        "recordId": "imc-4f886f33664553d85700",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "4d6df1aabff4f36c0072f1e6905384a739b0ac34c586ebb945545b83a423db66"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8887730176,
+        "denoise": 10364125184,
+        "decode": 10366222336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8887730176,
+        "denoise": 10364125184,
+        "decode": 10366222336
+      },
+      "overallAllocatorEnvelopeBytes": 10366222336
+    },
+    {
+      "id": "mage_flow:candle:q8:base:base:mage-flow-cuda-mage-flow-q8-shared-ladder-v3:imc-b025477f1256c6b7d52b",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-q8-candle-evidence.json",
+        "sha256": "b754d21621c02266666053dcb323baa39e042bc37a17b3a3243b13ef92b5f6ab",
+        "recordId": "imc-b025477f1256c6b7d52b",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-q8-shared-ladder-v3",
+        "loaderClosureDigest": "4d6df1aabff4f36c0072f1e6905384a739b0ac34c586ebb945545b83a423db66"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5466226688,
+        "denoise": 7143948288,
+        "decode": 7146045440
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5466226688,
+        "denoise": 7143948288,
+        "decode": 7146045440
+      },
+      "overallAllocatorEnvelopeBytes": 7146045440
+    },
+    {
       "id": "mage_flow:mlx:bf16:base:base:mage-flow-mage-flow-bf16-mlx-shared-ladder-v1:imc-4355eb2a1c8e81825197",
       "modelId": "mage_flow",
       "modelFamily": "mage-flow",
@@ -4488,6 +5257,51 @@
         "decode": 10373562368
       },
       "overallAllocatorEnvelopeBytes": 10373562368
+    },
+    {
+      "id": "mage_flow_base:candle:q8:base:base:mage-flow-cuda-mage-flow-base-q8-shared-ladder-v3:imc-10b66c0b4f4834b6b87f",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-q8-candle-evidence.json",
+        "sha256": "cc1bef785010903b98769b894c8ecee099f67a2e01880fa6949edb2e4e4842be",
+        "recordId": "imc-10b66c0b4f4834b6b87f",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q8-shared-ladder-v3",
+        "loaderClosureDigest": "b8f496fb345366eea1da1ebb1c823da64d3fdcae840b8219978f5745710bd526"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5465178112,
+        "denoise": 7142899712,
+        "decode": 7144996864
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5465178112,
+        "denoise": 7142899712,
+        "decode": 7144996864
+      },
+      "overallAllocatorEnvelopeBytes": 7144996864
     },
     {
       "id": "mage_flow_base:mlx:bf16:base:base:mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1:imc-5ca11acafd1ccc6ba6b1",
@@ -4673,6 +5487,51 @@
       "overallAllocatorEnvelopeBytes": 13863223296
     },
     {
+      "id": "mage_flow_edit:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3:imc-87979d8e4a564a1dec16",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json",
+        "sha256": "ef0a32c3aebdf63f10a1ddbcac5353aec91ba32effc7a3b5aff500c26615eddd",
+        "recordId": "imc-87979d8e4a564a1dec16",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3",
+        "loaderClosureDigest": "5be81d5ac62b4fe641df7e393305064d90726aaed1140649852276b538e989d4"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5534384128,
+        "denoise": 10131341312,
+        "decode": 10131341312
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5534384128,
+        "denoise": 10131341312,
+        "decode": 10131341312
+      },
+      "overallAllocatorEnvelopeBytes": 10131341312
+    },
+    {
       "id": "mage_flow_edit:mlx:bf16:base:base:mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1:imc-8590e420672347a08d21",
       "modelId": "mage_flow_edit",
       "modelFamily": "mage-flow",
@@ -4854,6 +5713,51 @@
         "decode": 13863223296
       },
       "overallAllocatorEnvelopeBytes": 13863223296
+    },
+    {
+      "id": "mage_flow_edit_base:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-base-q8-shared-ladder-v3:imc-f95ece4cc52580655d8a",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-q8-candle-evidence.json",
+        "sha256": "61e1fdc0735d194a57c6f0b5c55f452d13e9ca352c01ba78bac25bcbd1d77c6e",
+        "recordId": "imc-f95ece4cc52580655d8a",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q8-shared-ladder-v3",
+        "loaderClosureDigest": "c4075046618b3d5da5cd641cbaa3de4d06977f53364cfb683ef9dc30f1a47f8e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5534384128,
+        "denoise": 10198450176,
+        "decode": 10198450176
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5534384128,
+        "denoise": 10198450176,
+        "decode": 10198450176
+      },
+      "overallAllocatorEnvelopeBytes": 10198450176
     },
     {
       "id": "mage_flow_edit_base:mlx:bf16:base:base:mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1:imc-e636cbaf2675e9012486",
@@ -5039,6 +5943,51 @@
       "overallAllocatorEnvelopeBytes": 13527678976
     },
     {
+      "id": "mage_flow_edit_turbo:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-turbo-q8-shared-ladder-v3:imc-f35689a256751149ef82",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-q8-candle-evidence.json",
+        "sha256": "54f24c68785cb6212d1062c09714f054de91c25585bd5c9bea5e79dc7faa0be7",
+        "recordId": "imc-f35689a256751149ef82",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q8-shared-ladder-v3",
+        "loaderClosureDigest": "7ad5085184b4f8af6d855c662bc695859ea22692b66bb6a12016a7a9251794e0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5535432704,
+        "denoise": 9796845568,
+        "decode": 9796845568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5535432704,
+        "denoise": 9796845568,
+        "decode": 9796845568
+      },
+      "overallAllocatorEnvelopeBytes": 9796845568
+    },
+    {
       "id": "mage_flow_edit_turbo:mlx:bf16:base:base:mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1:imc-e745d017ddf6fafc0f3d",
       "modelId": "mage_flow_edit_turbo",
       "modelFamily": "mage-flow",
@@ -5220,6 +6169,51 @@
         "decode": 10138681344
       },
       "overallAllocatorEnvelopeBytes": 10138681344
+    },
+    {
+      "id": "mage_flow_turbo:candle:q8:base:base:mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3:imc-330b765612862a80a79b",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-q8-candle-evidence.json",
+        "sha256": "1ec7e1b8a9ac71362210709c2eb7b58f4d8be00253a9e0f1f43c5a334f47f922",
+        "recordId": "imc-330b765612862a80a79b",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3",
+        "loaderClosureDigest": "e030ead287abb9adab2c26f160159668e39276c05238a0cf9cafcd24d70e7e6e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5465178112,
+        "denoise": 7109345280,
+        "decode": 6104809472
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5465178112,
+        "denoise": 7109345280,
+        "decode": 6104809472
+      },
+      "overallAllocatorEnvelopeBytes": 7109345280
     },
     {
       "id": "mage_flow_turbo:mlx:bf16:base:base:mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1:imc-c96ca295ccfb9b0ce96f",
@@ -6176,6 +7170,51 @@
       "overallAllocatorEnvelopeBytes": 15842934784
     },
     {
+      "id": "sana_1600m:candle:bf16:base:base:sana-candle-dense-base-full-ladder-v1:imc-bcb6318873b25441cc91",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "provider": "sana_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sana-1600m-bf16-candle-evidence.json",
+        "sha256": "613611bfda7fb04b6b2436b5c0238648dacca3892783f07e7de2638e3a7a6632",
+        "recordId": "imc-bcb6318873b25441cc91",
+        "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
+        "loaderClosureDigest": "ed1e49d5eda0a7ec9354d9a613d4f888a6e0a5628ca78ad85e65419582422433"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12108955648,
+        "denoise": 8350859264,
+        "decode": 20296237056
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12108955648,
+        "denoise": 8350859264,
+        "decode": 20296237056
+      },
+      "overallAllocatorEnvelopeBytes": 20296237056
+    },
+    {
       "id": "sana_1600m:mlx:bf16:base:base:sana-base-bf16-mlx-full-ladder-v1-resident:imc-a4e0c62f15d4334a8a35",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -6309,6 +7348,51 @@
         "decode": 53650711564
       },
       "overallAllocatorEnvelopeBytes": 53650711564
+    },
+    {
+      "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sana-sprint-1600m-bf16-candle-evidence.json",
+        "sha256": "89266a6033bbc72674d36eea84a387934285eeebb0a0502b44546dc432576101",
+        "recordId": "imc-e5b549d8dba27afc7fb3",
+        "calibrationFingerprint": "sana-candle-dense-sprint-full-ladder-v1",
+        "loaderClosureDigest": "3d83d03dc59d67c063c9f3ae0cb92ea3a501b335e82d334d6633111573b391b9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12075401216,
+        "denoise": 8417968128,
+        "decode": 20296237056
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12075401216,
+        "denoise": 8417968128,
+        "decode": 20296237056
+      },
+      "overallAllocatorEnvelopeBytes": 20296237056
     },
     {
       "id": "sana_sprint_1600m:mlx:bf16:base:base:sana-sprint-bf16-mlx-full-ladder-v1-resident:imc-f76a266949c32dc069a0",
@@ -6538,6 +7622,141 @@
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "sd3_5_large:candle:bf16:base:base:sd35-large-candle-resident-staged-v1:imc-a483cb706c86fbc8ca96",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-bf16-candle-evidence.json",
+        "sha256": "c150e8aa0c5d04648ccad5ebb6f69dae2852aa29fbb0e0156f06467e435fd1ca",
+        "recordId": "imc-a483cb706c86fbc8ca96",
+        "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+        "loaderClosureDigest": "f870c9d7ba019c9e7cc0ba28dfd139ebc879e6e0455596e155a96177c900605c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "overallAllocatorEnvelopeBytes": 25801261056
+    },
+    {
+      "id": "sd3_5_large:candle:q4:base:base:sd35-large-candle-resident-staged-v1:imc-f0704206ce5b8b6c6330",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-q4-candle-evidence.json",
+        "sha256": "fe1cc7a5a7c7a42cd7aa409c54da7f50d4332fb78adb2f3536724398f826a228",
+        "recordId": "imc-f0704206ce5b8b6c6330",
+        "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+        "loaderClosureDigest": "f870c9d7ba019c9e7cc0ba28dfd139ebc879e6e0455596e155a96177c900605c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13551796224,
+        "denoise": 19425918976,
+        "decode": 11809062912
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13551796224,
+        "denoise": 19425918976,
+        "decode": 11809062912
+      },
+      "overallAllocatorEnvelopeBytes": 19425918976
+    },
+    {
+      "id": "sd3_5_large:candle:q8:base:base:sd35-large-candle-resident-staged-v1:imc-95815ae6e59526077de9",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-q8-candle-evidence.json",
+        "sha256": "4449e4898578f1563ac4ba652105831eff0b8d564aa82a4b3a7bfff97a1150b3",
+        "recordId": "imc-95815ae6e59526077de9",
+        "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+        "loaderClosureDigest": "f870c9d7ba019c9e7cc0ba28dfd139ebc879e6e0455596e155a96177c900605c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 14256439296,
+        "denoise": 21808283648,
+        "decode": 14224982016
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 14256439296,
+        "denoise": 21808283648,
+        "decode": 14224982016
+      },
+      "overallAllocatorEnvelopeBytes": 21808283648
+    },
+    {
       "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
       "modelId": "sd3_5_large",
       "modelFamily": "sd3",
@@ -6673,6 +7892,141 @@
       "overallAllocatorEnvelopeBytes": 37148212456
     },
     {
+      "id": "sd3_5_large_turbo:candle:bf16:base:base:sd35-large-turbo-candle-resident-staged-v1:imc-9cb058dbd00a4ea8e801",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-bf16-candle-evidence.json",
+        "sha256": "9df1e7c22407d79145b7ac917493a0aa23160f6147493a71c0cf3527d9676588",
+        "recordId": "imc-9cb058dbd00a4ea8e801",
+        "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+        "loaderClosureDigest": "024e342a35816f2b042775d23d92d0a10918e252471fc27641e1b2b3c718c402"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "overallAllocatorEnvelopeBytes": 25801261056
+    },
+    {
+      "id": "sd3_5_large_turbo:candle:q4:base:base:sd35-large-turbo-candle-resident-staged-v1:imc-fab59cd0f092b65c2893",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-q4-candle-evidence.json",
+        "sha256": "ee7a48c3050fe7f64e416eb7ee674046ae4a46b4d8f76b32c76e8529d88f1d2c",
+        "recordId": "imc-fab59cd0f092b65c2893",
+        "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+        "loaderClosureDigest": "024e342a35816f2b042775d23d92d0a10918e252471fc27641e1b2b3c718c402"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13552844800,
+        "denoise": 19426967552,
+        "decode": 11810111488
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13552844800,
+        "denoise": 19426967552,
+        "decode": 11810111488
+      },
+      "overallAllocatorEnvelopeBytes": 19426967552
+    },
+    {
+      "id": "sd3_5_large_turbo:candle:q8:base:base:sd35-large-turbo-candle-resident-staged-v1:imc-6f809bdf9267f77e6b95",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json",
+        "sha256": "c3e62b8065bb48671488a6cf41c6d96f5fa34bf24c44c6453376719fbbbaab5e",
+        "recordId": "imc-6f809bdf9267f77e6b95",
+        "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+        "loaderClosureDigest": "024e342a35816f2b042775d23d92d0a10918e252471fc27641e1b2b3c718c402"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 14222884864,
+        "denoise": 21774729216,
+        "decode": 14191427584
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 14222884864,
+        "denoise": 21774729216,
+        "decode": 14191427584
+      },
+      "overallAllocatorEnvelopeBytes": 21774729216
+    },
+    {
       "id": "sd3_5_large_turbo:mlx:bf16:base:base:sd3-5-large-turbo-bf16-mlx-shared-ladder-v1:imc-9698813bd1b3ac3dff77",
       "modelId": "sd3_5_large_turbo",
       "modelFamily": "sd3",
@@ -6806,6 +8160,141 @@
         "decode": 30442112096
       },
       "overallAllocatorEnvelopeBytes": 35503033768
+    },
+    {
+      "id": "sd3_5_medium:candle:bf16:base:base:sd35-medium-candle-resident-staged-v1:imc-97f4000a6ba19789f6cf",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-bf16-candle-evidence.json",
+        "sha256": "f07bbd0198bd1e4f812a74993f1f59287e84f8f0799ecf24431e56f48195a4a1",
+        "recordId": "imc-97f4000a6ba19789f6cf",
+        "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+        "loaderClosureDigest": "c567cb03f8e0a30d650276d90975a9ce5d0153009e786e069b181d4b8d37832c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13552844800,
+        "denoise": 13521387520,
+        "decode": 9863954432
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13552844800,
+        "denoise": 13521387520,
+        "decode": 9863954432
+      },
+      "overallAllocatorEnvelopeBytes": 13552844800
+    },
+    {
+      "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-q4-candle-evidence.json",
+        "sha256": "005ee2870dda9f81b8deb8eedea63563e3f391338b756aa5c7d8691bd330457c",
+        "recordId": "imc-40be0ad0e8f0a5f10598",
+        "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+        "loaderClosureDigest": "c567cb03f8e0a30d650276d90975a9ce5d0153009e786e069b181d4b8d37832c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13552844800,
+        "denoise": 13521387520,
+        "decode": 15702425600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13552844800,
+        "denoise": 13521387520,
+        "decode": 15702425600
+      },
+      "overallAllocatorEnvelopeBytes": 15702425600
+    },
+    {
+      "id": "sd3_5_medium:candle:q8:base:base:sd35-medium-candle-resident-staged-v1:imc-75c540104f2946323e05",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-q8-candle-evidence.json",
+        "sha256": "e367fe7263c7e35abb9a496fc36d43668798f4af9b3ece138f24b26ecadf4542",
+        "recordId": "imc-75c540104f2946323e05",
+        "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+        "loaderClosureDigest": "c567cb03f8e0a30d650276d90975a9ce5d0153009e786e069b181d4b8d37832c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13551796224,
+        "denoise": 13520338944,
+        "decode": 11372855296
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13551796224,
+        "denoise": 13520338944,
+        "decode": 11372855296
+      },
+      "overallAllocatorEnvelopeBytes": 13551796224
     },
     {
       "id": "sd3_5_medium:mlx:bf16:base:base:sd3-5-medium-bf16-mlx-shared-ladder-v1:imc-61454a8014ee1b8e5756",
@@ -7078,6 +8567,144 @@
       "overallAllocatorEnvelopeBytes": 14796455936
     },
     {
+      "id": "sensenova_u1_8b:candle:bf16:base:base:sensenova-u1-quality-bf16-candle-request-memory-ladder-v1:imc-969f2ad67e0c3dae1864",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-bf16-candle-evidence.json",
+        "sha256": "9c67d1dca7557c7e76e145ace75fca1b3c252c2514069bfcbef5be8b82088825",
+        "recordId": "imc-969f2ad67e0c3dae1864",
+        "calibrationFingerprint": "sensenova-u1-quality-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ab8f30b5a60684c48326708a8254a66626b965a527f9f360c87ad91aab1bc754"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "overallAllocatorEnvelopeBytes": 36805017600,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-q4-candle-evidence.json",
+        "sha256": "f8fb9a2ad35e6e2ddf776538a7f886e3802d81034103d66e27267d744e4ccda6",
+        "recordId": "imc-fcb2ae68b18103250015",
+        "calibrationFingerprint": "sensenova-u1-quality-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ab8f30b5a60684c48326708a8254a66626b965a527f9f360c87ad91aab1bc754"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "overallAllocatorEnvelopeBytes": 15296626688,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b:candle:q8:base:base:sensenova-u1-quality-q8-candle-request-memory-ladder-v1:imc-a00612f6d6e10da0719e",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-q8-candle-evidence.json",
+        "sha256": "7574d18a17a6ccd4a0fe34a7ca3281f852505189323198f80f84dee69e4c4197",
+        "recordId": "imc-a00612f6d6e10da0719e",
+        "calibrationFingerprint": "sensenova-u1-quality-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ab8f30b5a60684c48326708a8254a66626b965a527f9f360c87ad91aab1bc754"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "overallAllocatorEnvelopeBytes": 26738688000,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "sensenova_u1_8b:mlx:bf16:base:base:sensenova-u1-quality-bf16-mlx-shared-ladder-v1:imc-989847820f3a5dcbe171",
       "modelId": "sensenova_u1_8b",
       "modelFamily": "sensenova-u1",
@@ -7213,6 +8840,144 @@
         "decode": 21154901520
       },
       "overallAllocatorEnvelopeBytes": 22641309528,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:candle:bf16:base:base:sensenova-u1-fast-bf16-candle-request-memory-ladder-v1:imc-7e61fd92b85948193e7f",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-candle-evidence.json",
+        "sha256": "b1c1f246cbb22ffc0aeec265a08016b4788519c71f40572c04f2e6afa865e840",
+        "recordId": "imc-7e61fd92b85948193e7f",
+        "calibrationFingerprint": "sensenova-u1-fast-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "d9e160f13fb7180eddb590afc100b6aefb4f6c65e93e79a5e359643df97cd9e3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "overallAllocatorEnvelopeBytes": 36805017600,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:candle:q4:base:base:sensenova-u1-fast-q4-candle-request-memory-ladder-v1:imc-3914e8ed65048e470c69",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-candle-evidence.json",
+        "sha256": "235f1c60086a65de7aa0222446665e6a030a097979f25c985ae9607685b5d460",
+        "recordId": "imc-3914e8ed65048e470c69",
+        "calibrationFingerprint": "sensenova-u1-fast-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "d9e160f13fb7180eddb590afc100b6aefb4f6c65e93e79a5e359643df97cd9e3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "overallAllocatorEnvelopeBytes": 15296626688,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_fast:candle:q8:base:base:sensenova-u1-fast-q8-candle-request-memory-ladder-v1:imc-a98b52a97b99f4ea2616",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-candle-evidence.json",
+        "sha256": "c7587e38d62b7ae9078badd97ea662a0f9aa05f482ec35c081bcfcdb1898b686",
+        "recordId": "imc-a98b52a97b99f4ea2616",
+        "calibrationFingerprint": "sensenova-u1-fast-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "d9e160f13fb7180eddb590afc100b6aefb4f6c65e93e79a5e359643df97cd9e3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "overallAllocatorEnvelopeBytes": 26738688000,
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
@@ -7354,6 +9119,144 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_infographic_v2:candle:bf16:base:base:sensenova-u1-infographic-v2-bf16-candle-request-memory-ladder-v1:imc-60e742ca26ee5e8bcee5",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-candle-evidence.json",
+        "sha256": "0bc8534def9c0f44773af87e0982cf824a72898c1b1142823f0897b44a2276f9",
+        "recordId": "imc-60e742ca26ee5e8bcee5",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "1088df921a50e31e934d313b5e4ae9c2f51efea035f79053cd0cbc083944bb20"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "overallAllocatorEnvelopeBytes": 36805017600,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2:candle:q4:base:base:sensenova-u1-infographic-v2-q4-candle-request-memory-ladder-v1:imc-dee5d92ff4d14015d6b6",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-candle-evidence.json",
+        "sha256": "9d098dab4d9884f618cc59aed39ce290c37a17ad20611a7731f968897fa047f3",
+        "recordId": "imc-dee5d92ff4d14015d6b6",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "1088df921a50e31e934d313b5e4ae9c2f51efea035f79053cd0cbc083944bb20"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "overallAllocatorEnvelopeBytes": 15297675264,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2:candle:q8:base:base:sensenova-u1-infographic-v2-q8-candle-request-memory-ladder-v1:imc-32afc3723fa183200e5c",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-candle-evidence.json",
+        "sha256": "28a32a61f74c32ce4c8714ff928d0c412f15cc8a8170dd52a2553d3410a92bd3",
+        "recordId": "imc-32afc3723fa183200e5c",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "1088df921a50e31e934d313b5e4ae9c2f51efea035f79053cd0cbc083944bb20"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26758610944,
+        "decode": 26758610944
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26758610944,
+        "decode": 26758610944
+      },
+      "overallAllocatorEnvelopeBytes": 26758610944,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "sensenova_u1_8b_infographic_v2:mlx:bf16:base:base:sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1:imc-f3714df49f7065bc00ce",
       "modelId": "sensenova_u1_8b_infographic_v2",
       "modelFamily": "sensenova-u1",
@@ -7489,6 +9392,144 @@
         "decode": 21154870800
       },
       "overallAllocatorEnvelopeBytes": 22641278808,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:candle:bf16:base:base:sensenova-u1-infographic-v2-fast-bf16-candle-request-memory-ladder-v1:imc-7541684f142a1ee0f639",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-candle-evidence.json",
+        "sha256": "3f9f2be75df7479baa96551e58485a8c01826dd1391d87affa3cb9495bf3db82",
+        "recordId": "imc-7541684f142a1ee0f639",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "dd2f24ebfb7e24d992fcea3cec0135a5ec627505b1cf7355dd0e6e7de0a6f50b"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36806066176,
+        "denoise": 36806066176,
+        "decode": 36806066176
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36806066176,
+        "denoise": 36806066176,
+        "decode": 36806066176
+      },
+      "overallAllocatorEnvelopeBytes": 36806066176,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:candle:q4:base:base:sensenova-u1-infographic-v2-fast-q4-candle-request-memory-ladder-v1:imc-8e5635295324afb99c22",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-candle-evidence.json",
+        "sha256": "53f2ab418094cf8ea4f88e5ba57a0f92415ac0aa88af8d3ab6024725290051b8",
+        "recordId": "imc-8e5635295324afb99c22",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "dd2f24ebfb7e24d992fcea3cec0135a5ec627505b1cf7355dd0e6e7de0a6f50b"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15296626688,
+        "denoise": 15296626688,
+        "decode": 15296626688
+      },
+      "overallAllocatorEnvelopeBytes": 15296626688,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast:candle:q8:base:base:sensenova-u1-infographic-v2-fast-q8-candle-request-memory-ladder-v1:imc-0c5251af30983dca9d7f",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-candle-evidence.json",
+        "sha256": "861bc6fbbd4dd62b7074b928cdc93c547af42fd124552f8d8dadcbc75e6035d5",
+        "recordId": "imc-0c5251af30983dca9d7f",
+        "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "dd2f24ebfb7e24d992fcea3cec0135a5ec627505b1cf7355dd0e6e7de0a6f50b"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "overallAllocatorEnvelopeBytes": 26738688000,
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
@@ -7630,6 +9671,144 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_infographic_v3:candle:bf16:base:base:sensenova-u1-infographic-v3-bf16-candle-request-memory-ladder-v1:imc-f0bd7401e9144e9ff308",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-candle-evidence.json",
+        "sha256": "d599a642373f40f1bde8bd0489cf2040c9aa939052d6b4219a2e7cc0ad4800c5",
+        "recordId": "imc-f0bd7401e9144e9ff308",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ac7e04261be922398e08eba09cd9d76b375a2965a33566342d14224577c69443"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36806066176,
+        "denoise": 36806066176,
+        "decode": 36806066176
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36806066176,
+        "denoise": 36806066176,
+        "decode": 36806066176
+      },
+      "overallAllocatorEnvelopeBytes": 36806066176,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3:candle:q4:base:base:sensenova-u1-infographic-v3-q4-candle-request-memory-ladder-v1:imc-ef93e22a6e83d7dd8283",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-candle-evidence.json",
+        "sha256": "12b56cd4e36d2d1d17083624f4a3f2d0dfbb5b680664d00f398778d27b1e777f",
+        "recordId": "imc-ef93e22a6e83d7dd8283",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ac7e04261be922398e08eba09cd9d76b375a2965a33566342d14224577c69443"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "overallAllocatorEnvelopeBytes": 15297675264,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3:candle:q8:base:base:sensenova-u1-infographic-v3-q8-candle-request-memory-ladder-v1:imc-91a4c7624f8828cf2342",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-candle-evidence.json",
+        "sha256": "3948c92dfe302af246942e4b2887295ccd24b38a5ba3d3ecfadad35b3a3778b7",
+        "recordId": "imc-91a4c7624f8828cf2342",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "ac7e04261be922398e08eba09cd9d76b375a2965a33566342d14224577c69443"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26737639424,
+        "denoise": 26737639424,
+        "decode": 26737639424
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26737639424,
+        "denoise": 26737639424,
+        "decode": 26737639424
+      },
+      "overallAllocatorEnvelopeBytes": 26737639424,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "sensenova_u1_8b_infographic_v3:mlx:bf16:base:base:sensenova-u1-infographic-v3-bf16-mlx-shared-ladder-v1:imc-04cb3e24a7ad717c592d",
       "modelId": "sensenova_u1_8b_infographic_v3",
       "modelFamily": "sensenova-u1",
@@ -7765,6 +9944,144 @@
         "decode": 21154944656
       },
       "overallAllocatorEnvelopeBytes": 22641352664,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:candle:bf16:base:base:sensenova-u1-infographic-v3-fast-bf16-candle-request-memory-ladder-v1:imc-8f922d16ff98810da853",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-candle-evidence.json",
+        "sha256": "706977628ff66dae397dcece5b6a661dca03f05da3fa36b58e199baae3b7a2ef",
+        "recordId": "imc-8f922d16ff98810da853",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "cb6181ccef3fbd3493a8a8a0d366e64773a081917fc135bd2a74618af226a3b1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36803969024,
+        "denoise": 36803969024,
+        "decode": 36803969024
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36803969024,
+        "denoise": 36803969024,
+        "decode": 36803969024
+      },
+      "overallAllocatorEnvelopeBytes": 36803969024,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:candle:q4:base:base:sensenova-u1-infographic-v3-fast-q4-candle-request-memory-ladder-v1:imc-aacb90d0e9fa10b52973",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-candle-evidence.json",
+        "sha256": "388b862d9ca4f87d5ec5ef6ebbb38fa4182a49e6f3cd330a655987314d3748cd",
+        "recordId": "imc-aacb90d0e9fa10b52973",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "cb6181ccef3fbd3493a8a8a0d366e64773a081917fc135bd2a74618af226a3b1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15297675264,
+        "denoise": 15297675264,
+        "decode": 15297675264
+      },
+      "overallAllocatorEnvelopeBytes": 15297675264,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast:candle:q8:base:base:sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1:imc-f924dc1ac3dc0edd4845",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-candle-evidence.json",
+        "sha256": "fb5457c2e1c43cae7d4229894d931e11d203d23a36083e21377cc8a1f36c9a39",
+        "recordId": "imc-f924dc1ac3dc0edd4845",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "cb6181ccef3fbd3493a8a8a0d366e64773a081917fc135bd2a74618af226a3b1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "overallAllocatorEnvelopeBytes": 26738688000,
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
@@ -8888,28 +11205,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:bernini:candle:q4",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini:candle:q8",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:bernini:mlx:bf16",
       "modelId": "bernini",
       "modelFamily": "bernini",
@@ -8949,9 +11244,19 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/bernini-image-bf16-candle-evidence.json",
+        "sha256": "5d932da61795fac8ee6a607c5d89c465ce9398cc9d71fa0578b05382ef59cc02",
+        "recordId": "imc-fe6cb870cb4e01cc272a",
+        "envelopeBytes": 99621011456,
+        "values": {
+          "provider": "bernini"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:candle:q4",
@@ -8960,9 +11265,19 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/bernini-image-q4-candle-evidence.json",
+        "sha256": "29a2d7b59e96f159e2d597141c55837319ca4901085bf8ad33afe4f60af002bd",
+        "recordId": "imc-13cc08ced747839da4ae",
+        "envelopeBytes": 51906609152,
+        "values": {
+          "provider": "bernini"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:candle:q8",
@@ -8971,9 +11286,19 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/bernini-image-q8-candle-evidence.json",
+        "sha256": "68bda224a640d285da123454cfc06674f3e3033a1d49a3f9b6ee8d7736195c91",
+        "recordId": "imc-169a240de7158bdaf37f",
+        "envelopeBytes": 75193384960,
+        "values": {
+          "provider": "bernini"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:mlx:bf16",
@@ -9179,179 +11504,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:flux2_dev:candle:bf16",
-      "modelId": "flux2_dev",
-      "modelFamily": "flux2-dev",
-      "route": "flux2_dev",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_dev:candle:q4",
-      "modelId": "flux2_dev",
-      "modelFamily": "flux2-dev",
-      "route": "flux2_dev",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "42.7",
-          "provider": "flux2_dev",
-          "abi": "1"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux2_dev:candle:q8",
-      "modelId": "flux2_dev",
-      "modelFamily": "flux2-dev",
-      "route": "flux2_dev",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "70.8",
-          "provider": "flux2_dev",
-          "abi": "1"
-        }
-      }
-    },
-    {
       "id": "analytic:flux2_dev:mlx:bf16",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
       "route": "flux2_dev",
       "backend": "mlx",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b:candle:bf16",
-      "modelId": "flux2_klein_9b",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "53.3",
-          "provider": "flux2_klein_9b",
-          "abi": "1",
-          "vramGbByTier": "75.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux2_klein_9b:candle:q4",
-      "modelId": "flux2_klein_9b",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "24.2",
-          "provider": "flux2_klein_9b",
-          "abi": "1",
-          "vramGbByTier": "46.2"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux2_klein_9b:candle:q8",
-      "modelId": "flux2_klein_9b",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "28.7",
-          "provider": "flux2_klein_9b",
-          "abi": "1",
-          "vramGbByTier": "50.6"
-        }
-      }
-    },
-    {
-      "id": "analytic:flux2_klein_9b_kv:candle:bf16",
-      "modelId": "flux2_klein_9b_kv",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b_kv:candle:q4",
-      "modelId": "flux2_klein_9b_kv",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b_kv:candle:q8",
-      "modelId": "flux2_klein_9b_kv",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -9451,9 +11609,20 @@
       "route": "instantid",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'instantid'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/instantid-realvisxl-bf16-candle-evidence.json",
+        "sha256": "ce7002c26f215487cb958c020dc70e628bf181057c40d9f170ac5d37ee980731",
+        "recordId": "imc-b111a1550a875c71f558",
+        "envelopeBytes": 16206790656,
+        "values": {
+          "provider": "instantid",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:instantid_realvisxl:mlx:bf16",
@@ -9585,56 +11754,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:lens:candle:q4",
-      "modelId": "lens",
-      "modelFamily": "lens",
-      "route": "lens",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens_turbo:candle:q8",
-      "modelId": "lens_turbo",
-      "modelFamily": "lens",
-      "route": "lens_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:ltx_2_3:candle:bf16",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
       "route": "ltx_2_3_distilled",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_3:candle:q4",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3_distilled",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_3:candle:q8",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3_distilled",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -9651,34 +11776,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow:candle:bf16",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow:candle:q4",
       "modelId": "mage_flow",
       "modelFamily": "mage-flow",
       "route": "mage_flow",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow:candle:q8",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -9695,34 +11798,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_base:candle:q8",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_edit:candle:q4",
       "modelId": "mage_flow_edit",
       "modelFamily": "mage-flow",
       "route": "mage_flow_edit",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:candle:q8",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -9739,17 +11820,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit_base:candle:q8",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_edit_turbo:candle:q4",
       "modelId": "mage_flow_edit_turbo",
       "modelFamily": "mage-flow",
@@ -9761,34 +11831,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow_edit_turbo:candle:q8",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:mage_flow_turbo:candle:q4",
       "modelId": "mage_flow_turbo",
       "modelFamily": "mage-flow",
       "route": "mage_flow_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:candle:q8",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -10034,28 +12082,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:sana_1600m:candle:bf16",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_sprint_1600m:candle:bf16",
-      "modelId": "sana_sprint_1600m",
-      "modelFamily": "sana",
-      "route": "sana_sprint_1600m",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:scail2_14b:candle:bf16",
       "modelId": "scail2_14b",
       "modelFamily": "scail2",
@@ -10110,125 +12136,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:sd3_5_large:candle:bf16",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "41.3"
-        }
-      }
-    },
-    {
-      "id": "analytic:sd3_5_large:candle:q4",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "33.9"
-        }
-      }
-    },
-    {
-      "id": "analytic:sd3_5_large:candle:q8",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:candle:bf16",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:candle:q4",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:candle:q8",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:candle:bf16",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:candle:q4",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:candle:q8",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sdxl:mlx:bf16",
       "modelId": "sdxl",
       "modelFamily": "sdxl",
@@ -10260,384 +12167,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:candle:bf16",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:candle:q4",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b:candle:q8",
-      "modelId": "sensenova_u1_8b",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:candle:bf16",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:candle:q4",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:candle:q8",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:q4",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:q8",
-      "modelId": "sensenova_u1_8b_infographic_v2",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:q4",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:q8",
-      "modelId": "sensenova_u1_8b_infographic_v2_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:q4",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:q8",
-      "modelId": "sensenova_u1_8b_infographic_v3",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:bf16",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:q4",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.8"
-        }
-      }
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:q8",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
     },
     {
       "id": "analytic:svd:candle:default",

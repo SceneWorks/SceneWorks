@@ -1,0 +1,196 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "MiniMaxAI/MiniMax-H3",
+        "resolvedRevision": "939557dc319dd91227e30195a763f272ba7f8765",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
+      "capturedAt": "2026-09-12T03:12:56Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:minimax-h3-joint-av",
+        "blockers": [
+          "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 74687971328
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 35462840320
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 7480541184
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 74687971328
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 124
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 24
+          },
+          {
+            "name": "renderedAudio",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "referenceCount",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "minimax-h3-candle-q8-576x320-f124-fps24-seed22737",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-79e00d45e3be34b593a6",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:q8+partition:transformer+staged:SceneWorks/minimax-h3-mlx@137ce668c55a20bc0935fd1cf2a3de8448abb7f4/q8:minimax_h3:f124:576x320:fps24:seed22737",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-81fa1917418244806447",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 74687971328,
+          "allocatorBytes": 74687971328,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 7480541184,
+          "allocatorBytes": 7480541184,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 35462840320,
+          "allocatorBytes": 35462840320,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 74687971328,
+          "allocatorBytes": 74687971328,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "cb3010512ac34a6ef0d56204cbbc607fb7066025352cce6db7df1619641ccfc0",
+          "dirty": false,
+          "revision": "8fb95eb05cee4cf1e482aa050874fae98ccb3f78"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:478096169150432215a9cb69d484fdf76327086d4ba456ae89ff283f8ebffbaf",
+          "revision": "9d8f7525eee8f4b32282732949e08b6c5782b3b1"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle MiniMax-H3 joint audio+video text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 124,
+          "height": 320,
+          "width": 576
+        },
+        "mode": "text_to_video",
+        "modelId": "minimax_h3",
+        "overlay": "none",
+        "provider": "minimax_h3",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

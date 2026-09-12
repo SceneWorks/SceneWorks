@@ -1654,7 +1654,14 @@ test("every generated cell's state re-derives from its own three published facts
   const store = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
   );
-  const target = matrix.cells.find((cell) => cell.anchor !== null);
+  const target = matrix.cells.find((cell) =>
+    cell.anchor !== null && cell.state !== cellState({
+      implementation: cell.implementation,
+      anchorPresent: false,
+      derivationDefined: cell.derivationDefined,
+      anchorDerivable: false,
+    }),
+  );
   assert.ok(target, "no anchored cell to flip — the negative case would be vacuous");
   const flipped = {
     ...store,
