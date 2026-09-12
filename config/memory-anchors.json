@@ -913,6 +913,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux2_dev:candle:bf16:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-dd87c66f8fb1b72583bd",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-dev-bf16-candle-evidence.json",
+        "sha256": "23935070385b884f4a00f6f28d9efc4b80ff9b5c5a4ff3f5ab2ef51666a80980",
+        "recordId": "imc-dd87c66f8fb1b72583bd",
+        "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+        "loaderClosureDigest": "48e4c090def2c20e97cc1d878bdc90129236791c767aabeced568fe8a28358d2"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 99988013056,
+        "denoise": 101623791616,
+        "decode": 101607014400
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 99988013056,
+        "denoise": 101623791616,
+        "decode": 101607014400
+      },
+      "overallAllocatorEnvelopeBytes": 101623791616
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -9274,17 +9319,6 @@
       "route": "boogu_image_turbo",
       "backend": "mlx",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:flux2_dev:candle:bf16",
-      "modelId": "flux2_dev",
-      "modelFamily": "flux2-dev",
-      "route": "flux2_dev",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
