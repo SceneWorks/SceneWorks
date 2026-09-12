@@ -4271,7 +4271,8 @@ fn sensenova_candle_arm(request: &Value) -> Result<SenseNovaCandleArm, String> {
 fn sensenova_candle_calibration_fingerprint(arm: SenseNovaCandleArm, tier: &str) -> String {
     format!(
         "sensenova-u1-{}-{tier}-candle-request-memory-ladder-v1",
-        arm.slug
+        runtime_cuda::providers::sensenova::memory_strategy::route_label(arm.model_id)
+            .expect("registered SenseNova route")
     )
 }
 
