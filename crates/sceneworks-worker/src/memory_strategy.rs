@@ -643,6 +643,37 @@ pub fn select_strategy_charging(
     candidates: &[Candidate<'_>],
     reserve: ReserveCharge<'_>,
 ) -> Selection {
+    select_strategy_with_allowance_credit(request, contract, budget, candidates, reserve, 0)
+}
+
+/// Grade whole-pipeline peaks while preserving the legacy resident allowance on the bytes
+/// still to be allocated. The budget must already credit these provider-owned resident bytes.
+/// Optimized and measured candidates retain their original allowance terms.
+pub fn select_strategy_with_resident_credit(
+    request: RequestScope<'_>,
+    contract: &MemoryProviderContract,
+    budget: Option<Budget>,
+    candidates: &[Candidate<'_>],
+    resident_allowance_credit_bytes: u64,
+) -> Selection {
+    select_strategy_with_allowance_credit(
+        request,
+        contract,
+        budget,
+        candidates,
+        ReserveCharge::EveryCandidate,
+        resident_allowance_credit_bytes,
+    )
+}
+
+fn select_strategy_with_allowance_credit(
+    request: RequestScope<'_>,
+    contract: &MemoryProviderContract,
+    budget: Option<Budget>,
+    candidates: &[Candidate<'_>],
+    reserve: ReserveCharge<'_>,
+    resident_allowance_credit_bytes: u64,
+) -> Selection {
     if !contract.conformance_errors().is_empty()
         || contract.runtime.cancellation
             != MemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
@@ -719,8 +750,18 @@ pub fn select_strategy_charging(
                     // basis, charged against the term that carries the uncertainty.
                     let subject = candidate.admission_subject(backend_kind);
                     let allowance = crate::ladder_margin_policy::admission_allowance(subject);
-                    let admitted_peak_bytes =
-                        admitted_peak_bytes(subject, candidate.evidence.predicted_peak_bytes);
+                    let peak = candidate.evidence.predicted_peak_bytes;
+                    let allowance_peak = if strategy == MemoryStrategy::Resident
+                        && grade == CandidateGrade::Estimate
+                    {
+                        peak.saturating_sub(resident_allowance_credit_bytes)
+                    } else {
+                        peak
+                    };
+                    let admitted_peak_bytes = peak.saturating_add(allowance.bytes(
+                        allowance_peak,
+                        subject.unmodeled_activation_bytes.unwrap_or(0),
+                    ));
                     if grade == CandidateGrade::Estimate {
                         // sc-18096: record the estimate admission, which basis produced it, and
                         // both the raw and widened peaks, so a later OOM under this selection is

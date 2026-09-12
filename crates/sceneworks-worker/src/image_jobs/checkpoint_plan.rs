@@ -1782,6 +1782,16 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate:
     }
 }
 
+/// Ignore an unused negative prompt using the bound provider's capability contract.
+fn checkpoint_plan_negative_prompt(
+    request: &ImageRequest,
+    descriptor: &gen_core::ModelDescriptor,
+) -> Option<String> {
+    let negative = request.negative_prompt.trim();
+    (descriptor.capabilities.supports_negative_prompt && !negative.is_empty())
+        .then(|| negative.to_owned())
+}
+
 /// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
 /// registry bound for the plan's family and source shape.
 #[allow(clippy::too_many_arguments)]
@@ -1802,8 +1812,7 @@ async fn generate_checkpoint_plan_stream(
     let steps = checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100));
     let guidance = checkpoint_plan_f32_override(request, "guidanceScale");
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);
-    let negative_prompt = (!request.negative_prompt.trim().is_empty())
-        .then(|| request.negative_prompt.clone());
+    let negative_prompt = checkpoint_plan_negative_prompt(request, &sources.descriptor);
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
