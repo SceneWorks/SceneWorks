@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "290fa1f3e7dbf2039dd7f7434cf58f3c29eec35f",
+  "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -779,7 +779,7 @@
     },
     "candle:sensenova_u1_8b": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "b627583c8470228603d1a4a94e159b2b88c9209ea22084381389294bfbb262b9",
+      "digest": "fe4fb3305417f14ec8a2e34f05161e16868f05dfc8d21f95f4e142cbd2bd6fc7",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -798,7 +798,7 @@
     },
     "candle:sensenova_u1_8b_fast": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "bb27df81a729b7b5ac8b8b93c5cb1c16b72b07f7e766e6a322ee2e41503fea60",
+      "digest": "ff119182a7a0b6987b1816ff55be0827e465102fc079003660bce1c42255c63c",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1704,7 +1704,7 @@
     },
     "mlx:sensenova_u1_8b": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "a3732cd2f6b90426fd82623ecfdb144154429a73d032019a85901026f3a02652",
+      "digest": "8b4c2126d4fd4839080f33381d75423eaedf83329c5854b0f3f5528d82fe24b7",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1723,7 +1723,7 @@
     },
     "mlx:sensenova_u1_8b_fast": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "8790bc386ea73c7882a110555dd3eda493a6284b89f783b0b9a225a4879d6741",
+      "digest": "f5f95b0681cb63e7faed2e71ac79a675e28c934d2bc034c6eeabe5e5ea1f6b87",
       "sharedContractDigest": "45db193efc2f14ed7b64ac854f42466ee18e7109d38099276cae629995b682e5",
       "closureCrates": [
         "crates/contracts/core-llm",
