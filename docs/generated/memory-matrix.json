@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2510c3e56536fb3b77903a7e99a171e1fb9e29c9913583e444ad15f53b524494",
+    "sceneWorksRevision": "source-tree:b40d9f21b867e6bbf9924909ab74763475d849756173698cf3a583ff3587f734",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "4f5747b26c1dd77651d918eccd832e21ea8b286b2fc4da8484fa2958d04ff63c"
+        "sha256": "9e5bdbb46afdd0185a853b5456b6bbd4bbbd8e882d8f5a3e8c1f5f8189413f92"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,7 +89,7 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "47a456a6da9f555798fdec53863486e7aa89ca74d29956b3445b8098a19ff484"
+        "sha256": "c3f06adbf54cb44cb1f611f2fa9eb44aaa9f3e653f68c30a0f75f1def7e14085"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",

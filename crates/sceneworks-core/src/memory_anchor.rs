@@ -5033,7 +5033,10 @@ mod tests {
         // to the record too rather than being stored and trusted.
         for (field, value) in [
             ("overlay", serde_json::json!("identity")),
-            ("referenceCount", serde_json::json!(1)),
+            (
+                "referenceCount",
+                serde_json::json!(store().anchors[index].reference_count + 1),
+            ),
         ] {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
