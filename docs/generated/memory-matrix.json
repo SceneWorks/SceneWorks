@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:91731a3df691220236fc2ce40c4e0910d4ec1ea16feef01437b90949cab0d783",
+    "sceneWorksRevision": "source-tree:7740cbd7223008ec21c8f4e1ff582ee06711e58d0dfd36b73ab65a90fd2d2645",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "1af44aa2b3704c595d0ea71e2e7f3becf39119b7ec680703061733fc0e09acf7"
+        "sha256": "48410c6fe644318e74ade329a60c8b533c56c582841d8bc77e9a865641f0f967"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "081e724d6027d827eae6da77c976539eb5dc3abae0bab6da7fadf6f59dcc975e"
+        "sha256": "fee2d75cc79885c3d4c5e4126428ac062b2d0d9b2bdb0d2d9e4e0c93ead9124e"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -162,8 +162,8 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 201,
-    "analyticOnlyCells": 142,
+    "anchors": 202,
+    "analyticOnlyCells": 141,
     "anchoredCells": 3315,
     "staleAnchors": 82,
     "attestedAnchors": 4,
@@ -6385,6 +6385,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 0
+    },
+    {
+      "id": "ltx_2_3:candle:q8:base:base:sc-20772-ltx-2-3-candle-q8-i2v-v1:imc-ff2535e81c4225acd0f6",
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "ltx_2_3_distilled",
+      "mode": "image_to_video",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 97,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/ltx-2-3-q8-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 0
