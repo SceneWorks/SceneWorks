@@ -402,6 +402,22 @@ test("complete record validates and identity includes evidence scope plus resolv
   }
 });
 
+test("identity inventory uses the supported artifact digest and participates in record identity", () => {
+  const record = complete();
+  record.artifact.inventorySha256 = "a".repeat(64);
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  const bundle = () => ({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle(bundle());
+  const originalId = record.id;
+  record.artifact.inventorySha256 = "b".repeat(64);
+  assert.notEqual(recordId(record), originalId);
+  record.id = recordId(record);
+  validateBundle(bundle());
+  record.artifact.identityBundle = { compositeSha256: "b".repeat(64), files: {} };
+  assert.throws(() => validateBundle(bundle()), /identityBundle.*unexpected property/);
+});
+
 test("reference capture cardinality survives planning, schema validation and anchor extraction", () => {
   const key = "fixture_reference:q4:candle";
   const plan = anchorPlanFixture(key, { mode: "image_to_video", referenceCount: 1 });
