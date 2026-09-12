@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:04f4638fce7780281f895d43e4c98cd4bb811c1a213152a59bbb28fae29f8027",
+    "sceneWorksRevision": "source-tree:6d41dd5ab05bc66785c720ac514143438093f2dc240f7006c600e0d2faa52158",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "5592129856101c66e669d0f5863d35f77d941215c25aa3120ccc021913ac8324"
+        "sha256": "00ddc463e493c22b60664972ea87a9fb6c4aa75d7b37b7659f59af0e588a663d"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "f0a0da6093bcc44403e8b7032c5be704b5394a636e561fe9c8f322c61d3829f4"
+        "sha256": "daa314db57483a4fe9193d6d413ce67d3be7913e9258cdc784cb13df4a538ab2"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3593,
-    "elidedCells": 5797,
+    "publishedCells": 3603,
+    "elidedCells": 5787,
     "elidedByState": {
-      "Implemented": 1381,
+      "Implemented": 1371,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 210,
-    "analyticOnlyCells": 133,
-    "anchoredCells": 3368,
+    "anchors": 211,
+    "analyticOnlyCells": 132,
+    "anchoredCells": 3378,
     "staleAnchors": 82,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -7504,6 +7504,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 4
+    },
+    {
+      "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+      "modelId": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sana-sprint-1600m-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 10
     },
     {
       "id": "sana_sprint_1600m:mlx:bf16:base:base:sana-sprint-bf16-mlx-full-ladder-v1-resident:imc-f76a266949c32dc069a0",
@@ -16037,11 +16055,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -16049,11 +16067,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -16061,11 +16079,11 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -16073,11 +16091,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -16085,11 +16103,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -166223,6 +166241,568 @@
       }
     },
     {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_attention",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 1048576,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            4194304,
+            2097152,
+            1048576
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_decode",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_transformer_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 1048576,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            4194304,
+            2097152,
+            1048576
+          ],
+          "transformerWindowSizes": [
+            1,
+            2,
+            4,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:resident",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:staged_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_attention",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 1048576,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            4194304,
+            2097152,
+            1048576
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_decode",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 1048576,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            4194304,
+            2097152,
+            1048576
+          ],
+          "transformerWindowSizes": [
+            1,
+            2,
+            4,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:resident",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:staged_residency",
+      "modelId": "sana_sprint_1600m",
+      "resolvedRoute": "sana_sprint_1600m",
+      "provider": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 17411,
+      "owningModelStory": 17493,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sana_sprint_1600m:candle:bf16:base:base:sana-candle-dense-sprint-full-ladder-v1:imc-e5b549d8dba27afc7fb3"
+          }
+        ]
+      }
+    },
+    {
       "id": "sana_sprint_1600m:sana_sprint_1600m:mlx:bf16:image_to_image:none:resident",
       "modelId": "sana_sprint_1600m",
       "resolvedRoute": "sana_sprint_1600m",
@@ -226501,6 +227081,16 @@
       "sana_1600m:sana_1600m:mlx:q8:text_to_image:none:staged_residency"
     ],
     "sana_sprint_1600m": [
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_attention",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_decode",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:bounded_transformer_residency",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:resident",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:image_to_image:none:staged_residency",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_attention",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_decode",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:resident",
+      "sana_sprint_1600m:sana_sprint_1600m:candle:bf16:text_to_image:none:staged_residency",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:bf16:image_to_image:none:resident",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:bf16:image_to_image:none:staged_residency",
       "sana_sprint_1600m:sana_sprint_1600m:mlx:bf16:text_to_image:none:resident",
