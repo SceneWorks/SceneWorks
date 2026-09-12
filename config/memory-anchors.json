@@ -9789,9 +9789,20 @@
       "route": "instantid",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'instantid'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/instantid-realvisxl-bf16-candle-evidence.json",
+        "sha256": "ce7002c26f215487cb958c020dc70e628bf181057c40d9f170ac5d37ee980731",
+        "recordId": "imc-b111a1550a875c71f558",
+        "envelopeBytes": 16206790656,
+        "values": {
+          "provider": "instantid",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:instantid_realvisxl:mlx:bf16",
