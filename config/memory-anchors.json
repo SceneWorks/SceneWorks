@@ -7622,6 +7622,51 @@
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "sd3_5_large:candle:bf16:base:base:sd35-large-candle-resident-staged-v1:imc-a483cb706c86fbc8ca96",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-bf16-candle-evidence.json",
+        "sha256": "c150e8aa0c5d04648ccad5ebb6f69dae2852aa29fbb0e0156f06467e435fd1ca",
+        "recordId": "imc-a483cb706c86fbc8ca96",
+        "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+        "loaderClosureDigest": "f870c9d7ba019c9e7cc0ba28dfd139ebc879e6e0455596e155a96177c900605c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18215862272,
+        "denoise": 25801261056,
+        "decode": 22949134336
+      },
+      "overallAllocatorEnvelopeBytes": 25801261056
+    },
+    {
       "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
       "modelId": "sd3_5_large",
       "modelFamily": "sd3",
@@ -10901,27 +10946,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large:candle:bf16",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "41.3"
-        }
-      }
     },
     {
       "id": "analytic:sd3_5_large:candle:q4",
