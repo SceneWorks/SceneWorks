@@ -7170,6 +7170,51 @@
       "overallAllocatorEnvelopeBytes": 15842934784
     },
     {
+      "id": "sana_1600m:candle:bf16:base:base:sana-candle-dense-base-full-ladder-v1:imc-bcb6318873b25441cc91",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "provider": "sana_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sana-1600m-bf16-candle-evidence.json",
+        "sha256": "613611bfda7fb04b6b2436b5c0238648dacca3892783f07e7de2638e3a7a6632",
+        "recordId": "imc-bcb6318873b25441cc91",
+        "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
+        "loaderClosureDigest": "ed1e49d5eda0a7ec9354d9a613d4f888a6e0a5628ca78ad85e65419582422433"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12108955648,
+        "denoise": 8350859264,
+        "decode": 20296237056
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12108955648,
+        "denoise": 8350859264,
+        "decode": 20296237056
+      },
+      "overallAllocatorEnvelopeBytes": 20296237056
+    },
+    {
       "id": "sana_1600m:mlx:bf16:base:base:sana-base-bf16-mlx-full-ladder-v1-resident:imc-a4e0c62f15d4334a8a35",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -10754,17 +10799,6 @@
       "route": "sdxl",
       "backend": "mlx",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_1600m:candle:bf16",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
