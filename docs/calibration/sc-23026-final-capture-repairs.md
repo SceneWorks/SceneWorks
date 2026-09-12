@@ -37,6 +37,10 @@ measurement remains a separate operator dispatch.
   pinned recipe path. The engine fix resolves the parent and preserves the filename;
   prepared file receipts continue to bind the resolved bytes. Tests cover the real
   symlink layout, route and scale crossings, raw blob paths, and changed contents.
+- After the path repair, a real-file registry probe exposed a second Qwen refusal:
+  the nonzero overlay estimate lacked a typed auxiliary component. Nonzero adapter
+  bytes now use a whole-render `AdapterStack` component, with the same byte estimate
+  and no transformer-window reduction. Zero-overlay contracts stay unchanged.
 
 The host repairs replaced these truncated blobs only after downloading and
 verifying their complete publisher SHA-256. The prior blobs remain as backups.
@@ -52,3 +56,41 @@ and MiniMax `137ce668c55a20bc0935fd1cf2a3de8448abb7f4`. The post-install audit c
 163 safetensors files across these snapshots and the MiniMax upstream snapshot;
 all headers, contiguous tensor offsets, and declared lengths passed. All 17 scoped
 catalog rows are runnable in the host preflight. This is not a completed render.
+An expanded audit of every affected row's weight roots checked 689 safetensors
+paths without header, offset, or length errors. The actual Qwen Lightning snapshot
+and prepared LoRA receipts pass the production registry contract at all three tiers,
+using a temporary CPU-only probe; no model render or GPU campaign was executed.
+
+## Local verification
+
+- Adapter tests: 47 library and 96 Candle binary tests passed. Kolors admission and
+  PuLID production-reader regressions failed before the code fixes.
+- Capture harness: 65 tests passed, including inventory identity and strict schema
+  validation. The full catalog suite has nine Windows fixture failures reproduced
+  unchanged on base `68ad4cb1c` (133 pass, 22 platform skips); neither its code nor
+  its tests changed in this repair.
+- Qwen engine: 16 edit tests passed, including a red/green reproduction of the exact
+  Lightning refusal. All-target package Clippy with warnings denied passed, as did
+  formatting, the workspace gate, and the clock-assertion ratchet.
+- The additional nonzero-overlay conformance regression reproduced the real-host
+  failure before the fix and passes afterward; independent repair review passed.
+- Adapter Clippy passed with the existing `-A dead_code` baseline allowance and
+  other warnings denied. macOS adapter execution requires its platform CI lane.
+- Independent review passed for the code and host repairs. Final engine pin and
+  CI integration are checked separately before publication of the SceneWorks PR.
+
+## Pin integration
+
+SceneWorks pins `290fa1f3e7dbf2039dd7f7434cf58f3c29eec35f` from
+[inference PR #974](https://github.com/SceneWorks/inference/pull/974). The standard
+pin updater completed, including dependency-skew and source-audit checks. Existing
+capability dump revision labels remain historical; their revision-only differences
+are informational under the repository's gate teardown policy.
+
+At this exact pin, 143 adapter tests and 1,335 core tests passed (four core tests
+ignored). Adapter Clippy passed with its existing dead-code allowance. Generated
+anchors and matrix are current; loader/currency tests passed 59 with 17 platform
+skips. The four existing Krea/Z-Image attestations were extended after source review:
+Z-Image has an empty changed-file intersection, and Krea's intersection is confined
+to Qwen Edit path validation/accounting that its VAE/preview use does not execute.
+No new attestation or measurement revision was invented.
