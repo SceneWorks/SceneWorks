@@ -7030,6 +7030,7 @@ mod tests {
             .with_eligible_load_shape_declaration();
         let mut contract = composition_probe_contract(true, true);
         contract.provider_id = "lens".to_owned();
+        // Exercise the synthetic manifest's contract-only prices even after Lens is measured.
         let evaluation = evaluate_shared_image_inner(
             "lens",
             "lens",
@@ -7065,7 +7066,7 @@ mod tests {
             None,
             Some(contract),
             None,
-            None,
+            Some(no_anchors()),
         )
         .expect("weights-free Lens selector")
         .expect("the staged estimate fits while resident does not");

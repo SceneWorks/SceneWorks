@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/flux2-klein-9b-mlx",
+        "resolvedRevision": "1902693279fcfb828919370dfac2b8922d99499a",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "capturedAt": "2026-09-12T02:07:47Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:flux2-klein-9b-five-rung-reference",
+        "blockers": [
+          "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 24726470656
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 24625807360
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 30900486144
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 30900486144
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-flux2-klein-9b-q8-1024-seed16402-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-94d74201e78d88d2d73d",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-klein-9b-mlx@1902693279fcfb828919370dfac2b8922d99499a:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-6ca8d31ffeee624babd0",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 24726470656,
+          "allocatorBytes": 24726470656,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 30900486144,
+          "allocatorBytes": 30900486144,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 24625807360,
+          "allocatorBytes": 24625807360,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 30900486144,
+          "allocatorBytes": 30900486144,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "69be8c36b0e0cb9dd980d61b78d76d148eae112d067f205b109a9b2959d0c62a",
+          "dirty": false,
+          "revision": "8fb95eb05cee4cf1e482aa050874fae98ccb3f78"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:7d4feb86ad3c720f828cac257c71da6387522c3c09e57a29d0cae915e023849b",
+          "revision": "132a3e929db90421ee5583eadf1ef45fc8533ec4"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22727 anchor capture measures exact per-phase memory and strategy identity for the Candle FLUX.2 lanes; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle FLUX.2-klein-9B base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_klein_9b",
+        "overlay": "none",
+        "provider": "flux2_klein_9b",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}
