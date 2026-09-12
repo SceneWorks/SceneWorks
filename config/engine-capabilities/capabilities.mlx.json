@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8",
+    "inferenceRevision": "8b43c354a92bc7460866fc020774585b0fbed021",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -3668,7 +3668,7 @@
     {
       "id": "flux2_dev",
       "composed": false,
-      "selectorDigest": "sha256:3ce5d507f97724e6bbef439195b0e8e4e5f10f03d5b40b64a063515e76fd46ae",
+      "selectorDigest": "sha256:44b6a410f37760fa08aad9695ac0d87442fb00f31a45ecc9e151577d2de218bd",
       "surfaces": [
         {
           "selector": {
@@ -3689,7 +3689,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3738,7 +3739,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3787,7 +3789,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3973,7 +3976,7 @@
     {
       "id": "flux2_dev_edit",
       "composed": false,
-      "selectorDigest": "sha256:3ce5d507f97724e6bbef439195b0e8e4e5f10f03d5b40b64a063515e76fd46ae",
+      "selectorDigest": "sha256:44b6a410f37760fa08aad9695ac0d87442fb00f31a45ecc9e151577d2de218bd",
       "surfaces": [
         {
           "selector": {
@@ -3994,7 +3997,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -4043,7 +4047,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -4092,7 +4097,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
