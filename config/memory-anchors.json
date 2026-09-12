@@ -10039,6 +10039,52 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_infographic_v3_fast:candle:q8:base:base:sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1:imc-f924dc1ac3dc0edd4845",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-candle-evidence.json",
+        "sha256": "fb5457c2e1c43cae7d4229894d931e11d203d23a36083e21377cc8a1f36c9a39",
+        "recordId": "imc-f924dc1ac3dc0edd4845",
+        "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "cb6181ccef3fbd3493a8a8a0d366e64773a081917fc135bd2a74618af226a3b1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 26738688000,
+        "denoise": 26738688000,
+        "decode": 26738688000
+      },
+      "overallAllocatorEnvelopeBytes": 26738688000,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "sensenova_u1_8b_infographic_v3_fast:mlx:bf16:base:base:sensenova-u1-infographic-v3-fast-bf16-mlx-shared-ladder-v1:imc-8467900a349995491901",
       "modelId": "sensenova_u1_8b_infographic_v3_fast",
       "modelFamily": "sensenova-u1",
@@ -12121,27 +12167,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:q8",
-      "modelId": "sensenova_u1_8b_infographic_v3_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.5"
-        }
-      }
     },
     {
       "id": "analytic:svd:candle:default",
