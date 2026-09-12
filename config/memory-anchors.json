@@ -4986,6 +4986,51 @@
       "overallAllocatorEnvelopeBytes": 69260977594
     },
     {
+      "id": "mage_flow:candle:bf16:base:base:mage-flow-cuda-mage-flow-bf16-shared-ladder-v3:imc-4f886f33664553d85700",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json",
+        "sha256": "a15d27c002eae8ec082d72887b4db31d7d923e3ecf4a828d8ac65322e58da533",
+        "recordId": "imc-4f886f33664553d85700",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-bf16-shared-ladder-v3",
+        "loaderClosureDigest": "4d6df1aabff4f36c0072f1e6905384a739b0ac34c586ebb945545b83a423db66"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8887730176,
+        "denoise": 10364125184,
+        "decode": 10366222336
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8887730176,
+        "denoise": 10364125184,
+        "decode": 10366222336
+      },
+      "overallAllocatorEnvelopeBytes": 10366222336
+    },
+    {
       "id": "mage_flow:mlx:bf16:base:base:mage-flow-mage-flow-bf16-mlx-shared-ladder-v1:imc-4355eb2a1c8e81825197",
       "modelId": "mage_flow",
       "modelFamily": "mage-flow",
@@ -10133,17 +10178,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow:candle:bf16",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
