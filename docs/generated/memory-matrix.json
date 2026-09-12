@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2b38eed7cba0d7303d13b9053f6d9f115aa084f27a831531aa52809949d124bd",
+    "sceneWorksRevision": "source-tree:ccf67db63ba8dc0b5844bbb40bffdb063c90225e089bd38b5948539b832d54ec",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "147553694834f5efe6811780b350a6fd5f432da296cc91cf6ee0153029820da0"
+        "sha256": "299f6e1d09e93ef7f059c1f06366b332fcbe51562ea0d61719b2e517c84c5d03"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "d8ca53641f9f485e0587faaea5be7ce9380b018adea2cb0706bee39f5c069ae1"
+        "sha256": "dd13d295c973a5a85458a8a1643d01600a64d886930333836b26d544fef75565"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3337,
-    "elidedCells": 6053,
+    "publishedCells": 3370,
+    "elidedCells": 6020,
     "elidedByState": {
-      "Implemented": 1637,
+      "Implemented": 1604,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 191,
-    "analyticOnlyCells": 152,
-    "anchoredCells": 3101,
+    "anchors": 192,
+    "analyticOnlyCells": 151,
+    "anchoredCells": 3134,
     "staleAnchors": 82,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -5284,6 +5284,24 @@
       "cells": 33
     },
     {
+      "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+      "modelId": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/flux2-dev-q8-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 33
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "backend": "mlx",
@@ -10193,12 +10211,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 27,
-      "published": 12,
-      "elided": 15,
+      "published": 18,
+      "elided": 9,
       "implemented": 18,
       "states": {
-        "Anchored": 12,
-        "Implemented": 6,
+        "Anchored": 18,
         "Missing": 9
       },
       "implementedBy": {
@@ -10224,12 +10241,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 27,
-      "published": 12,
-      "elided": 15,
+      "published": 18,
+      "elided": 9,
       "implemented": 18,
       "states": {
-        "Anchored": 12,
-        "Implemented": 6,
+        "Anchored": 18,
         "Missing": 9
       },
       "implementedBy": {
@@ -10255,12 +10271,11 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 27,
-      "published": 12,
-      "elided": 15,
+      "published": 18,
+      "elided": 9,
       "implemented": 18,
       "states": {
-        "Anchored": 12,
-        "Implemented": 6,
+        "Anchored": 18,
         "Missing": 9
       },
       "implementedBy": {
@@ -10286,12 +10301,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 27,
-      "published": 18,
-      "elided": 9,
+      "published": 27,
+      "elided": 0,
       "implemented": 27,
       "states": {
-        "Anchored": 18,
-        "Implemented": 9
+        "Anchored": 27
       }
     },
     {
@@ -10299,12 +10313,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 27,
-      "published": 12,
-      "elided": 15,
+      "published": 18,
+      "elided": 9,
       "implemented": 18,
       "states": {
-        "Anchored": 12,
-        "Implemented": 6,
+        "Anchored": 18,
         "Missing": 9
       },
       "implementedBy": {
@@ -35227,6 +35240,1641 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#flux2_dev:candle:q4:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-50771a51b6b9c4e93cdc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:control:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:control:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:identity:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:none:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:character_image:none:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:control:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:control:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:identity:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:none:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:edit_image:none:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:control:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:control:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:identity:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_attention",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_decode",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:none:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15833,
+      "owningModelStory": 15922,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_dev:candle:q8:base:base:flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3:imc-4d4acee9ac99ba7ecfbd"
           }
         ]
       }
@@ -210700,6 +212348,39 @@
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:bounded_transformer_residency",
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:resident",
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:character_image:control:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:character_image:control:resident",
+      "flux2_dev:flux2_dev:candle:q8:character_image:control:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:character_image:identity:resident",
+      "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:character_image:none:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:character_image:none:resident",
+      "flux2_dev:flux2_dev:candle:q8:character_image:none:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:control:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:control:resident",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:control:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:identity:resident",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:none:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:none:resident",
+      "flux2_dev:flux2_dev:candle:q8:edit_image:none:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:control:resident",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:control:staged_residency",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:identity:resident",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_attention",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_decode",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:none:resident",
+      "flux2_dev:flux2_dev:candle:q8:text_to_image:none:staged_residency",
       "flux2_dev:flux2_dev:mlx:q4:character_image:control:resident",
       "flux2_dev:flux2_dev:mlx:q4:character_image:control:staged_residency",
       "flux2_dev:flux2_dev:mlx:q4:character_image:identity:resident",
