@@ -665,6 +665,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json"),
     ),
