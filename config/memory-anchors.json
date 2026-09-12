@@ -8252,6 +8252,51 @@
       "overallAllocatorEnvelopeBytes": 15702425600
     },
     {
+      "id": "sd3_5_medium:candle:q8:base:base:sd35-medium-candle-resident-staged-v1:imc-75c540104f2946323e05",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-medium-q8-candle-evidence.json",
+        "sha256": "e367fe7263c7e35abb9a496fc36d43668798f4af9b3ece138f24b26ecadf4542",
+        "recordId": "imc-75c540104f2946323e05",
+        "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+        "loaderClosureDigest": "c567cb03f8e0a30d650276d90975a9ce5d0153009e786e069b181d4b8d37832c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13551796224,
+        "denoise": 13520338944,
+        "decode": 11372855296
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13551796224,
+        "denoise": 13520338944,
+        "decode": 11372855296
+      },
+      "overallAllocatorEnvelopeBytes": 13551796224
+    },
+    {
       "id": "sd3_5_medium:mlx:bf16:base:base:sd3-5-medium-bf16-mlx-shared-ladder-v1:imc-61454a8014ee1b8e5756",
       "modelId": "sd3_5_medium",
       "modelFamily": "sd3",
@@ -11257,17 +11302,6 @@
       "modelFamily": "scail2",
       "route": "scail2_14b",
       "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_medium:candle:q8",
-      "modelId": "sd3_5_medium",
-      "modelFamily": "sd3",
-      "route": "sd3_5_medium",
-      "backend": "candle",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
