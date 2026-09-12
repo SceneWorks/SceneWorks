@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e0ae57e35d47f54cf2bf010ccf1dd4eac753488947e284171b2b92bef217c41d",
+    "sceneWorksRevision": "source-tree:3a4f3690def5215b97808fdd52a2b24cc653853843eedccf05c2fc39b8d1ce34",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "472848e8f10285cf4ddc1bf3a5fc8d74a666ae80d0544705a84bd7a9581a9a90"
+        "sha256": "a401311967d6876b7927846580d79a6b637e9b65efbd1423e1befa8e7a195f52"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "60c2e60431c17fc776032aebff178372428085b8e1a8da461a6156dfa6499694"
+        "sha256": "2b9d78420ed7fbcfd0983c08a61961565a31a19d1c826547e598338a3ca141db"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3631,
-    "elidedCells": 5759,
+    "publishedCells": 3635,
+    "elidedCells": 5755,
     "elidedByState": {
-      "Implemented": 1343,
+      "Implemented": 1339,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 218,
-    "analyticOnlyCells": 125,
-    "anchoredCells": 3406,
+    "anchors": 219,
+    "analyticOnlyCells": 124,
+    "anchoredCells": 3410,
     "staleAnchors": 82,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -7843,6 +7843,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/sd3-5-medium-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 4
+    },
+    {
+      "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+      "modelId": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sd3-5-medium-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 4
@@ -16698,12 +16716,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -16711,12 +16729,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 2,
-      "elided": 4,
+      "published": 4,
+      "elided": 2,
       "implemented": 6,
       "states": {
-        "Anchored": 2,
-        "Implemented": 4
+        "Anchored": 4,
+        "Implemented": 2
       }
     },
     {
@@ -170699,6 +170717,218 @@
       }
     },
     {
+      "id": "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:lora:resident",
+      "modelId": "sd3_5_medium",
+      "resolvedRoute": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15835,
+      "owningModelStory": 15931,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "sd3_5_medium",
+      "resolvedRoute": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15835,
+      "owningModelStory": 15931,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:none:resident",
+      "modelId": "sd3_5_medium",
+      "resolvedRoute": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15835,
+      "owningModelStory": 15931,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "sd3_5_medium",
+      "resolvedRoute": "sd3_5_medium",
+      "provider": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1440x1440",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15835,
+      "owningModelStory": 15931,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sd3_5_medium:candle:q4:base:base:sd35-medium-candle-resident-staged-v1:imc-40be0ad0e8f0a5f10598"
+          }
+        ]
+      }
+    },
+    {
       "id": "sd3_5_medium:sd3_5_medium:mlx:bf16:text_to_image:lora:resident",
       "modelId": "sd3_5_medium",
       "resolvedRoute": "sd3_5_medium",
@@ -228759,6 +228989,10 @@
       "sd3_5_medium:sd3_5_medium:candle:bf16:text_to_image:lora:staged_residency",
       "sd3_5_medium:sd3_5_medium:candle:bf16:text_to_image:none:resident",
       "sd3_5_medium:sd3_5_medium:candle:bf16:text_to_image:none:staged_residency",
+      "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:lora:resident",
+      "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:lora:staged_residency",
+      "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:none:resident",
+      "sd3_5_medium:sd3_5_medium:candle:q4:text_to_image:none:staged_residency",
       "sd3_5_medium:sd3_5_medium:mlx:bf16:text_to_image:lora:resident",
       "sd3_5_medium:sd3_5_medium:mlx:bf16:text_to_image:lora:staged_residency",
       "sd3_5_medium:sd3_5_medium:mlx:bf16:text_to_image:none:resident",
