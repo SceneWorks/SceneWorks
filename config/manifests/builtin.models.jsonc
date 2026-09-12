@@ -21311,6 +21311,7 @@
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+          "revision": "5be7df9619b54f4e2667b2755bc6a756675b5cd7",
           "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
