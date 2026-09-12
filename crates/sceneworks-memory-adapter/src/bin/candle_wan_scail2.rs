@@ -11,8 +11,8 @@
 //!   `resident-eager` identity names.
 //! * **The artifact is per (lane, TIER).** Each Wan route ships a `SceneWorks/…-candle` rehost with
 //!   `q4` and `q8` ONLY; its dense leg is the upstream `Wan-AI/…-Diffusers` checkpoint, whose
-//!   weights sit at the snapshot ROOT rather than under a `bf16/` subtree and whose revision the
-//!   manifest does not pin. SCAIL-2 is the opposite: ONE `SceneWorks/scail2-mlx` repository, all
+//!   weights sit at the snapshot ROOT rather than under a `bf16/` subtree. T2V is pinned for
+//!   repair; TI2V/I2V resolve staged upstream revisions. SCAIL-2 uses ONE repository, all
 //!   three tiers, both lanes.
 //!
 //! Everything else is the same claim: resolve the artifact, load through `runtime_cuda::catalog()`
@@ -557,7 +557,9 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
         steps: Some(arm.steps),
         frames: Some(frames),
         fps: Some(arm.fps),
-        video_mode: Some(arm.mode.to_owned()),
+        // TI2V's standard calibrated T2V scope requires the default route selector.
+        // A14B and SCAIL2 bind their explicit modes into sealed request receipts.
+        video_mode: (arm.provider != TI2V_5B.provider).then(|| arm.mode.to_owned()),
         conditioning,
         ..Default::default()
     }
@@ -1194,6 +1196,50 @@ mod tests {
             );
             for arm in [T2V_A14B, I2V_A14B] {
                 assert!(evidence_revision(arm, &spec, &mut request, selection).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ti2v_capture_request_enters_the_provider_scope_at_every_tier() {
+        let catalog = runtime_cuda::catalog().unwrap();
+        let registry = catalog.media();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|entry| entry.provider_id == TI2V_5B.provider)
+            .unwrap();
+        let behavior = registry
+            .memory_behavior_registrations()
+            .find(|entry| entry.provider_id == TI2V_5B.provider)
+            .unwrap();
+        for tier in ["bf16", "q4", "q8"] {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("absent-ti2v-fixture")))
+                .with_offload_policy(TI2V_5B.offload_policy);
+            spec.quantize = numeric_tier(tier).unwrap().quant;
+            let contract = (fixture.contract)(&spec).unwrap();
+            let fixtures =
+                (behavior.valid_fixtures)(&spec, &contract, MemoryStrategy::StagedResidency)
+                    .unwrap();
+            assert!(!fixtures.is_empty());
+            for fixture in fixtures {
+                let mut context = fixture.context;
+                context.selection.strategy = MemoryStrategy::Resident;
+                let geometry = Geometry {
+                    width: context.geometry.width,
+                    height: context.geometry.height,
+                    frames: context.geometry.frames,
+                };
+                let mut scope = (behavior.begin_request)(&spec, &contract, &context)
+                    .unwrap()
+                    .unwrap();
+                let mut request = generation_request(TI2V_5B, geometry);
+                scope.configure_request(&mut request).unwrap();
+                request.video_mode = Some(TI2V_5B.mode.to_owned());
+                assert!(scope
+                    .configure_request(&mut request)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("video_mode"));
             }
         }
     }
