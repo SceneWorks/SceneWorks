@@ -1138,6 +1138,51 @@
       "overallAllocatorEnvelopeBytes": 113150645436
     },
     {
+      "id": "flux2_klein_9b:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-11684b48bf42c7321ae1",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json",
+        "sha256": "472624a06e2a884c58ea9843a7be074d0baffeec2e4e1391e731d3de8d511e67",
+        "recordId": "imc-11684b48bf42c7321ae1",
+        "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+        "loaderClosureDigest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 24726470656,
+        "denoise": 48013246464,
+        "decode": 57207160832
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 24726470656,
+        "denoise": 48013246464,
+        "decode": 57207160832
+      },
+      "overallAllocatorEnvelopeBytes": 57207160832
+    },
+    {
       "id": "flux2_klein_9b:mlx:bf16:base:base:flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1:imc-674fc134cc94d24ef3a3",
       "modelId": "flux2_klein_9b",
       "modelFamily": "flux2-klein",
@@ -9423,31 +9468,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:flux2_klein_9b:candle:bf16",
-      "modelId": "flux2_klein_9b",
-      "modelFamily": "flux2-klein",
-      "route": "flux2_klein_9b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
-          "sequentialPeakGb": "53.3",
-          "provider": "flux2_klein_9b",
-          "abi": "1",
-          "vramGbByTier": "75.5"
-        }
-      }
     },
     {
       "id": "analytic:flux2_klein_9b:candle:q4",
