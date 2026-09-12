@@ -9019,9 +9019,19 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/bernini-image-bf16-candle-evidence.json",
+        "sha256": "5d932da61795fac8ee6a607c5d89c465ce9398cc9d71fa0578b05382ef59cc02",
+        "recordId": "imc-fe6cb870cb4e01cc272a",
+        "envelopeBytes": 99621011456,
+        "values": {
+          "provider": "bernini"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:candle:q4",
