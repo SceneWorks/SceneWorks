@@ -4261,6 +4261,52 @@
       "overallAllocatorEnvelopeBytes": 91802773474
     },
     {
+      "id": "ltx_2_3:candle:q4:base:base:sc-20772-ltx-2-3-candle-q4-i2v-v1:imc-8e42c3a1c155f14dd720",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "provider": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "image_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json",
+        "sha256": "ceaa82f879f92d88bc21b754e31c42af70e5c2264e6c13a3fa75ee64e329fcf7",
+        "recordId": "imc-8e42c3a1c155f14dd720",
+        "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
+        "loaderClosureDigest": "cca2c0922a4311657494dc3c4f2a4d63c0eec0b9b1506ae4d9d9a30f32a8b35e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 97,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 49826234368,
+        "denoise": 56939773952,
+        "decode": 61805166592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 49826234368,
+        "denoise": 56939773952,
+        "decode": 61805166592
+      },
+      "overallAllocatorEnvelopeBytes": 61805166592,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "ltx_2_3:mlx:bf16:base:base:sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2:imc-480f79e0b28dc695828b",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
@@ -10030,17 +10076,6 @@
       "route": "ltx_2_3_distilled",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:ltx_2_3:candle:q4",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3_distilled",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

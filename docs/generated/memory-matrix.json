@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:81ce2af232a1bb10641bd0c4c026f5aabd1c56895c59995294960e27ff4a13a4",
+    "sceneWorksRevision": "source-tree:91731a3df691220236fc2ce40c4e0910d4ec1ea16feef01437b90949cab0d783",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "50382b02bc538848d627b1a8f5f0cdf4e63dd979ed0f6eb596d26e69ddf7be5d"
+        "sha256": "1af44aa2b3704c595d0ea71e2e7f3becf39119b7ec680703061733fc0e09acf7"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "018dc243e3da7889a9f2a55431fd66ba4d0aa157471cd9102b31ea7a67bd2a2b"
+        "sha256": "081e724d6027d827eae6da77c976539eb5dc3abae0bab6da7fadf6f59dcc975e"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -162,8 +162,8 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 200,
-    "analyticOnlyCells": 143,
+    "anchors": 201,
+    "analyticOnlyCells": 142,
     "anchoredCells": 3315,
     "staleAnchors": 82,
     "attestedAnchors": 4,
@@ -6370,6 +6370,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 4
+    },
+    {
+      "id": "ltx_2_3:candle:q4:base:base:sc-20772-ltx-2-3-candle-q4-i2v-v1:imc-8e42c3a1c155f14dd720",
+      "modelId": "ltx_2_3",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "ltx_2_3_distilled",
+      "mode": "image_to_video",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 97,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 0
     },
     {
       "id": "ltx_2_3:mlx:bf16:base:base:sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2:imc-480f79e0b28dc695828b",
