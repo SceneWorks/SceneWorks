@@ -3748,11 +3748,9 @@ test("the wan 2.2 family and scail-2 are measurable on every shipped tier of eve
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
-// The Wan candle bf16 leg is the one cell in the whole table whose repository the manifest ships
-// WITHOUT a revision, so `resolveArtifactRoot` reads the revision off whatever snapshot is staged
-// instead of probing a pinned one. That is a real difference in how a root is bound, and it is
-// asserted here rather than left to the sibling case above, which would report only "measurable".
-test("the wan candle dense leg binds the upstream snapshot flat and unpinned", async () => {
+// Wan Candle BF16 uses flat upstream snapshots. T2V has an exact manifest revision so an
+// incomplete snapshot can be repaired; the other two still resolve their staged revision.
+test("the wan candle dense leg binds upstream snapshots flat, with T2V pinned for repair", async () => {
   const models = await readManifestModels();
   for (const [id, repo] of [
     ["wan_2_2", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"],
@@ -3763,13 +3761,23 @@ test("the wan candle dense leg binds the upstream snapshot flat and unpinned", a
     const artifact = familyArtifact(PROVIDER_FAMILIES[provider], "candle", "bf16");
     assert.equal(artifact.repo, repo, `${id}: the candle dense leg is the upstream checkpoint`);
     assert.equal(artifact.layout, "flat", `${id}: the upstream checkpoint has no tier subtree`);
-    // ...and the manifest really does ship it unpinned, which is what makes the flat, host-read
-    // binding necessary rather than a convenience.
     const download = (models.find((model) => model.id === id)?.downloads ?? []).find(
       (entry) => entry.repo === repo,
     );
     assert.ok(download, `${id} ships ${repo}`);
-    assert.equal(download.revision, undefined, `${id}: ${repo} is shipped without a revision`);
+    if (id === "wan_2_2_t2v_14b") {
+      assert.equal(download.revision, "5be7df9619b54f4e2667b2755bc6a756675b5cd7");
+      const { targets, unfetchable } = anchorDownloadTargets(
+        { key: `${id}:bf16:candle`, modelId: id, tier: "bf16", backend: "candle", provider }, models,
+      );
+      assert.deepEqual(unfetchable, []);
+      assert.equal(targets.length, 1);
+      assert.equal(targets[0].repo, repo);
+      assert.equal(targets[0].revision, download.revision);
+      assert.ok(hfDownloadArgvs(targets[0], "/hub").every(args => args.includes(download.revision)));
+    } else {
+      assert.equal(download.revision, undefined, `${id}: ${repo} is shipped without a revision`);
+    }
     // The packed siblings are the opposite: a pinned, tier-suffixed SceneWorks rehost.
     for (const tier of ["q4", "q8"]) {
       const packed = familyArtifact(PROVIDER_FAMILIES[provider], "candle", tier);

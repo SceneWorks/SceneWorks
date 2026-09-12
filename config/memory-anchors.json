@@ -9021,7 +9021,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9042,7 +9042,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9063,7 +9063,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9117,7 +9117,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9138,7 +9138,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9159,7 +9159,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9202,7 +9202,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9226,7 +9226,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9261,7 +9261,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9286,7 +9286,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9311,7 +9311,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9501,7 +9501,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9522,7 +9522,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9543,7 +9543,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9872,7 +9872,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9897,7 +9897,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -9922,7 +9922,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10068,7 +10068,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10122,7 +10122,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10143,7 +10143,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10274,7 +10274,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10295,7 +10295,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10316,7 +10316,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10337,7 +10337,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10358,7 +10358,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10379,7 +10379,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10400,7 +10400,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10421,7 +10421,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10442,7 +10442,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10463,7 +10463,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10484,7 +10484,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10505,7 +10505,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10526,7 +10526,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10547,7 +10547,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10568,7 +10568,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10589,7 +10589,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10610,7 +10610,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10631,7 +10631,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10674,7 +10674,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10695,7 +10695,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10716,7 +10716,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10770,7 +10770,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10791,7 +10791,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10812,7 +10812,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10866,7 +10866,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10887,7 +10887,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -10908,7 +10908,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
+        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
