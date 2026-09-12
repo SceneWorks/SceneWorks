@@ -8843,6 +8843,52 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "sensenova_u1_8b_fast:candle:bf16:base:base:sensenova-u1-fast-bf16-candle-request-memory-ladder-v1:imc-7e61fd92b85948193e7f",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "provider": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-candle-evidence.json",
+        "sha256": "b1c1f246cbb22ffc0aeec265a08016b4788519c71f40572c04f2e6afa865e840",
+        "recordId": "imc-7e61fd92b85948193e7f",
+        "calibrationFingerprint": "sensenova-u1-fast-bf16-candle-request-memory-ladder-v1",
+        "loaderClosureDigest": "d9e160f13fb7180eddb590afc100b6aefb4f6c65e93e79a5e359643df97cd9e3"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 36805017600,
+        "denoise": 36805017600,
+        "decode": 36805017600
+      },
+      "overallAllocatorEnvelopeBytes": 36805017600,
+      "stagedResidencyStructurallyNotApplicable": true
+    },
+    {
       "id": "sensenova_u1_8b_fast:mlx:bf16:base:base:sensenova-u1-fast-bf16-mlx-shared-ladder-v1:imc-6104367f39ad6d83794c",
       "modelId": "sensenova_u1_8b_fast",
       "modelFamily": "sensenova-u1",
@@ -11477,27 +11523,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sensenova_u1_8b_fast:candle:bf16",
-      "modelId": "sensenova_u1_8b_fast",
-      "modelFamily": "sensenova-u1",
-      "route": "sensenova_u1_8b_fast",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "36.7"
-        }
-      }
     },
     {
       "id": "analytic:sensenova_u1_8b_fast:candle:q4",
