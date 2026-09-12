@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c5576c16b1b56bf0b7f5066aa41c64e7f3dc33b01d439871c9a29b31f4bc5848",
+    "sceneWorksRevision": "source-tree:7d4feb86ad3c720f828cac257c71da6387522c3c09e57a29d0cae915e023849b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "f23cae905af3000796dd599948de19b05eb9d5a6a4c6a327c295d17c2acb35cb"
+        "sha256": "73a5b358047f5c6a93e87e7fced0f594358f598cd98485cd47d472538ba59db8"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "820f994377443483654e8ac9806a7762c555221d2f953547d4ba6c8aa16a5030"
+        "sha256": "fa2a82c0739aea007ad30791b8404181847beea86e8674adaca3ce169b608ab5"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3398,
-    "elidedCells": 5992,
+    "publishedCells": 3426,
+    "elidedCells": 5964,
     "elidedByState": {
-      "Implemented": 1576,
+      "Implemented": 1548,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 193,
-    "analyticOnlyCells": 150,
-    "anchoredCells": 3162,
+    "anchors": 194,
+    "analyticOnlyCells": 149,
+    "anchoredCells": 3190,
     "staleAnchors": 82,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -5405,6 +5405,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 28
+    },
+    {
+      "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+      "modelId": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/flux2-klein-9b-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 28
@@ -10987,12 +11005,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 36,
-      "published": 4,
-      "elided": 32,
+      "published": 8,
+      "elided": 28,
       "implemented": 12,
       "states": {
-        "Anchored": 4,
-        "Implemented": 8,
+        "Anchored": 8,
+        "Implemented": 4,
         "Missing": 24
       },
       "implementedBy": {
@@ -11019,12 +11037,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 36,
-      "published": 4,
-      "elided": 32,
+      "published": 8,
+      "elided": 28,
       "implemented": 12,
       "states": {
-        "Anchored": 4,
-        "Implemented": 8,
+        "Anchored": 8,
+        "Implemented": 4,
         "Missing": 24
       },
       "implementedBy": {
@@ -11051,12 +11069,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 36,
-      "published": 4,
-      "elided": 32,
+      "published": 8,
+      "elided": 28,
       "implemented": 12,
       "states": {
-        "Anchored": 4,
-        "Implemented": 8,
+        "Anchored": 8,
+        "Implemented": 4,
         "Missing": 24
       },
       "implementedBy": {
@@ -11083,12 +11101,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -11096,12 +11114,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 36,
-      "published": 4,
-      "elided": 32,
+      "published": 8,
+      "elided": 28,
       "implemented": 12,
       "states": {
-        "Anchored": 4,
-        "Implemented": 8,
+        "Anchored": 8,
+        "Implemented": 4,
         "Missing": 24
       },
       "implementedBy": {
@@ -44866,6 +44884,1378 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#flux2_klein_9b:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-11684b48bf42c7321ae1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:identity:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:lora:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:staged_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:identity:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:lora:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:staged_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:identity:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:lora:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:staged_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:identity:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:lora:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 1024,
+        "decodeOverlap": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:resident",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "flux2_klein_9b",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15831,
+      "owningModelStory": 15919,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c"
           }
         ]
       }
@@ -213860,6 +215250,34 @@
       "flux2_klein_9b:flux2_klein_9b:candle:bf16:text_to_image:none:bounded_transformer_residency",
       "flux2_klein_9b:flux2_klein_9b:candle:bf16:text_to_image:none:resident",
       "flux2_klein_9b:flux2_klein_9b:candle:bf16:text_to_image:none:staged_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:identity:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:lora:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_attention",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_decode",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:bounded_transformer_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:character_image:none:staged_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:identity:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:lora:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_attention",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_decode",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:bounded_transformer_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:edit_image:none:staged_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:identity:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:lora:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_attention",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_decode",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:bounded_transformer_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:image_to_image:none:staged_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:identity:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:lora:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_attention",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_decode",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:resident",
+      "flux2_klein_9b:flux2_klein_9b:candle:q4:text_to_image:none:staged_residency",
       "flux2_klein_9b:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_attention",
       "flux2_klein_9b:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_decode",
       "flux2_klein_9b:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_transformer_residency",
