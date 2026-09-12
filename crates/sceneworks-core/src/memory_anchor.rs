@@ -127,6 +127,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/bernini-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q8-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json"),
     ),

@@ -48,6 +48,52 @@
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "bernini:candle:q8:base:base:bernini-image-q8-candle-dual-expert-ladder-v1:imc-6eca4025670f1679a6a6",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "reference_to_video",
+      "overlay": null,
+      "referenceCount": 1,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-q8-candle-evidence.json",
+        "sha256": "3827ada663ec39091f36ca6c08656a2d4634881f33ab230b814d63a6479c90d7",
+        "recordId": "imc-6eca4025670f1679a6a6",
+        "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
+        "loaderClosureDigest": "7b13f566f52377c18c61df0af84b64b367fa84fe903d2fcfb92c28d4b70ca4cf"
+      },
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 45,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 77709967360,
+        "denoise": 77860962304,
+        "decode": 77715210240
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 77709967360,
+        "denoise": 77860962304,
+        "decode": 77715210240
+      },
+      "overallAllocatorEnvelopeBytes": 77860962304,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "chroma1_base:candle:bf16:base:base:chroma1-base-bf16-cuda-request-scoped-staged-residency-v1:imc-b1813ea0729c95602205",
       "modelId": "chroma1_base",
       "modelFamily": "chroma",
@@ -8929,17 +8975,6 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini:candle:q8",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
