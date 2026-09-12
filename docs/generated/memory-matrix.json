@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c7c44bb2438271f056daf8e4d48686f933afce91c09315a627e252a7f979eaa0",
+    "sceneWorksRevision": "source-tree:c39799ac75e36dac32be9476a1c9d69d04e3bf6a90cabe70d70a64bda687e9ff",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "088c41b051bba2d4041523dd8522b0acfb9cd91a1b958392ab0daf1434a666ee"
+        "sha256": "0709463fd37feb33e719a786fdeed60a0fa420329d53a2ded9abf191065b2863"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "acb6707932ffaacada3b831b2a3377f920599e2436f84bbfff93a84e8bc6c214"
+        "sha256": "da3ebaaea70cf0b8282bc3cd4f6f55ef86a297965aee6b315e60baeff8dd8aba"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3645,
-    "elidedCells": 5745,
+    "publishedCells": 3651,
+    "elidedCells": 5739,
     "elidedByState": {
-      "Implemented": 1329,
+      "Implemented": 1323,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 221,
-    "analyticOnlyCells": 122,
-    "anchoredCells": 3432,
+    "anchors": 222,
+    "analyticOnlyCells": 121,
+    "anchoredCells": 3450,
     "staleAnchors": 82,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -8275,6 +8275,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-22738/sensenova-u1-8b-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 18
+    },
+    {
+      "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+      "modelId": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/sensenova-u1-8b-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 18
@@ -17652,12 +17670,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 18,
-      "published": 6,
-      "elided": 12,
+      "published": 12,
+      "elided": 6,
       "implemented": 18,
       "states": {
-        "Anchored": 6,
-        "Implemented": 12
+        "Anchored": 12,
+        "Implemented": 6
       }
     },
     {
@@ -204793,7 +204811,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -204810,7 +204835,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:identity:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -204837,7 +204916,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -204854,7 +204940,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -204881,7 +204971,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -204898,7 +204995,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:none:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -204925,7 +205076,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -204942,7 +205100,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -204969,7 +205131,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -204986,7 +205155,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:identity:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205013,7 +205236,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205030,7 +205260,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205057,7 +205291,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205074,7 +205315,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:none:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205101,7 +205396,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205118,7 +205420,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205145,7 +205451,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205162,7 +205475,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:identity:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205189,7 +205556,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205206,7 +205580,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205233,7 +205611,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205250,7 +205635,61 @@
             "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:none:resident",
+      "modelId": "sensenova_u1_8b",
+      "resolvedRoute": "sensenova_u1_8b",
+      "provider": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2048x1152",
+          "1152x2048",
+          "1888x1248",
+          "1248x1888",
+          "1760x1312",
+          "1312x1760"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15821,
+      "owningModelStory": 15877,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -205277,7 +205716,14 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
       "derivationDefined": true,
       "state": "Structurally N/A",
       "owningFamilyStory": 15821,
@@ -205294,7 +205740,11 @@
             "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#sensenova_u1_8b:candle:q4:base:base:sensenova-u1-quality-q4-candle-request-memory-ladder-v1:imc-fcb2ae68b18103250015"
+          }
+        ]
       }
     },
     {
@@ -229876,16 +230326,22 @@
       "sensenova_u1_8b:sensenova_u1_8b:candle:bf16:text_to_image:none:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:bf16:text_to_image:none:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:identity:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:identity:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:identity:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:none:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:none:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:character_image:none:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:identity:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:identity:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:identity:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:none:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:none:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:edit_image:none:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:identity:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:identity:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:identity:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:none:bounded_decode",
+      "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:none:resident",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q4:text_to_image:none:staged_residency",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q8:character_image:identity:bounded_decode",
       "sensenova_u1_8b:sensenova_u1_8b:candle:q8:character_image:identity:staged_residency",
