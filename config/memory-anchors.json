@@ -7667,6 +7667,51 @@
       "overallAllocatorEnvelopeBytes": 25801261056
     },
     {
+      "id": "sd3_5_large:candle:q4:base:base:sd35-large-candle-resident-staged-v1:imc-f0704206ce5b8b6c6330",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "provider": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-q4-candle-evidence.json",
+        "sha256": "fe1cc7a5a7c7a42cd7aa409c54da7f50d4332fb78adb2f3536724398f826a228",
+        "recordId": "imc-f0704206ce5b8b6c6330",
+        "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+        "loaderClosureDigest": "f870c9d7ba019c9e7cc0ba28dfd139ebc879e6e0455596e155a96177c900605c"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13551796224,
+        "denoise": 19425918976,
+        "decode": 11809062912
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13551796224,
+        "denoise": 19425918976,
+        "decode": 11809062912
+      },
+      "overallAllocatorEnvelopeBytes": 19425918976
+    },
+    {
       "id": "sd3_5_large:mlx:bf16:base:base:sd3-5-large-bf16-mlx-shared-ladder-v1:imc-f542a84955c32cbecc3b",
       "modelId": "sd3_5_large",
       "modelFamily": "sd3",
@@ -10946,27 +10991,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large:candle:q4",
-      "modelId": "sd3_5_large",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "cbb28f1ff0f83c204791c1a4a8287e8f0f34e4bc9227a6fd29ebc41b3499299a",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "33.9"
-        }
-      }
     },
     {
       "id": "analytic:sd3_5_large:candle:q8",
