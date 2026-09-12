@@ -7982,6 +7982,51 @@
       "overallAllocatorEnvelopeBytes": 19426967552
     },
     {
+      "id": "sd3_5_large_turbo:candle:q8:base:base:sd35-large-turbo-candle-resident-staged-v1:imc-6f809bdf9267f77e6b95",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "provider": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json",
+        "sha256": "c3e62b8065bb48671488a6cf41c6d96f5fa34bf24c44c6453376719fbbbaab5e",
+        "recordId": "imc-6f809bdf9267f77e6b95",
+        "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+        "loaderClosureDigest": "024e342a35816f2b042775d23d92d0a10918e252471fc27641e1b2b3c718c402"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 14222884864,
+        "denoise": 21774729216,
+        "decode": 14191427584
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 14222884864,
+        "denoise": 21774729216,
+        "decode": 14191427584
+      },
+      "overallAllocatorEnvelopeBytes": 21774729216
+    },
+    {
       "id": "sd3_5_large_turbo:mlx:bf16:base:base:sd3-5-large-turbo-bf16-mlx-shared-ladder-v1:imc-9698813bd1b3ac3dff77",
       "modelId": "sd3_5_large_turbo",
       "modelFamily": "sd3",
@@ -11122,17 +11167,6 @@
       "modelFamily": "scail2",
       "route": "scail2_14b",
       "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sd3_5_large_turbo:candle:q8",
-      "modelId": "sd3_5_large_turbo",
-      "modelFamily": "sd3",
-      "route": "sd3_5_large_turbo",
-      "backend": "candle",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",

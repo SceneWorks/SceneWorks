@@ -965,6 +965,12 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json"
+        ),
+    ),
+    (
         "docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json"),
     ),
