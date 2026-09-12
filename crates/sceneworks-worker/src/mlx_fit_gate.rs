@@ -3187,6 +3187,13 @@ fn synthesize_estimate_ladder(
             // which activation term it is composed with, because without a block count that is
             // what decides whether the window slice is carried by the headroom or must stay in
             // the weights.
+            // Generic headroom includes fixed OS/app reserve; only actual activations receive
+            // the allocator allowance. A law-derived residue is already activation-only.
+            let unmodeled_activation_bytes = match activation_term {
+                ImageFloorActivationTerm::GenericHeadroom => floor_activation_bytes
+                    .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)),
+                ImageFloorActivationTerm::LawResidue => floor_activation_bytes,
+            };
             let predicted_peak_bytes = image_floor_weights_bytes(
                 contract,
                 &engaged,
@@ -3200,7 +3207,8 @@ fn synthesize_estimate_ladder(
                 backend = "mlx",
                 ?strategy,
                 raw_peak_bytes = predicted_peak_bytes,
-                activation_bytes = floor_activation_bytes,
+                headroom_bytes = floor_activation_bytes,
+                activation_bytes = unmodeled_activation_bytes,
                 activation_anchor = derived_residue
                     .as_ref()
                     .map(|(_, anchor_id)| anchor_id.as_str()),
@@ -3220,8 +3228,7 @@ fn synthesize_estimate_ladder(
                     calibration_fingerprint,
                 ),
                 basis: CandidateBasis::EstimateFloor,
-                // Declared where the split is CONSTRUCTED, three lines above.
-                unmodeled_activation_bytes: Some(floor_activation_bytes),
+                unmodeled_activation_bytes: Some(unmodeled_activation_bytes),
                 decode_quality: parameter_candidate.decode_quality,
             };
             ladder
@@ -3266,7 +3273,7 @@ fn verified_lower_alternative(
                 && binding.query.artifact_variant == calibration.resolved.identity.variant
                 && binding.query.resolved_path_fingerprint
                     == calibration.resolved.identity.fingerprint
-                && binding.geometry.batch == inputs.count.max(1)
+                && binding.geometry.batch == request_batch(inputs)
                 && binding.geometry.frames == 1
                 && binding.geometry.width <= inputs.width
                 && binding.geometry.height <= inputs.height
@@ -3785,17 +3792,23 @@ fn evaluate_request_with_budget_using_bundle(
             plan.engine_id, attributable_resident_bytes, modeled_peak_bytes
         )));
     }
-    let predicted_peak_bytes = if admission.path == AdmissionPath::Evidence {
-        // Exact evidence describes the whole request peak. On a warm cache, remove only this
-        // provider's already-resident assets from committed bytes so the full peak is charged once;
-        // unrelated allocations remain committed. Do not rewrite the evidence record's peak.
-        budget.committed_bytes = budget
-            .committed_bytes
-            .saturating_sub(attributable_resident_bytes);
-        modeled_peak_bytes
-    } else {
-        modeled_peak_bytes.saturating_sub(attributable_resident_bytes)
-    };
+    tracing::info!(
+        route = plan.engine_id,
+        total_bytes = budget.total_bytes,
+        active_bytes = budget.committed_bytes,
+        external_baseline_bytes = external_committed_bytes,
+        provider_credit_bytes = attributable_resident_bytes,
+        reserved_bytes = budget.reserved_headroom_bytes,
+        "MLX request memory attribution"
+    );
+    // Every candidate is a whole-pipeline peak, including synthesized ladder estimates.
+    // Remove this provider's already-resident allocation from the committed side once, so
+    // cold/warm Resident and staged candidates use the same accounting domain. Keep unrelated
+    // allocations charged, and apply safety allowances to the original modeled terms.
+    budget.committed_bytes = budget
+        .committed_bytes
+        .saturating_sub(attributable_resident_bytes);
+    let predicted_peak_bytes = modeled_peak_bytes;
     let (resident_selection, resident) = resident_evidence(
         contract,
         plan.tier,
@@ -3920,7 +3933,7 @@ fn evaluate_request_with_budget_using_bundle(
         candidate_bases.push(CandidateBasis::EstimateFloor);
         // ...but its PEAK does not decompose here, so it declares no activation term (sc-22508).
         // This candidate's peak is `predicted_memory_peak_from_base(contract_base_peak_bytes(
-        // request_total_peak_bytes(..)))` minus `attributable_resident_bytes`. Two of those three
+        // request_total_peak_bytes(..)))`. Two of those three
         // steps can destroy the weights+headroom shape: `request_total_peak_bytes` returns the
         // `mage_flow` provider's own `generation_peak_gb` scalar on that route, and
         // `predicted_memory_peak_from_base` is a gen-core trait method the loaded provider owns
@@ -3981,11 +3994,17 @@ fn evaluate_request_with_budget_using_bundle(
             budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
         },
     });
-    let baseline = crate::memory_strategy::select_strategy(
+    let resident_allowance_credit = if admission.path == AdmissionPath::Legacy {
+        attributable_resident_bytes
+    } else {
+        0
+    };
+    let baseline = crate::memory_strategy::select_strategy_with_resident_credit(
         request_scope,
         contract,
         selector_budget,
         &candidates,
+        resident_allowance_credit,
     );
     // sc-18317: a GRANTED warm-policy switch takes effect HERE or nowhere.
     //
@@ -4082,13 +4101,17 @@ fn evaluate_request_with_budget_using_bundle(
                 })
                 .unwrap_or_default();
             return Err(WorkerError::InvalidPayload(format!(
-                "{} request {}x{} count {} needs {:.2} GiB but only {:.2} GiB is safely available{}",
+                "{} request {}x{} count {} needs {:.2} GiB for the complete pipeline but only {:.2} GiB is safely available \
+                 ({:.2} GiB total, {:.2} GiB unrelated active allocations, {:.2} GiB reserved){}",
                 plan.engine_id,
                 inputs.width,
                 inputs.height,
                 inputs.count.max(1),
                 needed_gb,
                 available_gb,
+                budget.total_bytes as f64 / BYTES_PER_GIB,
+                budget.committed_bytes as f64 / BYTES_PER_GIB,
+                budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB,
                 alternative,
             )));
         }
@@ -4177,13 +4200,8 @@ fn evaluate_request_with_budget_using_bundle(
             && estimate.selection.parameters == selection.parameters
             && estimate.selection.tier == selection.tier
     }) {
-        // sc-18096: a synthesized deep rung was selected. The run context's incremental demand is
-        // that rung's raw estimate, not the resident baseline's — the whole point of the rung is a
-        // smaller working set. Warm-resident credit applies the same way as the baseline arm.
-        estimate
-            .evidence
-            .predicted_peak_bytes
-            .saturating_sub(attributable_resident_bytes)
+        // Keep the selected full peak paired with the normalized budget used by selection.
+        estimate.evidence.predicted_peak_bytes
     } else {
         predicted_peak_bytes
     };
@@ -8761,9 +8779,8 @@ mod tests {
         );
     }
 
-    /// The fixture's flat activation-headroom term (2 GiB fixed reserve + 4 GiB area at 1024²) —
-    /// the ONLY uncertain half of every floor above, and the term sc-22508's allowance is charged
-    /// against.
+    /// The fixture's combined headroom (2 GiB fixed reserve + 4 GiB activations at 1024²).
+    /// Only the activation slice receives the allocator allowance.
     const FIXTURE_HEADROOM_GB: f64 = 6.0;
 
     /// The production allowance an EstimateFloor candidate receives before the fit check.
@@ -8776,7 +8793,8 @@ mod tests {
     /// re-derivation.
     fn widened_estimate_gb(floor_gb: f64) -> f64 {
         floor_gb
-            + FIXTURE_HEADROOM_GB * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
+            + (FIXTURE_HEADROOM_GB - 2.0)
+                * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
     }
 
     /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
@@ -12004,8 +12022,13 @@ mod tests {
                 .expect("the floor is its weights term plus an activation term");
             assert_eq!(
                 estimate.unmodeled_activation_bytes,
-                Some(activation),
-                "{:?}: the declared activation slice is the one the peak was built from",
+                Some(match activation_term {
+                    ImageFloorActivationTerm::LawResidue => activation,
+                    ImageFloorActivationTerm::GenericHeadroom => activation.saturating_sub(
+                        plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)
+                    ),
+                }),
+                "{:?}: only the actual activation slice receives the allocator allowance",
                 estimate.selection.strategy
             );
             if engaged.contains(&MemoryStrategy::BoundedAttention) {
@@ -12141,7 +12164,14 @@ mod tests {
                 "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
                 estimate.selection.strategy
             );
-            assert_eq!(estimate.unmodeled_activation_bytes, Some(generic));
+            assert_eq!(
+                estimate.unmodeled_activation_bytes,
+                Some(
+                    generic.saturating_sub(
+                        plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)
+                    )
+                )
+            );
         }
     }
 
@@ -15274,16 +15304,6 @@ mod tests {
                 reference_count: 0,
             };
             let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
-            // The counterfactual must be graded on the arm PRODUCTION uses for this candidate, not
-            // on the one the audit can see is true. This peak is the legacy RESIDENT BASELINE's
-            // (weights are credited as already resident, leaving the headroom term), and sc-22508
-            // gives that baseline no weights/activation declaration: its peak reaches the selector
-            // through `predicted_memory_peak_from_base`, and on `mage_flow` through the provider's
-            // own `generation_peak_gb`, neither of which is guaranteed to decompose. So the policy
-            // charges it the undeclared-floor arm — the whole-peak recapture spread — and passing
-            // `Some(raw_incremental_peak)` here would model an allowance-of-activation ceiling
-            // (`FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` against the headroom term) that production
-            // never applies. That mismatch is what this assertion caught.
             let widened_incremental_peak = crate::memory_strategy::floor_admitted_peak_bytes(
                 gen_core::MemoryBackend::Mlx,
                 raw_incremental_peak,
@@ -15319,8 +15339,8 @@ mod tests {
             for host_gib in hosts {
                 let host_bytes = gib_to_bytes(host_gib as f64);
                 // This is exactly the live legacy budget after the generator has loaded:
-                // committed provider assets remain on the available side, while the modeled
-                // peak receives the matching provider-resident cache credit.
+                // Express the full-pipeline production comparison in its equivalent incremental
+                // form. The resident allowance still applies only to the incremental peak.
                 let available_incremental = host_bytes
                     .saturating_sub(plan.asset_bytes)
                     .saturating_sub(legacy_reserve_bytes);
@@ -16788,8 +16808,257 @@ mod tests {
 
         assert_eq!(
             selected.context.predicted_peak_bytes,
-            gib_to_bytes(3.0),
-            "five attributable GiB are already resident; the unrelated GiB stays charged"
+            gib_to_bytes(8.0),
+            "the full peak and normalized budget use the same accounting domain"
+        );
+        assert_eq!(
+            selected.context.budget.committed_bytes,
+            gib_to_bytes(1.0),
+            "only the unrelated GiB stays charged"
+        );
+    }
+
+    #[test]
+    fn generic_floor_keeps_fixed_reserve_without_padding_it_as_activation() {
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().unwrap();
+        let plan = fixture_plan();
+        for (edge, activation_gb) in [(1024, 4.0), (2048, 16.0)] {
+            let geometry = MemoryGeometry {
+                width: edge,
+                height: edge,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            let ladder = synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            );
+            let estimate = ladder
+                .estimates
+                .iter()
+                .find(|candidate| candidate.selection.strategy == MemoryStrategy::StagedResidency)
+                .unwrap();
+            assert_eq!(
+                estimate.unmodeled_activation_bytes,
+                Some(gib_to_bytes(activation_gb))
+            );
+            let weights = estimate_floor_weights_bytes(
+                contract,
+                &contract.engaged_composition_for_selection(&estimate.selection),
+            );
+            assert_eq!(
+                estimate.evidence.predicted_peak_bytes,
+                weights + gib_to_bytes(activation_gb + 2.0)
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires installed Flux2 Dev bf16 metadata; no tensors are loaded"]
+    fn installed_flux2_dev_request_uses_the_staged_ladder() {
+        let root = std::env::var_os("FLUX2_DEV_DIR").expect("FLUX2_DEV_DIR");
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .unwrap();
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "flux2_dev")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let spec = LoadSpec::new(WeightsSource::Dir(root.into()))
+            .with_resolved_route("flux2_dev")
+            .with_offload_policy(OffloadPolicy::Resident);
+        use crate::memory_route_registry::{MemoryRouteMode, MemoryRouteRequestContext};
+        let mode = MemoryRouteMode::TextToImage;
+        let context = MemoryRouteRequestContext {
+            mode,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            "flux2_dev",
+            Some("bf16"),
+            Some(mode),
+            entry,
+            spec,
+            context,
+        );
+        let mut spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+            "flux2_dev",
+            Some("bf16"),
+            Some(mode),
+            entry,
+            spec,
+            context,
+        );
+        if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::NotEvaluated
+        {
+            spec = crate::memory_route_registry::apply_registered_load_shape(
+                crate::memory_route_registry::MemoryRouteBackend::Mlx,
+                "flux2_dev",
+                mode,
+                spec,
+                false,
+            );
+        }
+        assert_ne!(
+            spec.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Refused
+        );
+        let contract =
+            runtime_macos::providers::flux2::memory_strategy::registered_dev_t2i_contract(&spec)
+                .unwrap();
+        let generator = RequestGenerator {
+            descriptor: crate::inference_runtime::media_descriptor("flux2_dev")
+                .unwrap()
+                .clone(),
+            contract: Some(contract),
+        };
+        let plan = MlxRequestPlan::for_spec_and_manifest(
+            "flux2_dev",
+            "flux2_dev",
+            &spec,
+            Some(entry),
+            None,
+        );
+        let evaluate = |count| {
+            let inputs = MlxRequestInputs {
+                count,
+                ..fixture_inputs(1024, 1024)
+            };
+            evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Warm,
+                spec.offload_policy,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(128.0),
+                    committed_bytes: gib_to_bytes(44.72),
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+                request_total_peak_bytes(
+                    &plan,
+                    MemoryGeometry {
+                        width: 1024,
+                        height: 1024,
+                        batch: 1,
+                        frames: 1,
+                        reference_count: 0,
+                    },
+                ),
+                0,
+                &[],
+            )
+            .unwrap()
+        };
+        let one = evaluate(1);
+        let two = evaluate(2);
+        assert_eq!(
+            one.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert!(one.memory.stage_residency);
+        assert_eq!(
+            one.context.predicted_peak_bytes,
+            two.context.predicted_peak_bytes
+        );
+        assert_eq!(two.context.geometry.batch, 1);
+        eprintln!(
+            "installed Flux2 Dev selected {:?}, full peak {:.2} GiB",
+            one.context.selection.strategy,
+            one.context.predicted_peak_bytes as f64 / BYTES_PER_GIB
+        );
+    }
+
+    #[test]
+    fn resident_loaded_staged_ladder_credits_only_its_own_allocations_before_selection() {
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().unwrap();
+        contract.asset_facts = gen_core::MemoryAssetFacts {
+            base_bytes: gib_to_bytes(100.0),
+            conditioning_bytes: gib_to_bytes(50.0),
+            transformer_bytes: gib_to_bytes(49.0),
+            decoder_bytes: gib_to_bytes(1.0),
+            overlay_bytes: 0,
+        };
+        for capability in &mut contract.strategies {
+            if !matches!(
+                capability.strategy,
+                MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+            ) {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        let mut plan = fixture_plan();
+        plan.asset_bytes = gib_to_bytes(100.0);
+        plan.activation_headroom_bytes = gib_to_bytes(18.0);
+        plan.fixed_reserve_bytes = gib_to_bytes(4.0);
+        let evaluate = |count, committed, external, peak| {
+            let inputs = fixture_inputs(1024, 1024);
+            let inputs = MlxRequestInputs { count, ..inputs };
+            evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Warm,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(128.0),
+                    committed_bytes: gib_to_bytes(committed),
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+                gib_to_bytes(peak),
+                gib_to_bytes(external),
+                &[],
+            )
+        };
+        for committed in [44.72, 100.0] {
+            let one =
+                evaluate(1, committed, 0.0, 130.0).expect("the staged complete pipeline fits");
+            let two = evaluate(2, committed, 0.0, 130.0).expect("count remains sequential");
+            assert_eq!(
+                one.context.selection.strategy,
+                MemoryStrategy::StagedResidency
+            );
+            assert!(one.memory.stage_residency);
+            assert_eq!(one.context.predicted_peak_bytes, gib_to_bytes(68.0));
+            assert_eq!(one.context.budget.committed_bytes, 0);
+            assert_eq!(two.context.geometry.batch, 1);
+            assert_eq!(
+                one.context.predicted_peak_bytes,
+                two.context.predicted_peak_bytes
+            );
+            assert_eq!(one.context.selection, two.context.selection);
+        }
+        assert_eq!(
+            evaluate(2, 100.0, 0.0, 118.0)
+                .unwrap()
+                .context
+                .selection
+                .strategy,
+            MemoryStrategy::Resident,
+            "normalization must preserve the legacy resident allowance"
+        );
+        assert!(
+            evaluate(2, 44.72, 44.72, 130.0).is_err(),
+            "unrelated allocations must remain charged"
         );
     }
 
@@ -16939,8 +17208,13 @@ mod tests {
         )
         .expect("a fully warm base and control branch require no duplicate incremental bytes");
         assert_eq!(
-            warm.context.predicted_peak_bytes, 0,
-            "warm credit must remove the base and typed control exactly once"
+            warm.context.predicted_peak_bytes,
+            BASE_SOURCE_BYTES + CONTROL_RESIDENT_BYTES,
+            "the complete pipeline peak keeps the base and typed control exactly once"
+        );
+        assert_eq!(
+            warm.context.budget.committed_bytes, 0,
+            "provider assets are credited once"
         );
 
         let legacy = evaluate_request_with_budget(
