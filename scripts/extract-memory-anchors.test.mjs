@@ -21,6 +21,7 @@ import {
   assertPackagedSources,
   buildAnchorStore,
   catalogCells,
+  contractEstimateEvidence,
   cellKey,
   envelopeEvidence,
   identityKey,
@@ -845,8 +846,7 @@ test("a candle lane whose engine has no staged composition is anchored by its re
     false,
   );
 
-  // The real manifest declares the exemption for all six SenseNova ids on both lanes, and for
-  // nothing that already has a packaged candle anchor.
+  // The real manifest declares the exemption for all six SenseNova ids on both lanes.
   const realManifest = JSON.parse(
     stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
   );
@@ -885,22 +885,20 @@ test("a candle lane whose engine has no staged composition is anchored by its re
       `${anchor.id}: the field is emitted only when true, so every other packaged row is byte-identical`,
     );
   }
-  // Every exempt-lane anchor the store holds is a SenseNova MLX one; the candle half of each
-  // exempt lane is still uncaptured, which is what keeps the `default argument` assertions above
-  // meaningful rather than vacuous.
+  // Both campaigns captured all three tiers on each SenseNova lane.
   assert.deepEqual(
     [...new Set(onExemptLane.map((anchor) => `${anchor.modelId}:${anchor.backend}`))].sort(),
     [
-      "sensenova_u1_8b:mlx",
-      "sensenova_u1_8b_fast:mlx",
-      "sensenova_u1_8b_infographic_v2:mlx",
-      "sensenova_u1_8b_infographic_v2_fast:mlx",
-      "sensenova_u1_8b_infographic_v3:mlx",
-      "sensenova_u1_8b_infographic_v3_fast:mlx",
-    ],
-    "the wave-3 campaign's six SenseNova MLX lanes are the exempt lanes the store carries",
+      "sensenova_u1_8b",
+      "sensenova_u1_8b_fast",
+      "sensenova_u1_8b_infographic_v2",
+      "sensenova_u1_8b_infographic_v2_fast",
+      "sensenova_u1_8b_infographic_v3",
+      "sensenova_u1_8b_infographic_v3_fast",
+    ].flatMap((modelId) => ["candle", "mlx"].map((backend) => `${modelId}:${backend}`)).sort(),
+    "both campaigns' SenseNova lanes are the exempt lanes the store carries",
   );
-  assert.equal(onExemptLane.length, 18, "three tiers on each of those six lanes");
+  assert.equal(onExemptLane.length, 36, "three tiers on each of those twelve lanes");
 });
 
 // sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a
@@ -1045,6 +1043,10 @@ test("a candle VIDEO record is derivable under the video law, not the still imag
 });
 
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const exemptLanes = stagedResidencyExemptLanes(manifest);
   const store = await buildAnchorStore({ matrix });
   const packaged = packagedAnchorSources(
     await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8"),
@@ -1068,7 +1070,7 @@ test("every emitted anchor cites a compiled-in corpus, and every retained corpus
     ]),
   );
   assert.doesNotThrow(() =>
-    assertEveryDerivableCorpusIsPackaged(corpora, packaged, catalogByCell),
+    assertEveryDerivableCorpusIsPackaged(corpora, packaged, catalogByCell, exemptLanes),
   );
   // SHAPE, not a census: whichever corpora are retained, dropping any ONE of them from the
   // packaged list must be caught, and the failure must name the file and the cells it strands.
@@ -1080,7 +1082,7 @@ test("every emitted anchor cites a compiled-in corpus, and every retained corpus
     const narrowed = new Set([...packaged].filter((item) => item !== dropped));
     assert.throws(
       () =>
-        assertEveryDerivableCorpusIsPackaged(corpora, narrowed, catalogByCell),
+        assertEveryDerivableCorpusIsPackaged(corpora, narrowed, catalogByCell, exemptLanes),
       (error) =>
         error.message.includes(dropped) &&
         /not compiled into PACKAGED_MEMORY_ANCHOR_SOURCES/.test(error.message),
@@ -1315,17 +1317,24 @@ test("contract_estimate is keyed on the ladder's inputs: a sequential row on a n
     )
     .map((row) => `${row.id} (${row.basis})`);
   assert.deepEqual(fellThrough, [], "a cell with the ladder's inputs is a contract_estimate");
-  // The two exclusions each exist in the catalog, or the keying is vacuous: at least one
-  // receipt-priced cell and at least one row-less cell with a published contract are classified
-  // on a manifest basis.
+  // Row-less contracts still have manifest-only cells; receipt-priced cells may now be anchored.
   const excluded = candle.filter(
     (row) =>
       publishesContract(row) &&
       ["manifest_tier_declaration", "no_retained_evidence"].includes(row.basis),
   );
-  assert.ok(
-    excluded.some((row) => isReceiptPricedRoute(row.route)),
-    "a receipt-priced route with a published contract stays on a manifest basis",
+  // Captures can anchor every receipt-priced cell. Exercise this exclusion directly so
+  // adding evidence cannot erase the negative case.
+  const receiptCell = (await catalogCells(matrix)).find((row) =>
+    publishesContract(row) && CONTRACT_LADDER_BACKENDS.includes(row.backend) &&
+    isReceiptPricedRoute(row.route) && manifestSequentialRow(manifest, row) !== null,
+  );
+  assert.ok(receiptCell, "a receipt-priced contract with a staged row exists");
+  assert.equal(contractEstimateEvidence(manifest, MANIFEST_PATH, "sha", receiptCell), null);
+  assert.notEqual(
+    contractEstimateEvidence(manifest, MANIFEST_PATH, "sha", { ...receiptCell, route: "lens" }),
+    null,
+    "the receipt-priced route is the input excluding this otherwise eligible contract",
   );
   assert.ok(
     excluded.some((row) => manifestSequentialRow(manifest, row) === null),

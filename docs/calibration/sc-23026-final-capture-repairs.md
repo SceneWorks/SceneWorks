@@ -94,3 +94,8 @@ skips. The four existing Krea/Z-Image attestations were extended after source re
 Z-Image has an empty changed-file intersection, and Krea's intersection is confined
 to Qwen Edit path validation/accounting that its VAE/preview use does not execute.
 No new attestation or measurement revision was invented.
+
+The final branch integrates main `495f98e4e`, which merged PR #2821 and its
+59 capture files while the repair PR was opening. Those evidence files are
+unchanged. Regenerating the combined indexes resolves the matrix conflicts and
+retains all 243 measured anchors alongside this repair's pin and attestations.
