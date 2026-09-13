@@ -8,6 +8,7 @@ mod compression;
 mod dataset_catalogs;
 #[cfg(feature = "embed-web")]
 mod embedded_web;
+mod film_harness;
 mod jobs;
 mod mcp;
 mod media;
