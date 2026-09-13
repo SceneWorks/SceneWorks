@@ -33,6 +33,9 @@ use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
 };
+// Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
+// this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
+use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`ProductionPlan`] documents this module reads and writes.
 pub const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -77,8 +80,16 @@ const MAX_SOUND_GAIN: f64 = 4.0;
 /// pack is checked in, so the list stays explicit.
 const REFERENCE_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
 
-/// Longest prompt the video route accepts (`MAX_PROMPT_CHARS` in rust-api).
-const MAX_PROMPT_CHARS: usize = 4000;
+/// Characters a reference file's basename may use. The name is interpolated into a multipart
+/// `Content-Disposition` header on import, so anything outside this set — a CR/LF above all — is
+/// refused here rather than sanitized downstream (sc-22710).
+fn is_safe_reference_basename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
 
 /// Tolerance when matching a target duration against a model's declared menu (seconds).
 const DURATION_MENU_TOLERANCE: f64 = 0.001;
@@ -896,6 +907,10 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             .is_some_and(|extension| {
                 REFERENCE_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
             });
+        let basename = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
         if entry.file.trim().is_empty()
             || file.is_absolute()
             || file
@@ -906,6 +921,18 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 format!("{field}.file"),
                 format!(
                     "file {:?} must be a relative path inside the pack directory",
+                    entry.file
+                ),
+            ));
+        } else if entry.file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
+            // The basename is interpolated into the multipart `Content-Disposition` header the
+            // import posts, so a CR/LF in it injects multipart headers. sc-22713 generates these
+            // documents, so the charset is enforced here rather than trusted.
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.file"),
+                format!(
+                    "file {:?} must have a 1-128 character [A-Za-z0-9._-] basename (it is sent as \
+                     a multipart filename)",
                     entry.file
                 ),
             ));
@@ -1158,13 +1185,25 @@ pub enum ModelLane {
 }
 
 impl ModelLane {
-    /// The lane this host renders video on: MLX on macOS, candle everywhere else.
-    pub fn for_current_platform() -> Self {
-        if cfg!(target_os = "macos") {
+    /// The lane a host running `platform` (an `std::env::consts::OS` spelling, as
+    /// `GET /api/v1/host-capabilities` reports it) renders video on: MLX on macOS, candle
+    /// everywhere else.
+    ///
+    /// The API host is the one that matters, not the client: a harness run with `--api` pointed at
+    /// another machine would otherwise check the wrong lane's `minMemoryGb` (mlx 64 vs candle 43
+    /// for `minimax_h3`) — sc-22710.
+    pub fn for_platform(platform: &str) -> Self {
+        if platform == "macos" {
             Self::Mlx
         } else {
             Self::Candle
         }
+    }
+
+    /// The lane THIS process's host renders video on. Only a fallback for a host that reports no
+    /// platform; prefer [`ModelLane::for_platform`] with the API's reported platform.
+    pub fn for_current_platform() -> Self {
+        Self::for_platform(std::env::consts::OS)
     }
 
     pub fn manifest_key(self) -> &'static str {
@@ -1433,7 +1472,12 @@ pub struct SourceDocument {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareRecord {
+    /// The RENDER host's platform, as `GET /api/v1/host-capabilities` reports it — not the
+    /// harness client's, which may be a different machine entirely (sc-22710).
     pub platform: String,
+    /// The render host's CPU architecture when the harness runs on it, `"unknown"` when the API
+    /// reports a different platform than this process (the host-capabilities route reports no
+    /// arch, and the client's would be a fabrication).
     pub arch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_memory_gb: Option<f64>,
@@ -1469,6 +1513,12 @@ pub struct ReferenceAssetRecord {
     pub file: String,
     pub sha256: String,
     pub asset_id: String,
+    /// Whether the pack approved this reference for conditioning. Unapproved entries are still
+    /// imported (so the record can point at them) but carry a distinct tag and are never resolved
+    /// into a shot's conditioning slots — AC1 is about APPROVED references staying addressable, so
+    /// the record has to be able to tell them apart (sc-22710).
+    #[serde(default = "default_true")]
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1540,8 +1590,17 @@ pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
     pub elapsed_seconds: f64,
+    /// Observed peak memory as a percentage of the render host's memory, when whichever source
+    /// supplied the peak expressed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_gpu_memory_pct: Option<f64>,
+    /// Observed peak memory in GiB — the number compared against `limits.maxMemoryGb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_gb: Option<f64>,
+    /// Which signal the peak came from (`metrics.peakMemoryBytes`, `metrics.peakMemoryPct`, or
+    /// `job.peakGpuMemoryPct`), so a record says what its memory claim rests on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1610,13 +1669,27 @@ pub struct TimelineTrackRecord {
 pub struct TimelineRecord {
     pub timeline_id: String,
     pub name: String,
+    /// The aspect ratio the timeline was CREATED at. The route admits only `16:9` / `9:16` /
+    /// `1:1`, so a take of any other shape is coerced to the nearest of those and letterboxed by
+    /// the export; `source_aspect_ratio` records what the takes actually are (sc-22710).
     pub aspect_ratio: String,
+    /// The takes' own reduced aspect ratio (e.g. `9:5` for 576x320).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_aspect_ratio: Option<String>,
+    /// Geometry of the first rendered take the timeline was sized from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_height: Option<u32>,
     pub fps: u32,
     /// Length of the assembled picture. The export is exactly this long.
     #[serde(default)]
     pub duration_seconds: f64,
     /// The picture track's items, in cut order. Kept as its own field (rather than only inside
     /// `tracks`) because it is the sequence: shot -> take -> position.
+    ///
+    /// Read back from the saved timeline, never from the harness's intent, so the record cannot
+    /// claim items the project does not hold.
     pub items: Vec<TimelineItemRecord>,
     /// Every track, picture and sound, with its bus controls (sc-22712).
     #[serde(default)]
@@ -1986,11 +2059,36 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_filename_that_could_inject_multipart_headers_is_refused() {
+        let mut value = pack_json();
+        value["references"][0]["file"] = json!("references/plate\r\nX-Injected: 1.png");
+        let pack: ReferencePack = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("multipart filename") && m.contains("basename")),
+            "{findings:?}"
+        );
+        // A quote, a semicolon or a space in the basename is the same class of problem.
+        let mut value = pack_json();
+        value["references"][0]["file"] = json!("references/a\"b; c.png");
+        let pack: ReferencePack = serde_json::from_value(value).unwrap();
+        assert!(!validate_reference_pack(&pack).is_empty());
+        // The shipped shape — a subdirectory plus an ordinary name — stays clean.
+        assert!(validate_reference_pack(&self::pack()).is_empty());
+    }
+
+    #[test]
     fn candle_lane_reads_the_candle_memory_minimum() {
         let mut entry = model_entry();
         entry.insert("candle".to_owned(), json!({ "minMemoryGb": 43 }));
         assert_eq!(model_min_memory_gb(&entry, ModelLane::Candle), Some(43.0));
         assert_eq!(model_min_memory_gb(&entry, ModelLane::Mlx), Some(64.0));
+        // The lane follows the RENDER host's platform, not the process reading the plan.
+        assert_eq!(ModelLane::for_platform("macos"), ModelLane::Mlx);
+        assert_eq!(ModelLane::for_platform("linux"), ModelLane::Candle);
+        assert_eq!(ModelLane::for_platform("windows"), ModelLane::Candle);
     }
 
     #[test]

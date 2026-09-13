@@ -73,16 +73,84 @@ impl ApiTransport for RouterTransport {
     }
 }
 
+/// An [`ApiTransport`] wrapping [`RouterTransport`] that can fail or rewrite chosen responses, so
+/// a test can inject the failures a live API can produce (a 500 mid-run, a two-phase asset handoff
+/// that never finishes) without changing production code to make itself testable.
+struct ScriptedTransport {
+    inner: RouterTransport,
+    /// `(method, path substring)` → status to answer with instead of calling the router.
+    failures: Vec<(&'static str, String, u16)>,
+    /// A path substring and the rewrite applied to the successful responses it matches.
+    rewrite: Option<ResponseRewrite>,
+}
+
+/// A path substring plus the mutation applied to every successful response whose path contains it.
+type ResponseRewrite = (String, fn(&mut Value));
+
+impl ScriptedTransport {
+    fn failing(app: axum::Router, method: &'static str, path: &str, status: u16) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            failures: vec![(method, path.to_owned(), status)],
+            rewrite: None,
+        }
+    }
+
+    fn rewriting(app: axum::Router, path: &str, rewrite: fn(&mut Value)) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            failures: Vec::new(),
+            rewrite: Some((path.to_owned(), rewrite)),
+        }
+    }
+}
+
+impl ApiTransport for ScriptedTransport {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        if let Some((_, _, status)) = self
+            .failures
+            .iter()
+            .find(|(method, path, _)| *method == request.method && request.path.contains(path))
+        {
+            let status = *status;
+            return Box::pin(async move {
+                Ok(ApiResponse {
+                    status,
+                    body: json!({ "detail": "injected failure" }),
+                })
+            });
+        }
+        let rewrite = self
+            .rewrite
+            .as_ref()
+            .filter(|(path, _)| request.path.contains(path.as_str()))
+            .map(|(_, rewrite)| *rewrite);
+        let inner = self.inner.call(request);
+        Box::pin(async move {
+            let mut response = inner.await?;
+            if let Some(rewrite) = rewrite {
+                if (200..300).contains(&response.status) {
+                    rewrite(&mut response.body);
+                }
+            }
+            Ok(response)
+        })
+    }
+}
+
 /// How the fake worker treats one video job, keyed by the shot id the harness stamps into
 /// `advanced.filmHarness.shotId`.
 #[derive(Debug, Clone, Copy)]
 enum VideoBehavior {
-    /// Complete after `delay`, reporting `peak_pct` as the observed GPU memory peak.
+    /// Complete after `delay`, reporting `peak_pct` as the observed peak in its metrics block.
     Complete { delay_secs: u64, peak_pct: f64 },
     /// Fail once (first attempt), then complete.
     FailFirst,
     /// Never complete; honour a cancel request by reporting `canceled`.
     Hang,
+    /// Never complete and never honour a cancel — a worker whose cooperative checkpoint is minutes
+    /// away, or one wedged in a command buffer. The job stays `running` forever.
+    HangIgnoringCancel,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -221,6 +289,9 @@ async fn run_fake_video_job(
     )
     .await;
     match behavior {
+        VideoBehavior::HangIgnoringCancel => loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        },
         VideoBehavior::Hang => loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let (_, snapshot) = request(
@@ -275,6 +346,7 @@ async fn run_fake_video_job(
         VideoBehavior::Complete { peak_pct, .. } => peak_pct,
         _ => 40.0,
     };
+    let peak_memory_bytes = (HOST_MEMORY_MB as f64 * 1024.0 * 1024.0 * peak_pct / 100.0) as u64;
     let asset_id = format!("asset_{}", &job_id.replace('-', "")[..16]);
     let media_rel = format!("assets/videos/{asset_id}.mp4");
     let project_dir = project_path(app, &project_id).await;
@@ -313,7 +385,6 @@ async fn run_fake_video_job(
         json!({
             "status": "completed", "stage": "completed", "progress": 1,
             "message": "fake render done", "workerId": WORKER_ID, "backend": "mlx",
-            "peakGpuMemoryPct": peak_pct,
             "result": {
                 "generationSetId": genset_id,
                 "expectedCount": 1,
@@ -329,6 +400,39 @@ async fn run_fake_video_job(
         }),
     )
     .await;
+    // The hardware peak goes where the real worker puts it: a metrics block POSTed to
+    // `/api/v1/jobs/:id/metrics` AFTER the terminal progress (sceneworks-worker `lib.rs`
+    // `metrics_probe.finish()` → `post_generation_metrics`). No `ProgressRequest` anywhere in the
+    // worker ever sets `peakGpuMemoryPct`, so a fake that reported the peak on the progress update
+    // would be testing a signal that does not exist on a real render.
+    post_generation_metrics(
+        app,
+        job_id,
+        json!({
+            "backend": "mlx",
+            "totalMs": 1_000,
+            "peakMemoryBytes": peak_memory_bytes,
+            "peakMemoryPct": peak_pct,
+        }),
+    )
+    .await;
+}
+
+/// The worker's `post_generation_metrics`: an upsert of the run's metrics block, posted after the
+/// job is already terminal.
+async fn post_generation_metrics(app: &axum::Router, job_id: &str, metrics: Value) {
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/metrics"),
+        metrics,
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "metrics {job_id}: {response}"
+    );
 }
 
 async fn run_fake_export_job(app: &axum::Router, job_id: &str, job: &Value) {
@@ -532,6 +636,33 @@ impl Harness {
         edit(&mut plan);
         let path = self.temp_dir.path().join("plan.json");
         std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    }
+
+    /// The checked-in pack (and its plates) copied into the temp dir with `edit` applied, so a test
+    /// can change an entry without touching the shipped documents.
+    /// The checked-in pack with `edit` applied, copied into the temp dir.
+    ///
+    /// Its SOUND is emptied first, the mirror of `edited_plan` and for the same reason (sc-22712):
+    /// every caller is testing something about references, and importing sound needs an ffmpeg
+    /// that is not on every lane. Pair it with `edited_plan`, which drops the roles that would
+    /// otherwise dangle.
+    fn edited_pack(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+        let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
+        let mut pack: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("fixture pack parses");
+        pack["sound"] = json!([]);
+        edit(&mut pack);
+        let dir = self.temp_dir.path().join("pack");
+        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+        for (role, _) in FIXTURE_REFERENCES {
+            let name = format!("references/{role}.png");
+            std::fs::copy(Path::new(FIXTURE_DIR).join(&name), dir.join(&name))
+                .expect("plate copies");
+        }
+        let path = dir.join("references.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
         path
     }
 
@@ -1128,15 +1259,20 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
             // Longer than the run budget, so the only thing that can end the attempt is the
             // harness's own budget (the fake worker ignores the cancel until its delay elapses).
             VideoBehavior::Complete {
-                delay_secs: 6,
+                delay_secs: 9,
                 peak_pct: 40.0,
             },
         )],
     )
     .await;
+    // The run budget is wall-clock from the START of the run, so it has to leave room for the
+    // pre-dispatch work (catalog, host, project, reference imports) on a loaded CI runner —
+    // otherwise the budget expires before the first attempt and the test measures its own setup.
+    // Two independent margins, because one of them alone was not enough: a six-second budget
+    // instead of three, AND a fixture that imports one plate instead of seven.
     let (plan, pack) = harness.lean_budget_fixture(|plan| {
         plan["limits"] = json!({
-            "maxRunSeconds": 3, "maxShotSeconds": 3, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+            "maxRunSeconds": 6, "maxShotSeconds": 6, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
         });
     });
     let options = harness.options(plan, pack, None);
@@ -1164,7 +1300,7 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
         .error
         .as_deref()
         .unwrap()
-        .contains("run exceeded its budget of 3s"));
+        .contains("run exceeded its budget of 6s"));
     for shot in &record.shots[1..] {
         assert_eq!(shot.outcome, ShotOutcome::NotDispatched, "{shot:?}");
         assert!(shot.attempts.is_empty());
@@ -1176,9 +1312,13 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
     assert_eq!(harness.run_record()["outcome"], "stopped_run_budget");
 }
 
+/// The memory limit reads the SAME signal a real render produces: the job's `generation_metrics`
+/// block (`peakMemoryBytes`), posted through `POST /api/v1/jobs/:id/metrics` after the terminal
+/// progress. Nothing in this file writes `peakGpuMemoryPct` — a job snapshot field every shipped
+/// worker leaves null — so the limit cannot be satisfied by a fabricated signal.
 #[tokio::test]
 async fn observed_memory_over_budget_stops_new_dispatch() {
-    // 90% of the 128 GB the fake worker reports is 115 GB, over the plan's 96 GB budget.
+    // 90% of the 128 GiB the fake worker reports is 115.2 GiB, over the plan's 96 GB budget.
     let harness = Harness::start(
         true,
         vec![(
@@ -1210,7 +1350,20 @@ async fn observed_memory_over_budget_stops_new_dispatch() {
         "the finished take is kept\n{}",
         summary(&record)
     );
-    assert_eq!(record.shots[0].attempts[0].peak_gpu_memory_pct, Some(90.0));
+    let attempt = &record.shots[0].attempts[0];
+    assert_eq!(
+        attempt.peak_memory_source.as_deref(),
+        Some("metrics.peakMemoryBytes"),
+        "the limit must read the production signal, not the job snapshot"
+    );
+    assert!(
+        attempt
+            .peak_memory_gb
+            .is_some_and(|gb| (gb - 115.2).abs() < 0.01),
+        "{:?}",
+        attempt.peak_memory_gb
+    );
+    assert_eq!(attempt.peak_gpu_memory_pct, Some(90.0));
     assert_eq!(record.shots[1].outcome, ShotOutcome::NotDispatched);
     let video_jobs = harness
         .script
@@ -1221,6 +1374,334 @@ async fn observed_memory_over_budget_stops_new_dispatch() {
         .count();
     assert_eq!(video_jobs, 1);
     assert_eq!(harness.run_record()["outcome"], "stopped_memory_limit");
+    // The peak the harness compared is the one the metrics route holds for that job.
+    let job_id = attempt.job_id.as_deref().expect("job id");
+    let (status, metrics) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}/metrics"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        metrics["peakMemoryBytes"].as_u64(),
+        Some((HOST_MEMORY_MB as f64 * 1024.0 * 1024.0 * 0.90) as u64)
+    );
+}
+
+/// E2's production record survives the failure it exists to explain: a run that has already
+/// created a project and imported assets must still leave a `run.json` when the API fails mid-run.
+#[tokio::test]
+async fn an_api_failure_mid_run_still_writes_the_run_record() {
+    let harness = Harness::start(true, vec![]).await;
+    // The tag PATCH is the first write AFTER the project exists and the first reference has been
+    // imported, so the run fails with real side effects already on disk.
+    let transport = ScriptedTransport::failing(harness.app.clone(), "PATCH", "/tags", 500);
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010"]),
+    );
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the injected 500 fails the run");
+    assert!(
+        matches!(&error, HarnessError::Api { status: 500, path, .. } if path.contains("/tags")),
+        "{error}"
+    );
+
+    let record = harness.run_record();
+    assert_eq!(record["outcome"], "failed");
+    assert!(
+        record["projectId"].is_string(),
+        "the record names the project the run created: {record}"
+    );
+    let diagnostics: Vec<String> = record["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .map(|finding| finding["message"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        diagnostics.iter().any(|message| message.contains("500")
+            && message.contains("/tags")
+            && message.contains("the run stopped on an error")),
+        "{diagnostics:?}"
+    );
+    assert!(harness.temp_dir.path().join("run-out/plan.json").exists());
+}
+
+/// A cancel the worker never honours must stop the run, not free the harness to dispatch a second
+/// render against the one memory budget the plan declared.
+#[tokio::test]
+async fn a_cancel_the_worker_ignores_stops_dispatch_instead_of_retrying() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::HangIgnoringCancel)]).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 2, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run finishes with a record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let sh010 = &record.shots[0];
+    assert_eq!(sh010.outcome, ShotOutcome::TimedOut);
+    assert_eq!(
+        sh010.attempts.len(),
+        1,
+        "the uncancelable attempt consumes the shot: {:#?}",
+        sh010.attempts
+    );
+    assert!(
+        sh010.attempts[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("still running")
+            && sh010.attempts[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("stopping dispatch rather than running a second render"),
+        "{:?}",
+        sh010.attempts[0].error
+    );
+    assert_eq!(
+        record.shots[1].outcome,
+        ShotOutcome::NotDispatched,
+        "no further shot goes out while the first render is still in flight"
+    );
+    let video_jobs = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(kind, _, _)| kind == "video_generate")
+        .count();
+    assert_eq!(video_jobs, 1, "exactly one render was ever dispatched");
+    assert_eq!(harness.run_record()["outcome"], "failed");
+}
+
+/// A terminal job whose assets the API never finishes persisting is bounded and reported for what
+/// it is, instead of being polled until the shot budget expires and blamed on a timeout.
+#[tokio::test]
+async fn a_terminal_job_whose_assets_never_settle_is_reported_as_unsettled() {
+    let harness = Harness::start(true, vec![]).await;
+    // Every job snapshot the harness reads is rewritten to look like the two-phase handoff never
+    // completed: raw `assetWrites` still in place, no `assets` / `assetIds`.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/jobs/", |body| {
+        if body.get("type").and_then(Value::as_str) == Some("video_generate")
+            && body["status"] == "completed"
+        {
+            body["result"]["assetWrites"] = json!([{ "type": "video" }]);
+            if let Some(result) = body["result"].as_object_mut() {
+                result.remove("assets");
+                result.remove("assetIds");
+            }
+        }
+    });
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 3, "maxAttemptsPerShot": 2, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010"]));
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("run finishes with a record");
+    let attempt = &record.shots[0].attempts[0];
+    assert_eq!(attempt.status, "completed", "{}", summary(&record));
+    assert!(
+        attempt
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("assets never settled"),
+        "{:?}",
+        attempt.error
+    );
+    assert_eq!(
+        record.shots[0].attempts.len(),
+        1,
+        "a server-side persistence stall is not retried into a second render"
+    );
+    assert_eq!(record.shots[0].outcome, ShotOutcome::Failed);
+    assert!(
+        attempt.elapsed_seconds < 60.0,
+        "the wait is bounded, not left to the shot budget: {}",
+        attempt.elapsed_seconds
+    );
+}
+
+/// A timeline with no track to hold the takes is an error, not a silently empty save: the record
+/// must never list a sequence the project does not hold.
+#[tokio::test]
+async fn a_timeline_with_no_video_track_fails_the_run_instead_of_saving_nothing() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/timelines", |body| {
+        if body.get("tracks").is_some() {
+            body["tracks"] = json!([{ "id": "track_audio", "kind": "audio", "items": [] }]);
+        }
+    });
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010"]),
+    );
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("a timeline with nowhere to put the takes stops the run");
+    assert!(
+        error
+            .to_string()
+            .contains("has no track_main and no video track"),
+        "{error}"
+    );
+    // E2 again: the record still lands, with the rendered take and the failure both in it.
+    let record = harness.run_record();
+    assert_eq!(record["outcome"], "failed");
+    assert_eq!(record["shots"][0]["outcome"], "rendered");
+    assert!(record["timeline"].is_null(), "{record}");
+}
+
+/// An unapproved reference is still imported and recorded, but is distinguishable in the record and
+/// in the project — AC1 is about APPROVED references staying addressable.
+#[tokio::test]
+async fn unapproved_references_are_tagged_and_recorded_apart_from_approved_ones() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = harness.edited_pack(|pack| {
+        for entry in pack["references"].as_array_mut().expect("references") {
+            if entry["role"] == "house_style" {
+                entry["approved"] = json!(false);
+            }
+        }
+    });
+    let options = harness.options(harness.edited_plan(|_| {}), pack, Some(&["SH010"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let project_id = record.project_id.clone().expect("project created");
+    let unapproved = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "house_style")
+        .expect("the unapproved reference is still imported and recorded");
+    assert!(!unapproved.approved);
+    assert!(
+        record
+            .references
+            .iter()
+            .filter(|reference| reference.role != "house_style")
+            .all(|reference| reference.approved),
+        "{:#?}",
+        record.references
+    );
+    let tags_for = |asset_id: &str| {
+        let app = harness.app.clone();
+        let path = format!("/api/v1/projects/{project_id}/assets/{asset_id}");
+        async move {
+            let (_, asset) = request(app, "GET", &path, Value::Null).await;
+            asset["tags"]
+                .as_array()
+                .map(|tags| {
+                    tags.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }
+    };
+    let tags = tags_for(&unapproved.asset_id).await;
+    assert!(
+        tags.iter()
+            .any(|tag| tag == "film-harness-reference-unapproved"),
+        "{tags:?}"
+    );
+    assert!(
+        !tags.iter().any(|tag| tag == "film-harness-reference"),
+        "an unapproved plate must not carry the conditioning-eligible tag: {tags:?}"
+    );
+    let approved = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("approved plate");
+    let tags = tags_for(&approved.asset_id).await;
+    assert!(
+        tags.iter().any(|tag| tag == "film-harness-reference"),
+        "{tags:?}"
+    );
+}
+
+/// Ctrl-C on the binary: the in-flight job is canceled through the API, nothing else is dispatched,
+/// and the record still lands with the reason in it.
+#[tokio::test]
+async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 120, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010", "SH020"]));
+    let control = film_harness::RunControl::new();
+    // Flip the control once a render is actually in flight, not after a fixed sleep, so the test
+    // exercises "canceled with a job running" on every runner rather than racing the import.
+    let signal = tokio::spawn({
+        let control = control.clone();
+        let app = harness.app.clone();
+        async move {
+            for _ in 0..400 {
+                let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+                let running = jobs.as_array().is_some_and(|jobs| {
+                    jobs.iter()
+                        .any(|job| job["type"] == "video_generate" && job["status"] == "running")
+                });
+                if running {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            control.cancel();
+        }
+    });
+    let record = film_harness::run_with_control(&harness.transport, &options, &control)
+        .await
+        .expect("run finishes with a record");
+    signal.await.expect("signal task");
+
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let sh010 = &record.shots[0];
+    assert_eq!(sh010.attempts.len(), 1, "{:#?}", sh010.attempts);
+    assert_eq!(sh010.attempts[0].status, "canceled_by_operator");
+    let job_id = sh010.attempts[0].job_id.as_deref().expect("job id");
+    let (_, job) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(job["status"], "canceled", "{job}");
+    assert_eq!(record.shots[1].outcome, ShotOutcome::NotDispatched);
+    let on_disk = harness.run_record();
+    assert_eq!(on_disk["outcome"], "failed");
+    let diagnostics: Vec<String> = on_disk["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .map(|finding| finding["message"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("canceled by operator")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

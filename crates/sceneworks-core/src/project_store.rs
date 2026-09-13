@@ -4182,15 +4182,26 @@ fn reindex_project_path(
     Ok(counts)
 }
 
+/// Every aspect ratio a timeline may declare, with the frame it renders at. One declaration
+/// (sc-22710): a caller that must CHOOSE a ratio for footage of some other shape — the film
+/// harness picks one before it creates a timeline — reads this list rather than hand-copying it
+/// and drifting into a 400 here.
+pub const TIMELINE_ASPECT_RATIOS: &[(&str, u32, u32)] = &[
+    ("16:9", 1280, 720),
+    ("9:16", 720, 1280),
+    ("1:1", 1024, 1024),
+];
+
 fn timeline_dimensions(aspect_ratio: &str) -> ProjectStoreResult<(u32, u32)> {
-    match aspect_ratio {
-        "16:9" => Ok((1280, 720)),
-        "9:16" => Ok((720, 1280)),
-        "1:1" => Ok((1024, 1024)),
-        _ => Err(ProjectStoreError::BadRequest(
-            "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
-        )),
-    }
+    TIMELINE_ASPECT_RATIOS
+        .iter()
+        .find(|(name, _, _)| *name == aspect_ratio)
+        .map(|(_, width, height)| (*width, *height))
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest(
+                "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
+            )
+        })
 }
 
 /// Roles a timeline track may declare. `kind` says how a track is rendered (picture, overlay,
