@@ -174,7 +174,6 @@ in the record are read back off the saved timeline, not off the harness's intent
 
 `scripts/film-harness-smoke.sh` builds this checkout, starts the API and the native GPU worker
 against a scratch data dir, waits for both to register, renders `SH010,SH020` of the fixture on
-<<<<<<< HEAD
 MiniMax-H3 q4 (MLX), and tears both down. The fixture's placeholder plates and clips are
 deterministic (`fixture-images`, `fixture-sound`), so the checked-in PNGs and WAVs are reproducible
 byte for byte — the clips are integer triangle waves with no floating point anywhere, because a
