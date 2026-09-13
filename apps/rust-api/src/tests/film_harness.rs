@@ -22,6 +22,7 @@ use crate::film_harness::{
     self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, RunOptions,
     TransportFuture, FIXTURE_REFERENCES,
 };
+use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
 
 const FIXTURE_DIR: &str = concat!(
@@ -91,6 +92,27 @@ struct WorkerScript {
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
     claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
+    /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
+    /// order. The last one repeats once the list runs out, which is what lets a test prove the
+    /// repair loop STOPS rather than looping on a reply that never validates.
+    plan_replies: Vec<String>,
+    plan_calls: usize,
+    /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
+    /// by the shot's own prompt.
+    refine_template: Option<String>,
+}
+
+impl WorkerScript {
+    fn next_plan_reply(&mut self) -> String {
+        let index = self
+            .plan_calls
+            .min(self.plan_replies.len().saturating_sub(1));
+        self.plan_calls += 1;
+        self.plan_replies
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| "the planner has nothing to say".to_owned())
+    }
 }
 
 impl WorkerScript {
@@ -118,7 +140,7 @@ async fn register_fake_worker(app: &axum::Router) {
             "workerId": WORKER_ID,
             "gpuId": "mlx",
             "gpuName": "Apple M-series (fake)",
-            "capabilities": ["video_generate", "timeline_export", "frame_extract"],
+            "capabilities": ["video_generate", "timeline_export", "frame_extract", "prompt_refine"],
             "loadedModels": [],
             "utilization": { "memoryTotalMb": HOST_MEMORY_MB }
         }),
@@ -177,6 +199,7 @@ fn spawn_fake_worker(
             match job_type.as_str() {
                 "video_generate" => run_fake_video_job(&app, &script, &job_id, &job).await,
                 "timeline_export" => run_fake_export_job(&app, &job_id, &job).await,
+                "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -331,6 +354,41 @@ async fn run_fake_video_job(
     .await;
 }
 
+/// The scripted stand-in for the native `prompt_refine` worker. It replaces ONLY the decode: the
+/// job was created through the real `POST /api/v1/prompts/refine` route, claimed through the real
+/// worker API, and its result is read back through the real job snapshot — so the planner is
+/// exercised against the seam it will use on the GPU, with the model's answer scripted.
+async fn run_fake_refine_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let task = payload["task"].as_str().unwrap_or_default().to_owned();
+    let prompt = payload["prompt"].as_str().unwrap_or_default().to_owned();
+    let refined = if task == "film_plan" {
+        script.lock().next_plan_reply()
+    } else {
+        script
+            .lock()
+            .refine_template
+            .clone()
+            .unwrap_or_else(|| "{prompt}".to_owned())
+            .replace("{prompt}", &prompt)
+    };
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
+            "result": { "originalPrompt": prompt, "refinedPrompt": refined }
+        }),
+    )
+    .await;
+}
+
 async fn run_fake_export_job(app: &axum::Router, job_id: &str, job: &Value) {
     let payload = &job["payload"];
     let project_id = job["projectId"].as_str().expect("project id").to_owned();
@@ -430,6 +488,7 @@ impl Harness {
         RunOptions {
             plan_path,
             reference_pack_path: pack_path,
+            compiled_path: None,
             project_id: None,
             shot_ids: shots.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
             out_dir: self.temp_dir.path().join("run-out"),
@@ -1166,6 +1225,7 @@ async fn validate_subcommand_path_checks_documents_without_an_api() {
     let options = RunOptions {
         plan_path: Path::new(FIXTURE_DIR).join("plan.jsonc"),
         reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        compiled_path: None,
         project_id: None,
         shot_ids: Some(vec!["SH010".into(), "SH999".into()]),
         out_dir: temp_dir.path().to_path_buf(),
@@ -1184,4 +1244,601 @@ async fn validate_subcommand_path_checks_documents_without_an_api() {
     let (plan, pack) = film_harness::validate(None, &options).await.unwrap();
     assert_eq!(plan.shots.len(), 6);
     assert_eq!(pack.references.len(), 7);
+}
+
+// ----------------------------------------------------------------------------------------------
+// Local planner (sc-22713): brief -> plan -> compiled requests -> dispatch.
+//
+// The planner drives the SHIPPED LLM seam — `POST /api/v1/prompts/refine`, the `prompt_refine`
+// job, the worker's native TextLlm — so these tests create the jobs through the real route and
+// script only the model's answer (`run_fake_refine_job`). Nothing here loads weights or touches a
+// GPU: what is under test is the request the planner composes, the strictness of the parse, the
+// bound on the repair loop, and the conformance of the compiled requests to the INSTALLED manifest.
+// ----------------------------------------------------------------------------------------------
+
+const BRIEF_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../config/film-harness/courier-workshop/brief.jsonc"
+);
+
+/// The six beats the checked-in brief requires, in order.
+const BRIEF_BEATS: &[&str] = &[
+    "arrival",
+    "approach",
+    "handover",
+    "departure",
+    "discovery",
+    "opening",
+];
+
+/// One shot of a scripted planner draft, on the H3 envelope (24 fps, 576x320, 5.1667s).
+fn draft_shot(id: &str, beat_id: &str) -> Value {
+    json!({
+        "id": id,
+        "beatId": beat_id,
+        "beat": format!("beat {beat_id}"),
+        "framing": "wide static, eye level",
+        "prompt": format!("A cluttered woodworking workshop in warm late-afternoon light; {beat_id}."),
+        "targetDurationSeconds": 5.1667,
+        "startState": "the workshop before this shot",
+        "endState": "the workshop after this shot",
+        "sound": "room tone, distant birds",
+        "conditioning": { "mode": "text_to_video" },
+        "seed": 22713,
+        "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    })
+}
+
+/// A well-formed draft covering every beat of the checked-in brief.
+fn full_draft() -> Value {
+    json!({
+        "shots": BRIEF_BEATS
+            .iter()
+            .enumerate()
+            .map(|(index, beat)| draft_shot(&format!("SH{:03}0", index + 1), beat))
+            .collect::<Vec<_>>()
+    })
+}
+
+fn draft_text(draft: &Value) -> String {
+    serde_json::to_string_pretty(draft).expect("draft serializes")
+}
+
+fn planner_options(harness: &Harness, out: &str) -> film_planner::PlannerOptions {
+    film_planner::PlannerOptions {
+        brief_path: PathBuf::from(BRIEF_FIXTURE),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        out_dir: harness.temp_dir.path().join(out),
+        max_repair_rounds: 2,
+        refine_prompts: false,
+        require_installed: false,
+        // Empty: the in-process transport has no URL. The local-only rule is exercised as a unit
+        // test in `film_planner` and end to end below.
+        api_url: String::new(),
+        force: false,
+        poll_interval: Duration::from_millis(50),
+        job_timeout: Duration::from_secs(30),
+    }
+}
+
+fn planner_llm(harness: &Harness) -> film_planner::SceneWorksLlm<'_> {
+    film_planner::SceneWorksLlm::new(
+        &harness.transport,
+        Duration::from_millis(50),
+        Duration::from_secs(30),
+    )
+}
+
+fn set_plan_replies(harness: &Harness, replies: Vec<String>) {
+    let mut script = harness.script.lock();
+    script.plan_replies = replies;
+    script.plan_calls = 0;
+}
+
+fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Vec<Value> {
+    harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(job_type, _, payload)| {
+            job_type == "prompt_refine" && (!plan_task_only || payload["task"] == "film_plan")
+        })
+        .map(|(_, _, payload)| payload.clone())
+        .collect()
+}
+
+fn findings_of(error: HarnessError) -> Vec<String> {
+    match error {
+        HarnessError::Validation(findings) => findings.iter().map(ToString::to_string).collect(),
+        other => panic!("expected a validation refusal, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    harness.script.lock().refine_template = Some(
+        "integrated_multimodal_description: {prompt}\noverall_soundscape: room tone".to_owned(),
+    );
+    let mut options = planner_options(&harness, "planned");
+    options.refine_prompts = true;
+
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("the planner produces a plan");
+
+    // A complete plan: every beat, every narrative field, timing, camera, reference bindings and
+    // the intended start/end state of each shot.
+    assert_eq!(artifacts.repair_rounds, 0);
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert_eq!(artifacts.plan.id, "courier-workshop-planned");
+    assert_eq!(artifacts.plan.model.id, "minimax_h3");
+    assert_eq!(artifacts.plan.limits.max_memory_gb, 96.0);
+    for shot in &artifacts.plan.shots {
+        assert!(!shot.beat.trim().is_empty(), "{shot:?}");
+        assert!(!shot.framing.trim().is_empty(), "{shot:?}");
+        assert!(!shot.start_state.trim().is_empty(), "{shot:?}");
+        assert!(!shot.end_state.trim().is_empty(), "{shot:?}");
+        assert!(shot.target_duration_seconds > 0.0, "{shot:?}");
+        assert!(
+            !shot.continuity_roles.is_empty(),
+            "every shot binds canonical reference roles: {shot:?}"
+        );
+    }
+
+    // The plan is a file, and the SAME validator the hand-authored path uses accepts it unchanged.
+    assert_eq!(artifacts.plan_path, options.out_dir.join("plan.json"));
+    let run_options = RunOptions {
+        plan_path: artifacts.plan_path.clone(),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        compiled_path: Some(artifacts.compiled_path.clone()),
+        project_id: None,
+        shot_ids: None,
+        out_dir: harness.temp_dir.path().join("planned-run"),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let (plan, _) = film_harness::validate(Some(&harness.transport), &run_options)
+        .await
+        .expect("the generated plan validates against the live catalog");
+    assert_eq!(plan.shots.len(), BRIEF_BEATS.len());
+
+    // The compiled requests are a second versioned document, on the installed model's envelope.
+    let compiled: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
+    )
+    .expect("compiled.json parses");
+    assert_eq!(compiled["schemaVersion"], 1);
+    assert_eq!(compiled["planId"], "courier-workshop-planned");
+    assert_eq!(compiled["model"]["fps"], 24);
+    let requests = compiled["requests"].as_array().expect("requests");
+    assert_eq!(requests.len(), BRIEF_BEATS.len());
+    for request in requests {
+        assert_eq!(request["fps"], 24);
+        assert_eq!(request["width"], 576);
+        assert_eq!(request["height"], 320);
+        assert_eq!(request["durationSeconds"], 5.1667);
+        assert_eq!(request["mode"], "text_to_video");
+        assert_eq!(request["promptSource"], "refined");
+        assert!(
+            request["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("integrated_multimodal_description:"),
+            "the H3 refinement produced the dispatched prompt: {request}"
+        );
+        assert!(request.get("negativePrompt").is_none(), "{request}");
+        assert!(
+            request["referenceRoles"].as_array().unwrap().is_empty(),
+            "H3 declares maxReferenceAssets 0: {request}"
+        );
+    }
+
+    // The planner drove the shipped seam: one film_plan job plus one rewrite job per shot, all of
+    // them `prompt_refine`, with the target model forwarded (which is what selects the H3 asset).
+    let refine_jobs = refine_job_payloads(&harness, false);
+    assert_eq!(refine_jobs.len(), 1 + BRIEF_BEATS.len(), "{refine_jobs:?}");
+    assert_eq!(refine_jobs[0]["task"], "film_plan");
+    assert_eq!(refine_jobs[0]["modelId"], "minimax_h3");
+    assert_eq!(refine_jobs[0]["workflow"], "video");
+    for payload in &refine_jobs[1..] {
+        assert!(payload.get("task").is_none(), "{payload}");
+        assert_eq!(payload["modelId"], "minimax_h3");
+    }
+    // The planning request carried the brief's beats and only APPROVED roles.
+    let request = refine_jobs[0]["prompt"].as_str().unwrap();
+    for beat in BRIEF_BEATS {
+        assert!(request.contains(beat), "{beat} missing from the request");
+    }
+    assert!(request.contains("workshop_plate (plate)"), "{request}");
+}
+
+#[tokio::test]
+async fn a_dropped_beat_is_repaired_and_the_repair_loop_is_bounded() {
+    let harness = Harness::start(true, vec![]).await;
+    // The first draft drops "handover"; the repair round returns the whole plan.
+    let mut short = full_draft();
+    short["shots"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|shot| shot["beatId"] != "handover");
+    set_plan_replies(
+        &harness,
+        vec![draft_text(&short), draft_text(&full_draft())],
+    );
+    let options = planner_options(&harness, "repaired");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("the repair round produces a plan");
+    assert_eq!(artifacts.repair_rounds, 1);
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    // The repair round was told exactly what was wrong, and the dropped beat was never accepted.
+    let repair = refine_job_payloads(&harness, true)
+        .get(1)
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a second planning job was created");
+    assert!(repair.contains("Repair round 1 of 2"), "{repair}");
+    assert!(
+        repair.contains("required beat \"handover\""),
+        "the finding is handed back verbatim: {repair}"
+    );
+
+    // A planner that never covers the beat is refused after the declared rounds — not looped on.
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&short)]);
+    let options = planner_options(&harness, "exhausted");
+    let error = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect_err("an uncorrected draft is refused");
+    let findings = findings_of(error);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("required beat \"handover\"")),
+        "{findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("did not produce a valid plan within 2 repair round")),
+        "{findings:?}"
+    );
+    // Exactly 1 + 2 model calls: the loop is bounded by the declared rounds.
+    assert_eq!(harness.script.lock().plan_calls, 3);
+    // Nothing was written but the diagnosable refusal.
+    assert!(!options.out_dir.join("plan.json").exists());
+    let rejected = std::fs::read_to_string(options.out_dir.join("planner-rejected.txt"))
+        .expect("the refused answer is written out");
+    assert!(rejected.contains("\"beatId\": \"arrival\""), "{rejected}");
+    // Planning dispatches nothing: no video job was ever created.
+    assert!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .all(|job| job["type"] == "prompt_refine"),
+        "planning created a non-planning job"
+    );
+}
+
+#[tokio::test]
+async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() {
+    let mut unknown_field = full_draft();
+    unknown_field["shots"][0]["cameraLens"] = json!("35mm");
+    let mut off_menu = full_draft();
+    off_menu["shots"][1]["targetDurationSeconds"] = json!(6.0);
+    let mut unsupported = full_draft();
+    unsupported["shots"][2]["conditioning"] =
+        json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+    let mut unanchored = full_draft();
+    unanchored["shots"][3]["continuityRoles"] = json!([]);
+    unanchored["shots"][3]["conditioning"] =
+        json!({ "mode": "text_to_video", "chainFromShotId": "SH0030" });
+    let mut missing_asset = full_draft();
+    missing_asset["shots"][4]["conditioning"] =
+        json!({ "mode": "image_to_video", "firstFrameRole": "a_plate_nobody_approved" });
+
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "prose",
+            "I'd love to help! Here are some ideas for your film...".to_owned(),
+            "not a plan document",
+        ),
+        ("unknown field", draft_text(&unknown_field), "cameraLens"),
+        ("off-menu duration", draft_text(&off_menu), "duration menu"),
+        (
+            "unsupported conditioning",
+            draft_text(&unsupported),
+            "does not declare reference_to_video",
+        ),
+        (
+            "chain as the only anchor",
+            draft_text(&unanchored),
+            "the only continuity this shot declares is the chain",
+        ),
+        (
+            "missing reference asset",
+            draft_text(&missing_asset),
+            "is not in reference pack",
+        ),
+    ];
+    for (label, reply, expected) in cases {
+        let harness = Harness::start(true, vec![]).await;
+        set_plan_replies(&harness, vec![reply]);
+        let mut options = planner_options(&harness, "refused");
+        options.max_repair_rounds = 0;
+        let error = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{label}: expected a refusal"));
+        let findings = findings_of(error);
+        assert!(
+            findings.iter().any(|finding| finding.contains(expected)),
+            "{label}: {findings:?}"
+        );
+        assert!(!options.out_dir.join("plan.json").exists(), "{label}");
+        // One call: with zero repair rounds the planner asks once and stops.
+        assert_eq!(harness.script.lock().plan_calls, 1, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn a_hosted_endpoint_refuses_the_planner_before_it_creates_a_job() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let mut options = planner_options(&harness, "hosted");
+    options.api_url = "https://api.openai.com/v1".to_owned();
+    let error = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect_err("a hosted endpoint is refused");
+    let findings = findings_of(error);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("not this machine or a private-network host"),
+        "{findings:?}"
+    );
+    assert_eq!(harness.script.lock().plan_calls, 0);
+    assert!(harness.jobs().await.is_empty(), "no job was created");
+}
+
+#[tokio::test]
+async fn planning_without_a_local_refiner_is_refused_rather_than_queued_forever() {
+    // No worker at all: nothing can run an LLM job, so the planner says so instead of waiting out
+    // its timeout on a job nobody will claim.
+    let harness = Harness::start(false, vec![]).await;
+    let options = planner_options(&harness, "no-refiner");
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("planning without a refiner is refused"),
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("no registered worker advertises prompt_refine"),
+        "{findings:?}"
+    );
+    assert!(harness.jobs().await.is_empty(), "no job was created");
+}
+
+#[tokio::test]
+async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compile_is_refused() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let options = planner_options(&harness, "editable");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+
+    // The human edits the plan by hand: a different prompt and a longer legal clip.
+    let mut plan: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.plan_path).expect("plan readable"),
+    )
+    .expect("plan parses");
+    plan["shots"][0]["prompt"] = json!("A hand-written prompt the planner never wrote.");
+    plan["shots"][0]["targetDurationSeconds"] = json!(8.0);
+    std::fs::write(
+        &artifacts.plan_path,
+        serde_json::to_string_pretty(&plan).unwrap(),
+    )
+    .unwrap();
+
+    // The stale compiled document is refused rather than dispatched.
+    let run_options = RunOptions {
+        plan_path: artifacts.plan_path.clone(),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        compiled_path: Some(artifacts.compiled_path.clone()),
+        project_id: None,
+        shot_ids: None,
+        out_dir: harness.temp_dir.path().join("editable-run"),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let findings = findings_of(
+        film_harness::validate(Some(&harness.transport), &run_options)
+            .await
+            .expect_err("a plan edited after the compile is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("has changed since it was compiled")),
+        "{findings:?}"
+    );
+
+    // Recompiling adopts the edit, and `--no-refine` keeps the hand-written text verbatim.
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &artifacts.plan_path,
+    )
+    .await
+    .expect("the edited plan recompiles");
+    let first = &artifacts.compiled.requests[0];
+    assert_eq!(
+        first.prompt,
+        "A hand-written prompt the planner never wrote."
+    );
+    assert_eq!(first.duration_seconds, 8.0);
+    film_harness::validate(Some(&harness.transport), &run_options)
+        .await
+        .expect("the recompiled plan validates");
+
+    // An edit that deletes a beat is reported against the brief rather than quietly compiled.
+    let mut plan: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.plan_path).expect("plan readable"),
+    )
+    .unwrap();
+    plan["shots"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|shot| shot["beatId"] != "handover");
+    std::fs::write(
+        &artifacts.plan_path,
+        serde_json::to_string_pretty(&plan).unwrap(),
+    )
+    .unwrap();
+    let findings = findings_of(
+        film_planner::compile_existing(
+            &harness.transport,
+            &planner_llm(&harness),
+            &options,
+            &artifacts.plan_path,
+        )
+        .await
+        .expect_err("a deleted beat is reported"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("\"handover\"")),
+        "{findings:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_path() {
+    let harness = Harness::start(true, vec![]).await;
+    // Two beats is enough to prove the dispatch path; the run itself is the sc-22710 one.
+    let mut draft = full_draft();
+    draft["shots"].as_array_mut().unwrap().truncate(2);
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["requiredBeats"].as_array_mut().unwrap().truncate(2);
+    brief["targetTotalSeconds"] = json!({ "min": 10.0, "max": 12.0 });
+    let brief_path = harness.temp_dir.path().join("two-beat-brief.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    harness.script.lock().refine_template =
+        Some("integrated_multimodal_description: {prompt}".to_owned());
+    let mut options = planner_options(&harness, "dispatch");
+    options.brief_path = brief_path;
+    options.refine_prompts = true;
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+
+    let run_options = RunOptions {
+        plan_path: artifacts.plan_path.clone(),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // Found beside the plan, exactly as a run started from the plan directory would.
+        compiled_path: None,
+        project_id: None,
+        shot_ids: None,
+        out_dir: harness.temp_dir.path().join("dispatch-run"),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let record = film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("the generated plan runs");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(record.shots.len(), 2);
+    assert!(record
+        .shots
+        .iter()
+        .all(|shot| shot.outcome == ShotOutcome::Rendered));
+    // The run record pins the compiled document it dispatched, not just the plan.
+    let compiled_source = record
+        .compiled
+        .as_ref()
+        .expect("compiled document recorded");
+    assert_eq!(compiled_source.id, "courier-workshop-planned");
+    assert_eq!(compiled_source.sha256.len(), 64);
+    assert!(run_options.out_dir.join("compiled.json").is_file());
+
+    // Every dispatched video job carried the COMPILED prompt, not the plan's authored one.
+    let dispatched: Vec<Value> = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(job_type, _, _)| job_type == "video_generate")
+        .map(|(_, _, payload)| payload.clone())
+        .collect();
+    assert_eq!(dispatched.len(), 2);
+    for payload in &dispatched {
+        let shot_id = payload["advanced"]["filmHarness"]["shotId"]
+            .as_str()
+            .unwrap();
+        let request = artifacts
+            .compiled
+            .request(shot_id)
+            .unwrap_or_else(|| panic!("{shot_id} is in the compiled document"));
+        assert_eq!(payload["prompt"], json!(request.prompt));
+        assert_eq!(payload["duration"], json!(request.duration_seconds));
+        assert_eq!(payload["width"], json!(request.width));
+        assert_eq!(payload["height"], json!(request.height));
+        assert_eq!(
+            payload["advanced"]["filmHarness"]["promptSource"],
+            "refined"
+        );
+        assert_eq!(payload["advanced"]["mlxQuantize"], 4);
+        assert!(
+            payload["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("integrated_multimodal_description:"),
+            "{payload}"
+        );
+    }
+}
+
+#[test]
+fn the_checked_in_brief_is_valid_and_matches_the_hand_authored_baseline() {
+    let text = std::fs::read_to_string(BRIEF_FIXTURE).expect("brief fixture readable");
+    let brief = sceneworks_core::film_planner::parse_brief(&text).expect("brief parses");
+    let findings = sceneworks_core::film_planner::validate_brief(&brief);
+    assert!(findings.is_empty(), "{findings:?}");
+    let ids: Vec<&str> = brief
+        .required_beats
+        .iter()
+        .map(|beat| beat.id.as_str())
+        .collect();
+    assert_eq!(ids, BRIEF_BEATS);
+    // The brief plans the SAME model, tier and canvas the hand-authored baseline renders, so the
+    // two plans are comparable, and it carries a DIFFERENT plan id so neither overwrites the other.
+    let baseline = sceneworks_core::film_plan::parse_plan(
+        &std::fs::read_to_string(Path::new(FIXTURE_DIR).join("plan.jsonc")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(brief.model, baseline.model);
+    assert_eq!(brief.limits, baseline.limits);
+    assert_ne!(brief.id, baseline.id);
+    // Every beat is coverable inside the model's shortest legal clip and the declared window.
+    assert!(brief.required_beats.len() as f64 * 5.1667 >= brief.target_total_seconds.min);
+    assert!(brief.max_shots >= brief.required_beats.len());
 }

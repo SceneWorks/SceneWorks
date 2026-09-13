@@ -281,6 +281,7 @@ use logs::list_logs;
 mod error;
 // Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
 pub mod film_harness;
+pub mod film_planner;
 pub(crate) use error::ApiError;
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
