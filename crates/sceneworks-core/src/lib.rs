@@ -60,6 +60,15 @@ pub mod workflow_share;
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";
 
+/// sc-8884 (F-082): the char cap the API applies to every free-text prompt field (`prompt` and
+/// `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
+/// `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
+///
+/// It lives here rather than in rust-api because pre-dispatch validators outside that crate
+/// (`film_plan`, sc-22710) must refuse a prompt the enqueue route would refuse; a hand-copied
+/// number turns an actionable pre-flight diagnostic into a 400 at enqueue when the two drift.
+pub const MAX_PROMPT_CHARS: usize = 4000;
+
 /// Stdout sentinel for remote worker-restart (epic 4484 story 12). The API process
 /// doesn't supervise the desktop's GPU worker, so `POST /api/v1/worker/restart` prints
 /// this exact line to stdout; the desktop shell — which already reads the API sidecar's

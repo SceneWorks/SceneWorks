@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::film_harness::review::{
     self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
 };
-use crate::film_harness::{self, CancelToken};
+use crate::film_harness::{self, RunControl};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
 
 const REVIEW_PLAN: &str = concat!(
@@ -65,7 +65,7 @@ fn review_options(harness: &Harness, shots: &[&str]) -> ReviewOptions {
     let mut options = ReviewOptions::new(harness.out_dir());
     options.review_plan_path = Some(PathBuf::from(REVIEW_PLAN));
     options.poll_interval = Duration::from_millis(100);
-    options.cancel = CancelToken::new();
+    options.control = RunControl::new();
     options.shot_ids = shots.iter().map(|id| (*id).to_owned()).collect();
     options
 }
@@ -213,7 +213,7 @@ async fn a_review_writes_observed_state_beside_the_run_and_only_points_at_the_in
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     vision
         .preflight()
@@ -318,7 +318,7 @@ async fn an_unobserved_handoff_is_flagged_unobserved_and_never_recorded_as_compl
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let reviewed = review::review(&harness.transport, &options, &vision)
         .await
@@ -392,7 +392,7 @@ async fn a_disagreeing_answer_becomes_an_actionable_mismatch_naming_intended_and
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let reviewed = review::review(&harness.transport, &options, &vision)
         .await
@@ -436,7 +436,7 @@ async fn a_hedged_contradiction_is_uncertain_and_never_an_actionable_flag() {
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let reviewed = review::review(&harness.transport, &options, &vision)
         .await
@@ -479,7 +479,7 @@ async fn a_review_never_writes_intended_state_or_conditioning_and_never_reaches_
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let after = review::review(&harness.transport, &options, &vision)
         .await
@@ -542,7 +542,7 @@ async fn a_second_review_appends_and_keeps_the_first_documents_evidence() {
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let first = review::review(&harness.transport, &options, &vision)
         .await
@@ -628,7 +628,7 @@ async fn a_review_that_hits_its_frame_budget_stops_and_keeps_the_partial_evidenc
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let reviewed = review::review(&harness.transport, &options, &vision)
         .await
@@ -829,7 +829,7 @@ async fn a_repair_renders_exactly_one_more_take_with_the_reviews_flags_in_the_re
     let vision = VqaVision::new(
         &harness.transport,
         options.poll_interval,
-        options.cancel.clone(),
+        options.control.clone(),
     );
     let reviewed = review::review(&harness.transport, &options, &vision)
         .await

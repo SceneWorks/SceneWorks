@@ -66,7 +66,8 @@ use tokio::time::Instant;
 
 use super::{
     api_detail, encode_asset_upload, flag_dependents, persist_record, read_run_record, read_source,
-    sha256_hex, ApiRequest, ApiTransport, CancelToken, Client, HarnessError, RequestBody,
+    sha256_hex, ApiRequest, ApiTransport, Client, HarnessError, PollBounds, RequestBody,
+    RunControl, ASSET_SETTLE_GRACE, CANCEL_GRACE,
 };
 
 /// Directory, inside the run directory, holding one observed-state document per review.
@@ -142,25 +143,31 @@ pub trait ReviewVision: Send + Sync {
 /// The production backend: the existing `image_vqa` job type, SenseNova-U1-8B, through the route
 /// the Library's own VQA affordance uses.
 pub struct VqaVision<'a> {
-    client: Client<'a>,
     transport: &'a dyn ApiTransport,
     model: String,
     poll_interval: Duration,
-    cancel: CancelToken,
+    /// Held by value, so the borrowed [`Client`] this backend builds per call cannot outlive it.
+    control: RunControl,
 }
 
 impl<'a> VqaVision<'a> {
     pub fn new(
         transport: &'a dyn ApiTransport,
         poll_interval: Duration,
-        cancel: CancelToken,
+        control: RunControl,
     ) -> Self {
         Self {
-            client: Client { transport },
             transport,
             model: VQA_MODEL_ID.to_owned(),
             poll_interval,
-            cancel,
+            control,
+        }
+    }
+
+    fn client(&self) -> Client<'_> {
+        Client {
+            transport: self.transport,
+            control: &self.control,
         }
     }
 
@@ -169,7 +176,7 @@ impl<'a> VqaVision<'a> {
     /// record every question as unobserved, which reads as evidence and is not.
     pub async fn preflight(&self) -> Result<(), HarnessError> {
         let workers = self
-            .client
+            .client()
             .expect_ok("GET", "/api/v1/workers", None)
             .await?;
         let serves = workers.as_array().into_iter().flatten().any(|worker| {
@@ -220,8 +227,8 @@ impl ReviewVision for VqaVision<'_> {
     ) -> VisionFuture<'a, VisionAnswer> {
         Box::pin(async move {
             let started = Instant::now();
-            let created = self
-                .client
+            let client = self.client();
+            let created = client
                 .expect_ok(
                     "POST",
                     "/api/v1/image/vqa/jobs",
@@ -243,15 +250,8 @@ impl ReviewVision for VqaVision<'_> {
                 })?
                 .to_owned();
             let deadline = started + Duration::from_secs(max_seconds);
-            let (view, _) = self
-                .client
-                .wait_for_job(
-                    &job_id,
-                    deadline,
-                    deadline,
-                    self.poll_interval,
-                    &self.cancel,
-                )
+            let (view, _) = client
+                .wait_for_job(&job_id, poll_bounds(deadline, self.poll_interval))
                 .await?;
             if view.status != "completed" {
                 return Err(HarnessError::Transport(format!(
@@ -377,6 +377,19 @@ impl ReviewVision for ScriptedVision {
                 elapsed_seconds: 0.0,
             })
         })
+    }
+}
+
+/// One deadline bounds a review's job wait in every direction: the shot budget, the run budget and
+/// the cancel/settle graces are all the review plan's own `limits`, not a plan's render budget.
+fn poll_bounds(deadline: Instant, poll_interval: Duration) -> PollBounds {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    PollBounds {
+        shot_deadline: deadline,
+        run_deadline: deadline,
+        poll_interval,
+        cancel_grace: CANCEL_GRACE.min(remaining.max(Duration::from_secs(1))),
+        settle_grace: ASSET_SETTLE_GRACE.min(remaining.max(Duration::from_secs(1))),
     }
 }
 
@@ -616,18 +629,20 @@ pub struct ReviewOptions {
     /// Review only these shots. Empty reviews every selected shot that has a take.
     pub shot_ids: Vec<String>,
     pub poll_interval: Duration,
-    pub cancel: CancelToken,
+    /// The same cooperative control a run uses: an in-process flag plus the run directory's cancel
+    /// sentinel, so `film-harness cancel --out DIR` stops a review from another shell too.
+    pub control: RunControl,
 }
 
 impl ReviewOptions {
     pub fn new(out_dir: PathBuf) -> Self {
-        let cancel = CancelToken::watching(&out_dir);
+        let control = RunControl::watching(&out_dir);
         Self {
             out_dir,
             review_plan_path: None,
             shot_ids: Vec::new(),
             poll_interval: Duration::from_secs(3),
-            cancel,
+            control,
         }
     }
 }
@@ -691,7 +706,10 @@ pub async fn review(
         }
     }
 
-    let client = Client { transport };
+    let client = Client {
+        transport,
+        control: &options.control,
+    };
     let timeline_id = ensure_review_timeline(&client, &project_id, &context.record).await?;
 
     for shot_id in &targets {
@@ -873,8 +891,8 @@ async fn review_one(
             ));
             break;
         }
-        if Instant::now() >= deadline || options.cancel.is_requested() {
-            stop.get_or_insert_with(|| review_stop_reason(&options.cancel, limits));
+        if Instant::now() >= deadline || options.control.is_canceled() {
+            stop.get_or_insert_with(|| review_stop_reason(&options.control, limits));
             break;
         }
         let timestamp = (position * length).clamp(0.0, (length - 0.001).max(0.0));
@@ -978,7 +996,7 @@ async fn review_one(
         limits,
         review_plan.uncertain_below,
         deadline,
-        &options.cancel,
+        &options.control,
     )
     .await?;
     let Answered {
@@ -1021,8 +1039,8 @@ async fn review_one(
     })
 }
 
-fn review_stop_reason(cancel: &CancelToken, limits: ReviewLimits) -> String {
-    if cancel.is_requested() {
+fn review_stop_reason(control: &RunControl, limits: ReviewLimits) -> String {
+    if control.is_canceled() {
         "canceled: a cancel was requested while the review was running".to_owned()
     } else {
         format!(
@@ -1060,15 +1078,15 @@ async fn answer_questions(
     limits: ReviewLimits,
     uncertain_below: f64,
     deadline: Instant,
-    cancel: &CancelToken,
+    control: &RunControl,
 ) -> Result<Answered, HarnessError> {
     let mut observations = Vec::new();
     let mut mismatches = Vec::new();
     let mut stop = None;
     let mut real_model_inference = !questions.is_empty();
     for question in questions.iter() {
-        if Instant::now() >= deadline || cancel.is_requested() {
-            stop.get_or_insert_with(|| review_stop_reason(cancel, limits));
+        if Instant::now() >= deadline || control.is_canceled() {
+            stop.get_or_insert_with(|| review_stop_reason(control, limits));
             break;
         }
         let mut graded: Vec<&FrameRef> = question.frames.select(frames);
@@ -1141,13 +1159,7 @@ async fn extract_frame(
         .ok_or_else(|| HarnessError::Transport(format!("frame job response has no id: {created}")))?
         .to_owned();
     let (view, _) = client
-        .wait_for_job(
-            &job_id,
-            deadline,
-            deadline,
-            options.poll_interval,
-            &options.cancel,
-        )
+        .wait_for_job(&job_id, poll_bounds(deadline, options.poll_interval))
         .await?;
     if view.status != "completed" {
         return Err(HarnessError::Transport(format!(
@@ -1524,7 +1536,7 @@ pub struct EvalOptions {
     /// Project to import frames into. Created (or adopted) by name when absent.
     pub project_id: Option<String>,
     pub poll_interval: Duration,
-    pub cancel: CancelToken,
+    pub control: RunControl,
 }
 
 impl EvalOptions {
@@ -1535,7 +1547,7 @@ impl EvalOptions {
             media_root: None,
             project_id: None,
             poll_interval: Duration::from_secs(3),
-            cancel: CancelToken::new(),
+            control: RunControl::new(),
         }
     }
 }
@@ -1589,7 +1601,10 @@ pub async fn review_eval(
         })
         .unwrap_or_else(|| set_dir.clone());
 
-    let client = Client { transport };
+    let client = Client {
+        transport,
+        control: &options.control,
+    };
     let project_id = ensure_eval_project(&client, options, &set).await?;
     std::fs::create_dir_all(&options.out_dir)?;
 
@@ -1645,7 +1660,7 @@ pub async fn review_eval(
             review_plan.limits,
             review_plan.uncertain_below,
             deadline,
-            &options.cancel,
+            &options.control,
         )
         .await?;
         let Answered {

@@ -11,46 +11,29 @@
 //! Order of operations, and the guarantee each step gives:
 //!
 //! 1. read + validate the plan and reference pack (structure, cross-references, files on disk);
-//! 2. resolve the model's catalog entry and validate every shot against its declared modes,
-//!    menus, caps and memory minimum ([`sceneworks_core::film_plan`]);
-//! 3. confirm a registered worker advertises `video_generate`, read the host memory it reports,
-//!    and check the plan's memory budget against it —
+//! 2. read the API HOST's platform and memory from `GET /api/v1/host-capabilities` — `--api` may
+//!    point at another machine, so the host's platform, not `cfg!(target_os)`, decides the lane
+//!    and is what the record claims as the render hardware;
+//! 3. resolve the model's catalog entry and validate every shot against its declared modes,
+//!    menus, caps and lane memory minimum ([`sceneworks_core::film_plan`]), plus the enqueue
+//!    route's own platform-reachability and reference-payload gates, and confirm a registered
+//!    worker advertises `video_generate` —
 //!    **no job is created while any finding is outstanding** (the run record is still written,
 //!    with outcome `rejected`);
-//! 4. create/reuse the project and import every approved reference as a project asset tagged
-//!    with its role;
+//! 4. create/reuse the project and import every reference as a project asset tagged with its role
+//!    (an unapproved one is tagged apart and never used as conditioning);
 //! 5. dispatch the selected shots one at a time under the plan's wall-clock, attempt and memory
-//!    limits — a limit (or a cancel) that trips cancels the in-flight job (cooperatively, through
-//!    the API) and stops new dispatch;
-//! 6. assemble the selected takes on a timeline and export it through the `timeline_export` job;
-//! 7. write `run.json` (shot -> attempt -> job -> asset, which take is selected, the human
-//!    decisions, timeline, export, observed model/backend/hardware) beside copies of the two source
-//!    documents.
-//!
-//! sc-22711 makes that record the run's DURABLE STATE rather than a report written at the end. It
-//! is rewritten atomically at every transition, and three entry points share the same driver:
-//!
-//! * [`run`] starts a new record;
-//! * [`resume`] adopts an existing one — every recorded take is reused and every job the record
-//!   names is read back from the API and adopted at whatever state it actually reached, under what
-//!   is LEFT of the plan's cumulative wall-clock budget and per-shot attempt cap;
-//! * [`replace_take`] is the one human action that changes a shot's selected take: it rejects the
-//!   current one (which stays in the record), renders exactly one more for that shot alone, and
-//!   flags — never regenerates — the shots that declared a dependency on it.
-//!
-//! The window a record alone cannot close — the job was created but its id was never written — is
-//! closed by an [`idempotency_key`] carried in the job payload, so a replay finds its own job
-//! rather than enqueuing a second one. The project, the imported references and the export job are
-//! adopted the same way, by the identity each was created under.
-//!
-//! Assumed throughout: **one controller at a time per run directory**. Nothing locks the record, so
-//! the keys above make a SEQUENTIAL replay safe, not two live controllers writing the same
-//! `run.json`. [`replace_take`] refuses while the shot still has an unsettled attempt, which is the
-//! case that would otherwise orphan a job.
+//!    limits — a limit that trips cancels the in-flight job (cooperatively, through the API) and
+//!    stops new dispatch; the observed peak comes from the job's metrics block
+//!    (`GET /api/v1/jobs/:id/metrics`), which is where a real worker reports it;
+//! 6. assemble the rendered takes on a timeline and export it through the `timeline_export` job;
+//! 7. write `run.json` (shot -> attempt -> job -> asset, timeline, export, observed
+//!    model/backend/hardware) beside copies of the two source documents — on every path past
+//!    step 1, refusals and mid-run failures included.
 
 pub mod review;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -73,89 +56,66 @@ use tokio::time::Instant;
 /// Statuses the job store treats as terminal.
 const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 
-/// How long to wait for a canceled job to reach a terminal state before the harness records it as
-/// timed out and moves on. The worker cancels cooperatively between stages, so this bounds the wait
-/// rather than the worker.
+/// How long to wait for a canceled job to reach a terminal state before the harness gives up on it.
+/// The worker cancels cooperatively between stages, so this bounds the wait rather than the worker.
+/// Capped at the plan's own per-shot budget, so a plan that declares a short shot also gets a short
+/// grace.
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
-/// Export resolutions the timeline export route admits (`validate_timeline_export`).
-const EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
+/// How long a TERMINAL job may keep raw `assetWrites` in its result — the window between the
+/// worker's terminal status and the API's asset persistence (`persist_reported_assets`) — before
+/// the harness stops waiting and records the attempt as terminal-but-unsettled. Also capped at the
+/// per-shot budget.
+const ASSET_SETTLE_GRACE: Duration = Duration::from_secs(30);
 
-/// Tag every harness-imported reference carries beside its role tag.
+/// How long to keep re-reading `GET /api/v1/jobs/:id/metrics` after a terminal attempt. The worker
+/// POSTs its metrics block AFTER the terminal progress update, so the first read can legitimately
+/// come back `null`.
+const METRICS_GRACE: Duration = Duration::from_secs(5);
+
+/// Cadence of the metrics re-read inside [`METRICS_GRACE`] (independent of the job poll cadence,
+/// which a real run sets to seconds).
+const METRICS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How close two `ln(w/h)` distances must be to count as a tie when picking a timeline aspect
+/// ratio. 4:3 is EXACTLY equidistant from 1:1 and 16:9 on that scale (4/3 is their geometric
+/// mean), so the tie is real arithmetic, not float noise, and must be broken deliberately.
+const ASPECT_TIE_EPSILON: f64 = 1e-9;
+
+/// Bytes per GB in every memory comparison the harness makes: GiB. `GET /api/v1/host-capabilities`
+/// reports `memoryGb` as the worker's `memoryTotalMb / 1024`, and the manifests' `minMemoryGb` are
+/// written in the same base, so `limits.maxMemoryGb` is a GiB budget and an observed peak in bytes
+/// has to be divided by 1024^3 to be compared with it.
+const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// Tag every harness-imported APPROVED reference carries beside its role tag.
 const REFERENCE_TAG: &str = "film-harness-reference";
+
+/// Tag an imported reference the pack has NOT approved carries instead, so a query for the
+/// conditioning-eligible references cannot pick it up.
+const UNAPPROVED_REFERENCE_TAG: &str = "film-harness-reference-unapproved";
 
 /// File name of the run record inside the run directory.
 pub const RUN_RECORD_FILE: &str = "run.json";
 
 /// File `film-harness cancel` drops in the run directory. A controller in another process polls for
-/// it, which is what makes cancellation work without a shared handle to the running controller.
+/// it, which is what makes cancellation work without a shared handle to the running controller
+/// (sc-22711).
 pub const CANCEL_SENTINEL_FILE: &str = "cancel.requested";
 
 /// How many jobs a reconciliation lists when looking for a job this run created.
 const JOB_LOOKUP_LIMIT: u32 = 500;
 
-/// A cancel request, observable from inside a running harness.
-///
-/// Two sources, because cancellation has to work both ways: an in-process handle (the binary's
-/// Ctrl-C hook, or a test) sets the flag, and a separate `film-harness cancel` invocation drops
-/// [`CANCEL_SENTINEL_FILE`] in the run directory. A controller checks both before every dispatch
-/// and on every poll, so a cancel lands within one poll interval either way.
-#[derive(Debug, Clone, Default)]
-pub struct CancelToken {
-    flag: Arc<AtomicBool>,
-    sentinel: Option<PathBuf>,
-}
-
-impl CancelToken {
-    /// A token only this process can trip.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// A token that is also tripped by the presence of `<run_dir>/cancel.requested`.
-    pub fn watching(run_dir: &Path) -> Self {
-        Self {
-            flag: Arc::new(AtomicBool::new(false)),
-            sentinel: Some(run_dir.join(CANCEL_SENTINEL_FILE)),
-        }
-    }
-
-    /// Trip the token from this process (a signal handler, or a test).
-    pub fn request(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-    }
-
-    /// Whether a cancel has been requested by either source.
-    pub fn is_requested(&self) -> bool {
-        if self.flag.load(Ordering::SeqCst) {
-            return true;
-        }
-        self.sentinel
-            .as_deref()
-            .is_some_and(|path| path.try_exists().unwrap_or(false))
-    }
-}
-
-/// Ask the run in `run_dir` to stop, from outside the process that is running it. Returns the path
-/// of the sentinel it wrote. A run that is not currently held picks this up on its next start, so
-/// [`clear_cancel_request`] runs before a resume.
-pub fn request_cancel(run_dir: &Path) -> Result<PathBuf, HarnessError> {
-    std::fs::create_dir_all(run_dir)?;
-    let path = run_dir.join(CANCEL_SENTINEL_FILE);
-    std::fs::write(&path, format!("{}\n", utc_now()))?;
-    Ok(path)
-}
-
-/// Remove a stale cancel sentinel so a resume is not cancelled by the request that stopped the
-/// previous controller.
-pub fn clear_cancel_request(run_dir: &Path) -> Result<(), HarnessError> {
-    let path = run_dir.join(CANCEL_SENTINEL_FILE);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
+/// Attempt statuses that need no further reconciliation on a resume.
+const TERMINAL_ATTEMPT_STATUSES: &[&str] = &[
+    "completed",
+    "failed",
+    "canceled",
+    "canceled_by_operator",
+    "interrupted",
+    "timed_out",
+    "rejected",
+];
 
 /// One request to the SceneWorks API.
 #[derive(Debug, Clone)]
@@ -208,7 +168,7 @@ pub enum HarnessError {
     Transport(String),
     /// The requested action does not apply to the run record on disk — it is finished and not
     /// resumable, its documents no longer hash to what the run was started from, or it names no
-    /// such shot. Nothing was dispatched.
+    /// such shot. Nothing was dispatched (sc-22711).
     Refused(String),
     Io(String),
 }
@@ -267,13 +227,74 @@ pub struct RunOptions {
     /// worker that owns no weights and turn this off; a real run keeps it on so an uninstalled
     /// tier is refused here rather than by a failed job.
     pub require_installed: bool,
-    /// Cancel request the run watches. Default: only this process can trip it.
-    pub cancel: CancelToken,
+}
+
+/// Cooperative cancellation for a run. The `film-harness` binary flips it from its `ctrl_c`
+/// handler; the harness then cancels the in-flight job through the API, stops dispatching, and
+/// still writes the run record — rather than leaving a 45-minute render on the GPU with no record
+/// of it, which is the opposite of what the plan's limits are for.
+/// sc-22711 adds the second source: a controller can also be asked to stop from ANOTHER process, by
+/// `film-harness cancel --out DIR` dropping [`CANCEL_SENTINEL_FILE`] in the run directory. A
+/// controller checks both before every dispatch and on every poll, so a cancel lands within one
+/// poll interval either way.
+#[derive(Debug, Clone, Default)]
+pub struct RunControl {
+    canceled: Arc<AtomicBool>,
+    sentinel: Option<PathBuf>,
+}
+
+impl RunControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A control that is also tripped by the presence of `<run_dir>/cancel.requested`.
+    pub fn watching(run_dir: &Path) -> Self {
+        Self {
+            canceled: Arc::new(AtomicBool::new(false)),
+            sentinel: Some(run_dir.join(CANCEL_SENTINEL_FILE)),
+        }
+    }
+
+    /// Ask the in-flight run to cancel its job and stop dispatching. Idempotent.
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        if self.canceled.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.sentinel
+            .as_deref()
+            .is_some_and(|path| path.try_exists().unwrap_or(false))
+    }
+}
+
+/// Ask the run in `run_dir` to stop, from outside the process running it. Returns the sentinel it
+/// wrote. A run that is not currently held picks this up on its next start, so
+/// [`clear_cancel_request`] runs before a resume.
+pub fn request_cancel(run_dir: &Path) -> Result<PathBuf, HarnessError> {
+    std::fs::create_dir_all(run_dir)?;
+    let path = run_dir.join(CANCEL_SENTINEL_FILE);
+    std::fs::write(&path, format!("{}\n", utc_now()))?;
+    Ok(path)
+}
+
+/// Remove a stale cancel sentinel so a resume is not cancelled by the request that stopped the
+/// previous controller.
+pub fn clear_cancel_request(run_dir: &Path) -> Result<(), HarnessError> {
+    let path = run_dir.join(CANCEL_SENTINEL_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// What `resume` and `replace-take` need. Everything else — which plan, which pack, which project,
 /// which shots, which limits — comes from the run record in `out_dir`, because those are properties
-/// of the run being continued, not of the invocation continuing it.
+/// of the run being continued, not of the invocation continuing it (sc-22711).
 #[derive(Debug, Clone)]
 pub struct ResumeOptions {
     /// The run directory holding `run.json`.
@@ -283,19 +304,19 @@ pub struct ResumeOptions {
     /// take is selected (without it the existing export is simply marked stale).
     pub export: bool,
     pub require_installed: bool,
-    pub cancel: CancelToken,
+    pub control: RunControl,
 }
 
 impl ResumeOptions {
     /// Defaults for a run directory: watch that directory's cancel sentinel, poll every 5s, export.
     pub fn new(out_dir: PathBuf) -> Self {
-        let cancel = CancelToken::watching(&out_dir);
+        let control = RunControl::watching(&out_dir);
         Self {
             out_dir,
             poll_interval: Duration::from_secs(5),
             export: true,
             require_installed: true,
-            cancel,
+            control,
         }
     }
 }
@@ -312,6 +333,28 @@ pub fn read_run_record(run_dir: &Path) -> Result<RunRecord, HarnessError> {
     })
 }
 
+/// The multipart filename for `path`'s basename: every character outside `[A-Za-z0-9._-]` replaced,
+/// so a name can never inject `Content-Disposition` headers. `validate_reference_pack` already
+/// refuses such a basename; this is the second half of the same guard, at the encoder, so no future
+/// caller can reach the header with an unchecked name.
+pub fn sanitize_multipart_filename(filename: &str) -> String {
+    let sanitized: String = filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.trim_matches('.').is_empty() {
+        "reference.png".to_owned()
+    } else {
+        sanitized
+    }
+}
+
 /// Encode a single-file `multipart/form-data` body the asset import route accepts: the `file`
 /// field plus a JSON `provenance` field.
 pub fn encode_asset_upload(
@@ -326,7 +369,7 @@ pub fn encode_asset_upload(
     body.extend_from_slice(
         format!(
             "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            filename.replace('"', "")
+            sanitize_multipart_filename(filename)
         )
         .as_bytes(),
     );
@@ -395,8 +438,25 @@ impl JobView {
     /// as `assets` / `assetIds` (the durable two-phase handoff in `update_job_progress`), so a
     /// poller can observe `completed` with the raw facts still in place. Reading that snapshot as
     /// done would record "completed without an asset".
+    ///
+    /// The persisted side is the positive signal: once `assets` / `assetIds` are present the
+    /// handoff is done, whatever else the result still carries. Waiting on the ABSENCE of
+    /// `assetWrites` alone has no escape hatch — `persist_reported_assets` returns early without
+    /// removing the key when the job row carries no `project_id`, and the recovery loop can retry a
+    /// persistently failing handoff indefinitely — which would poll a finished job until the shot
+    /// budget expired and then report it as a timeout with the take lost.
     fn is_settled(&self) -> bool {
         self.status != "completed"
+            || self
+                .result
+                .get("assets")
+                .and_then(Value::as_array)
+                .is_some()
+            || self
+                .result
+                .get("assetIds")
+                .and_then(Value::as_array)
+                .is_some()
             || self
                 .result
                 .get("assetWrites")
@@ -420,13 +480,30 @@ enum PollStop {
     ShotBudget,
     /// The run's budget ran out.
     RunBudget,
-    /// A cancel was requested while the job was in flight.
-    Canceled,
+    /// The operator asked the run to stop (SIGINT on the binary).
+    Operator,
+    /// The job reached a terminal status but the API never finished persisting its reported
+    /// assets, so the result stayed non-final for [`ASSET_SETTLE_GRACE`].
+    AssetsUnsettled,
 }
 
-#[derive(Clone, Copy)]
+/// Everything one poll loop is bounded by.
+#[derive(Debug, Clone, Copy)]
+struct PollBounds {
+    shot_deadline: Instant,
+    run_deadline: Instant,
+    poll_interval: Duration,
+    /// How long a canceled job gets to reach a terminal state: [`CANCEL_GRACE`] capped at the
+    /// plan's per-shot budget.
+    cancel_grace: Duration,
+    /// How long a terminal job gets to finish persisting its reported assets:
+    /// [`ASSET_SETTLE_GRACE`] capped at the plan's per-shot budget.
+    settle_grace: Duration,
+}
+
 struct Client<'a> {
     transport: &'a dyn ApiTransport,
+    control: &'a RunControl,
 }
 
 impl Client<'_> {
@@ -490,7 +567,7 @@ impl Client<'_> {
     ///
     /// This is the whole answer to the "created the job, died before recording its id" window: the
     /// key is in the payload the API persisted, so the controller that comes back finds its own job
-    /// instead of enqueuing a second one for the same attempt.
+    /// instead of enqueuing a second one for the same attempt (sc-22711).
     async fn find_job_by_idempotency_key(
         &self,
         project_id: &str,
@@ -539,28 +616,40 @@ impl Client<'_> {
         Ok(candidates.last().map(|(id, _)| (*id).to_owned()))
     }
 
-    /// Poll `job_id` until it is terminal or a deadline passes. On a deadline (or a cancel request)
-    /// the job is canceled through the API and given [`CANCEL_GRACE`] to settle; the returned view
-    /// is the last one observed either way.
+    /// Poll `job_id` until it is terminal or a deadline passes. On a deadline (or an operator
+    /// cancel) the job is canceled through the API and given `bounds.grace` to settle; the returned
+    /// view is the last one observed either way.
+    ///
+    /// A job that is already terminal but whose result the API has not finished persisting is
+    /// waited out separately — never cancelled, since cancelling a finished job is meaningless —
+    /// and bounded by the same grace, after which it comes back as
+    /// [`PollStop::AssetsUnsettled`] rather than as a budget timeout.
     async fn wait_for_job(
         &self,
         job_id: &str,
-        shot_deadline: Instant,
-        run_deadline: Instant,
-        poll_interval: Duration,
-        cancel: &CancelToken,
+        bounds: PollBounds,
     ) -> Result<(JobView, PollStop), HarnessError> {
+        let mut unsettled_deadline: Option<Instant> = None;
         loop {
             let view = self.get_job(job_id).await?;
-            if view.is_terminal() && view.is_settled() {
-                return Ok((view, PollStop::Terminal));
+            if view.is_terminal() {
+                if view.is_settled() {
+                    return Ok((view, PollStop::Terminal));
+                }
+                let deadline =
+                    *unsettled_deadline.get_or_insert(Instant::now() + bounds.settle_grace);
+                if Instant::now() >= deadline {
+                    return Ok((view, PollStop::AssetsUnsettled));
+                }
+                tokio::time::sleep(bounds.poll_interval.min(bounds.settle_grace)).await;
+                continue;
             }
             let now = Instant::now();
-            let stop = if cancel.is_requested() {
-                Some(PollStop::Canceled)
-            } else if now >= run_deadline {
+            let stop = if self.control.is_canceled() {
+                Some(PollStop::Operator)
+            } else if now >= bounds.run_deadline {
                 Some(PollStop::RunBudget)
-            } else if now >= shot_deadline {
+            } else if now >= bounds.shot_deadline {
                 Some(PollStop::ShotBudget)
             } else {
                 None
@@ -571,10 +660,10 @@ impl Client<'_> {
                 let _ = self
                     .json("POST", &format!("/api/v1/jobs/{job_id}/cancel"), None)
                     .await?;
-                let grace_deadline = Instant::now() + CANCEL_GRACE;
+                let grace_deadline = Instant::now() + bounds.cancel_grace;
                 let mut last = view;
                 while Instant::now() < grace_deadline {
-                    tokio::time::sleep(poll_interval).await;
+                    tokio::time::sleep(bounds.poll_interval.min(bounds.cancel_grace)).await;
                     last = self.get_job(job_id).await?;
                     if last.is_terminal() && last.is_settled() {
                         break;
@@ -582,18 +671,118 @@ impl Client<'_> {
                 }
                 return Ok((last, stop));
             }
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(bounds.poll_interval).await;
         }
+    }
+
+    /// The job's `generation_metrics` block (`GET /api/v1/jobs/:id/metrics`), retried for
+    /// [`METRICS_GRACE`] because the worker POSTs it AFTER the terminal progress update — the same
+    /// two-phase shape the asset handoff has. `None` once the window closes with nothing recorded
+    /// (a worker whose probe measured nothing posts no block at all), and never an error: telemetry
+    /// must not fail a run that rendered.
+    async fn job_metrics(&self, job_id: &str, poll_interval: Duration) -> Option<Value> {
+        let path = format!("/api/v1/jobs/{job_id}/metrics");
+        let deadline = Instant::now() + METRICS_GRACE;
+        let cadence = poll_interval.min(METRICS_RETRY_INTERVAL);
+        loop {
+            if let Ok(response) = self.json("GET", &path, None).await {
+                if (200..300).contains(&response.status) && !response.body.is_null() {
+                    return Some(response.body);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(cadence).await;
+        }
+    }
+}
+
+/// One attempt's observed memory peak, and which signal it came from.
+#[derive(Debug, Clone, Default)]
+struct MemoryObservation {
+    /// The peak in GiB — what `limits.maxMemoryGb` is compared against.
+    gb: Option<f64>,
+    /// The peak as a percentage of host memory, when the source expressed one.
+    pct: Option<f64>,
+    source: Option<String>,
+}
+
+/// Read an attempt's peak memory, preferring the real production signal.
+///
+/// `GenerationMetrics.peakMemoryBytes` (MLX `get_peak_memory` on macOS, the nvidia-smi high-water
+/// mark on candle) is the only measured peak a shipped worker reports: EVERY `ProgressRequest` in
+/// `sceneworks-worker` sets `peakGpuMemoryPct: None`, so the job snapshot's field is always null on
+/// a real render and is kept here only as a last resort for a future worker that fills it.
+fn memory_observation(
+    metrics: Option<&Value>,
+    view: &JobView,
+    host_memory_gb: Option<f64>,
+) -> MemoryObservation {
+    // A zero peak is "nothing was measured", not "this run used no memory" — the export job's own
+    // metrics row on a real run is exactly that — so it falls through to the next source.
+    let number = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_f64)
+            .filter(|number| number.is_finite() && *number > 0.0)
+    };
+    let metrics_pct = number(metrics.and_then(|metrics| metrics.get("peakMemoryPct")));
+    if let Some(bytes) = number(metrics.and_then(|metrics| metrics.get("peakMemoryBytes"))) {
+        return MemoryObservation {
+            gb: Some(bytes / BYTES_PER_GB),
+            pct: metrics_pct,
+            source: Some("metrics.peakMemoryBytes".to_owned()),
+        };
+    }
+    if let (Some(pct), Some(host)) = (metrics_pct, host_memory_gb) {
+        return MemoryObservation {
+            gb: Some(host * pct / 100.0),
+            pct: Some(pct),
+            source: Some("metrics.peakMemoryPct".to_owned()),
+        };
+    }
+    match (view.peak_gpu_memory_pct, host_memory_gb) {
+        (Some(pct), Some(host)) => MemoryObservation {
+            gb: Some(host * pct / 100.0),
+            pct: Some(pct),
+            source: Some("job.peakGpuMemoryPct".to_owned()),
+        },
+        (Some(pct), None) => MemoryObservation {
+            gb: None,
+            pct: Some(pct),
+            source: Some("job.peakGpuMemoryPct".to_owned()),
+        },
+        _ => MemoryObservation::default(),
     }
 }
 
 /// What the run learned about the host and the worker that will render.
 #[derive(Debug, Clone, Default)]
 struct HostFacts {
+    /// The API HOST's platform (`std::env::consts::OS` spelling), from
+    /// `GET /api/v1/host-capabilities`. `--api` may point at another machine, so this — not
+    /// `cfg!(target_os)` — decides the lane whose `minMemoryGb` the plan is checked against, the
+    /// platform the route's own reachability gate is judged on, and the hardware the record claims.
+    platform: Option<String>,
     host_memory_gb: Option<f64>,
     video_worker_id: Option<String>,
     video_gpu_name: Option<String>,
     export_worker: bool,
+}
+
+impl HostFacts {
+    /// The lane the render host reads its memory minimum from, falling back to this process's own
+    /// platform only when the API reports none.
+    fn lane(&self) -> ModelLane {
+        match self.platform.as_deref() {
+            Some(platform) => ModelLane::for_platform(platform),
+            None => ModelLane::for_current_platform(),
+        }
+    }
+
+    fn platform_or_local(&self) -> &str {
+        self.platform.as_deref().unwrap_or(std::env::consts::OS)
+    }
 }
 
 async fn discover_host(client: &Client<'_>) -> Result<HostFacts, HarnessError> {
@@ -621,6 +810,11 @@ async fn discover_host(client: &Client<'_>) -> Result<HostFacts, HarnessError> {
     let host = client
         .expect_ok("GET", "/api/v1/host-capabilities", None)
         .await?;
+    facts.platform = host
+        .get("platform")
+        .and_then(Value::as_str)
+        .filter(|platform| !platform.trim().is_empty())
+        .map(str::to_owned);
     facts.host_memory_gb = host
         .get("memoryGb")
         .and_then(Value::as_f64)
@@ -709,7 +903,7 @@ struct ShotDispatch<'a> {
     run_id: &'a str,
     attempt: u32,
     /// [`idempotency_key`] for this attempt, recorded before the job is created and stamped into
-    /// the payload so a replay can recognise its own job.
+    /// the payload so a replay can recognise its own job (sc-22711).
     idempotency_key: &'a str,
     fps: u32,
     width: u32,
@@ -719,7 +913,7 @@ struct ShotDispatch<'a> {
 
 /// The key one attempt of one shot dispatches under. Stable across restarts because every part of
 /// it is: the run id is in the record, the shot id is in the plan, and attempt numbers never repeat
-/// within a shot.
+/// within a shot (sc-22711).
 pub fn idempotency_key(run_id: &str, shot_id: &str, attempt: u32) -> String {
     format!("{run_id}:{shot_id}:a{attempt}")
 }
@@ -816,20 +1010,70 @@ fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Optio
     })
 }
 
+/// The timeline aspect ratio a take of this geometry is CREATED at: the admitted ratio closest to
+/// the take's own, derived from the real geometry rather than from its orientation alone.
+///
+/// The timeline route admits only what `sceneworks_core::project_store::TIMELINE_ASPECT_RATIOS`
+/// lists (`16:9` / `9:16` / `1:1`), and the fixture's 576x320 takes are 9:5 — so SOMETHING has to
+/// be coerced, and the export pads the take into the frame (a 576x320 take in a 640-tall 16:9
+/// export lands as 1138x640 with bars). Distance is measured on `ln(w/h)` — the scale-free
+/// comparison, on which 2:1 is as far from 16:9 as 16:9 is from 1.0 — and a tie goes to the
+/// candidate whose ORIENTATION matches the take's, because 4:3 sits exactly halfway between 1:1
+/// and 16:9 on that scale and a landscape take belongs in a landscape frame.
+/// [`reduced_aspect_ratio`] records what the takes actually are, so the record never states the
+/// coerced ratio as a fact about the footage.
 fn aspect_ratio_for(width: u32, height: u32) -> &'static str {
-    match width.cmp(&height) {
-        std::cmp::Ordering::Greater => "16:9",
-        std::cmp::Ordering::Less => "9:16",
-        std::cmp::Ordering::Equal => "1:1",
+    let take = (f64::from(width.max(1)) / f64::from(height.max(1))).ln();
+    let orientation = width.cmp(&height);
+    let mut best: Option<(&'static str, f64, bool)> = None;
+    for (name, candidate_width, candidate_height) in
+        sceneworks_core::project_store::TIMELINE_ASPECT_RATIOS
+    {
+        let distance =
+            (take - (f64::from(*candidate_width) / f64::from(*candidate_height)).ln()).abs();
+        let matches_orientation = candidate_width.cmp(candidate_height) == orientation;
+        let better = match best {
+            None => true,
+            Some((_, best_distance, best_matches)) => {
+                if (distance - best_distance).abs() <= ASPECT_TIE_EPSILON {
+                    matches_orientation && !best_matches
+                } else {
+                    distance < best_distance
+                }
+            }
+        };
+        if better {
+            best = Some((name, distance, matches_orientation));
+        }
     }
+    best.map_or("16:9", |(name, _, _)| name)
+}
+
+/// The takes' own ratio in lowest terms, e.g. `9:5` for 576x320.
+fn reduced_aspect_ratio(width: u32, height: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a.max(1)
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let divisor = gcd(width, height);
+    format!("{}:{}", width / divisor, height / divisor)
 }
 
 fn export_resolution_for(height: u32) -> u32 {
-    EXPORT_RESOLUTIONS
+    crate::TIMELINE_EXPORT_RESOLUTIONS
         .iter()
         .copied()
         .find(|candidate| *candidate >= height)
-        .unwrap_or(1280)
+        .unwrap_or_else(|| {
+            crate::TIMELINE_EXPORT_RESOLUTIONS
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(1280)
+        })
 }
 
 fn seconds_since(start: Instant) -> f64 {
@@ -839,12 +1083,6 @@ fn seconds_since(start: Instant) -> f64 {
 /// Write `record` as `run.json` under `out_dir` and, when the project directory is reachable on
 /// this filesystem, as `<project>/film-harness/<run_id>/run.json` too. Source documents are copied
 /// beside the out-dir record so the run is self-describing.
-///
-/// The record is the run's durable state, rewritten at every transition, so it is written
-/// **atomically** (temp file + rename): a controller killed during a write must leave the previous
-/// record intact rather than a truncated file no resume can parse. The source copies are written
-/// once and then left alone, so an edit to the source plan mid-run cannot rewrite the copy the run
-/// was actually started from.
 fn persist_record(
     record: &RunRecord,
     out_dir: &Path,
@@ -856,6 +1094,8 @@ fn persist_record(
         .map_err(|error| HarnessError::Io(error.to_string()))?;
     let record_path = out_dir.join(RUN_RECORD_FILE);
     write_atomically(&record_path, json.as_bytes())?;
+    // Written once and then left alone, so an edit to the source plan mid-run cannot rewrite the
+    // copy the run was actually started from — which is what a resume re-hashes (sc-22711).
     for (source, copy) in [
         (plan_path, out_dir.join("plan.json")),
         (pack_path, out_dir.join("references.json")),
@@ -876,8 +1116,11 @@ fn persist_record(
     Ok(record_path)
 }
 
-/// Write `bytes` to `path` through a sibling temp file and a rename, so a reader never sees a
-/// half-written file and a crash mid-write leaves the previous contents.
+/// Write `bytes` to `path` through a sibling temp file and a rename.
+///
+/// sc-22711 rewrites the record at every state transition rather than once at the end, so a
+/// controller killed during a write must leave the PREVIOUS record intact rather than a truncated
+/// file no resume can parse.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), HarnessError> {
     let temp = path.with_extension(format!(
         "{}tmp",
@@ -912,11 +1155,18 @@ pub async fn validate(
         return Err(HarnessError::Validation(findings));
     }
     if let Some(transport) = transport {
-        let client = Client { transport };
+        let control = RunControl::default();
+        let client = Client {
+            transport,
+            control: &control,
+        };
+        // The host comes FIRST: its platform decides which lane's `minMemoryGb` the plan is
+        // checked against and which platform the route's reachability gate is judged on, so the
+        // model checks cannot run before it is known.
+        let facts = discover_host(&client).await?;
         let entry = resolve_model_entry(&client, &plan.model.id).await?;
-        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed);
+        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed, &facts);
         if findings.is_empty() {
-            let facts = discover_host(&client).await?;
             findings.extend(host_findings(&plan, &facts, options.export));
         }
         if !findings.is_empty() {
@@ -956,10 +1206,59 @@ fn selection_findings(plan: &ProductionPlan, selection: Option<&[String]>) -> Ve
     findings
 }
 
+/// The route's own platform-reachability gate, run before dispatch instead of being discovered as
+/// a 400 at enqueue: `POST /api/v1/video/jobs` calls exactly this function
+/// ([`crate::generation::ensure_video_model_available_on_platform`]) on the resolved manifest
+/// entry, so a plan this validator passes cannot be refused for the reason it checks.
+fn platform_reachability_finding(
+    model_id: &str,
+    entry: &JsonObject<String, Value>,
+    platform: &str,
+) -> Option<PlanDiagnostic> {
+    let value = Value::Object(entry.clone());
+    crate::generation::ensure_video_model_available_on_platform(model_id, &value, platform)
+        .err()
+        .map(|error| PlanDiagnostic::plan("model.id", error.detail))
+}
+
+/// The route's reference-payload gate, run before dispatch on the payload shape each shot will
+/// produce. Placeholder ids stand in for the asset ids the import has not created yet: they are
+/// non-blank and untrimmed-free by construction, so the only questions this can answer are the ones
+/// that depend on the PLAN — how many references a shot carries, and the model/mode spelling.
+fn reference_payload_findings(
+    plan: &ProductionPlan,
+    entry: &JsonObject<String, Value>,
+) -> Vec<PlanDiagnostic> {
+    let value = Value::Object(entry.clone());
+    let mut findings = Vec::new();
+    for shot in &plan.shots {
+        let mut payload = JsonObject::new();
+        payload.insert("model".to_owned(), json!(plan.model.id));
+        payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
+        payload.insert(
+            "referenceAssetIds".to_owned(),
+            Value::Array(
+                (0..shot.conditioning.reference_roles.len())
+                    .map(|index| json!(format!("placeholder_reference_{index}")))
+                    .collect(),
+            ),
+        );
+        if let Err(error) = crate::validate_video_reference_asset_ids_payload(&payload, &value) {
+            findings.push(PlanDiagnostic::shot(
+                &shot.id,
+                "conditioning.referenceRoles",
+                error.detail,
+            ));
+        }
+    }
+    findings
+}
+
 fn model_findings(
     plan: &ProductionPlan,
     entry: Option<&JsonObject<String, Value>>,
     require_installed: bool,
+    facts: &HostFacts,
 ) -> Vec<PlanDiagnostic> {
     let Some(entry) = entry else {
         return vec![PlanDiagnostic::plan(
@@ -989,11 +1288,17 @@ fn model_findings(
             ),
         ));
     }
+    findings.extend(platform_reachability_finding(
+        &plan.model.id,
+        entry,
+        facts.platform_or_local(),
+    ));
     findings.extend(film_plan::validate_plan_against_model(
         plan,
         entry,
-        ModelLane::for_current_platform(),
+        facts.lane(),
     ));
+    findings.extend(reference_payload_findings(plan, entry));
     findings
 }
 
@@ -1046,21 +1351,68 @@ async fn prepare(
     export: bool,
     require_installed: bool,
 ) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
+    let facts = discover_host(client).await?;
     let entry = resolve_model_entry(client, &plan.model.id).await?;
-    let mut findings = model_findings(plan, entry.as_ref(), require_installed);
-    let facts = if findings.is_empty() {
-        let facts = discover_host(client).await?;
+    let mut findings = model_findings(plan, entry.as_ref(), require_installed, &facts);
+    if findings.is_empty() {
         findings.extend(host_findings(plan, &facts, export));
-        facts
-    } else {
-        HostFacts::default()
-    };
+    }
     if !findings.is_empty() {
         return Ok(Err(findings));
     }
     let entry = entry.expect("model findings are empty only with an entry");
     let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
     Ok(Ok(Prepared { entry, facts, fps }))
+}
+
+/// One shot's selected take, resolved to everything the timeline needs.
+struct SelectedTake {
+    shot_id: String,
+    take: TakeRecord,
+    width: u32,
+    height: u32,
+    job_id: Option<String>,
+}
+
+/// An asset `run_id` already imported for `role`, matched on the provenance the import stamped.
+/// This is what keeps a replay from importing the same reference twice when the controller died
+/// between the upload and the record write (sc-22711).
+fn find_imported_reference(
+    assets: &[Value],
+    run_id: &str,
+    role: &str,
+    sha256: &str,
+) -> Option<String> {
+    assets
+        .iter()
+        .find(|asset| {
+            let field = |name: &str| {
+                asset
+                    .pointer("/extra/filmHarness")
+                    .and_then(|block| block.get(name))
+                    .and_then(Value::as_str)
+            };
+            field("runId") == Some(run_id)
+                && field("role") == Some(role)
+                && field("sha256") == Some(sha256)
+        })
+        .and_then(|asset| asset.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// How long an attempt has already been in flight.
+///
+/// A controller that died mid-poll never wrote `elapsedSeconds`, so the recorded value alone would
+/// hand a hung job a fresh per-shot budget on every restart. `startedAt` IS persisted at dispatch,
+/// and the job kept running while nothing was watching it, so wall-clock since then is the honest
+/// number; the larger of the two wins.
+fn attempt_spent_seconds(attempt: &AttemptRecord) -> f64 {
+    let recorded = attempt.elapsed_seconds.max(0.0);
+    let by_clock = parse_utc_seconds(&attempt.started_at)
+        .map(|started| (sceneworks_core::time::now_unix_seconds() - started).max(0) as f64)
+        .unwrap_or(0.0);
+    recorded.max(by_clock)
 }
 
 /// One controller holding one run.
@@ -1077,7 +1429,6 @@ struct Session<'a> {
     out_dir: PathBuf,
     poll_interval: Duration,
     export: bool,
-    cancel: CancelToken,
     plan: ProductionPlan,
     pack: ReferencePack,
     entry: JsonObject<String, Value>,
@@ -1094,7 +1445,7 @@ struct Session<'a> {
     stop: Option<(RunOutcome, RunStop)>,
 }
 
-impl<'a> Session<'a> {
+impl Session<'_> {
     /// Total wall-clock this run has consumed, across every controller that has held it.
     fn elapsed(&self) -> f64 {
         self.prior_elapsed + self.started.elapsed().as_secs_f64()
@@ -1134,9 +1485,25 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// A cancel that has been requested but not yet acted on.
-    fn cancel_requested(&self) -> bool {
-        self.cancel.is_requested()
+    fn canceled(&self) -> bool {
+        self.client.control.is_canceled()
+    }
+
+    /// The per-shot budget, and the graces derived from it: a cancel is never given more room to
+    /// settle than the plan gave the whole attempt.
+    fn shot_budget(&self) -> Duration {
+        Duration::from_secs(self.plan.limits.max_shot_seconds)
+    }
+
+    fn bounds(&self, shot_deadline: Instant) -> PollBounds {
+        let shot_budget = self.shot_budget();
+        PollBounds {
+            shot_deadline,
+            run_deadline: self.run_deadline,
+            poll_interval: self.poll_interval,
+            cancel_grace: CANCEL_GRACE.min(shot_budget),
+            settle_grace: ASSET_SETTLE_GRACE.min(shot_budget),
+        }
     }
 
     fn project_id(&self) -> Result<String, HarnessError> {
@@ -1152,7 +1519,7 @@ impl<'a> Session<'a> {
 
     /// The project this run writes into. A run that created its own names it after the plan AND the
     /// run, which is what lets a controller that died right after `POST /projects` find that exact
-    /// project again instead of creating a second one.
+    /// project again instead of creating a second one (sc-22711).
     fn project_name(&self) -> String {
         format!("{} ({})", self.plan.title, self.record.run_id)
     }
@@ -1211,9 +1578,19 @@ impl<'a> Session<'a> {
     async fn ensure_references(&mut self) -> Result<(), HarnessError> {
         let project_id = self.project_id()?;
         for existing in &self.record.references {
-            self.role_assets
-                .insert(existing.role.clone(), existing.asset_id.clone());
+            // Only APPROVED roles resolve into a shot's conditioning slots, on a resume exactly as
+            // on a first run.
+            if existing.approved {
+                self.role_assets
+                    .insert(existing.role.clone(), existing.asset_id.clone());
+            }
         }
+        let imported: BTreeSet<String> = self
+            .record
+            .references
+            .iter()
+            .map(|reference| reference.role.clone())
+            .collect();
         let pack_dir = self
             .pack_path
             .parent()
@@ -1221,10 +1598,10 @@ impl<'a> Session<'a> {
             .unwrap_or_else(|| PathBuf::from("."));
         let references = self.pack.references.clone();
         // One listing for the whole pass, not one per reference: anything imported later in this
-        // loop is this controller's own and is already in `role_assets`.
+        // loop is this controller's own and is already recorded.
         let already_imported = if references
             .iter()
-            .any(|reference| !self.role_assets.contains_key(&reference.role))
+            .any(|reference| !imported.contains(&reference.role))
         {
             self.client
                 .expect_ok(
@@ -1240,7 +1617,7 @@ impl<'a> Session<'a> {
             Vec::new()
         };
         for reference in &references {
-            if self.role_assets.contains_key(&reference.role) {
+            if imported.contains(&reference.role) {
                 continue;
             }
             let path = pack_dir.join(&reference.file);
@@ -1258,14 +1635,17 @@ impl<'a> Session<'a> {
                         .await?
                 }
             };
-            self.role_assets
-                .insert(reference.role.clone(), asset_id.clone());
+            if reference.approved {
+                self.role_assets
+                    .insert(reference.role.clone(), asset_id.clone());
+            }
             self.record.references.push(ReferenceAssetRecord {
                 role: reference.role.clone(),
                 kind: reference.kind.clone(),
                 file: reference.file.clone(),
                 sha256,
                 asset_id,
+                approved: reference.approved,
             });
             self.persist()?;
         }
@@ -1342,13 +1722,21 @@ impl<'a> Session<'a> {
                 ))
             })?
             .to_owned();
+        // An unapproved reference is imported (so the record can point at it and a human can review
+        // it) but tagged distinctly, so a query for the conditioning-eligible references cannot
+        // pick it up.
+        let kind_tag = if reference.approved {
+            REFERENCE_TAG
+        } else {
+            UNAPPROVED_REFERENCE_TAG
+        };
         self.client
             .expect_ok(
                 "PATCH",
                 &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
                 Some(json!({
                     "tags": [
-                        REFERENCE_TAG,
+                        kind_tag,
                         format!("role:{}", reference.role),
                         format!("pack:{}", self.pack.id)
                     ]
@@ -1448,8 +1836,9 @@ impl<'a> Session<'a> {
     async fn work_shot(&mut self, shot: &film_plan::Shot) -> Result<(), HarnessError> {
         self.reconcile_shot(shot).await?;
         loop {
-            let index = self.record.shots.iter().position(|s| s.shot_id == shot.id);
-            let Some(index) = index else { return Ok(()) };
+            let Some(index) = self.record.shots.iter().position(|s| s.shot_id == shot.id) else {
+                return Ok(());
+            };
             if self.record.shots[index].selected_attempt.is_some() {
                 self.record.shots[index].outcome = ShotOutcome::Rendered;
                 return Ok(());
@@ -1471,7 +1860,7 @@ impl<'a> Session<'a> {
                     {
                         break;
                     }
-                    if self.cancel_requested() {
+                    if self.canceled() {
                         self.halt(
                             RunOutcome::Canceled,
                             "canceled",
@@ -1504,6 +1893,8 @@ impl<'a> Session<'a> {
                         finished_at: None,
                         elapsed_seconds: 0.0,
                         peak_gpu_memory_pct: None,
+                        peak_memory_gb: None,
+                        peak_memory_source: None,
                         error: None,
                         take: None,
                         rejection: None,
@@ -1522,9 +1913,8 @@ impl<'a> Session<'a> {
                 break;
             }
         }
-        let index = match self.record.shots.iter().position(|s| s.shot_id == shot.id) {
-            Some(index) => index,
-            None => return Ok(()),
+        let Some(index) = self.record.shots.iter().position(|s| s.shot_id == shot.id) else {
+            return Ok(());
         };
         let record = &mut self.record.shots[index];
         record.outcome = match record
@@ -1535,7 +1925,7 @@ impl<'a> Session<'a> {
             _ if record.selected_attempt.is_some() => ShotOutcome::Rendered,
             None => ShotOutcome::NotDispatched,
             Some("timed_out") => ShotOutcome::TimedOut,
-            Some("canceled") => ShotOutcome::Canceled,
+            Some("canceled" | "canceled_by_operator") => ShotOutcome::Canceled,
             Some(_) => ShotOutcome::Failed,
         };
         // A shot that spent its attempts does NOT stop the run: the remaining shots are independent
@@ -1644,20 +2034,22 @@ impl<'a> Session<'a> {
             + Duration::from_secs_f64((self.plan.limits.max_shot_seconds as f64 - spent).max(0.0));
         let (view, poll_stop) = self
             .client
-            .wait_for_job(
-                &job_id,
-                shot_deadline,
-                self.run_deadline,
-                self.poll_interval,
-                &self.cancel,
-            )
+            .wait_for_job(&job_id, self.bounds(shot_deadline))
             .await?;
 
-        // 3. Settle it into the record.
-        let memory_exceeded = match (view.peak_gpu_memory_pct, self.facts.host_memory_gb) {
-            (Some(pct), Some(host)) => host * pct / 100.0 > self.plan.limits.max_memory_gb,
-            _ => false,
-        };
+        // 3. Settle it into the record. The observed peak comes off the job's metrics block, which
+        // the worker POSTs after its terminal progress — so read it once the attempt is terminal,
+        // whatever ended it.
+        let metrics = self.client.job_metrics(&job_id, self.poll_interval).await;
+        let memory = memory_observation(metrics.as_ref(), &view, self.facts.host_memory_gb);
+        let memory_exceeded = memory
+            .gb
+            .is_some_and(|observed| observed > self.plan.limits.max_memory_gb);
+        // Whether the cancel the harness posted was actually honoured. A job still running after
+        // the grace is a render in flight that nothing here can stop.
+        let cancel_honoured = view.is_terminal();
+        let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
+        let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
             .then(|| take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref()))
             .flatten();
@@ -1665,10 +2057,16 @@ impl<'a> Session<'a> {
             let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
             attempt.finished_at = Some(utc_now());
             attempt.elapsed_seconds = spent + attempt_started.elapsed().as_secs_f64();
-            attempt.peak_gpu_memory_pct = view.peak_gpu_memory_pct;
+            attempt.peak_gpu_memory_pct = memory.pct;
+            attempt.peak_memory_gb = memory.gb;
+            attempt.peak_memory_source = memory.source.clone();
             attempt.status = match poll_stop {
-                PollStop::Terminal => view.status.clone(),
-                PollStop::Canceled => "canceled".to_owned(),
+                // Terminal either way — for `AssetsUnsettled` the JOB finished and it is the
+                // API's asset handoff that stalled, so the attempt records the job's own status
+                // and says what stalled in `error`. A resume re-reads a completed attempt that
+                // carries no take, which gives the handoff another chance to have landed.
+                PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+                PollStop::Operator => "canceled_by_operator".to_owned(),
                 PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
             };
             attempt.error = match poll_stop {
@@ -1680,10 +2078,40 @@ impl<'a> Session<'a> {
                 }
                 PollStop::Terminal if view.status == "completed" => None,
                 PollStop::Terminal => Some(view.failure_text()),
-                PollStop::Canceled => Some("canceled by request".to_owned()),
+                PollStop::AssetsUnsettled => Some(format!(
+                    "job {job_id} reached {} but its assets never settled within {:.0}s (the \
+                     result still carries raw assetWrites): {}",
+                    view.status,
+                    settle_grace.as_secs_f64(),
+                    view.result
+                )),
+                PollStop::Operator => Some(if cancel_honoured {
+                    format!("canceled by operator (job {job_id} is {})", view.status)
+                } else {
+                    format!(
+                        "canceled by operator; job {job_id} was still {} {:.0}s after the cancel \
+                         was posted",
+                        view.status,
+                        cancel_grace.as_secs_f64()
+                    )
+                }),
+                PollStop::ShotBudget if !cancel_honoured => Some(format!(
+                    "attempt exceeded the per-shot budget of {}s and job {job_id} is still \
+                     running {:.0}s after the cancel was posted — stopping dispatch rather than \
+                     running a second render beside it",
+                    self.plan.limits.max_shot_seconds,
+                    cancel_grace.as_secs_f64()
+                )),
                 PollStop::ShotBudget => Some(format!(
                     "attempt exceeded the per-shot budget of {}s (last status {})",
                     self.plan.limits.max_shot_seconds, view.status
+                )),
+                PollStop::RunBudget if !cancel_honoured => Some(format!(
+                    "run exceeded its budget of {}s and job {job_id} is still running {:.0}s \
+                     after the cancel was posted — stopping dispatch rather than running a second \
+                     render beside it",
+                    self.plan.limits.max_run_seconds,
+                    cancel_grace.as_secs_f64()
                 )),
                 PollStop::RunBudget => Some(format!(
                     "run exceeded its budget of {}s while this attempt was in flight (last status \
@@ -1709,11 +2137,34 @@ impl<'a> Session<'a> {
 
         // 4. Decide whether the run may keep dispatching.
         match poll_stop {
-            PollStop::Canceled => {
+            PollStop::AssetsUnsettled => {
+                // Retrying would dispatch a fresh render against a server-side condition a retry
+                // cannot fix.
+                self.halt(
+                    RunOutcome::Failed,
+                    "assets_unsettled",
+                    format!(
+                        "shot {}'s job finished but the API never persisted its assets; the take \
+                         cannot be adopted and a retry would not fix it",
+                        shot.id
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
+            PollStop::Operator => {
                 self.halt(
                     RunOutcome::Canceled,
                     "canceled",
-                    format!("canceled while shot {} was in flight", shot.id),
+                    if cancel_honoured {
+                        format!("canceled while shot {} was in flight", shot.id)
+                    } else {
+                        format!(
+                            "canceled while shot {} was in flight, and the job was still {} when \
+                             the grace ran out — check the GPU before resuming",
+                            shot.id, view.status
+                        )
+                    },
                     true,
                 );
                 return Ok(false);
@@ -1731,6 +2182,22 @@ impl<'a> Session<'a> {
                 );
                 return Ok(false);
             }
+            PollStop::ShotBudget if !cancel_honoured => {
+                // The render is still on the GPU. Neither the next attempt nor the next shot may go
+                // out beside it: the plan declared ONE memory budget, and two renders in flight is
+                // exactly what it is there to prevent.
+                self.halt(
+                    RunOutcome::Failed,
+                    "cancel_not_honoured",
+                    format!(
+                        "shot {}'s job was still {} after the cancel grace, so a render is in \
+                         flight that nothing here can stop; no further dispatch",
+                        shot.id, view.status
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
             _ => {}
         }
         if memory_exceeded {
@@ -1738,10 +2205,11 @@ impl<'a> Session<'a> {
                 RunOutcome::StoppedMemoryLimit,
                 "memory_limit",
                 format!(
-                    "shot {} peaked at {:.1}% of host memory, over the plan's {} GB budget; raise \
+                    "shot {} peaked at {:.1} GB ({}), over the plan's {} GB budget; raise \
                      limits.maxMemoryGb or pick a cheaper tier and start a new run",
                     shot.id,
-                    view.peak_gpu_memory_pct.unwrap_or_default(),
+                    memory.gb.unwrap_or_default(),
+                    memory.source.as_deref().unwrap_or("no source"),
                     self.plan.limits.max_memory_gb
                 ),
                 false,
@@ -1795,25 +2263,29 @@ impl<'a> Session<'a> {
                     take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref())
                 })
                 .flatten();
-            {
+            if terminal {
+                let metrics = self.client.job_metrics(&job_id, self.poll_interval).await;
+                let memory = memory_observation(metrics.as_ref(), &view, self.facts.host_memory_gb);
+                let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+                attempt.peak_gpu_memory_pct = memory.pct;
+                attempt.peak_memory_gb = memory.gb;
+                attempt.peak_memory_source = memory.source;
+                attempt.job_id = Some(job_id.clone());
+                attempt.status = view.status.clone();
+                attempt.finished_at.get_or_insert_with(utc_now);
+                attempt.error = match (&view.status[..], take.is_some()) {
+                    ("completed", true) => None,
+                    ("completed", false) => Some(format!(
+                        "job {job_id} completed without an asset in its result: {}",
+                        view.result
+                    )),
+                    _ => Some(view.failure_text()),
+                };
+                attempt.take = take.clone();
+            } else {
                 let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
                 attempt.job_id = Some(job_id.clone());
-                attempt.peak_gpu_memory_pct = view.peak_gpu_memory_pct;
-                if terminal {
-                    attempt.status = view.status.clone();
-                    attempt.finished_at.get_or_insert_with(utc_now);
-                    attempt.error = match (&view.status[..], take.is_some()) {
-                        ("completed", true) => None,
-                        ("completed", false) => Some(format!(
-                            "job {job_id} completed without an asset in its result: {}",
-                            view.result
-                        )),
-                        _ => Some(view.failure_text()),
-                    };
-                    attempt.take = take.clone();
-                } else {
-                    attempt.status = "running".to_owned();
-                }
+                attempt.status = "running".to_owned();
             }
             if take.is_some() && self.record.shots[shot_index].selected_attempt.is_none() {
                 let number = self.record.shots[shot_index].attempts[attempt_index].attempt;
@@ -1835,15 +2307,6 @@ impl<'a> Session<'a> {
     // Timeline and export
     // -----------------------------------------------------------------------------------------
 
-    /// The tallest selected take, which fixes the export ladder rung the render uses.
-    fn tallest_selected(&self) -> u32 {
-        self.selected_takes()
-            .iter()
-            .map(|selected| selected.height)
-            .max()
-            .unwrap_or(0)
-    }
-
     /// The selected take of every selected shot, in plan order — what the timeline is built from.
     fn selected_takes(&self) -> Vec<SelectedTake> {
         self.record
@@ -1863,6 +2326,15 @@ impl<'a> Session<'a> {
             .collect()
     }
 
+    /// The tallest selected take, which fixes the export ladder rung the render uses.
+    fn tallest_selected(&self) -> u32 {
+        self.selected_takes()
+            .iter()
+            .map(|selected| selected.height)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Create (or update) the run's timeline from the selected takes. Pure API writes, no job:
     /// re-running it after a take changed rewrites one item and leaves the rest alone.
     async fn assemble_timeline(&mut self) -> Result<bool, HarnessError> {
@@ -1871,7 +2343,8 @@ impl<'a> Session<'a> {
         if takes.is_empty() {
             return Ok(false);
         }
-        let aspect_ratio = aspect_ratio_for(takes[0].width, takes[0].height);
+        let (first_width, first_height) = (takes[0].width, takes[0].height);
+        let aspect_ratio = aspect_ratio_for(first_width, first_height);
         let existing_id = self
             .record
             .timeline
@@ -1914,6 +2387,33 @@ impl<'a> Session<'a> {
                 HarnessError::Transport(format!("timeline response has no id: {timeline}"))
             })?
             .to_owned();
+        // The main video track, by id or — if the project store's default track ids ever change —
+        // by kind. Writing the items nowhere and saving an EMPTY timeline while the record still
+        // listed every shot is the one outcome that must not happen.
+        let tracks = timeline
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let track_index = tracks
+            .iter()
+            .position(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
+            .or_else(|| {
+                tracks
+                    .iter()
+                    .position(|track| track.get("kind").and_then(Value::as_str) == Some("video"))
+            })
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "timeline {timeline_id} has no track_main and no video track to hold the \
+                     rendered takes: {timeline}"
+                ))
+            })?;
+        let track_id = tracks[track_index]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("track_main")
+            .to_owned();
         let mut items = Vec::new();
         let mut item_records = Vec::new();
         let mut cursor = 0.0_f64;
@@ -1942,7 +2442,7 @@ impl<'a> Session<'a> {
             let end = cursor + length;
             items.push(json!({
                 "id": item_id,
-                "trackId": "track_main",
+                "trackId": track_id,
                 "assetId": take.asset_id,
                 "type": "video",
                 "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
@@ -1969,30 +2469,32 @@ impl<'a> Session<'a> {
             });
             cursor = end;
         }
-        if let Some(track) = timeline
-            .get_mut("tracks")
-            .and_then(Value::as_array_mut)
-            .and_then(|tracks| {
-                tracks
-                    .iter_mut()
-                    .find(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
-            })
-        {
-            track["items"] = Value::Array(items);
-        }
-        self.client
+        timeline["tracks"][track_index]["items"] = Value::Array(items);
+        let saved = self
+            .client
             .expect_ok(
                 "PUT",
                 &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
                 Some(json!({ "timeline": timeline })),
             )
             .await?;
+        // Read the items back off the SAVED document rather than trusting the harness's own intent:
+        // the record then cannot describe a timeline that was never persisted.
+        let persisted = persisted_timeline_items(&saved, &item_records).ok_or_else(|| {
+            HarnessError::Transport(format!(
+                "saved timeline {timeline_id} does not hold the {} items the run assembled: {saved}",
+                item_records.len()
+            ))
+        })?;
         self.record.timeline = Some(TimelineRecord {
             timeline_id,
             name: timeline_name,
             aspect_ratio: aspect_ratio.to_owned(),
+            source_aspect_ratio: Some(reduced_aspect_ratio(first_width, first_height)),
+            source_width: Some(first_width),
+            source_height: Some(first_height),
             fps: self.fps,
-            items: item_records,
+            items: persisted,
         });
         self.persist()?;
         Ok(true)
@@ -2010,7 +2512,7 @@ impl<'a> Session<'a> {
                 return Ok(true);
             }
         }
-        if self.cancel_requested() {
+        if self.canceled() {
             self.halt(
                 RunOutcome::Canceled,
                 "canceled",
@@ -2036,7 +2538,7 @@ impl<'a> Session<'a> {
         if self.record.export_pending.is_none() {
             self.record.export_pending = Some(ExportPending {
                 requested_at: utc_now(),
-                supersedes: superseded.clone(),
+                supersedes: superseded,
             });
             self.record.export = None;
             // Persisted BEFORE the export job exists, for the same reason a shot attempt is.
@@ -2054,7 +2556,6 @@ impl<'a> Session<'a> {
         let export_job_id = match existing {
             Some(job_id) => job_id,
             None => {
-                let height = self.tallest_selected();
                 let export_job = self
                     .client
                     .expect_ok(
@@ -2064,7 +2565,7 @@ impl<'a> Session<'a> {
                             timeline.timeline_id
                         ),
                         Some(json!({
-                            "resolution": export_resolution_for(height),
+                            "resolution": export_resolution_for(self.tallest_selected()),
                             "fps": self.fps,
                             "requestedGpu": "auto",
                         })),
@@ -2091,14 +2592,12 @@ impl<'a> Session<'a> {
         self.persist()?;
 
         let export_started = Instant::now();
+        let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
         let (view, poll_stop) = self
             .client
             .wait_for_job(
                 &export_job_id,
-                export_started + Duration::from_secs(self.plan.limits.max_shot_seconds),
-                self.run_deadline,
-                self.poll_interval,
-                &self.cancel,
+                self.bounds(export_started + self.shot_budget()),
             )
             .await?;
         let asset_id = view
@@ -2114,8 +2613,8 @@ impl<'a> Session<'a> {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let status = match poll_stop {
-            PollStop::Terminal => view.status.clone(),
-            PollStop::Canceled => "canceled".to_owned(),
+            PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+            PollStop::Operator => "canceled_by_operator".to_owned(),
             PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
         };
         let export_ok = status == "completed" && asset_id.is_some();
@@ -2127,7 +2626,12 @@ impl<'a> Session<'a> {
             render_path,
             error: (!export_ok).then(|| match poll_stop {
                 PollStop::Terminal => view.failure_text(),
-                PollStop::Canceled => "canceled by request".to_owned(),
+                PollStop::AssetsUnsettled => format!(
+                    "the export job reached {} but its assets never settled within {:.0}s",
+                    view.status,
+                    settle_grace.as_secs_f64()
+                ),
+                PollStop::Operator => "canceled by operator during the export".to_owned(),
                 PollStop::ShotBudget => format!(
                     "export exceeded the per-job budget of {}s",
                     self.plan.limits.max_shot_seconds
@@ -2140,7 +2644,7 @@ impl<'a> Session<'a> {
         });
         self.persist()?;
         match poll_stop {
-            PollStop::Canceled => self.halt(
+            PollStop::Operator => self.halt(
                 RunOutcome::Canceled,
                 "canceled",
                 "canceled while the timeline export was in flight".to_owned(),
@@ -2220,74 +2724,47 @@ impl<'a> Session<'a> {
 
     /// Project -> references -> shots -> timeline -> export -> close.
     async fn drive(mut self) -> Result<RunRecord, HarnessError> {
+        let outcome = self.drive_inner().await;
+        match outcome {
+            Ok(export_ok) => {
+                self.finish(export_ok)?;
+                Ok(self.record)
+            }
+            // A transport/API failure partway through is exactly when the record matters most: by
+            // then the run may have created a project, imported assets and dispatched jobs. It
+            // stays `running`, because that is what it is — a resume reconciles it.
+            Err(error) => {
+                self.record.diagnostics.push(PlanDiagnostic::plan(
+                    "run",
+                    format!("the run stopped on an error: {error}"),
+                ));
+                // Best effort: an io failure while writing the record must not replace the failure
+                // that caused it with a less informative one.
+                let _ = self.persist();
+                Err(error)
+            }
+        }
+    }
+
+    async fn drive_inner(&mut self) -> Result<bool, HarnessError> {
         self.ensure_project().await?;
         self.ensure_references().await?;
         self.work_shots().await?;
-        let export_ok = self.assemble_and_export().await?;
-        self.finish(export_ok)?;
-        Ok(self.record)
+        self.assemble_and_export().await
+    }
+
+    /// Flag every shot that declared a dependency on `shot_id`. See [`flag_dependents`], which the
+    /// human reject path in [`review::decide_take`] shares, so a take that stops being the selected
+    /// one raises exactly the same signal however it stopped.
+    fn flag_dependents(&mut self, shot_id: &str, reason: &str) {
+        flag_dependents(
+            &mut self.record,
+            &self.plan,
+            shot_id,
+            &format!("its selected take was replaced ({reason})"),
+        );
     }
 }
-
-/// An asset `run_id` already imported for `role`, matched on the provenance the import stamped.
-/// This is what keeps a replay from importing the same reference twice when the controller died
-/// between the upload and the record write.
-fn find_imported_reference(
-    assets: &[Value],
-    run_id: &str,
-    role: &str,
-    sha256: &str,
-) -> Option<String> {
-    assets
-        .iter()
-        .find(|asset| {
-            let field = |name: &str| {
-                asset
-                    .pointer("/extra/filmHarness")
-                    .and_then(|block| block.get(name))
-                    .and_then(Value::as_str)
-            };
-            field("runId") == Some(run_id)
-                && field("role") == Some(role)
-                && field("sha256") == Some(sha256)
-        })
-        .and_then(|asset| asset.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-/// How long an attempt has already been in flight.
-///
-/// A controller that died mid-poll never wrote `elapsedSeconds`, so the recorded value alone would
-/// hand a hung job a fresh per-shot budget on every restart. `startedAt` IS persisted at dispatch,
-/// and the job kept running while nothing was watching it, so wall-clock since then is the honest
-/// number; the larger of the two wins.
-fn attempt_spent_seconds(attempt: &AttemptRecord) -> f64 {
-    let recorded = attempt.elapsed_seconds.max(0.0);
-    let by_clock = parse_utc_seconds(&attempt.started_at)
-        .map(|started| (sceneworks_core::time::now_unix_seconds() - started).max(0) as f64)
-        .unwrap_or(0.0);
-    recorded.max(by_clock)
-}
-
-/// One shot's selected take, resolved to everything the timeline needs.
-struct SelectedTake {
-    shot_id: String,
-    take: TakeRecord,
-    width: u32,
-    height: u32,
-    job_id: Option<String>,
-}
-
-/// Attempt statuses that need no further reconciliation.
-const TERMINAL_ATTEMPT_STATUSES: &[&str] = &[
-    "completed",
-    "failed",
-    "canceled",
-    "interrupted",
-    "timed_out",
-    "rejected",
-];
 
 /// Execute `options` end to end. Returns the run record (also written to `options.out_dir`) on
 /// every path that got past validation, including runs that stopped on a limit; a refused plan
@@ -2296,11 +2773,26 @@ pub async fn run(
     transport: &dyn ApiTransport,
     options: &RunOptions,
 ) -> Result<RunRecord, HarnessError> {
+    run_with_control(transport, options, &RunControl::default()).await
+}
+
+/// [`run`] with an operator cancellation handle. The `film-harness` binary passes one so SIGINT
+/// cancels the in-flight job through the API and still leaves a record, instead of orphaning a
+/// render on the GPU.
+///
+/// Every path past document validation writes `run.json` — sc-22711 writes it at every state
+/// transition, not only at the end, so a controller killed anywhere leaves a record `resume` can
+/// reconcile against the API.
+pub async fn run_with_control(
+    transport: &dyn ApiTransport,
+    options: &RunOptions,
+    control: &RunControl,
+) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
     let plan_bytes = std::fs::read(&options.plan_path)?;
     let pack_bytes = std::fs::read(&options.reference_pack_path)?;
-    let client = Client { transport };
+    let client = Client { transport, control };
 
     // Steps 1-3: refuse before the first write.
     let (plan, pack) = match validate(None, options).await {
@@ -2347,7 +2839,7 @@ pub async fn run(
             return Err(HarnessError::Validation(findings));
         }
     };
-    let lane = ModelLane::for_current_platform();
+    let lane = prepared.facts.lane();
     let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
     record.model = Some(ModelRecord {
         id: plan.model.id.clone(),
@@ -2357,8 +2849,14 @@ pub async fn run(
         backend_observed: None,
         weights: primary_weights(&prepared.entry, plan.model.tier.as_deref()),
         hardware: HardwareRecord {
-            platform: std::env::consts::OS.to_owned(),
-            arch: std::env::consts::ARCH.to_owned(),
+            platform: prepared.facts.platform_or_local().to_owned(),
+            // The host-capabilities route reports no arch, so this process's arch is the truth only
+            // when the API is on this platform; otherwise claiming one would be a fabrication.
+            arch: if prepared.facts.platform_or_local() == std::env::consts::OS {
+                std::env::consts::ARCH.to_owned()
+            } else {
+                "unknown".to_owned()
+            },
             host_memory_gb: prepared.facts.host_memory_gb,
             gpu_name: prepared.facts.video_gpu_name.clone(),
             worker_id: prepared.facts.video_worker_id.clone(),
@@ -2373,7 +2871,6 @@ pub async fn run(
         out_dir: options.out_dir.clone(),
         poll_interval: options.poll_interval,
         export: options.export,
-        cancel: options.cancel.clone(),
         plan,
         pack,
         entry: prepared.entry,
@@ -2456,7 +2953,10 @@ async fn continue_run(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    let client = Client { transport };
+    let client = Client {
+        transport,
+        control: &options.control,
+    };
     let prepared = prepare(&client, &plan, options.export, options.require_installed)
         .await?
         .map_err(HarnessError::Validation)?;
@@ -2491,20 +2991,22 @@ fn read_source(
 
 fn session_from<'a>(
     transport: &'a dyn ApiTransport,
-    options: &ResumeOptions,
+    options: &'a ResumeOptions,
     continued: Continued,
     started: Instant,
     run_deadline: Instant,
 ) -> Session<'a> {
     Session {
-        client: Client { transport },
+        client: Client {
+            transport,
+            control: &options.control,
+        },
         transport,
         plan_path: continued.plan_path,
         pack_path: continued.pack_path,
         out_dir: options.out_dir.clone(),
         poll_interval: options.poll_interval,
         export: options.export,
-        cancel: options.cancel.clone(),
         plan: continued.plan,
         pack: continued.pack,
         entry: continued.prepared.entry,
@@ -2714,6 +3216,8 @@ pub async fn replace_take(
         finished_at: None,
         elapsed_seconds: 0.0,
         peak_gpu_memory_pct: None,
+        peak_memory_gb: None,
+        peak_memory_source: None,
         error: None,
         take: None,
         rejection: None,
@@ -2762,16 +3266,34 @@ pub async fn replace_take(
     Ok(session.record)
 }
 
-impl Session<'_> {
-    /// Flag every shot that declared a dependency on `shot_id`. See [`flag_dependents`].
-    fn flag_dependents(&mut self, shot_id: &str, reason: &str) {
-        flag_dependents(
-            &mut self.record,
-            &self.plan,
-            shot_id,
-            &format!("its selected take was replaced ({reason})"),
-        );
+/// The timeline items as the SAVE persisted them, in the order the run assembled them, or `None`
+/// when the saved document does not hold exactly the items that were sent (which would mean the
+/// record and the project disagree about what the sequence is).
+fn persisted_timeline_items(
+    saved: &Value,
+    intended: &[TimelineItemRecord],
+) -> Option<Vec<TimelineItemRecord>> {
+    let items: Vec<&Value> = saved
+        .get("tracks")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|track| track.get("items").and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let mut persisted = Vec::with_capacity(intended.len());
+    for record in intended {
+        let item = items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(record.item_id.as_str()))?;
+        persisted.push(TimelineItemRecord {
+            shot_id: record.shot_id.clone(),
+            item_id: record.item_id.clone(),
+            asset_id: item.get("assetId").and_then(Value::as_str)?.to_owned(),
+            timeline_start: item.get("timelineStart").and_then(Value::as_f64)?,
+            timeline_end: item.get("timelineEnd").and_then(Value::as_f64)?,
+        });
     }
+    (persisted.len() == items.len()).then_some(persisted)
 }
 
 /// Flag every shot that declared a dependency on `shot_id` AND already has a take of its own.
@@ -2842,7 +3364,7 @@ fn base_record(
         created_at: utc_now(),
         finished_at: None,
         // A record is born `running`: it exists before the first API write, and only `finish`
-        // decides what it became.
+        // decides what it became (sc-22711).
         state: RunState::Running,
         outcome: RunOutcome::Failed,
         stop: None,
@@ -3115,6 +3637,189 @@ mod unit_tests {
     }
 
     #[test]
+    fn a_filename_cannot_inject_multipart_headers() {
+        let (_, body) = encode_asset_upload(
+            "plate\r\nX-Injected: 1\r\n\r\nevil.png",
+            "image/png",
+            b"\x89PNG",
+            &json!({}),
+        );
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("X-Injected: 1\r\n"), "{text}");
+        assert!(
+            text.contains("filename=\"plate__X-Injected__1____evil.png\""),
+            "{text}"
+        );
+        assert_eq!(sanitize_multipart_filename("a\"b.png"), "a_b.png");
+        assert_eq!(
+            sanitize_multipart_filename("../../etc/passwd"),
+            ".._.._etc_passwd"
+        );
+        assert_eq!(sanitize_multipart_filename("..."), "reference.png");
+    }
+
+    #[test]
+    fn the_platform_gate_is_the_routes_own_and_follows_the_api_host() {
+        let mac_only: JsonObject<String, Value> =
+            json!({ "id": "some_model", "type": "video", "macOnly": true })
+                .as_object()
+                .cloned()
+                .unwrap();
+        let portable: JsonObject<String, Value> = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let finding = platform_reachability_finding("some_model", &mac_only, "linux")
+            .expect("a mac-only model is unreachable on linux");
+        assert_eq!(finding.field, "model.id");
+        assert!(finding.message.contains("only on macOS"), "{finding}");
+        assert!(platform_reachability_finding("some_model", &mac_only, "macos").is_none());
+        assert!(platform_reachability_finding("some_model", &portable, "linux").is_none());
+    }
+
+    #[test]
+    fn the_reference_payload_gate_is_the_routes_own() {
+        // Ten reference roles: past the route's blanket ceiling of nine, which no per-model
+        // `limits.maxReferenceAssets` can raise. Found here rather than as a 400 at enqueue.
+        let roles: Vec<String> = (0..10).map(|index| format!("role_{index}")).collect();
+        let plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "conditioning": { "mode": "reference_to_video", "referenceRoles": roles }
+            }]
+        }))
+        .expect("plan parses");
+        let entry: JsonObject<String, Value> = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let findings = reference_payload_findings(&plan, &entry);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert!(findings[0].message.contains("at most 9"), "{findings:?}");
+
+        // The shipped shape — no references at all — passes.
+        let plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "conditioning": { "mode": "text_to_video" }
+            }]
+        }))
+        .expect("plan parses");
+        assert!(reference_payload_findings(&plan, &entry).is_empty());
+    }
+
+    #[test]
+    fn the_lane_and_platform_follow_the_api_host_not_this_process() {
+        let remote = HostFacts {
+            platform: Some("linux".to_owned()),
+            ..HostFacts::default()
+        };
+        assert_eq!(remote.lane(), ModelLane::Candle);
+        assert_eq!(remote.platform_or_local(), "linux");
+        let mac = HostFacts {
+            platform: Some("macos".to_owned()),
+            ..HostFacts::default()
+        };
+        assert_eq!(mac.lane(), ModelLane::Mlx);
+        // Only a host that reports no platform at all falls back to this process's own.
+        let unknown = HostFacts::default();
+        assert_eq!(unknown.lane(), ModelLane::for_current_platform());
+        assert_eq!(unknown.platform_or_local(), std::env::consts::OS);
+    }
+
+    #[test]
+    fn the_memory_peak_prefers_the_metrics_route_over_the_job_snapshot() {
+        let view = |pct: Option<f64>| JobView {
+            status: "completed".to_owned(),
+            error: None,
+            message: String::new(),
+            peak_gpu_memory_pct: pct,
+            backend: None,
+            result: Value::Null,
+        };
+        let bytes = json!({ "peakMemoryBytes": 115.2 * BYTES_PER_GB, "peakMemoryPct": 90.0 });
+        let observed = memory_observation(Some(&bytes), &view(Some(10.0)), Some(128.0));
+        assert_eq!(
+            observed.source.as_deref(),
+            Some("metrics.peakMemoryBytes"),
+            "the snapshot's 10% must not win over a measured byte count"
+        );
+        assert!(observed.gb.is_some_and(|gb| (gb - 115.2).abs() < 1e-6));
+
+        let pct_only = json!({ "peakMemoryPct": 50.0 });
+        let observed = memory_observation(Some(&pct_only), &view(None), Some(128.0));
+        assert_eq!(observed.source.as_deref(), Some("metrics.peakMemoryPct"));
+        assert_eq!(observed.gb, Some(64.0));
+
+        // Last resort: the job snapshot's field, which every shipped worker leaves null.
+        let observed = memory_observation(None, &view(Some(25.0)), Some(128.0));
+        assert_eq!(observed.source.as_deref(), Some("job.peakGpuMemoryPct"));
+        assert_eq!(observed.gb, Some(32.0));
+        assert!(memory_observation(None, &view(None), Some(128.0))
+            .gb
+            .is_none());
+        // A zero row (what the cpu export job records on a real run) is "nothing measured".
+        let zeroed = json!({ "peakMemoryBytes": 0, "peakMemoryPct": 0.0 });
+        assert!(memory_observation(Some(&zeroed), &view(None), Some(128.0))
+            .gb
+            .is_none());
+    }
+
+    #[test]
+    fn a_completed_job_is_settled_once_its_assets_are_persisted() {
+        let with_result = |result: Value| JobView {
+            status: "completed".to_owned(),
+            error: None,
+            message: String::new(),
+            peak_gpu_memory_pct: None,
+            backend: None,
+            result,
+        };
+        assert!(!with_result(json!({ "assetWrites": [{ "type": "video" }] })).is_settled());
+        assert!(
+            with_result(json!({ "assetWrites": [{ "type": "video" }], "assets": [] })).is_settled(),
+            "the persisted side is the positive signal, whatever else the result still carries"
+        );
+        assert!(with_result(json!({ "assetIds": ["asset_1"] })).is_settled());
+        assert!(with_result(json!({})).is_settled());
+    }
+
+    #[test]
+    fn timeline_items_are_read_back_off_the_saved_document() {
+        let intended = vec![TimelineItemRecord {
+            shot_id: "SH010".to_owned(),
+            item_id: "item_sh010_abcd1234".to_owned(),
+            asset_id: "asset_1".to_owned(),
+            timeline_start: 0.0,
+            timeline_end: 5.0,
+        }];
+        let saved = json!({ "tracks": [{ "id": "track_main", "items": [{
+            "id": "item_sh010_abcd1234", "assetId": "asset_1",
+            "timelineStart": 0.0, "timelineEnd": 5.1667
+        }] }, { "id": "track_audio", "items": [] }] });
+        let persisted = persisted_timeline_items(&saved, &intended).expect("items read back");
+        assert_eq!(persisted[0].shot_id, "SH010");
+        assert!(
+            (persisted[0].timeline_end - 5.1667).abs() < 1e-9,
+            "the SAVED value wins over the intended one"
+        );
+        // A timeline the save dropped the items from cannot be recorded as if it held them.
+        let empty = json!({ "tracks": [{ "id": "track_main", "items": [] }] });
+        assert!(persisted_timeline_items(&empty, &intended).is_none());
+    }
+
+    #[test]
     fn tier_maps_to_the_shared_mlx_quantize_convention() {
         assert_eq!(mlx_quantize_for_tier("q4"), json!(4));
         assert_eq!(mlx_quantize_for_tier("q8"), json!(8));
@@ -3127,9 +3832,33 @@ mod unit_tests {
         assert_eq!(export_resolution_for(720), 720);
         assert_eq!(export_resolution_for(768), 1024);
         assert_eq!(export_resolution_for(2000), 1280);
+        // The timeline ratio is the admitted one CLOSEST to the take's real geometry, and it is a
+        // coercion whenever the take is not already 16:9 / 9:16 / 1:1: the fixture's 576x320 takes
+        // are 9:5, so the 16:9 timeline pads them (the real smoke's export landed at 1138x640).
         assert_eq!(aspect_ratio_for(576, 320), "16:9");
+        assert_eq!(reduced_aspect_ratio(576, 320), "9:5");
         assert_eq!(aspect_ratio_for(320, 576), "9:16");
+        assert_eq!(reduced_aspect_ratio(320, 576), "5:9");
         assert_eq!(aspect_ratio_for(768, 768), "1:1");
+        assert_eq!(reduced_aspect_ratio(768, 768), "1:1");
+        // 4:3 is exactly equidistant from 1:1 and 16:9 on the log scale (4/3 is their geometric
+        // mean), so the tie-break decides — and a landscape take belongs in a landscape frame.
+        assert_eq!(aspect_ratio_for(1024, 768), "16:9");
+        assert_eq!(aspect_ratio_for(768, 1024), "9:16");
+        assert_eq!(reduced_aspect_ratio(1024, 768), "4:3");
+        // Only an exact match is not a coercion.
+        assert_eq!(aspect_ratio_for(1280, 720), "16:9");
+        assert_eq!(reduced_aspect_ratio(1280, 720), "16:9");
+        assert_eq!(reduced_aspect_ratio(1344, 768), "7:4");
+    }
+
+    #[test]
+    fn the_export_resolution_menu_is_the_routes_own() {
+        assert_eq!(
+            crate::TIMELINE_EXPORT_RESOLUTIONS,
+            &[640, 720, 1024, 1280],
+            "the harness picks from the list validate_timeline_export enforces"
+        );
     }
 
     #[test]
