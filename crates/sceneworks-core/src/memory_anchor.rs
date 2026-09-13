@@ -1299,6 +1299,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json"),
     ),
