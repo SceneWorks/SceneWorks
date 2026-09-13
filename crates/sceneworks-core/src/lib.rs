@@ -20,6 +20,7 @@ pub mod download_receipt;
 pub mod external_roots;
 pub mod file_lock;
 pub mod film_plan;
+pub mod film_review;
 pub mod hf_home;
 pub mod hf_repo_renames;
 pub mod ideogram_caption;

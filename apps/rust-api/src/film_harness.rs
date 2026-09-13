@@ -48,6 +48,8 @@
 //! `run.json`. [`replace_take`] refuses while the shot still has an unsettled attempt, which is the
 //! case that would otherwise orphan a job.
 
+pub mod review;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -1412,6 +1414,8 @@ impl<'a> Session<'a> {
                 attempts: Vec::new(),
                 selected_attempt: None,
                 needs_review: Vec::new(),
+                reviews: Vec::new(),
+                human_decision: None,
             });
         }
         self.record.shots = ordered;
@@ -2759,40 +2763,60 @@ pub async fn replace_take(
 }
 
 impl Session<'_> {
-    /// Flag every shot that declared a dependency on `shot_id` AND already has a take of its own.
-    /// A shot that has not rendered yet needs no flag: it will be rendered against the current
-    /// state. Direct dependents only — a flagged shot's own take did not change, so the signal does
-    /// not cascade on its own.
+    /// Flag every shot that declared a dependency on `shot_id`. See [`flag_dependents`].
     fn flag_dependents(&mut self, shot_id: &str, reason: &str) {
-        let dependents: Vec<(String, String, String)> =
-            film_plan::direct_dependents(&self.plan, shot_id)
-                .into_iter()
-                .map(|(shot, edge)| (shot.id.clone(), edge.kind.clone(), edge.note.clone()))
-                .collect();
-        let raised_at = utc_now();
-        for (dependent_id, kind, note) in dependents {
-            let Some(record) = self.record.shot_mut(&dependent_id) else {
-                continue;
-            };
-            if record.selected_attempt.is_none() {
-                continue;
-            }
-            let detail = if note.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" ({note})")
-            };
-            record.needs_review.push(ReviewFlag {
-                raised_at: raised_at.clone(),
-                source_shot_id: shot_id.to_owned(),
-                dependency: kind.clone(),
-                reason: format!(
-                    "shot {shot_id}'s selected take was replaced ({reason}); this shot's {kind} \
-                     depends on it{detail} — review it and replace it too if it no longer matches"
-                ),
-            });
-        }
+        flag_dependents(
+            &mut self.record,
+            &self.plan,
+            shot_id,
+            &format!("its selected take was replaced ({reason})"),
+        );
     }
+}
+
+/// Flag every shot that declared a dependency on `shot_id` AND already has a take of its own.
+/// A shot that has not rendered yet needs no flag: it will be rendered against the current
+/// state. Direct dependents only — a flagged shot's own take did not change, so the signal does
+/// not cascade on its own. Returns how many shots were flagged.
+///
+/// Shared by [`replace_take`] and by the human reject path in [`review::decide_take`], so a take
+/// that stops being the selected one raises exactly the same signal however it stopped.
+fn flag_dependents(
+    record: &mut RunRecord,
+    plan: &ProductionPlan,
+    shot_id: &str,
+    what_happened: &str,
+) -> usize {
+    let dependents: Vec<(String, String, String)> = film_plan::direct_dependents(plan, shot_id)
+        .into_iter()
+        .map(|(shot, edge)| (shot.id.clone(), edge.kind.clone(), edge.note.clone()))
+        .collect();
+    let raised_at = utc_now();
+    let mut flagged = 0;
+    for (dependent_id, kind, note) in dependents {
+        let Some(shot_record) = record.shot_mut(&dependent_id) else {
+            continue;
+        };
+        if shot_record.selected_attempt.is_none() {
+            continue;
+        }
+        let detail = if note.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" ({note})")
+        };
+        shot_record.needs_review.push(ReviewFlag {
+            raised_at: raised_at.clone(),
+            source_shot_id: shot_id.to_owned(),
+            dependency: kind.clone(),
+            reason: format!(
+                "shot {shot_id}: {what_happened}; this shot's {kind} depends on it{detail} — \
+                 review it and replace it too if it no longer matches"
+            ),
+        });
+        flagged += 1;
+    }
+    flagged
 }
 
 fn base_record(

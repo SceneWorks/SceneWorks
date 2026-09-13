@@ -1,6 +1,6 @@
 # Local filmmaking harness (`film-harness`)
 
-Epic 22708 / sc-22710, sc-22711. Renders a hand-authored production plan into a SceneWorks sequence
+Epic 22708 / sc-22710, sc-22711, sc-22714. Renders a hand-authored production plan into a SceneWorks sequence
 through the existing API seams — projects, asset import, `POST /api/v1/video/jobs`, job polling,
 timelines and the `timeline_export` job — and leaves a versioned run record behind. No new UI, no
 parallel renderer: every take is produced by whatever GPU worker claims the job.
@@ -11,7 +11,10 @@ parallel renderer: every take is produced by whatever GPU worker claims the job.
 | --- | --- | --- |
 | Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` |
 | Reference pack | `sceneworks_core::film_plan::ReferencePack` | `config/film-harness/courier-workshop/references.jsonc` |
+| Review plan | `sceneworks_core::film_review::ReviewPlan` | `config/film-harness/courier-workshop/review.jsonc` |
 | Run record | `sceneworks_core::film_plan::RunRecord` | written to `--out/run.json` and `<project>/film-harness/<run_id>/run.json` |
+| Observed state | `sceneworks_core::film_review::ObservedState` | written to `--out/reviews/<shot>-a<attempt>-r<n>.json` |
+| Labeled set | `sceneworks_core::film_review::EvalSet` | `config/film-harness/review-eval/labels.jsonc`, `real-takes.jsonc` |
 
 A plan carries stable shot ids, narrative beat, framing, prompt, target duration, intended start/end
 state, dialogue/sound intent and the conditioning each shot wants, expressed as **reference roles**
@@ -106,6 +109,114 @@ with the reason and the dependency kind, and the timeline item for that shot is 
 for the person who read the flag. Without `--export` the existing export is marked `stale`; with it,
 one re-export runs.
 
+## Reviewing a take (sc-22714)
+
+**Review is assistive, not quality assurance.** A local vision model both misses real faults and
+flags correct takes. Nothing it reports approves, rejects, conditions or re-renders anything — only
+a human decision recorded through the controller does. Every document and every command prints that
+sentence.
+
+### The two seams it drives
+
+No new model, no new job type, no new inference dependency. Two routes the app already serves:
+
+1. `POST /api/v1/projects/:p/timelines/:t/items/:i/frames` — the **`frame_extract`** CPU/FFmpeg job,
+   the only video→still seam this API has, samples the take at the review plan's declared positions
+   and persists each frame as a project asset;
+2. `POST /api/v1/image/vqa/jobs` — the **`image_vqa`** job (SenseNova-U1-8B on the MLX/candle
+   understanding path) is asked ONE declared question per frame and answers in text
+   (`result.answer`).
+
+Frame extraction rides a **separate one-item review timeline** (`film-harness review (<runId>)`),
+never the export timeline: reviewing must not rewrite the thing the run is for. The vision half sits
+behind `ReviewVision`, so the whole flow also runs against a scripted backend with no weights —
+which is what the deterministic tests and `review-eval --scripted` use. A scripted run records
+`backend.realModelInference: false`, and the worker's own report always wins over what the backend
+claims about itself.
+
+### The review plan
+
+`review.jsonc` is a third document beside the plan and the pack, with its own version. Per shot it
+declares questions, each with a `topic` (one of `character_identity`, `costume`, `location`,
+`parcel_identity`, `parcel_custody`, `action_completion`, `cut_continuity`), the `intended` claim
+restated for the human who reads the flag, the `ask` put to the model verbatim, `expect` /
+`contradict` answer substrings, which `frames` to grade on (`first`/`last`/`all`/`any`), and two
+flags: `mustObserve` and `acrossCut`. Its `limits` (`maxSeconds`, `maxFramesPerShot`,
+`maxQuestionsPerShot`, `maxAnswerSeconds`) are declared **before** anything is dispatched.
+
+Grading order is load-bearing: an empty answer or one carrying an "I cannot tell" marker is
+`unobserved` **first**, then `contradict`, then `expect`; an answer matching neither list is
+`unobserved`, because silence is not agreement. A hedge ("it appears blue") keeps the reading but
+halves its confidence, so a hedged contradiction is reported `uncertain` rather than `mismatch`.
+
+### Observed state is not intended state
+
+Each review writes one `ObservedState` document under `<out>/reviews/`. It carries the sampled
+frames (timestamp, asset id, path, the `frame_extract` job id), one observation per question (the
+verdict, the value read, an explicit `unobserved`, a confidence, the frames it cites and every raw
+answer), and the mismatch flags those produced. Three invariants:
+
+- it **references** the intended state (`intended`: run id, plan id/version/sha, and a JSON pointer
+  into the run record) and never copies it, so the two cannot drift;
+- `unobserved` carries **no value** — `observed` is absent entirely. **An action or handoff the
+  reviewer did not see is recorded `unobserved`, never `completed`**, and when the question is
+  `mustObserve` that raises a flag of its own;
+- nothing here is an input to generation. `ShotRunRecord::intended` and `conditioningAssets` are
+  derived from the plan and the reference pack alone; the run record gains only a `reviews[]` index
+  entry — a path and some counts, no observed values.
+
+A review that reaches a declared limit stops, records `stop`, and **keeps the partial evidence**.
+Re-reviewing appends: an earlier review's document is never overwritten.
+
+### The human loop
+
+```text
+film-harness review         --out DIR [--shots SH010,SH020] [--review-plan FILE]
+film-harness accept-take    --out DIR --shot SH030 [--reason TEXT]
+film-harness reject-take    --out DIR --shot SH030 --reason TEXT
+film-harness request-repair --out DIR --shot SH030 [--reason TEXT] [--export]
+```
+
+| command | what it changes | what it never does |
+| --- | --- | --- |
+| `accept-take` | records `humanDecision: accepted` and clears **that shot's** `needsReview` flags | touch any other shot; reach the API at all |
+| `reject-take` | marks the take `rejection` (the take, its job and its asset stay), clears the selection, flags the shots that **declared** a dependency on it, marks the export stale | re-render anything; touch an unrelated shot's accepted take |
+| `request-repair` | ONE bounded attempt through `replace-take`, with the review's own actionable flags folded into the recorded reason | loop, retry a failed repair, or put an observation into the prompt |
+
+`request-repair` folds in only the review **of the currently selected take** — a review of a take
+that has since been replaced says nothing about the one being repaired. The folded text lands in the
+rejection reason and the decision log; the render payload is the plan's prompt, unchanged.
+
+### Labeled evaluation
+
+```text
+film-harness review-eval --set config/film-harness/review-eval/labels.jsonc [--out DIR] \
+                         [--media-root DIR] [--project-id ID] [--scripted]
+film-harness review-fixtures --set config/film-harness/review-eval/labels.jsonc
+```
+
+A labeled set is correct takes plus deliberately broken ones (wrong parcel colour, missing
+character, wrong location, unfinished action, an occluded handoff, a discontinuous cut, wrong
+costume), each with the verdict a correct reviewer *should* reach per question. The report counts,
+per question and per topic:
+
+| expected | reported | counted as |
+| --- | --- | --- |
+| `mismatch` | `mismatch` | detection |
+| `mismatch` | anything else | **miss** |
+| `match` | `mismatch` | **false alarm** |
+| `match` | `unobserved` | abstention |
+| `unobserved` | `match` / `mismatch` | **overclaim** |
+
+`overclaim` is tracked separately on purpose: it is the failure mode where an uncertain observation
+becomes a fact, and it must not be able to hide inside a detection count.
+
+Two sets ship. `labels.jsonc` uses **placeholder** frames (flat deterministic plates from
+`review-fixtures`, reproducible byte for byte) so the set is self-contained and the CPU tests run
+anywhere — pointing a real vision model at them measures nothing. `real-takes.jsonc` hand-labels
+frames of the two real MiniMax-H3 takes from the sc-22710 smoke; its `mediaRoot` points outside the
+repository and a missing frame is a refusal, never a silent zero.
+
 ## Validation before dispatch
 
 `film-harness` creates nothing until every check passes; findings name the shot and the field:
@@ -136,10 +247,22 @@ target/debug/film-harness run          --plan PLAN --references REFS [--api URL]
                                        [--no-export] [--skip-install-check]
 target/debug/film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
 target/debug/film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export]
+target/debug/film-harness review       --out DIR [--shots IDS] [--review-plan FILE] [--api URL]
+target/debug/film-harness accept-take  --out DIR --shot SHxxx [--reason TEXT]
+target/debug/film-harness reject-take  --out DIR --shot SHxxx --reason TEXT
+target/debug/film-harness request-repair --out DIR --shot SHxxx [--reason TEXT] [--export]
+target/debug/film-harness review-eval  --set LABELS.jsonc [--out DIR] [--media-root DIR] [--scripted]
+target/debug/film-harness review-fixtures --set LABELS.jsonc
 target/debug/film-harness cancel       --out DIR
 target/debug/film-harness status       --out DIR
 target/debug/film-harness fixture-images --out DIR
 ```
+
+`review` and `review-eval` need a worker advertising `image_vqa` (and, for `review`,
+`frame_extract`); both refuse up front when none is registered, rather than queuing questions
+nobody can answer and then recording every one as unobserved. `review` exits 3 when any reviewed
+take carries an actionable flag, 0 when none does. `accept-take` / `reject-take` touch no API at
+all.
 
 `run` needs a SceneWorks API (default `http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from
 `$SCENEWORKS_ACCESS_TOKEN`) with a registered GPU worker and a utility worker for the ffmpeg export

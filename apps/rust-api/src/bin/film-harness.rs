@@ -8,10 +8,23 @@
 //!                           [--skip-install-check]
 //! film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
 //! film-harness replace-take --out DIR --shot SH030 [--reason TEXT] [--export]
+//! film-harness review       --out DIR [--shots SH010,SH020] [--review-plan FILE] [--api URL]
+//! film-harness accept-take  --out DIR --shot SH030 [--reason TEXT]
+//! film-harness reject-take  --out DIR --shot SH030 --reason TEXT
+//! film-harness request-repair --out DIR --shot SH030 [--reason TEXT] [--export]
+//! film-harness review-eval  --set LABELS.jsonc [--out DIR] [--media-root DIR] [--api URL]
+//! film-harness review-fixtures --set LABELS.jsonc [--media-root DIR]
 //! film-harness cancel       --out DIR
 //! film-harness status       --out DIR
 //! film-harness fixture-images --out DIR
 //! ```
+//!
+//! The review commands (sc-22714) read a rendered take back through the EXISTING understanding
+//! seams — the `frame_extract` job for timestamped frame evidence, then the `image_vqa` job
+//! (SenseNova-U1-8B) for one declared question per frame — and write an observed-state document
+//! per take under `<out>/reviews/`. They add no model and no job type. **Review is assistive, not
+//! quality assurance**: it flags things for a person, and only `accept-take`, `reject-take` and
+//! `request-repair` change anything.
 //!
 //! `run` needs a SceneWorks API with a registered GPU worker (`video_generate`) and a utility
 //! worker (`timeline_export`, e.g. `SCENEWORKS_RUN_UTILITY_INPROCESS=1`). It creates nothing until
@@ -31,6 +44,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use sceneworks_core::film_plan::{RunOutcome, RunState};
+use sceneworks_core::film_review::{format_eval_report, ASSISTIVE_NOTICE};
+use sceneworks_rust_api::film_harness::review::{
+    self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
+};
 use sceneworks_rust_api::film_harness::{
     self, CancelToken, HarnessError, HttpTransport, ResumeOptions, RunOptions, FIXTURE_REFERENCES,
 };
@@ -43,6 +60,12 @@ USAGE:
   film-harness run          --plan PLAN.json --references REFERENCES.json [OPTIONS]
   film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
   film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export] [--api URL]
+  film-harness review       --out DIR [--shots IDS] [--review-plan FILE] [--api URL] [--poll-seconds N]
+  film-harness accept-take  --out DIR --shot SHxxx [--reason TEXT]
+  film-harness reject-take  --out DIR --shot SHxxx --reason TEXT
+  film-harness request-repair --out DIR --shot SHxxx [--reason TEXT] [--export] [--api URL]
+  film-harness review-eval  --set LABELS.jsonc [--out DIR] [--media-root DIR] [--project-id ID] [--api URL]
+  film-harness review-fixtures --set LABELS.jsonc [--media-root DIR]
   film-harness cancel       --out DIR
   film-harness status       --out DIR
   film-harness fixture-images --out DIR
@@ -66,6 +89,26 @@ replace-take rejects the take a shot is carrying and renders exactly ONE more fo
              --export the existing export is only marked stale.
 cancel       asks a run in another shell to stop; status prints what a record says without touching
              the API.
+
+review       samples the selected take of each shot at the review plan's declared positions (the
+             frame_extract job), puts each declared question to the image_vqa job (SenseNova-U1-8B)
+             and writes an observed-state document per take under <out>/reviews/. It renders
+             nothing, moves no selection and writes no intended state. Bounded by the review plan's
+             own limits; a review that runs out keeps its partial evidence and says why it stopped.
+accept-take  records that a person looked and is happy: clears that shot's needsReview flags and
+             leaves the selection alone. No API, no render.
+reject-take  records that a person rejects the take: the take, its job and its asset are KEPT, the
+             selection is cleared, the shots that declared a dependency on it are flagged
+             needsReview and the export is marked stale. Nothing is re-rendered.
+request-repair  ONE bounded repair attempt through replace-take, with the review's own mismatch
+             flags folded into the recorded reason. It does not loop and it never feeds an
+             observation back into the prompt.
+review-eval  scores the reviewer against a fixed labeled set of correct and deliberately broken
+             takes and reports detections, misses, false alarms, abstentions and overclaims.
+review-fixtures writes the placeholder frames a labeled set names.
+
+REVIEW IS ASSISTIVE, NOT QUALITY ASSURANCE. A local vision model both misses real faults and flags
+correct takes; nothing it says approves, rejects or conditions anything.
 ";
 
 fn main() -> ExitCode {
@@ -87,7 +130,13 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     };
     match command {
         "validate" | "run" => {}
-        "resume" | "replace-take" => return record_command(command, &args[1..]).await,
+        "resume" | "replace-take" | "request-repair" => {
+            return record_command(command, &args[1..]).await
+        }
+        "review" => return review_command(&args[1..]).await,
+        "accept-take" | "reject-take" => return decide_command(command, &args[1..]),
+        "review-eval" => return review_eval_command(&args[1..]).await,
+        "review-fixtures" => return review_fixtures_command(&args[1..]),
         "cancel" => return cancel_command(&args[1..]),
         "status" => return status_command(&args[1..]),
         "fixture-images" => return fixture_images(&args[1..]),
@@ -215,6 +264,7 @@ fn print_record(record: &sceneworks_core::film_plan::RunRecord, out_dir: &std::p
         for flag in &shot.needs_review {
             println!("           NEEDS REVIEW: {}", flag.reason);
         }
+        print!("{}", review::format_shot_reviews(shot));
     }
     if let Some(export) = &record.export {
         println!(
@@ -264,18 +314,206 @@ async fn record_command(command: &str, args: &[String]) -> ExitCode {
     spawn_signal_handler(parsed.options.cancel.clone());
     let result = match command {
         "resume" => film_harness::resume(&transport, &parsed.options).await,
-        _ => {
+        other => {
             let Some(shot) = parsed.shot.as_deref() else {
-                eprintln!("film-harness: replace-take needs --shot SHxxx\n\n{USAGE}");
+                eprintln!("film-harness: {other} needs --shot SHxxx\n\n{USAGE}");
                 return ExitCode::from(1);
             };
-            film_harness::replace_take(&transport, &parsed.options, shot, &parsed.reason).await
+            if other == "request-repair" {
+                review::request_repair(&transport, &parsed.options, shot, &parsed.reason).await
+            } else {
+                film_harness::replace_take(&transport, &parsed.options, shot, &parsed.reason).await
+            }
         }
     };
     match result {
         Ok(record) => {
             print_record(&record, &parsed.options.out_dir);
             exit_code_for(&record)
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `review`: sample the selected takes and put the review plan's questions to the vision model.
+async fn review_command(args: &[String]) -> ExitCode {
+    let Some(out_dir) = flag_value(args, "--out") else {
+        eprintln!("film-harness: review needs --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let api_url = flag_value(args, "--api")
+        .or_else(|| std::env::var("SCENEWORKS_API_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let token =
+        flag_value(args, "--token").or_else(|| std::env::var("SCENEWORKS_ACCESS_TOKEN").ok());
+    let poll_seconds = match flag_value(args, "--poll-seconds")
+        .map(|value| value.parse::<u64>())
+        .transpose()
+    {
+        Ok(value) => value.unwrap_or(3).max(1),
+        Err(error) => {
+            eprintln!("film-harness: --poll-seconds: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut options = ReviewOptions::new(PathBuf::from(&out_dir));
+    options.review_plan_path = flag_value(args, "--review-plan").map(PathBuf::from);
+    options.poll_interval = Duration::from_secs(poll_seconds);
+    options.shot_ids = flag_value(args, "--shots")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(error) = film_harness::clear_cancel_request(&options.out_dir) {
+        eprintln!("film-harness: {error}");
+        return ExitCode::from(1);
+    }
+    let transport = match HttpTransport::new(&api_url, token) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    spawn_signal_handler(options.cancel.clone());
+    let vision = VqaVision::new(&transport, options.poll_interval, options.cancel.clone());
+    if let Err(error) = vision.preflight().await {
+        return report_error(error);
+    }
+    match review::review(&transport, &options, &vision).await {
+        Ok(record) => {
+            print_record(&record, &options.out_dir);
+            println!("\n{ASSISTIVE_NOTICE}");
+            let flagged = record
+                .shots
+                .iter()
+                .filter_map(|shot| shot.latest_review())
+                .any(|review| review.actionable_flags > 0);
+            if flagged {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `accept-take` / `reject-take`: a human decision, recorded. No API, no render.
+fn decide_command(command: &str, args: &[String]) -> ExitCode {
+    let (Some(out_dir), Some(shot)) = (flag_value(args, "--out"), flag_value(args, "--shot"))
+    else {
+        eprintln!("film-harness: {command} needs --out DIR --shot SHxxx\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let decision = if command == "accept-take" {
+        Decision::Accept
+    } else {
+        Decision::Reject
+    };
+    let reason = flag_value(args, "--reason").unwrap_or_default();
+    if decision == Decision::Reject && reason.trim().is_empty() {
+        eprintln!(
+            "film-harness: reject-take needs --reason TEXT — the reason is what the next person \
+             (and the repair) reads\n\n{USAGE}"
+        );
+        return ExitCode::from(1);
+    }
+    let reason = if reason.trim().is_empty() {
+        "accepted by hand".to_owned()
+    } else {
+        reason
+    };
+    let out_dir = PathBuf::from(out_dir);
+    match review::decide_take(&out_dir, &shot, decision, &reason) {
+        Ok(record) => {
+            print_record(&record, &out_dir);
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `review-eval`: score the reviewer against a fixed labeled set.
+async fn review_eval_command(args: &[String]) -> ExitCode {
+    let Some(set) = flag_value(args, "--set") else {
+        eprintln!("film-harness: review-eval needs --set LABELS.jsonc\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let out_dir =
+        flag_value(args, "--out").unwrap_or_else(|| "film-harness-review-eval".to_owned());
+    let mut options = EvalOptions::new(PathBuf::from(set), PathBuf::from(out_dir));
+    options.media_root = flag_value(args, "--media-root").map(PathBuf::from);
+    options.project_id = flag_value(args, "--project-id");
+    if let Some(seconds) = flag_value(args, "--poll-seconds").and_then(|v| v.parse::<u64>().ok()) {
+        options.poll_interval = Duration::from_secs(seconds.max(1));
+    }
+    // `--scripted` runs the whole evaluation with no model at all. It measures the harness, not the
+    // reviewer, and every document it writes says `realModelInference: false`.
+    let scripted = args.iter().any(|arg| arg == "--scripted");
+    let api_url = flag_value(args, "--api")
+        .or_else(|| std::env::var("SCENEWORKS_API_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let token =
+        flag_value(args, "--token").or_else(|| std::env::var("SCENEWORKS_ACCESS_TOKEN").ok());
+    let transport = match HttpTransport::new(&api_url, token) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    spawn_signal_handler(options.cancel.clone());
+    let scripted_backend = ScriptedVision::new();
+    let vqa_backend = VqaVision::new(&transport, options.poll_interval, options.cancel.clone());
+    if !scripted {
+        if let Err(error) = vqa_backend.preflight().await {
+            return report_error(error);
+        }
+    }
+    let vision: &dyn review::ReviewVision = if scripted {
+        &scripted_backend
+    } else {
+        &vqa_backend
+    };
+    match review::review_eval(&transport, &options, vision).await {
+        Ok(results) => {
+            print!("{}", format_eval_report(&results));
+            println!(
+                "results: {}",
+                options.out_dir.join("review-eval.json").display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `review-fixtures`: write the placeholder frames a labeled set names.
+fn review_fixtures_command(args: &[String]) -> ExitCode {
+    let Some(set) = flag_value(args, "--set") else {
+        eprintln!("film-harness: review-fixtures needs --set LABELS.jsonc\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let media_root = flag_value(args, "--media-root").map(PathBuf::from);
+    match review::write_review_fixture_frames(&PathBuf::from(set), media_root.as_deref()) {
+        Ok(paths) => {
+            for path in &paths {
+                println!("{}", path.display());
+            }
+            println!(
+                "{} placeholder frame(s) written — flat plates, not footage; point review-eval at \
+                 real media to measure anything",
+                paths.len()
+            );
+            ExitCode::SUCCESS
         }
         Err(error) => report_error(error),
     }
@@ -387,7 +625,11 @@ fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, 
     }
     let out_dir = out.ok_or("--out is required")?;
     if reason.trim().is_empty() {
-        reason = "replaced by hand".to_owned();
+        reason = if command == "request-repair" {
+            "repair requested by hand".to_owned()
+        } else {
+            "replaced by hand".to_owned()
+        };
     }
     let mut options = ResumeOptions::new(out_dir);
     options.poll_interval = Duration::from_secs(poll_seconds);

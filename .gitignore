@@ -304,3 +304,6 @@ build.bat
 
 # film-harness run records (sc-22710) default here
 film-harness-runs/
+
+# film-harness review-eval results (sc-22714) default here
+film-harness-review-eval/

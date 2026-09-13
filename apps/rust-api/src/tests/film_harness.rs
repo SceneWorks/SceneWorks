@@ -25,14 +25,14 @@ use crate::film_harness::{
 };
 use crate::tests::support::{create_app_with_state, request, test_settings};
 
-const FIXTURE_DIR: &str = concat!(
+pub(crate) const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../config/film-harness/courier-workshop"
 );
 
 /// [`ApiTransport`] over the in-process router: the same `oneshot` driver every route test uses.
-struct RouterTransport {
-    app: axum::Router,
+pub(crate) struct RouterTransport {
+    pub(crate) app: axum::Router,
 }
 
 impl ApiTransport for RouterTransport {
@@ -77,7 +77,7 @@ impl ApiTransport for RouterTransport {
 /// How the fake worker treats one video job, keyed by the shot id the harness stamps into
 /// `advanced.filmHarness.shotId`.
 #[derive(Debug, Clone, Copy)]
-enum VideoBehavior {
+pub(crate) enum VideoBehavior {
     /// Complete after `delay`, reporting `peak_pct` as the observed GPU memory peak.
     Complete { delay_secs: u64, peak_pct: f64 },
     /// Fail once (first attempt), then complete.
@@ -89,13 +89,22 @@ enum VideoBehavior {
 }
 
 #[derive(Debug, Clone, Default)]
-struct WorkerScript {
+pub(crate) struct WorkerScript {
     behaviors: Vec<(String, VideoBehavior)>,
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
     claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
     /// Make the next `timeline_export` job fail, for the failed-export resume path.
     export_fails: bool,
+    /// sc-22714 VQA answers, keyed by the `[questionId@frameId]` tag the reviewer stamps onto
+    /// every question. Most specific first: `questionId@frameId`, then `questionId`, then
+    /// `vqa_fallback`. An unmatched question answers "I cannot tell", so a test that forgets one
+    /// records it as UNOBSERVED rather than as silent agreement.
+    pub(crate) vqa_answers: std::collections::BTreeMap<String, String>,
+    /// Fail every `image_vqa` job, for the "the backend answered nothing at all" path.
+    pub(crate) vqa_fails: bool,
+    /// Questions the fake worker has been asked, in order: (tag, question).
+    pub(crate) vqa_asked: Vec<(String, String)>,
 }
 
 impl WorkerScript {
@@ -123,7 +132,10 @@ async fn register_fake_worker(app: &axum::Router) {
             "workerId": WORKER_ID,
             "gpuId": "mlx",
             "gpuName": "Apple M-series (fake)",
-            "capabilities": ["video_generate", "timeline_export", "frame_extract"],
+            // `image_vqa` (sc-22714) is what the reviewer's questions ride; `frame_extract` is
+            // what turns a take into timestamped frame evidence. Both are job types the real
+            // worker already advertises.
+            "capabilities": ["video_generate", "timeline_export", "frame_extract", "image_vqa"],
             "loadedModels": [],
             "utilization": { "memoryTotalMb": HOST_MEMORY_MB }
         }),
@@ -182,6 +194,11 @@ fn spawn_fake_worker(
             match job_type.as_str() {
                 "video_generate" => run_fake_video_job(&app, &script, &job_id, &job).await,
                 "timeline_export" => run_fake_export_job(&app, &script, &job_id, &job).await,
+                // sc-22714: the two understanding seams the reviewer drives. Neither renders
+                // anything — `frame_extract` writes a placeholder still where FFmpeg would, and
+                // `image_vqa` answers from the script's table in the shape SenseNova-U1 posts.
+                "frame_extract" => run_fake_frame_job(&app, &job_id, &job).await,
+                "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -349,6 +366,112 @@ async fn run_fake_video_job(
     .await;
 }
 
+/// The `frame_extract` job, faked: write a placeholder still where FFmpeg would and report it as
+/// an `assetWrites` fact, exactly as `run_frame_extract` does. Asset persistence, the sidecar, the
+/// index and the two-phase result rewrite are all production code paths (sc-22714).
+async fn run_fake_frame_job(app: &axum::Router, job_id: &str, job: &Value) {
+    let payload = &job["payload"];
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let timestamp = payload["sourceTimestamp"].as_f64().unwrap_or(0.0);
+    let asset_id = format!("asset_frame_{}", &job_id.replace('-', "")[..12]);
+    let media_rel = format!("assets/frames/{asset_id}.png");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join("assets/frames")).expect("frames dir");
+    std::fs::write(
+        project_dir.join(&media_rel),
+        film_harness::fixture_plate_png("review-frame", [90, 82, 70]).expect("plate encodes"),
+    )
+    .expect("fake frame");
+    let fact = json!({
+        "type": "frame",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "width": 576, "height": 320,
+        "displayName": format!("Frame {timestamp:.2}s"),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": "frame_extract", "model": "timeline-frame-extract",
+        "adapter": "ffmpeg-frame-extract",
+        "prompt": format!("Extract frame at {timestamp:.2}s"),
+        "negativePrompt": "", "loras": [],
+        "normalizedSettings": {
+            "timelineId": payload["timelineId"],
+            "timelineItemId": payload["timelineItemId"],
+            "playheadSeconds": payload["playheadSeconds"],
+            "sourceTimestamp": timestamp,
+        },
+    });
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Frame saved.", "workerId": WORKER_ID,
+            "result": { "assetWrites": [fact], "adapter": "ffmpeg-frame-extract" }
+        }),
+    )
+    .await;
+}
+
+/// The `image_vqa` job, faked: answer from the script's table in the shape
+/// `sensenova_jobs::vqa_result_json` posts. No weights ran, and `realModelInference: false` says
+/// so — which is what keeps a scripted review from ever reading as a real one.
+async fn run_fake_vqa_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let question = job["payload"]["question"].as_str().unwrap_or("").to_owned();
+    let tag = question
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(tag, _)| tag.to_owned())
+        .unwrap_or_default();
+    let (answer, fails) = {
+        let mut script = script.lock();
+        script.vqa_asked.push((tag.clone(), question.clone()));
+        let question_id = tag.split('@').next().unwrap_or("").to_owned();
+        let answer = script
+            .vqa_answers
+            .get(&tag)
+            .or_else(|| script.vqa_answers.get(&question_id))
+            .or_else(|| script.vqa_answers.get("vqa_fallback"))
+            .cloned()
+            .unwrap_or_else(|| "I cannot tell from this frame.".to_owned());
+        (answer, script.vqa_fails)
+    };
+    if fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake vqa fault", "error": "fake vqa fault: no weights",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Answer ready.", "workerId": WORKER_ID, "backend": "mlx",
+            "result": {
+                "answer": answer,
+                "question": question,
+                "sourceAssetId": job["payload"]["sourceAssetId"],
+                "model": job["payload"]["model"],
+                "realModelInference": false,
+            }
+        }),
+    )
+    .await;
+}
+
 async fn run_fake_export_job(
     app: &axum::Router,
     script: &Arc<Mutex<WorkerScript>>,
@@ -396,16 +519,16 @@ async fn run_fake_export_job(
     .await;
 }
 
-struct Harness {
-    app: axum::Router,
-    transport: RouterTransport,
+pub(crate) struct Harness {
+    pub(crate) app: axum::Router,
+    pub(crate) transport: RouterTransport,
     temp_dir: tempfile::TempDir,
-    script: Arc<Mutex<WorkerScript>>,
+    pub(crate) script: Arc<Mutex<WorkerScript>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
-    async fn start(with_worker: bool, behaviors: Vec<(&str, VideoBehavior)>) -> Self {
+    pub(crate) async fn start(with_worker: bool, behaviors: Vec<(&str, VideoBehavior)>) -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         // `/api/v1/models` serves the manifests under the config dir, so seed the REAL shipped
         // builtin manifest: the harness validates the fixture against `minimax_h3`'s actual
@@ -457,7 +580,7 @@ impl Harness {
         }
     }
 
-    fn options(
+    pub(crate) fn options(
         &self,
         plan_path: PathBuf,
         pack_path: PathBuf,
@@ -476,13 +599,13 @@ impl Harness {
         }
     }
 
-    fn out_dir(&self) -> PathBuf {
+    pub(crate) fn out_dir(&self) -> PathBuf {
         self.temp_dir.path().join("run-out")
     }
 
     /// What `resume` / `replace-take` are driven with in these tests: the same run directory, a
     /// tight poll cadence, and a token only the test can trip.
-    fn resume_options(&self) -> ResumeOptions {
+    pub(crate) fn resume_options(&self) -> ResumeOptions {
         ResumeOptions {
             out_dir: self.out_dir(),
             poll_interval: Duration::from_millis(250),
@@ -495,7 +618,7 @@ impl Harness {
     /// Resume until the run reaches a state it will not leave on its own, so a test asserts about
     /// the end of the story rather than about how many crashes it took to get there. Bounded: a
     /// resume that makes no progress is a failure, not a retry.
-    async fn resume_to_completion(&self) -> RunRecord {
+    pub(crate) async fn resume_to_completion(&self) -> RunRecord {
         let mut last = None;
         for round in 0..12 {
             match film_harness::resume(&self.transport, &self.resume_options()).await {
@@ -535,7 +658,7 @@ impl Harness {
         projects.as_array().map(Vec::len).unwrap_or_default()
     }
 
-    async fn jobs(&self) -> Vec<Value> {
+    pub(crate) async fn jobs(&self) -> Vec<Value> {
         let (_, jobs) = request(self.app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
         jobs.as_array().cloned().unwrap_or_default()
     }
@@ -1429,7 +1552,7 @@ impl ApiTransport for FaultTransport {
     }
 }
 
-fn fast(shots: &[&str]) -> Vec<(&'static str, VideoBehavior)> {
+pub(crate) fn fast(shots: &[&str]) -> Vec<(&'static str, VideoBehavior)> {
     const IDS: &[&str] = &["SH010", "SH020", "SH030", "SH040", "SH050", "SH060"];
     IDS.iter()
         .filter(|id| shots.contains(id))
@@ -1702,7 +1825,7 @@ async fn resuming_a_finished_run_reuses_every_take_and_enqueues_nothing() {
 }
 
 /// Reading the record back off disk, which is what a separate `film-harness` invocation does.
-fn harness_record(harness: &Harness) -> RunRecord {
+pub(crate) fn harness_record(harness: &Harness) -> RunRecord {
     film_harness::read_run_record(&harness.out_dir()).expect("run record on disk")
 }
 
