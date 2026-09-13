@@ -55,6 +55,24 @@ pub const SHOT_CONDITIONING_MODES: &[&str] = &[
 /// Reference kinds a pack entry may declare.
 pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style", "plate"];
 
+/// Sound kinds a pack entry may declare (sc-22712).
+///
+/// Deliberately a SEPARATE list from [`REFERENCE_KINDS`] over a separate `sound` array, rather
+/// than an extra reference kind: a reference is something a shot can be conditioned on, and an
+/// audio file is not. Keeping them apart means `referenceRoles: ["main_theme"]` is a structural
+/// error the validator can name instead of a request the model would have to refuse.
+pub const SOUND_KINDS: &[&str] = &["dialogue", "ambience", "music", "sfx"];
+
+/// Audio extensions a pack's sound entry may carry. Import normalises every one of them to
+/// PCM-16 WAV (`ProjectStore::import_asset`), so this list only has to cover what a human is
+/// likely to have on disk.
+const SOUND_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
+
+/// Widest gain the plan admits on a bus, a bed or a line. Matches the timeline's own per-track
+/// ceiling (`project_store::validate_timeline_track`), so a plan cannot express a level the
+/// timeline would then refuse to persist.
+const MAX_SOUND_GAIN: f64 = 4.0;
+
 /// Image extensions a reference file may carry; the import route accepts any `image/*` but the
 /// pack is checked in, so the list stays explicit.
 const REFERENCE_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
@@ -76,7 +94,128 @@ pub struct ProductionPlan {
     pub synopsis: String,
     pub model: PlanModel,
     pub limits: PlanLimits,
+    /// How the sequence's sound is assembled (sc-22712). Optional: a plan that says nothing about
+    /// sound gets [`PlanSound::default`], which places no beds and mutes generated clip audio.
+    #[serde(default)]
+    pub sound: PlanSound,
     pub shots: Vec<Shot>,
+}
+
+/// What a generated take's OWN audio does in the export.
+///
+/// The default is [`GeneratedAudio::Mute`], and that choice is the doubling policy: a take whose
+/// model spoke the line and a recorded dialogue clip for the same beat would otherwise both land
+/// in the mix, with nothing in the documents saying which one was meant. Including it is always an
+/// explicit act — at the run level, at the shot level, or both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedAudio {
+    /// Mix the take's own audio alongside whatever else is placed.
+    Include,
+    /// Drop the take's own audio; only placed sound is heard.
+    #[default]
+    Mute,
+}
+
+impl GeneratedAudio {
+    /// The spelling the timeline's `generatedAudio` field uses.
+    pub fn as_timeline_str(self) -> &'static str {
+        match self {
+            Self::Include => "include",
+            Self::Mute => "mute",
+        }
+    }
+}
+
+/// The sequence's sound design: one default for generated clip audio plus three independently
+/// controlled buses.
+///
+/// Dialogue is placed per shot (each line sits against the beat it belongs to), while ambience and
+/// music are placed ONCE across the whole sequence. That asymmetry is the point: a bed that is
+/// re-placed per shot restarts at every cut, and "continuous sound across intentional cuts" is
+/// precisely what this POC has to demonstrate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanSound {
+    /// Run-level default for every shot that does not override it.
+    #[serde(default)]
+    pub generated_audio: GeneratedAudio,
+    /// Bus settings for the per-shot dialogue track.
+    #[serde(default)]
+    pub dialogue: SoundBus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambience: Option<SoundBed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music: Option<SoundBed>,
+}
+
+/// Gain and mute for one audio bus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoundBus {
+    #[serde(default = "default_gain")]
+    pub gain: f64,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+impl Default for SoundBus {
+    fn default() -> Self {
+        Self {
+            gain: default_gain(),
+            muted: false,
+        }
+    }
+}
+
+/// A continuous bed placed once across the sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoundBed {
+    /// Role resolving against the pack's `sound` entries.
+    pub role: String,
+    #[serde(default = "default_gain")]
+    pub gain: f64,
+    #[serde(default)]
+    pub muted: bool,
+    /// Where on the sequence the bed starts. Beds normally run from the head, so this defaults to
+    /// zero; it exists so music can come in after the opening beat.
+    #[serde(default)]
+    pub start_seconds: f64,
+    /// Where in the SOURCE file the bed starts.
+    #[serde(default)]
+    pub source_in_seconds: f64,
+    #[serde(default)]
+    pub fade_in_seconds: f64,
+    #[serde(default)]
+    pub fade_out_seconds: f64,
+}
+
+/// One dialogue line placed against a shot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DialogueClip {
+    /// Role resolving against the pack's `sound` entries; must be a `dialogue` entry.
+    pub role: String,
+    /// Offset from the START OF THE SHOT, not from the head of the sequence — so a line stays
+    /// against its beat when earlier shots are trimmed or reordered.
+    #[serde(default)]
+    pub offset_seconds: f64,
+    #[serde(default = "default_gain")]
+    pub gain: f64,
+    #[serde(default)]
+    pub source_in_seconds: f64,
+    /// How much of the clip to play. Defaults to the whole file (measured on import).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub fade_in_seconds: f64,
+    #[serde(default)]
+    pub fade_out_seconds: f64,
+}
+
+fn default_gain() -> f64 {
+    1.0
 }
 
 /// The one local model/backend the plan renders through. `tier` is the quantization tier to
@@ -131,6 +270,13 @@ pub struct Shot {
     pub dialogue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
+    /// Override the run-level generated-audio policy for this shot (sc-22712).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_audio: Option<GeneratedAudio>,
+    /// The dialogue line placed against this shot, if any. `dialogue` above is the INTENT (what is
+    /// said); this is the actual audio, resolved from the pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue_clip: Option<DialogueClip>,
     pub conditioning: ShotConditioning,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -161,6 +307,25 @@ pub struct ReferencePack {
     #[serde(default)]
     pub description: String,
     pub references: Vec<ReferenceEntry>,
+    /// Approved audio, kept beside the approved images so a sequence's sound is as addressable and
+    /// as versioned as its pictures (sc-22712). Optional, so a pack written before sound existed
+    /// still reads.
+    #[serde(default)]
+    pub sound: Vec<SoundEntry>,
+}
+
+/// One approved audio file the plan's sound roles resolve against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoundEntry {
+    /// Role name (`[A-Za-z0-9_-]{1,64}`), unique within the pack's sound entries.
+    pub role: String,
+    /// One of [`SOUND_KINDS`]. A role may only be placed on the bus its kind names.
+    pub kind: String,
+    /// Audio path relative to the pack document's directory.
+    pub file: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,6 +494,7 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         }
     }
     findings.extend(validate_limits(&plan.limits));
+    findings.extend(validate_plan_sound(&plan.sound));
     if plan.shots.is_empty() {
         findings.push(PlanDiagnostic::plan(
             "shots",
@@ -356,6 +522,159 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         }
         findings.extend(validate_shot_structure(shot));
     }
+    findings
+}
+
+/// A gain, a fade or an offset must be a real, non-negative number inside the range the timeline
+/// can persist. A `NaN` here would survive every comparison below and arrive at ffmpeg as the
+/// string `NaN`, which is the sort of finding that is only cheap while it is still in the document.
+fn validate_sound_number(
+    findings: &mut Vec<PlanDiagnostic>,
+    field: &str,
+    label: &str,
+    value: f64,
+    max: f64,
+) {
+    if !value.is_finite() || value < 0.0 || value > max {
+        findings.push(PlanDiagnostic::plan(
+            field.to_owned(),
+            format!("{label} {value} must be a finite number in 0..={max}"),
+        ));
+    }
+}
+
+fn validate_sound_bus(findings: &mut Vec<PlanDiagnostic>, field: &str, bus: &SoundBus) {
+    validate_sound_number(
+        findings,
+        &format!("{field}.gain"),
+        "gain",
+        bus.gain,
+        MAX_SOUND_GAIN,
+    );
+}
+
+fn validate_sound_bed(findings: &mut Vec<PlanDiagnostic>, field: &str, bed: &SoundBed) {
+    if !is_safe_plan_id(&bed.role) {
+        findings.push(PlanDiagnostic::plan(
+            format!("{field}.role"),
+            format!(
+                "sound role {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                bed.role
+            ),
+        ));
+    }
+    validate_sound_number(
+        findings,
+        &format!("{field}.gain"),
+        "gain",
+        bed.gain,
+        MAX_SOUND_GAIN,
+    );
+    validate_sound_number(
+        findings,
+        &format!("{field}.startSeconds"),
+        "start",
+        bed.start_seconds,
+        f64::MAX,
+    );
+    validate_sound_number(
+        findings,
+        &format!("{field}.sourceInSeconds"),
+        "source in",
+        bed.source_in_seconds,
+        f64::MAX,
+    );
+    validate_sound_number(
+        findings,
+        &format!("{field}.fadeInSeconds"),
+        "fade in",
+        bed.fade_in_seconds,
+        60.0,
+    );
+    validate_sound_number(
+        findings,
+        &format!("{field}.fadeOutSeconds"),
+        "fade out",
+        bed.fade_out_seconds,
+        60.0,
+    );
+}
+
+/// Structural findings on the plan's sound block alone (sc-22712).
+fn validate_plan_sound(sound: &PlanSound) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    validate_sound_bus(&mut findings, "sound.dialogue", &sound.dialogue);
+    if let Some(bed) = &sound.ambience {
+        validate_sound_bed(&mut findings, "sound.ambience", bed);
+    }
+    if let Some(bed) = &sound.music {
+        validate_sound_bed(&mut findings, "sound.music", bed);
+    }
+    findings
+}
+
+/// Structural findings on one shot's dialogue clip.
+fn validate_dialogue_clip(shot_id: &str, clip: &DialogueClip) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    if !is_safe_plan_id(&clip.role) {
+        findings.push(PlanDiagnostic::shot(
+            shot_id,
+            "dialogueClip.role",
+            format!(
+                "sound role {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                clip.role
+            ),
+        ));
+    }
+    let mut plan_findings = Vec::new();
+    validate_sound_number(
+        &mut plan_findings,
+        "dialogueClip.gain",
+        "gain",
+        clip.gain,
+        MAX_SOUND_GAIN,
+    );
+    validate_sound_number(
+        &mut plan_findings,
+        "dialogueClip.offsetSeconds",
+        "offset",
+        clip.offset_seconds,
+        f64::MAX,
+    );
+    validate_sound_number(
+        &mut plan_findings,
+        "dialogueClip.sourceInSeconds",
+        "source in",
+        clip.source_in_seconds,
+        f64::MAX,
+    );
+    validate_sound_number(
+        &mut plan_findings,
+        "dialogueClip.fadeInSeconds",
+        "fade in",
+        clip.fade_in_seconds,
+        60.0,
+    );
+    validate_sound_number(
+        &mut plan_findings,
+        "dialogueClip.fadeOutSeconds",
+        "fade out",
+        clip.fade_out_seconds,
+        60.0,
+    );
+    if let Some(duration) = clip.duration_seconds {
+        if !duration.is_finite() || duration <= 0.0 {
+            plan_findings.push(PlanDiagnostic::plan(
+                "dialogueClip.durationSeconds",
+                format!("duration {duration} must be a finite number > 0"),
+            ));
+        }
+    }
+    findings.extend(
+        plan_findings
+            .into_iter()
+            .map(|finding| PlanDiagnostic::shot(shot_id, finding.field, finding.message)),
+    );
     findings
 }
 
@@ -506,6 +825,9 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    if let Some(clip) = &shot.dialogue_clip {
+        findings.extend(validate_dialogue_clip(id, clip));
+    }
     findings
 }
 
@@ -598,6 +920,76 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
+    // because the two are placed through different slots and a collision would make
+    // `referenceRoles: ["theme"]` resolve to something a video model cannot take.
+    let mut heard = BTreeSet::new();
+    for (index, entry) in pack.sound.iter().enumerate() {
+        let field = format!("referencePack.sound[{index}]");
+        if !is_safe_plan_id(&entry.role) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!(
+                    "role {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                    entry.role
+                ),
+            ));
+        } else if !heard.insert(entry.role.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!("duplicate sound role {:?}", entry.role),
+            ));
+        } else if seen.contains(entry.role.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!(
+                    "role {:?} is already a reference role; sound and reference roles share one \
+                     namespace so a role always names one kind of thing",
+                    entry.role
+                ),
+            ));
+        }
+        if !SOUND_KINDS.contains(&entry.kind.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.kind"),
+                format!(
+                    "unknown sound kind {:?}; expected one of {}",
+                    entry.kind,
+                    SOUND_KINDS.join(", ")
+                ),
+            ));
+        }
+        let file = Path::new(&entry.file);
+        let extension_ok = file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                SOUND_AUDIO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+            });
+        if entry.file.trim().is_empty()
+            || file.is_absolute()
+            || file
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.file"),
+                format!(
+                    "file {:?} must be a relative path inside the pack directory",
+                    entry.file
+                ),
+            ));
+        } else if !extension_ok {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.file"),
+                format!(
+                    "file {:?} must be audio ({})",
+                    entry.file,
+                    SOUND_AUDIO_EXTENSIONS.join(", ")
+                ),
+            ));
+        }
+    }
     findings
 }
 
@@ -650,6 +1042,61 @@ pub fn validate_plan_against_pack(
             }
         }
     }
+    findings.extend(validate_sound_against_pack(plan, pack));
+    findings
+}
+
+/// Every sound role the plan places must exist in the pack AND be the kind the bus it is placed on
+/// expects (sc-22712).
+///
+/// The kind check is not pedantry: `ambience.role` pointing at a `dialogue` entry is a plan that
+/// will run, export, and sound wrong, and the cost of finding that out is a whole GPU render. A
+/// role that names the wrong kind is refused here, before the first job exists.
+fn validate_sound_against_pack(plan: &ProductionPlan, pack: &ReferencePack) -> Vec<PlanDiagnostic> {
+    let sound: BTreeMap<&str, &SoundEntry> = pack
+        .sound
+        .iter()
+        .map(|entry| (entry.role.as_str(), entry))
+        .collect();
+    let known = || {
+        if sound.is_empty() {
+            "none".to_owned()
+        } else {
+            sound.keys().copied().collect::<Vec<_>>().join(", ")
+        }
+    };
+    let mut findings = Vec::new();
+    let mut check = |shot_id: Option<&str>, field: &str, role: &str, expected: &str| {
+        let finding = match sound.get(role) {
+            None => Some(format!(
+                "sound role {role:?} is not in reference pack {:?} (sound roles: {})",
+                pack.id,
+                known()
+            )),
+            Some(entry) if entry.kind != expected => Some(format!(
+                "sound role {role:?} is a {:?} entry but it is placed on the {expected} bus",
+                entry.kind
+            )),
+            Some(_) => None,
+        };
+        if let Some(message) = finding {
+            findings.push(match shot_id {
+                Some(id) => PlanDiagnostic::shot(id, field, message),
+                None => PlanDiagnostic::plan(field, message),
+            });
+        }
+    };
+    if let Some(bed) = &plan.sound.ambience {
+        check(None, "sound.ambience.role", &bed.role, "ambience");
+    }
+    if let Some(bed) = &plan.sound.music {
+        check(None, "sound.music.role", &bed.role, "music");
+    }
+    for shot in &plan.shots {
+        if let Some(clip) = &shot.dialogue_clip {
+            check(Some(&shot.id), "dialogueClip.role", &clip.role, "dialogue");
+        }
+    }
     findings
 }
 
@@ -672,6 +1119,28 @@ pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> V
                 format!("referencePack.references[{index}].file"),
                 format!(
                     "reference {:?}: {} is missing ({error})",
+                    entry.role,
+                    path.display()
+                ),
+            )),
+        }
+    }
+    for (index, entry) in pack.sound.iter().enumerate() {
+        let path = pack_dir.join(&entry.file);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
+            Ok(_) => findings.push(PlanDiagnostic::plan(
+                format!("referencePack.sound[{index}].file"),
+                format!(
+                    "sound {:?}: {} is empty or not a file",
+                    entry.role,
+                    path.display()
+                ),
+            )),
+            Err(error) => findings.push(PlanDiagnostic::plan(
+                format!("referencePack.sound[{index}].file"),
+                format!(
+                    "sound {:?}: {} is missing ({error})",
                     entry.role,
                     path.display()
                 ),
@@ -1016,6 +1485,10 @@ pub struct IntendedState {
     pub dialogue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
+    /// The generated-audio policy this shot resolved to — its own override if it declared one,
+    /// otherwise the run-level default (sc-22712). Recorded because it is what the export obeyed.
+    #[serde(default)]
+    pub generated_audio: GeneratedAudio,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1090,11 +1563,46 @@ pub struct ShotRunRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItemRecord {
-    pub shot_id: String,
+    /// The shot this item belongs to. `None` for a sequence-level bed, which belongs to the
+    /// sequence rather than to any one shot — that is exactly what makes it continuous across cuts
+    /// (sc-22712).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shot_id: Option<String>,
     pub item_id: String,
     pub asset_id: String,
     pub timeline_start: f64,
     pub timeline_end: f64,
+    /// Source range the item takes, so a trim is legible in the record without re-reading the
+    /// timeline document.
+    #[serde(default)]
+    pub source_in: f64,
+    #[serde(default)]
+    pub source_out: f64,
+    /// Effective gain (track gain times item volume) and the fades applied to this item.
+    #[serde(default = "default_gain")]
+    pub gain: f64,
+    #[serde(default)]
+    pub fade_in_seconds: f64,
+    #[serde(default)]
+    pub fade_out_seconds: f64,
+    /// The RESOLVED generated-audio policy for a picture item — what the export actually did, not
+    /// what the plan asked for. `None` on a placed sound clip, which has no generated audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_audio: Option<GeneratedAudio>,
+}
+
+/// One track of the assembled sequence, with the bus controls that were in force.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineTrackRecord {
+    pub track_id: String,
+    /// `video` or `audio`, as the timeline document spells it.
+    pub kind: String,
+    /// `picture`, `dialogue`, `ambience` or `music`.
+    pub role: String,
+    pub gain: f64,
+    pub muted: bool,
+    pub items: Vec<TimelineItemRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1104,7 +1612,34 @@ pub struct TimelineRecord {
     pub name: String,
     pub aspect_ratio: String,
     pub fps: u32,
+    /// Length of the assembled picture. The export is exactly this long.
+    #[serde(default)]
+    pub duration_seconds: f64,
+    /// The picture track's items, in cut order. Kept as its own field (rather than only inside
+    /// `tracks`) because it is the sequence: shot -> take -> position.
     pub items: Vec<TimelineItemRecord>,
+    /// Every track, picture and sound, with its bus controls (sc-22712).
+    #[serde(default)]
+    pub tracks: Vec<TimelineTrackRecord>,
+    /// The run-level generated-audio default every shot inherited unless it overrode it.
+    #[serde(default)]
+    pub generated_audio_default: GeneratedAudio,
+    /// Edits applied to the assembled sequence after the initial assembly, oldest first.
+    #[serde(default)]
+    pub edits: Vec<TimelineEditRecord>,
+}
+
+/// One trim / reorder / take-replacement applied to the assembled sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEditRecord {
+    /// `trim`, `reorder` or `replace_take`.
+    pub kind: String,
+    pub applied_at: String,
+    /// Human-readable description of what changed, e.g. `SH010 source range 0.000..2.500`.
+    pub detail: String,
+    /// Duration of the sequence after the edit.
+    pub duration_seconds: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1144,6 +1679,9 @@ pub struct RunRecord {
     pub selected_shot_ids: Vec<String>,
     #[serde(default)]
     pub references: Vec<ReferenceAssetRecord>,
+    /// Sound files the run imported, with the same shape as `references` (sc-22712).
+    #[serde(default)]
+    pub sound: Vec<ReferenceAssetRecord>,
     #[serde(default)]
     pub shots: Vec<ShotRunRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1471,6 +2009,217 @@ mod tests {
         assert!(findings[0].contains("shots[0].id"));
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Sound (sc-22712)
+    // ---------------------------------------------------------------------------------------
+
+    /// A pack and plan carrying sound, for the checks below.
+    fn sound_pack_json() -> Value {
+        let mut pack = pack_json();
+        pack["sound"] = json!([
+            { "role": "courier_line", "kind": "dialogue", "file": "sound/courier_line.wav" },
+            { "role": "room_tone", "kind": "ambience", "file": "sound/room_tone.wav" },
+            { "role": "theme", "kind": "music", "file": "sound/theme.mp3" }
+        ]);
+        pack
+    }
+
+    fn sound_plan_json() -> Value {
+        let mut plan = plan_json();
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "dialogue": { "gain": 1.0 },
+            "ambience": { "role": "room_tone", "gain": 0.3, "fadeInSeconds": 1.0 },
+            "music": { "role": "theme", "gain": 0.2 }
+        });
+        plan["shots"][1]["dialogueClip"] = json!({ "role": "courier_line", "offsetSeconds": 0.5 });
+        plan
+    }
+
+    /// A plan that says nothing about sound is still a valid plan, and its policy is `mute`.
+    ///
+    /// This is the compatibility claim for every plan written for sc-22710: adding sound must not
+    /// make an existing document unreadable, and the absence of a policy must resolve to the one
+    /// that cannot double a line.
+    #[test]
+    fn a_plan_without_a_sound_block_defaults_to_muting_generated_audio() {
+        let plan: ProductionPlan = serde_json::from_value(plan_json()).expect("plan parses");
+        assert_eq!(plan.sound.generated_audio, GeneratedAudio::Mute);
+        assert!(plan.sound.ambience.is_none() && plan.sound.music.is_none());
+        assert_eq!(plan.sound.dialogue.gain, 1.0);
+        assert!(!plan.sound.dialogue.muted);
+        assert!(plan.shots.iter().all(|shot| shot.dialogue_clip.is_none()));
+        assert!(validate_plan_structure(&plan).is_empty());
+
+        let pack: ReferencePack = serde_json::from_value(pack_json()).expect("pack parses");
+        assert!(pack.sound.is_empty());
+        assert!(validate_reference_pack(&pack).is_empty());
+        assert!(validate_plan_against_pack(&plan, &pack).is_empty());
+    }
+
+    #[test]
+    fn a_plan_and_pack_carrying_sound_validate_clean() {
+        let plan: ProductionPlan = serde_json::from_value(sound_plan_json()).expect("plan parses");
+        let pack: ReferencePack = serde_json::from_value(sound_pack_json()).expect("pack parses");
+        assert!(validate_plan_structure(&plan).is_empty());
+        assert!(validate_reference_pack(&pack).is_empty());
+        assert!(
+            validate_plan_against_pack(&plan, &pack).is_empty(),
+            "{:?}",
+            validate_plan_against_pack(&plan, &pack)
+        );
+        assert_eq!(
+            plan.shots[1]
+                .dialogue_clip
+                .as_ref()
+                .expect("SH020 has a line")
+                .role,
+            "courier_line"
+        );
+    }
+
+    /// A sound role placed on the wrong bus is refused BEFORE anything renders.
+    ///
+    /// This is the finding worth the most: `ambience.role` pointing at a dialogue take is a plan
+    /// that runs, exports and simply sounds wrong, and discovering that costs a whole GPU render.
+    #[test]
+    fn a_sound_role_on_the_wrong_bus_is_refused() {
+        let mut plan_value = sound_plan_json();
+        plan_value["sound"]["ambience"]["role"] = json!("courier_line");
+        plan_value["shots"][1]["dialogueClip"]["role"] = json!("theme");
+        let plan: ProductionPlan = serde_json::from_value(plan_value).expect("plan parses");
+        let pack: ReferencePack = serde_json::from_value(sound_pack_json()).expect("pack parses");
+        let findings = messages(&validate_plan_against_pack(&plan, &pack));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("sound.ambience.role")
+                    && finding.contains("\"dialogue\" entry")
+                    && finding.contains("ambience bus")),
+            "{findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("dialogueClip.role")
+                    && finding.contains("\"music\" entry")),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_sound_role_names_the_roles_the_pack_does_have() {
+        let mut plan_value = sound_plan_json();
+        plan_value["sound"]["music"]["role"] = json!("missing_cue");
+        let plan: ProductionPlan = serde_json::from_value(plan_value).expect("plan parses");
+        let pack: ReferencePack = serde_json::from_value(sound_pack_json()).expect("pack parses");
+        let findings = messages(&validate_plan_against_pack(&plan, &pack));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("missing_cue")
+                    && finding.contains("courier_line, room_tone, theme")),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_pack_refuses_a_bad_sound_entry() {
+        let mut pack_value = sound_pack_json();
+        pack_value["sound"] = json!([
+            { "role": "courier_line", "kind": "dialogue", "file": "sound/a.wav" },
+            { "role": "courier_line", "kind": "dialogue", "file": "sound/b.wav" },
+            { "role": "bad_kind", "kind": "foley", "file": "sound/c.wav" },
+            { "role": "not_audio", "kind": "music", "file": "sound/c.png" },
+            { "role": "escapes", "kind": "music", "file": "../outside.wav" },
+            { "role": "red_parcel", "kind": "sfx", "file": "sound/d.wav" }
+        ]);
+        let pack: ReferencePack = serde_json::from_value(pack_value).expect("pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        for expected in [
+            "duplicate sound role",
+            "unknown sound kind",
+            "must be audio",
+            "must be a relative path",
+            "already a reference role",
+        ] {
+            assert!(
+                findings.iter().any(|finding| finding.contains(expected)),
+                "expected a finding containing {expected:?}: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_gains_fades_and_offsets_are_refused() {
+        let mut plan_value = sound_plan_json();
+        plan_value["sound"]["ambience"]["gain"] = json!(12.0);
+        plan_value["sound"]["music"]["fadeOutSeconds"] = json!(-1.0);
+        plan_value["shots"][1]["dialogueClip"]["offsetSeconds"] = json!(-0.5);
+        plan_value["shots"][1]["dialogueClip"]["durationSeconds"] = json!(0.0);
+        let plan: ProductionPlan = serde_json::from_value(plan_value).expect("plan parses");
+        let findings = messages(&validate_plan_structure(&plan));
+        for expected in [
+            "sound.ambience.gain",
+            "sound.music.fadeOutSeconds",
+            "dialogueClip.offsetSeconds",
+            "dialogueClip.durationSeconds",
+        ] {
+            assert!(
+                findings.iter().any(|finding| finding.contains(expected)),
+                "expected a finding for {expected:?}: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_sound_file_is_found_before_dispatch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("references")).expect("references dir");
+        for entry in ["workshop_plate.png", "red_parcel.png", "look.png"] {
+            std::fs::write(dir.path().join("references").join(entry), b"x").expect("plate writes");
+        }
+        std::fs::create_dir_all(dir.path().join("sound")).expect("sound dir");
+        std::fs::write(dir.path().join("sound/room_tone.wav"), b"x").expect("clip writes");
+        let pack: ReferencePack = serde_json::from_value(sound_pack_json()).expect("pack parses");
+        let findings = messages(&validate_reference_pack_files(&pack, dir.path()));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("courier_line") && finding.contains("is missing")),
+            "{findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("theme") && finding.contains("is missing")),
+            "{findings:#?}"
+        );
+        assert!(
+            !findings.iter().any(|finding| finding.contains("room_tone")),
+            "the clip that IS on disk must not be reported: {findings:#?}"
+        );
+    }
+
+    /// A shot's policy wins over the run's, and both spell the same way the timeline does.
+    #[test]
+    fn a_shot_can_override_the_runs_generated_audio_policy() {
+        let mut plan_value = sound_plan_json();
+        plan_value["sound"]["generatedAudio"] = json!("mute");
+        plan_value["shots"][0]["generatedAudio"] = json!("include");
+        let plan: ProductionPlan = serde_json::from_value(plan_value).expect("plan parses");
+        assert!(validate_plan_structure(&plan).is_empty());
+        assert_eq!(plan.sound.generated_audio, GeneratedAudio::Mute);
+        assert_eq!(
+            plan.shots[0].generated_audio,
+            Some(GeneratedAudio::Include),
+            "an explicit per-shot opt-in"
+        );
+        assert_eq!(plan.shots[1].generated_audio, None, "SH020 inherits");
+        assert_eq!(GeneratedAudio::Include.as_timeline_str(), "include");
+        assert_eq!(GeneratedAudio::Mute.as_timeline_str(), "mute");
+        assert_eq!(GeneratedAudio::default(), GeneratedAudio::Mute);
+    }
     #[test]
     fn run_record_round_trips() {
         let record = RunRecord {
@@ -1497,6 +2246,7 @@ mod tests {
             limits: plan().limits,
             selected_shot_ids: vec!["SH010".into()],
             references: vec![],
+            sound: vec![],
             shots: vec![],
             timeline: None,
             export: None,

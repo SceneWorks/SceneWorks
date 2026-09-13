@@ -2262,6 +2262,64 @@ impl TimelineExport<'_> {
         Ok(segments)
     }
 
+    /// Resolve every audio source the timeline places into a file on disk (sc-22712).
+    ///
+    /// A placement whose asset is missing from the project, whose media file is gone, or which
+    /// carries no decodable audio stream is DROPPED rather than fatal: the picture is the
+    /// deliverable, and losing the whole export because one clip turned out to be silent would be
+    /// a worse answer than an export with one fewer layer. Everything dropped is logged with the
+    /// track it came from, so a missing layer is diagnosable from the job log.
+    async fn resolve_audio_sources(&self, duration: f64) -> Vec<ResolvedAudioSource> {
+        let mut resolved = Vec::new();
+        for placement in audio_placements(&self.timeline, duration) {
+            let Ok(asset) = self
+                .store
+                .get_asset(&self.request.project_id, &placement.asset_id)
+            else {
+                tracing::warn!(
+                    asset_id = %placement.asset_id,
+                    track_id = %placement.track_id,
+                    "timeline export: audio source asset is missing; dropping it from the mix"
+                );
+                continue;
+            };
+            let media_rel = asset
+                .get("file")
+                .and_then(|file| file.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let Ok(media_path) = safe_project_path(&self.project_path, media_rel) else {
+                tracing::warn!(
+                    asset_id = %placement.asset_id,
+                    "timeline export: audio source path is unsafe; dropping it from the mix"
+                );
+                continue;
+            };
+            if !media_path.exists() {
+                tracing::warn!(
+                    asset_id = %placement.asset_id,
+                    path = %media_path.display(),
+                    "timeline export: audio source file is missing; dropping it from the mix"
+                );
+                continue;
+            }
+            if !source_has_audio_stream("ffmpeg", &media_path).await {
+                tracing::info!(
+                    asset_id = %placement.asset_id,
+                    track_id = %placement.track_id,
+                    generated = placement.generated,
+                    "timeline export: source carries no audio stream; dropping it from the mix"
+                );
+                continue;
+            }
+            resolved.push(ResolvedAudioSource {
+                placement,
+                media_path,
+            });
+        }
+        resolved
+    }
+
     /// Mux the rendered segments into the project's render directory, write the
     /// asset sidecar and recipe, index the asset, and report completion.
     ///
@@ -2317,14 +2375,40 @@ impl TimelineExport<'_> {
             ),
         )
         .await?;
-        mux_segments(
-            "ffmpeg",
-            segments,
-            tmp_path,
-            &output_path,
-            Some(self.context),
-        )
-        .await?;
+        // sc-22712. With nothing to mix this is byte-for-byte the export it always was: one mux
+        // straight to the deliverable, still `-c copy` on the concat path. Sound is a SECOND pass
+        // over the finished picture rather than a wider first pass, because the picture pass joins
+        // pre-rendered segments whose timing has nothing to do with where a bed or a line sits —
+        // a bed spanning three cuts cannot be expressed as a property of any one segment.
+        let audio = self.resolve_audio_sources(duration).await;
+        if audio.is_empty() {
+            mux_segments(
+                "ffmpeg",
+                segments,
+                tmp_path,
+                &output_path,
+                Some(self.context),
+            )
+            .await?;
+        } else {
+            let picture_path = tmp_path.join("picture.mp4");
+            mux_segments(
+                "ffmpeg",
+                segments,
+                tmp_path,
+                &picture_path,
+                Some(self.context),
+            )
+            .await?;
+            mux_audio(
+                "ffmpeg",
+                &picture_path,
+                &audio,
+                &output_path,
+                Some(self.context),
+            )
+            .await?;
+        }
 
         let asset = build_render_asset(
             &self.request,
@@ -2334,6 +2418,7 @@ impl TimelineExport<'_> {
             self.spec.width,
             self.spec.height,
             duration,
+            &audio,
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
         let asset_id = required_value_str(&asset, "id")?.to_owned();
@@ -2986,6 +3071,322 @@ pub(crate) fn main_track_items(timeline: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Sample format every mixed source is converted to before `amix` sees it. Fixed rather than
+/// negotiated so a mono 22 kHz dialogue take and a stereo 48 kHz music bed mix to the same thing on
+/// every host — an `amix` over inputs with different layouts is a source of host-dependent output,
+/// and this export is supposed to be reproducible from the saved timeline alone.
+const AUDIO_MIX_FORMAT: &str = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+
+/// One audio source placed on the timeline, resolved to the numbers ffmpeg needs (sc-22712).
+///
+/// A placement is produced for every item on a non-muted `kind: "audio"` track, and for a PICTURE
+/// item only when it explicitly opts in with `generatedAudio: "include"`. That asymmetry is the
+/// doubling guard: a generated take whose model spoke the line contributes nothing to the mix
+/// unless the timeline says out loud that it should.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioPlacement {
+    pub(crate) asset_id: String,
+    pub(crate) track_id: String,
+    pub(crate) role: String,
+    /// Range taken from the SOURCE file, in source seconds.
+    pub(crate) source_in: f64,
+    pub(crate) source_out: f64,
+    /// Where the clip lands on the timeline, and how long its slot is.
+    pub(crate) timeline_start: f64,
+    pub(crate) span: f64,
+    pub(crate) speed: f64,
+    /// Track gain multiplied by the item's own `volume`.
+    pub(crate) gain: f64,
+    pub(crate) fade_in: f64,
+    pub(crate) fade_out: f64,
+    /// True when this is a picture item's own audio rather than a placed sound clip.
+    pub(crate) generated: bool,
+}
+
+/// An [`AudioPlacement`] whose asset has been resolved to a file on disk.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedAudioSource {
+    pub(crate) placement: AudioPlacement,
+    pub(crate) media_path: PathBuf,
+}
+
+/// Walk the saved timeline into the ordered list of audio sources the export must mix.
+///
+/// Pure: no store, no ffmpeg. `picture_duration` is the length of the picture the video pass
+/// produced, and it is a HARD CEILING — a clip that starts past the last frame is dropped and one
+/// that overruns it is shortened. That is what makes "the exported duration and the audio
+/// synchronisation match the saved timeline" a single claim rather than two: the mix cannot extend
+/// the file, so the export is exactly as long as the picture the timeline describes.
+///
+/// Order is `(timelineStart, trackId, assetId)` so the generated filter graph — and therefore the
+/// exported bytes — do not depend on the order tracks happen to sit in the document.
+pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<AudioPlacement> {
+    let mut placements = Vec::new();
+    let Some(tracks) = timeline.get("tracks").and_then(Value::as_array) else {
+        return placements;
+    };
+    for track in tracks {
+        if track.get("muted").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let track_id = track
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let kind = track.get("kind").and_then(Value::as_str).unwrap_or("video");
+        let role = track
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or(match kind {
+                "overlay" => "overlay",
+                "audio" => "sound",
+                _ => "picture",
+            })
+            .to_owned();
+        let track_gain = item_f64(track, "gain", 1.0).clamp(0.0, 4.0);
+        let is_audio_track = kind == "audio";
+        let Some(items) = track.get("items").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let generated = !is_audio_track;
+            if generated && item.get("generatedAudio").and_then(Value::as_str) != Some("include") {
+                continue;
+            }
+            let Some(asset_id) = item.get("assetId").and_then(Value::as_str) else {
+                continue;
+            };
+            let timeline_start = item_f64(item, "timelineStart", 0.0).max(0.0);
+            let timeline_end = item_f64(item, "timelineEnd", 0.0);
+            if timeline_end <= timeline_start || timeline_start >= picture_duration {
+                continue;
+            }
+            let span = (timeline_end.min(picture_duration) - timeline_start).max(0.0);
+            if span <= 0.0 {
+                continue;
+            }
+            let speed = item_f64(item, "speed", 1.0).clamp(0.1, 8.0);
+            let source_in = item_f64(item, "sourceIn", 0.0).max(0.0);
+            let declared_out = item_f64(item, "sourceOut", 0.0);
+            // A clip whose declared source range is shorter than its slot still plays only what it
+            // has; one with no usable range at all takes the slot's worth of source.
+            let source_out = if declared_out > source_in {
+                declared_out
+            } else {
+                source_in + span * speed
+            };
+            let gain = (track_gain * item_f64(item, "volume", 1.0).clamp(0.0, 2.0)).clamp(0.0, 8.0);
+            let fade_in = item_f64(item, "fadeInSeconds", 0.0).clamp(0.0, span);
+            let fade_out = item_f64(item, "fadeOutSeconds", 0.0).clamp(0.0, span);
+            placements.push(AudioPlacement {
+                asset_id: asset_id.to_owned(),
+                track_id: track_id.clone(),
+                role: role.clone(),
+                source_in,
+                source_out,
+                timeline_start,
+                span,
+                speed,
+                gain,
+                fade_in,
+                fade_out,
+                generated,
+            });
+        }
+    }
+    placements.sort_by(|left, right| {
+        left.timeline_start
+            .total_cmp(&right.timeline_start)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+            .then_with(|| left.asset_id.cmp(&right.asset_id))
+    });
+    placements
+}
+
+/// Decompose a playback rate into a chain of `atempo` filters.
+///
+/// `atempo` is specified for `0.5..=2.0` per instance; the timeline admits `0.1..=8.0`. Chaining
+/// powers of two around a final residual covers the whole range, and it is the only way a
+/// speed-changed clip's audio stays in step with the `setpts`-rescaled picture the video pass
+/// produced. Returns an empty chain at unit speed so the common case adds no filters at all.
+pub(crate) fn atempo_chain(speed: f64) -> Vec<String> {
+    let mut remaining = speed.clamp(0.1, 8.0);
+    let mut filters = Vec::new();
+    while remaining > 2.0 {
+        filters.push("atempo=2.000000".to_owned());
+        remaining /= 2.0;
+    }
+    while remaining < 0.5 {
+        filters.push("atempo=0.500000".to_owned());
+        remaining *= 2.0;
+    }
+    if (remaining - 1.0).abs() > 1e-6 {
+        filters.push(format!("atempo={remaining:.6}"));
+    }
+    filters
+}
+
+/// The filter chain for one mixed source. `input` is its ffmpeg input index (input 0 is always the
+/// already-muxed picture), and the chain ends in the `[aN]` label `audio_mix_filter` mixes.
+///
+/// Order matters and is not arbitrary: trim the source range, rebase timestamps, retime, cap at the
+/// slot length, normalise the format, apply gain, apply the fades **while they are still relative
+/// to the clip**, and only then delay the whole thing to its place on the timeline.
+pub(crate) fn audio_source_filter(input: usize, source: &ResolvedAudioSource) -> String {
+    let placement = &source.placement;
+    let mut chain = vec![
+        format!(
+            "atrim=start={:.3}:end={:.3}",
+            placement.source_in, placement.source_out
+        ),
+        "asetpts=PTS-STARTPTS".to_owned(),
+    ];
+    chain.extend(atempo_chain(placement.speed));
+    chain.push(format!("atrim=end={:.3}", placement.span));
+    chain.push("asetpts=PTS-STARTPTS".to_owned());
+    chain.push(AUDIO_MIX_FORMAT.to_owned());
+    chain.push(format!("volume={:.4}", placement.gain));
+    if placement.fade_in > 0.0 {
+        chain.push(format!("afade=t=in:st=0:d={:.3}", placement.fade_in));
+    }
+    if placement.fade_out > 0.0 {
+        chain.push(format!(
+            "afade=t=out:st={:.3}:d={:.3}",
+            (placement.span - placement.fade_out).max(0.0),
+            placement.fade_out
+        ));
+    }
+    let delay_ms = (placement.timeline_start * 1000.0).round().max(0.0) as i64;
+    if delay_ms > 0 {
+        chain.push(format!("adelay={delay_ms}:all=1"));
+    }
+    format!("[{input}:a]{}[a{input}]", chain.join(","))
+}
+
+/// Build the whole `-filter_complex` graph: one chain per source, then the mix.
+///
+/// `normalize=0` is load-bearing. `amix`'s default renormalises by input count, so adding a quiet
+/// music bed would silently drop the dialogue by 6 dB and the gains written in the timeline would
+/// mean nothing. With it off, `volume=` is the only thing that sets a level — which is the whole
+/// point of giving dialogue, ambience and music independent faders.
+///
+/// `apad` closes the other half: the mix is padded with silence so it always outlasts the picture,
+/// and `-shortest` then cuts the file at the last video frame. Without the pad, `-shortest` would
+/// end the FILE when the audio ran out and truncate the picture.
+pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
+    let mut chains: Vec<String> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| audio_source_filter(index + 1, source))
+        .collect();
+    let labels: String = (1..=sources.len())
+        .map(|index| format!("[a{index}]"))
+        .collect();
+    if sources.len() == 1 {
+        chains.push(format!("{labels}apad[aout]"));
+    } else {
+        chains.push(format!(
+            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,apad[aout]",
+            sources.len()
+        ));
+    }
+    chains.join(";")
+}
+
+/// Arguments for the audio pass: take the finished picture, mix every placed source over it, and
+/// write the deliverable.
+///
+/// The picture is copied, never re-encoded — the video pass already produced exactly the frames the
+/// timeline describes, and a second encode would cost quality for nothing.
+///
+/// **`-map_metadata -1` is load-bearing here for the same reason it is in
+/// [`mux_with_crossfades_args`] (sc-15956), and more so:** this command has the picture as input 0
+/// and every sound clip after it, so ffmpeg's multi-input default would republish the muxed
+/// picture's container metadata as the export's own. `an_audio_mix_does_not_inherit_a_clips_recipe`
+/// fails if this regresses.
+pub(crate) fn audio_mix_args(
+    ffmpeg: &str,
+    picture_path: &Path,
+    sources: &[ResolvedAudioSource],
+    output_path: &Path,
+) -> WorkerResult<Vec<String>> {
+    if sources.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Timeline audio mix has no sources.".to_owned(),
+        ));
+    }
+    let mut args = vec![
+        ffmpeg.to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        picture_path.display().to_string(),
+    ];
+    for source in sources {
+        args.push("-i".to_owned());
+        args.push(source.media_path.display().to_string());
+    }
+    args.extend([
+        "-filter_complex".to_owned(),
+        audio_mix_filter(sources),
+        "-map".to_owned(),
+        "0:v".to_owned(),
+        "-map".to_owned(),
+        "[aout]".to_owned(),
+        "-c:v".to_owned(),
+        "copy".to_owned(),
+        "-c:a".to_owned(),
+        "aac".to_owned(),
+        "-b:a".to_owned(),
+        "192k".to_owned(),
+        "-ar".to_owned(),
+        "48000".to_owned(),
+        "-ac".to_owned(),
+        "2".to_owned(),
+        "-shortest".to_owned(),
+        "-map_metadata".to_owned(),
+        "-1".to_owned(),
+        output_path.display().to_string(),
+    ]);
+    Ok(args)
+}
+
+/// Mix `sources` over `picture_path` into `output_path`.
+pub(crate) async fn mux_audio(
+    ffmpeg: &str,
+    picture_path: &Path,
+    sources: &[ResolvedAudioSource],
+    output_path: &Path,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<()> {
+    run_ffmpeg(
+        audio_mix_args(ffmpeg, picture_path, sources, output_path)?,
+        context,
+    )
+    .await
+}
+
+/// Whether `source_path` actually carries a decodable audio stream.
+///
+/// Asked of every source before it enters the graph, because `[N:a]` against a file with no audio
+/// stream does not degrade — it fails the WHOLE command, so one silent generated take would take
+/// the entire export down with it. The sidecar is not trusted for this: `hasAudio` is written by
+/// whatever produced the clip, and the question here is what ffmpeg can actually read now.
+///
+/// Probed with `ffmpeg`, not `ffprobe`, for the reason spelled out on [`probe_source_frame_count`]:
+/// the desktop app ships the imageio-ffmpeg binary and there is no `ffprobe` beside it.
+async fn source_has_audio_stream(ffmpeg: &str, source_path: &Path) -> bool {
+    let program = resolve_probe_program(ffmpeg);
+    let mut command = Command::new(&program);
+    command.args(["-hide_banner", "-i", &source_path.display().to_string()]);
+    let Ok(output) = run_ffmpeg_probe_command(command).await else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+}
+
 pub(crate) fn output_dimensions(aspect_ratio: &str, resolution: u32) -> (u32, u32) {
     let resolution = resolution.max(2);
     let (width, height) = match aspect_ratio {
@@ -3333,6 +3734,7 @@ pub(crate) fn concat_file_contents<'a>(paths: impl Iterator<Item = &'a PathBuf>)
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_render_asset(
     request: &TimelineExportRequest,
     timeline: &Value,
@@ -3341,6 +3743,7 @@ pub(crate) fn build_render_asset(
     width: u32,
     height: u32,
     duration: f64,
+    audio: &[ResolvedAudioSource],
 ) -> Value {
     let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
@@ -3358,6 +3761,28 @@ pub(crate) fn build_render_asset(
         .get("aspectRatio")
         .and_then(Value::as_str)
         .unwrap_or("16:9");
+    // What actually reached the mix, layer by layer (sc-22712). Recorded rather than recomputed
+    // because `resolve_audio_sources` DROPS sources it cannot read, so the timeline alone does not
+    // say what was audible — and "why is the music missing" is exactly the question this sidecar
+    // has to be able to answer after the fact.
+    let audio_layers = audio
+        .iter()
+        .map(|source| {
+            let placement = &source.placement;
+            json!({
+                "trackId": placement.track_id,
+                "role": placement.role,
+                "assetId": placement.asset_id,
+                "generated": placement.generated,
+                "timelineStart": (placement.timeline_start * 1000.0).round() / 1000.0,
+                "durationSeconds": (placement.span * 1000.0).round() / 1000.0,
+                "gain": (placement.gain * 10000.0).round() / 10000.0,
+                "fadeInSeconds": placement.fade_in,
+                "fadeOutSeconds": placement.fade_out,
+            })
+        })
+        .collect::<Vec<_>>();
+    let has_audio = !audio_layers.is_empty();
     json!({
         "schemaVersion": 1,
         "id": asset_id,
@@ -3372,7 +3797,8 @@ pub(crate) fn build_render_asset(
             "width": width,
             "height": height,
             "duration": (duration * 1000.0).round() / 1000.0,
-            "fps": request.fps
+            "fps": request.fps,
+            "hasAudio": has_audio
         },
         "status": {
             "favorite": false,
@@ -3398,7 +3824,12 @@ pub(crate) fn build_render_asset(
             },
             "rawAdapterSettings": {
                 "timelinePath": request.timeline_path,
-                "renderer": "ffmpeg segment concat"
+                "renderer": if has_audio {
+                    "ffmpeg segment concat + audio mix"
+                } else {
+                    "ffmpeg segment concat"
+                },
+                "audioLayers": audio_layers
             }
         },
         "lineage": {
@@ -5565,5 +5996,946 @@ mod frame_extract_seek_tests {
                 .expect("extraction succeeds");
             assert!(std::fs::metadata(&out).expect("frame file").len() > 0);
         });
+    }
+}
+
+/// sc-22712: dialogue, ambience and music as three independently controlled buses, mixed into the
+/// timeline export.
+///
+/// **Every claim here is measured off the exported MP4's own samples**, never off the ffmpeg
+/// command that was supposed to produce them. An argument-shape assertion cannot tell the
+/// difference between a filter graph that mutes a track and one that merely fails to unmute it,
+/// and "the gains in the timeline mean what they say" is not a property of a string. So each
+/// fixture bed is a tone at a known frequency, the export is decoded back to PCM, and a Goertzel
+/// probe asks what is actually audible in the window the timeline says it should be.
+///
+/// Deliberately ungated `#[cfg(test)]` for the same reason as `frame_extract_seek_tests` directly
+/// above: the code under test compiles on every target, and the lane that runs it is plain Linux.
+#[cfg(test)]
+mod timeline_audio_mix_tests {
+    use super::*;
+    use crate::video_jobs::tests::ffmpeg_reachable;
+
+    const SAMPLE_RATE: f64 = 48_000.0;
+
+    fn scratch(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("temp dir")
+    }
+
+    fn lavfi(inputs: &[&str], tail: &[&str], out: &Path) -> Vec<String> {
+        let mut args = vec!["ffmpeg".to_owned(), "-y".to_owned()];
+        for input in inputs {
+            args.push("-f".to_owned());
+            args.push("lavfi".to_owned());
+            args.push("-i".to_owned());
+            args.push((*input).to_owned());
+        }
+        args.extend(tail.iter().map(|arg| (*arg).to_owned()));
+        args.push(out.display().to_string());
+        args
+    }
+
+    /// A picture clip whose OWN audio is a tone at `tone_hz` — the "generated clip audio" every
+    /// doubling assertion below is about.
+    async fn picture_clip(out: &Path, seconds: f64, tone_hz: u32) -> bool {
+        run_ffmpeg(
+            lavfi(
+                &[
+                    &format!("testsrc2=size=320x180:rate=24:duration={seconds}"),
+                    &format!("sine=frequency={tone_hz}:duration={seconds}:sample_rate=48000"),
+                ],
+                &["-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac"],
+                out,
+            ),
+            None,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// A picture clip with no audio stream at all, for the drop-rather-than-fail path.
+    async fn silent_picture_clip(out: &Path, seconds: f64) -> bool {
+        run_ffmpeg(
+            lavfi(
+                &[&format!("testsrc2=size=320x180:rate=24:duration={seconds}")],
+                &["-pix_fmt", "yuv420p", "-an"],
+                out,
+            ),
+            None,
+        )
+        .await
+        .is_ok()
+    }
+
+    async fn tone_wav(out: &Path, seconds: f64, tone_hz: u32) -> bool {
+        run_ffmpeg(
+            lavfi(
+                &[&format!(
+                    "sine=frequency={tone_hz}:duration={seconds}:sample_rate=48000"
+                )],
+                &["-c:a", "pcm_s16le"],
+                out,
+            ),
+            None,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// A bed whose instantaneous frequency rises as `200 + 150t` Hz.
+    ///
+    /// This is the shape that can tell "one continuous bed" apart from "the same bed restarted at
+    /// every cut", which a constant tone cannot: a restart puts the STARTING frequency back on the
+    /// other side of the cut, and the probe below reads the frequency rather than the level.
+    async fn chirp_wav(out: &Path, seconds: f64) -> bool {
+        run_ffmpeg(
+            lavfi(
+                &[&format!(
+                    "aevalsrc=exprs=sin(2*PI*(200*t+75*t*t)):d={seconds}:s=48000"
+                )],
+                &["-c:a", "pcm_s16le"],
+                out,
+            ),
+            None,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// Decode `[start, start + seconds)` of `path` to mono 48 kHz PCM.
+    fn decode_window(path: &Path, start: f64, seconds: f64) -> Vec<f64> {
+        let program = resolve_probe_program("ffmpeg");
+        let output = std::process::Command::new(program)
+            .args([
+                "-v",
+                "error",
+                "-ss",
+                &format!("{start:.3}"),
+                "-i",
+                &path.display().to_string(),
+                "-t",
+                &format!("{seconds:.3}"),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-f",
+                "s16le",
+                "-",
+            ])
+            .output()
+            .expect("ffmpeg decodes the export");
+        output
+            .stdout
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f64 / 32768.0)
+            .collect()
+    }
+
+    fn rms(samples: &[f64]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|value| value * value).sum::<f64>() / samples.len() as f64).sqrt()
+    }
+
+    /// Normalised magnitude of `frequency` in `samples` — a single-bin DFT (Goertzel).
+    fn tone_level(samples: &[f64], frequency: f64) -> f64 {
+        let count = samples.len();
+        if count < 64 {
+            return 0.0;
+        }
+        let bin = (0.5 + count as f64 * frequency / SAMPLE_RATE).floor();
+        let omega = 2.0 * std::f64::consts::PI * bin / count as f64;
+        let coefficient = 2.0 * omega.cos();
+        let (mut previous, mut older) = (0.0_f64, 0.0_f64);
+        for sample in samples {
+            let current = sample + coefficient * previous - older;
+            older = previous;
+            previous = current;
+        }
+        (previous * previous + older * older - coefficient * previous * older)
+            .max(0.0)
+            .sqrt()
+            / (count as f64 / 2.0)
+    }
+
+    /// The strongest frequency in `samples`, searched on a 5 Hz grid.
+    fn dominant_frequency(samples: &[f64], low: u32, high: u32) -> f64 {
+        (low..=high)
+            .step_by(5)
+            .map(|frequency| (frequency as f64, tone_level(samples, frequency as f64)))
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(frequency, _)| frequency)
+            .unwrap_or(0.0)
+    }
+
+    fn track(id: &str, kind: &str, role: &str, muted: bool, gain: f64, items: Value) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "kind": kind,
+            "role": role,
+            "locked": false,
+            "muted": muted,
+            "gain": gain,
+            "items": items,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn item(
+        id: &str,
+        track_id: &str,
+        asset_id: &str,
+        kind: &str,
+        source_in: f64,
+        source_out: f64,
+        start: f64,
+        end: f64,
+        extra: Value,
+    ) -> Value {
+        let mut value = json!({
+            "id": id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "type": kind,
+            "displayName": id,
+            "sourceIn": source_in,
+            "sourceOut": source_out,
+            "timelineStart": start,
+            "timelineEnd": end,
+            "speed": 1.0,
+            "fit": "fit",
+            "volume": 1.0,
+            "generatedAudio": "mute",
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
+        });
+        let object = value.as_object_mut().expect("item object");
+        for (key, entry) in extra.as_object().expect("extra object") {
+            object.insert(key.clone(), entry.clone());
+        }
+        value
+    }
+
+    fn asset(kind: &str, path: &str, mime: &str) -> Value {
+        json!({"type": kind, "file": {"path": path, "mimeType": mime}})
+    }
+
+    /// Run the production export sequence over a hand-built timeline: plan the main track, render
+    /// each segment, mux the picture, then mix the audio. Returns the exported file and the
+    /// planned duration.
+    ///
+    /// This is the real path minus the store and the API — `plan_segments`, `render_item_segment`,
+    /// `mux_segments` and `mux_audio` are the same functions `TimelineExport` calls, in the same
+    /// order, with the same arguments.
+    async fn export(
+        dir: &Path,
+        timeline: &Value,
+        assets: &[(&str, Value)],
+        spec: RenderSpec,
+    ) -> (PathBuf, f64) {
+        let mut items = main_track_items(timeline);
+        items.sort_by(|left, right| {
+            item_f64(left, "timelineStart", 0.0).total_cmp(&item_f64(right, "timelineStart", 0.0))
+        });
+        let (plan, duration) = plan_segments(&items).expect("main track plans");
+
+        let mut segments = Vec::new();
+        for (index, planned) in plan.iter().enumerate() {
+            if let Some(gap) = planned.leading_gap {
+                let gap_path = dir.join(format!("segment_{index:04}_gap.mp4"));
+                render_black_segment("ffmpeg", &gap_path, gap, spec, None)
+                    .await
+                    .expect("gap renders");
+                segments.push(TimelineSegment {
+                    path: gap_path,
+                    duration: gap,
+                    transition: None,
+                    transition_duration: 0.0,
+                });
+            }
+            let asset_id = required_value_str(planned.item, "assetId").expect("assetId");
+            let asset = assets
+                .iter()
+                .find(|(id, _)| *id == asset_id)
+                .map(|(_, value)| value.clone())
+                .expect("asset is in the fixture set");
+            let segment_path = dir.join(format!("segment_{index:04}.mp4"));
+            let segment_duration = render_item_segment(
+                "ffmpeg",
+                dir,
+                planned.item,
+                &asset,
+                &segment_path,
+                spec,
+                None,
+            )
+            .await
+            .expect("segment renders");
+            segments.push(TimelineSegment {
+                path: segment_path,
+                duration: segment_duration,
+                transition: planned.transition.clone(),
+                transition_duration: planned.transition_duration,
+            });
+        }
+
+        let sources: Vec<ResolvedAudioSource> = audio_placements(timeline, duration)
+            .into_iter()
+            .map(|placement| {
+                let asset = assets
+                    .iter()
+                    .find(|(id, _)| *id == placement.asset_id)
+                    .map(|(_, value)| value.clone())
+                    .expect("audio asset is in the fixture set");
+                let relative = asset["file"]["path"]
+                    .as_str()
+                    .expect("asset path")
+                    .to_owned();
+                ResolvedAudioSource {
+                    placement,
+                    media_path: dir.join(relative),
+                }
+            })
+            .collect();
+
+        let output = dir.join("export.mp4");
+        if sources.is_empty() {
+            mux_segments("ffmpeg", &segments, dir, &output, None)
+                .await
+                .expect("picture muxes");
+        } else {
+            let picture = dir.join("picture.mp4");
+            mux_segments("ffmpeg", &segments, dir, &picture, None)
+                .await
+                .expect("picture muxes");
+            mux_audio("ffmpeg", &picture, &sources, &output, None)
+                .await
+                .expect("audio mixes");
+        }
+        (output, duration)
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Pure planning: which items reach the mix at all, and with what numbers.
+    // -----------------------------------------------------------------------------------------
+
+    /// The doubling guard, stated as a selection rule before any ffmpeg runs.
+    ///
+    /// A picture item is in the mix only when it says `generatedAudio: "include"`. The default the
+    /// store writes is `"mute"`, so a shot that has both a generated take with a spoken line AND a
+    /// placed dialogue clip contributes exactly ONE of them unless the timeline explicitly asks
+    /// for both — which is the whole content of the policy.
+    #[test]
+    fn generated_picture_audio_joins_the_mix_only_when_the_item_opts_in() {
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "asset_a", "video", 0.0, 2.0, 0.0, 2.0, json!({})),
+                    item("item_b", "track_main", "asset_b", "video", 0.0, 2.0, 2.0, 4.0,
+                         json!({"generatedAudio": "include"})),
+                ])),
+                track("track_dialogue", "audio", "dialogue", false, 1.0, json!([
+                    item("item_d", "track_dialogue", "asset_d", "audio", 0.0, 1.0, 0.5, 1.5, json!({})),
+                ])),
+            ],
+        });
+        let placements = audio_placements(&timeline, 4.0);
+        let selected: Vec<(&str, bool)> = placements
+            .iter()
+            .map(|placement| (placement.asset_id.as_str(), placement.generated))
+            .collect();
+        assert_eq!(
+            selected,
+            vec![("asset_d", false), ("asset_b", true)],
+            "the muted-by-default picture item must stay OUT of the mix while the one that opted \
+             in joins it; the dialogue clip is always in. Placements: {placements:#?}"
+        );
+    }
+
+    /// A muted track contributes nothing, and gains multiply track by item.
+    #[test]
+    fn track_mute_removes_a_bus_and_track_gain_multiplies_item_volume() {
+        let timeline = json!({
+            "tracks": [
+                track("track_music", "audio", "music", true, 1.0, json!([
+                    item("item_m", "track_music", "asset_m", "audio", 0.0, 4.0, 0.0, 4.0, json!({})),
+                ])),
+                track("track_ambience", "audio", "ambience", false, 0.5, json!([
+                    item("item_x", "track_ambience", "asset_x", "audio", 0.0, 4.0, 0.0, 4.0,
+                         json!({"volume": 0.5})),
+                ])),
+            ],
+        });
+        let placements = audio_placements(&timeline, 4.0);
+        assert_eq!(placements.len(), 1, "the muted music bus must be dropped");
+        assert_eq!(placements[0].asset_id, "asset_x");
+        assert!(
+            (placements[0].gain - 0.25).abs() < 1e-9,
+            "track gain 0.5 times item volume 0.5 is 0.25, got {}",
+            placements[0].gain
+        );
+    }
+
+    /// The picture is the ceiling: the mix can never make the file longer than the timeline says.
+    #[test]
+    fn placements_are_clamped_to_the_picture_duration() {
+        let timeline = json!({
+            "tracks": [
+                track("track_ambience", "audio", "ambience", false, 1.0, json!([
+                    item("item_over", "track_ambience", "asset_o", "audio", 0.0, 30.0, 0.0, 30.0, json!({})),
+                    item("item_past", "track_ambience", "asset_p", "audio", 0.0, 2.0, 9.0, 11.0, json!({})),
+                ])),
+            ],
+        });
+        let placements = audio_placements(&timeline, 4.0);
+        assert_eq!(
+            placements.len(),
+            1,
+            "a clip that starts after the last frame has no slot at all: {placements:#?}"
+        );
+        assert!((placements[0].span - 4.0).abs() < 1e-9, "{placements:#?}");
+    }
+
+    /// `atempo` is specified for 0.5..=2.0 per instance; the timeline admits 0.1..=8.0.
+    #[test]
+    fn atempo_chains_cover_the_speed_range_the_timeline_admits() {
+        assert!(atempo_chain(1.0).is_empty(), "unit speed adds no filters");
+        for speed in [0.1_f64, 0.25, 0.5, 0.75, 1.5, 2.0, 3.0, 8.0] {
+            let chain = atempo_chain(speed);
+            let product: f64 = chain
+                .iter()
+                .map(|filter| {
+                    filter
+                        .trim_start_matches("atempo=")
+                        .parse::<f64>()
+                        .expect("atempo factor parses")
+                })
+                .product();
+            assert!(
+                (product - speed).abs() < 1e-4,
+                "atempo chain for {speed} multiplies to {product}: {chain:?}"
+            );
+            assert!(
+                chain.iter().all(|filter| {
+                    let factor: f64 = filter
+                        .trim_start_matches("atempo=")
+                        .parse()
+                        .expect("factor");
+                    (0.5..=2.0).contains(&factor)
+                }),
+                "every atempo factor must stay inside 0.5..=2.0: {chain:?}"
+            );
+        }
+    }
+
+    /// `amix` renormalises by input count unless told not to, which would make every gain in the
+    /// timeline a lie the moment a second bus appeared.
+    #[test]
+    fn the_mix_never_renormalises_by_input_count() {
+        let sources: Vec<ResolvedAudioSource> = ["a", "b"]
+            .iter()
+            .map(|id| ResolvedAudioSource {
+                placement: AudioPlacement {
+                    asset_id: (*id).to_owned(),
+                    track_id: "track_dialogue".to_owned(),
+                    role: "dialogue".to_owned(),
+                    source_in: 0.0,
+                    source_out: 1.0,
+                    timeline_start: 0.0,
+                    span: 1.0,
+                    speed: 1.0,
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                    generated: false,
+                },
+                media_path: PathBuf::from(format!("{id}.wav")),
+            })
+            .collect();
+        let filter = audio_mix_filter(&sources);
+        assert!(
+            filter.contains("amix=inputs=2:normalize=0"),
+            "the mix must not renormalise: {filter}"
+        );
+        assert!(
+            filter.ends_with("apad[aout]"),
+            "the mix must be padded so -shortest cuts on the PICTURE, not on the audio: {filter}"
+        );
+    }
+
+    /// The same inheritance hazard `a_crossfaded_export_does_not_inherit_a_clips_recipe` measured,
+    /// on the newer multi-input command (sc-15956 / sc-22712).
+    #[test]
+    fn an_audio_mix_does_not_inherit_a_clips_recipe() {
+        let sources = vec![ResolvedAudioSource {
+            placement: AudioPlacement {
+                asset_id: "a".to_owned(),
+                track_id: "track_music".to_owned(),
+                role: "music".to_owned(),
+                source_in: 0.0,
+                source_out: 1.0,
+                timeline_start: 0.0,
+                span: 1.0,
+                speed: 1.0,
+                gain: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                generated: false,
+            },
+            media_path: PathBuf::from("a.wav"),
+        }];
+        let args = audio_mix_args(
+            "ffmpeg",
+            Path::new("picture.mp4"),
+            &sources,
+            Path::new("out.mp4"),
+        )
+        .expect("one source mixes");
+        let metadata = args
+            .iter()
+            .position(|arg| arg == "-map_metadata")
+            .and_then(|at| args.get(at + 1))
+            .map(String::as_str);
+        assert_eq!(
+            metadata,
+            Some("-1"),
+            "the audio mix takes the picture as input 0 and every clip after it, so ffmpeg's \
+             multi-input default would republish the picture's metadata as the export's own. \
+             Args: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:v", "copy"]),
+            "the picture is already exactly the frames the timeline describes; re-encoding it \
+             costs quality for nothing. Args: {args:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Measured: what the exported MP4 actually sounds like.
+    // -----------------------------------------------------------------------------------------
+
+    /// The story's whole second acceptance criterion, measured in one export.
+    ///
+    /// Three buses over a two-shot cut: a dialogue line inside shot 1 only, an ambience bed at a
+    /// quarter gain spanning both shots, and a muted music bus. The picture clips carry their own
+    /// 900 Hz generated audio and do NOT opt in.
+    #[tokio::test]
+    async fn each_bus_lands_where_the_timeline_says_at_the_gain_it_says() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_buses_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 2.0, 900).await);
+        assert!(picture_clip(&root.join("shot_b.mp4"), 2.0, 900).await);
+        assert!(tone_wav(&root.join("line.wav"), 1.0, 440).await);
+        assert!(tone_wav(&root.join("room.wav"), 4.0, 300).await);
+        assert!(tone_wav(&root.join("theme.wav"), 4.0, 1200).await);
+
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "shot_a", "video", 0.0, 2.0, 0.0, 2.0, json!({})),
+                    item("item_b", "track_main", "shot_b", "video", 0.0, 2.0, 2.0, 4.0, json!({})),
+                ])),
+                track("track_dialogue", "audio", "dialogue", false, 1.0, json!([
+                    item("item_line", "track_dialogue", "line", "audio", 0.0, 1.0, 0.5, 1.5, json!({})),
+                ])),
+                track("track_ambience", "audio", "ambience", false, 0.25, json!([
+                    item("item_room", "track_ambience", "room", "audio", 0.0, 4.0, 0.0, 4.0, json!({})),
+                ])),
+                track("track_music", "audio", "music", true, 1.0, json!([
+                    item("item_theme", "track_music", "theme", "audio", 0.0, 4.0, 0.0, 4.0, json!({})),
+                ])),
+            ],
+        });
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("shot_b", asset("video", "shot_b.mp4", "video/mp4")),
+            ("line", asset("audio", "line.wav", "audio/wav")),
+            ("room", asset("audio", "room.wav", "audio/wav")),
+            ("theme", asset("audio", "theme.wav", "audio/wav")),
+        ];
+        let spec = RenderSpec {
+            width: 320,
+            height: 180,
+            fps: 24,
+        };
+        let (export_path, duration) = export(root, &timeline, &assets, spec).await;
+        assert!((duration - 4.0).abs() < 1e-6, "planned duration {duration}");
+
+        let inside = decode_window(&export_path, 0.6, 0.3);
+        let outside = decode_window(&export_path, 2.5, 0.3);
+        assert!(
+            !inside.is_empty() && !outside.is_empty(),
+            "the export must carry a decodable audio stream"
+        );
+
+        let line_inside = tone_level(&inside, 440.0);
+        let line_outside = tone_level(&outside, 440.0);
+        assert!(
+            line_inside > 0.02,
+            "the dialogue line must be audible in 0.5..1.5s, measured {line_inside:.5}"
+        );
+        assert!(
+            line_outside < line_inside / 10.0,
+            "the dialogue line must be GONE after its clip ends: {line_outside:.5} inside the \
+             window was {line_inside:.5}"
+        );
+
+        // The muted music bus and the opted-out generated audio are both absent everywhere.
+        for (label, frequency) in [("muted music bus", 1200.0), ("generated clip audio", 900.0)] {
+            for (window_label, window) in [("during", &inside), ("after", &outside)] {
+                let level = tone_level(window, frequency);
+                assert!(
+                    level < 0.01,
+                    "{label} must be silent ({window_label} window), measured {level:.5}"
+                );
+            }
+        }
+
+        // The ambience bed is present on both sides of the cut at 2.0s, at the same level.
+        let before_cut = decode_window(&export_path, 1.7, 0.25);
+        let after_cut = decode_window(&export_path, 2.1, 0.25);
+        let ambience_before = tone_level(&before_cut, 300.0);
+        let ambience_after = tone_level(&after_cut, 300.0);
+        assert!(
+            ambience_before > 0.02 && ambience_after > 0.02,
+            "the ambience bed must span the cut: {ambience_before:.5} before, \
+             {ambience_after:.5} after"
+        );
+        assert!(
+            (ambience_before - ambience_after).abs() < ambience_before * 0.35,
+            "the bed's level must not step at the cut: {ambience_before:.5} -> {ambience_after:.5}"
+        );
+
+        // The window with dialogue over the bed is louder than the bed alone.
+        assert!(
+            rms(&inside) > rms(&outside),
+            "the window with dialogue over the bed must be louder than the bed alone: {:.5} vs \
+             {:.5}",
+            rms(&inside),
+            rms(&outside)
+        );
+    }
+
+    /// A continuous bed is CONTINUOUS, not re-triggered per shot.
+    ///
+    /// The bed's frequency rises with time, so the probe reads the bed's own clock: if the export
+    /// had restarted it at the cut, the frequency just after 2.0s would be the STARTING frequency
+    /// again instead of the one two seconds in.
+    #[tokio::test]
+    async fn a_bed_placed_once_does_not_restart_at_a_cut() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_bed_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 2.0, 900).await);
+        assert!(picture_clip(&root.join("shot_b.mp4"), 2.0, 900).await);
+        assert!(chirp_wav(&root.join("bed.wav"), 4.0).await);
+
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "shot_a", "video", 0.0, 2.0, 0.0, 2.0, json!({})),
+                    item("item_b", "track_main", "shot_b", "video", 0.0, 2.0, 2.0, 4.0, json!({})),
+                ])),
+                track("track_ambience", "audio", "ambience", false, 1.0, json!([
+                    item("item_bed", "track_ambience", "bed", "audio", 0.0, 4.0, 0.0, 4.0, json!({})),
+                ])),
+            ],
+        });
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("shot_b", asset("video", "shot_b.mp4", "video/mp4")),
+            ("bed", asset("audio", "bed.wav", "audio/wav")),
+        ];
+        let (export_path, _) = export(
+            root,
+            &timeline,
+            &assets,
+            RenderSpec {
+                width: 320,
+                height: 180,
+                fps: 24,
+            },
+        )
+        .await;
+
+        // Instantaneous frequency of the fixture is 200 + 150t Hz; probe the middle of each window.
+        for (start, expected) in [(0.1_f64, 230.0_f64), (2.1, 530.0), (3.5, 740.0)] {
+            let window = decode_window(&export_path, start, 0.2);
+            let dominant = dominant_frequency(&window, 150, 900);
+            assert!(
+                (dominant - expected).abs() <= 25.0,
+                "at {start}s the bed should be near {expected} Hz (it is one continuous take, not \
+                 one restarted at each cut); measured {dominant} Hz"
+            );
+        }
+    }
+
+    /// The picture's length is the file's length, with or without a mix, and the mix does not
+    /// nudge it either way.
+    #[tokio::test]
+    async fn the_exported_duration_matches_the_timeline_with_and_without_sound() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_duration_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 3.0, 900).await);
+        // A bed deliberately LONGER than the picture: it must not extend the file.
+        assert!(tone_wav(&root.join("room.wav"), 10.0, 300).await);
+
+        let picture_only = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "shot_a", "video", 0.5, 3.0, 0.0, 2.5, json!({})),
+                ])),
+            ],
+        });
+        let mut with_sound = picture_only.clone();
+        with_sound["tracks"]
+            .as_array_mut()
+            .expect("tracks")
+            .push(track(
+                "track_ambience",
+                "audio",
+                "ambience",
+                false,
+                0.5,
+                json!([item(
+                    "item_room",
+                    "track_ambience",
+                    "room",
+                    "audio",
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                    json!({})
+                )]),
+            ));
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("room", asset("audio", "room.wav", "audio/wav")),
+        ];
+        let spec = RenderSpec {
+            width: 320,
+            height: 180,
+            fps: 24,
+        };
+
+        let silent_dir = root.join("silent");
+        std::fs::create_dir_all(&silent_dir).expect("scratch dir");
+        for name in ["shot_a.mp4", "room.wav"] {
+            std::fs::copy(root.join(name), silent_dir.join(name)).expect("fixture copy");
+        }
+        let (silent_export, silent_duration) =
+            export(&silent_dir, &picture_only, &assets, spec).await;
+        let (mixed_export, mixed_duration) = export(root, &with_sound, &assets, spec).await;
+
+        assert!((silent_duration - 2.5).abs() < 1e-6);
+        assert!((mixed_duration - 2.5).abs() < 1e-6);
+
+        let measured_silent = probe_source_duration("ffmpeg", &silent_export)
+            .await
+            .expect("silent export has a duration");
+        let measured_mixed = probe_source_duration("ffmpeg", &mixed_export)
+            .await
+            .expect("mixed export has a duration");
+        // One frame at 24 fps is 41.7 ms; allow two, which is the container's own rounding.
+        assert!(
+            (measured_silent - 2.5).abs() < 0.09,
+            "picture-only export measured {measured_silent}s against a 2.5s timeline"
+        );
+        assert!(
+            (measured_mixed - 2.5).abs() < 0.09,
+            "a 10s bed must not extend a 2.5s timeline; measured {measured_mixed}s"
+        );
+
+        // And the sound really is in there, up to the very end.
+        let tail = decode_window(&mixed_export, 2.2, 0.25);
+        assert!(
+            tone_level(&tail, 300.0) > 0.02,
+            "the bed must still be playing at the last cut point"
+        );
+    }
+
+    /// Both halves of the doubling policy, measured: `include` really does bring the generated
+    /// line in, and it mixes ALONGSIDE the placed dialogue only because the timeline asked.
+    #[tokio::test]
+    async fn generated_audio_doubles_with_dialogue_only_when_explicitly_included() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_double_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 2.0, 900).await);
+        assert!(tone_wav(&root.join("line.wav"), 2.0, 440).await);
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("line", asset("audio", "line.wav", "audio/wav")),
+        ];
+        let spec = RenderSpec {
+            width: 320,
+            height: 180,
+            fps: 24,
+        };
+
+        let timeline_for = |policy: &str| {
+            json!({
+                "aspectRatio": "16:9",
+                "tracks": [
+                    track("track_main", "video", "picture", false, 1.0, json!([
+                        item("item_a", "track_main", "shot_a", "video", 0.0, 2.0, 0.0, 2.0,
+                             json!({"generatedAudio": policy})),
+                    ])),
+                    track("track_dialogue", "audio", "dialogue", false, 1.0, json!([
+                        item("item_line", "track_dialogue", "line", "audio", 0.0, 2.0, 0.0, 2.0, json!({})),
+                    ])),
+                ],
+            })
+        };
+
+        for (policy, subdir) in [("mute", "muted"), ("include", "included")] {
+            let case_dir = root.join(subdir);
+            std::fs::create_dir_all(&case_dir).expect("scratch dir");
+            for name in ["shot_a.mp4", "line.wav"] {
+                std::fs::copy(root.join(name), case_dir.join(name)).expect("fixture copy");
+            }
+            let (export_path, _) = export(&case_dir, &timeline_for(policy), &assets, spec).await;
+            let window = decode_window(&export_path, 0.5, 0.5);
+            let dialogue = tone_level(&window, 440.0);
+            let generated = tone_level(&window, 900.0);
+            assert!(
+                dialogue > 0.02,
+                "the placed dialogue clip is always in the mix ({policy}), measured {dialogue:.5}"
+            );
+            if policy == "mute" {
+                assert!(
+                    generated < 0.01,
+                    "a shot with BOTH a generated take and a placed dialogue clip must not mix \
+                     both by default — that is the doubling this policy exists to prevent. \
+                     Generated tone measured {generated:.5}"
+                );
+            } else {
+                assert!(
+                    generated > 0.02,
+                    "`generatedAudio: include` is an explicit request for the take's own audio; \
+                     measured {generated:.5}"
+                );
+            }
+        }
+    }
+
+    /// The defect the sc-22710 GPU smoke measured, stated as a test.
+    ///
+    /// Both MiniMax-H3 takes in that run carried a real AAC track (H3 renders `t2va`/`fl2va`:
+    /// video AND audio), and the exported MP4 came out with ONE stream. The picture pass renders
+    /// every segment `-an` and the concat mux copies what it is given, so a take's audio could
+    /// never survive no matter what the timeline said.
+    ///
+    /// This is the narrowest statement of the fix: one take with an AAC track, no placed sound at
+    /// all, and the ONLY thing that differs between the two exports is the policy on the item.
+    /// Under `mute` the file has no audio stream — not a silent one, none, exactly as before —
+    /// and under `include` the take's own tone is audible in the export.
+    #[tokio::test]
+    async fn a_take_with_an_aac_track_exports_with_audio_only_when_the_policy_includes_it() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_aac_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("take.mp4"), 2.0, 900).await);
+        assert!(
+            source_has_audio_stream("ffmpeg", &root.join("take.mp4")).await,
+            "the fixture take must carry an audio track, like a real H3 render"
+        );
+        let assets = [("take", asset("video", "take.mp4", "video/mp4"))];
+        let spec = RenderSpec {
+            width: 320,
+            height: 180,
+            fps: 24,
+        };
+        let timeline_for = |policy: &str| {
+            json!({
+                "aspectRatio": "16:9",
+                "tracks": [
+                    track("track_main", "video", "picture", false, 1.0, json!([
+                        item("item_a", "track_main", "take", "video", 0.0, 2.0, 0.0, 2.0,
+                             json!({"generatedAudio": policy})),
+                    ])),
+                ],
+            })
+        };
+
+        for name in ["muted", "included"] {
+            let case_dir = root.join(name);
+            std::fs::create_dir_all(&case_dir).expect("scratch dir");
+            std::fs::copy(root.join("take.mp4"), case_dir.join("take.mp4")).expect("fixture copy");
+        }
+
+        let (muted, _) = export(&root.join("muted"), &timeline_for("mute"), &assets, spec).await;
+        assert!(
+            !source_has_audio_stream("ffmpeg", &muted).await,
+            "with the policy at `mute` the export carries no audio stream at all — the picture \
+             pass is untouched and there is nothing to mix"
+        );
+
+        let (included, _) = export(
+            &root.join("included"),
+            &timeline_for("include"),
+            &assets,
+            spec,
+        )
+        .await;
+        assert!(
+            source_has_audio_stream("ffmpeg", &included).await,
+            "`generatedAudio: include` must put the take's own AAC track into the export — this is \
+             the sc-22710 smoke's video-only MP4"
+        );
+        let window = decode_window(&included, 0.5, 0.5);
+        let level = tone_level(&window, 900.0);
+        assert!(
+            level > 0.02,
+            "the take's own tone must be AUDIBLE, not merely present as an empty stream; measured \
+             {level:.5}"
+        );
+    }
+
+    /// A source with no audio stream is detected, so the mix can drop it instead of dying.
+    ///
+    /// `[N:a]` against a file with no audio stream fails the WHOLE ffmpeg command, so a single
+    /// silent take that opted in would otherwise take the entire export down with it.
+    #[tokio::test]
+    async fn a_silent_source_is_detected_rather_than_failing_the_whole_export() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_silent_");
+        let root = dir.path();
+        assert!(silent_picture_clip(&root.join("silent.mp4"), 1.0).await);
+        assert!(picture_clip(&root.join("voiced.mp4"), 1.0, 900).await);
+        assert!(
+            !source_has_audio_stream("ffmpeg", &root.join("silent.mp4")).await,
+            "a clip encoded with -an has no audio stream"
+        );
+        assert!(
+            source_has_audio_stream("ffmpeg", &root.join("voiced.mp4")).await,
+            "a clip with a sine track does"
+        );
     }
 }

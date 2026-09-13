@@ -26,17 +26,18 @@
 //! 7. write `run.json` (shot -> attempt -> job -> asset, timeline, export, observed
 //!    model/backend/hardware) beside copies of the two source documents.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
 use sceneworks_core::film_plan::{
-    self, AttemptRecord, ConditioningAssets, ExportRecord, HardwareRecord, IntendedState,
-    ModelLane, ModelRecord, PlanDiagnostic, ProductionPlan, ReferenceAssetRecord, ReferencePack,
-    RunOutcome, RunRecord, ShotOutcome, ShotRunRecord, SourceDocument, TakeRecord,
-    TimelineItemRecord, TimelineRecord, RUN_RECORD_SCHEMA_VERSION,
+    self, AttemptRecord, ConditioningAssets, ExportRecord, GeneratedAudio, HardwareRecord,
+    IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionPlan, ReferenceAssetRecord,
+    ReferencePack, RunOutcome, RunRecord, ShotOutcome, ShotRunRecord, SoundBed, SoundBus,
+    SourceDocument, TakeRecord, TimelineEditRecord, TimelineItemRecord, TimelineRecord,
+    TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
 };
 use sceneworks_core::time::utc_now;
 use serde_json::{json, Map as JsonObject, Value};
@@ -972,6 +973,118 @@ pub async fn run(
         });
     }
 
+    // Sound imports the same way pictures do (sc-22712). Import normalises every clip to PCM-16
+    // WAV and measures its duration off the stored file, so `durationSeconds` here is the length
+    // the export will actually read rather than anything the plan claimed.
+    //
+    // Only what this run will PLACE is imported — the two beds plus the dialogue of the SELECTED
+    // shots. Unlike a reference image, importing an audio clip costs an ffmpeg transcode, and a
+    // pack legitimately carries sound for shots a `--shots` run left out. `record.sound` is
+    // therefore the list of clips that were actually available to the mix.
+    let placed_sound_roles: BTreeSet<String> = plan
+        .sound
+        .ambience
+        .iter()
+        .chain(plan.sound.music.iter())
+        .map(|bed| bed.role.clone())
+        .chain(
+            plan.shots
+                .iter()
+                .filter(|shot| record.selected_shot_ids.contains(&shot.id))
+                .filter_map(|shot| shot.dialogue_clip.as_ref().map(|clip| clip.role.clone())),
+        )
+        .collect();
+    let mut sound_assets: BTreeMap<String, SoundAsset> = BTreeMap::new();
+    for entry in pack
+        .sound
+        .iter()
+        .filter(|entry| placed_sound_roles.contains(&entry.role))
+    {
+        let path = pack_dir.join(&entry.file);
+        let bytes = std::fs::read(&path)?;
+        let sha256 = sha256_hex(&bytes);
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("sound.wav")
+            .to_owned();
+        let provenance = json!({
+            "filmHarness": {
+                "kind": "sound",
+                "role": entry.role,
+                "soundKind": entry.kind,
+                "referencePackId": pack.id,
+                "referencePackVersion": pack.version,
+                "planId": plan.id,
+                "planVersion": plan.version,
+                "runId": run_id,
+                "sourceFile": entry.file,
+                "sha256": sha256,
+            }
+        });
+        let (boundary, body) =
+            encode_asset_upload(&filename, audio_content_type(&path), &bytes, &provenance);
+        let route = format!("/api/v1/projects/{project_id}/assets");
+        let response = transport
+            .call(ApiRequest {
+                method: "POST",
+                path: route.clone(),
+                body: RequestBody::Multipart {
+                    boundary,
+                    bytes: body,
+                },
+            })
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(HarnessError::Api {
+                method: "POST",
+                path: route,
+                status: response.status,
+                detail: api_detail(&response.body),
+            });
+        }
+        let asset_id = response
+            .body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "sound import response has no id: {}",
+                    response.body
+                ))
+            })?
+            .to_owned();
+        let duration_seconds = response
+            .body
+            .get("file")
+            .and_then(|file| file.get("duration"))
+            .and_then(Value::as_f64)
+            .filter(|seconds| *seconds > 0.0);
+        client
+            .expect_ok(
+                "PATCH",
+                &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
+                Some(json!({
+                    "tags": [SOUND_TAG, format!("role:{}", entry.role), format!("pack:{}", pack.id)]
+                })),
+            )
+            .await?;
+        sound_assets.insert(
+            entry.role.clone(),
+            SoundAsset {
+                asset_id: asset_id.clone(),
+                duration_seconds,
+            },
+        );
+        record.sound.push(ReferenceAssetRecord {
+            role: entry.role.clone(),
+            kind: entry.kind.clone(),
+            file: entry.file.clone(),
+            sha256,
+            asset_id,
+        });
+    }
+
     // Step 5: shots, one at a time, under the declared limits.
     let run_deadline = started + Duration::from_secs(plan.limits.max_run_seconds);
     let shot_budget = Duration::from_secs(plan.limits.max_shot_seconds);
@@ -1014,6 +1127,7 @@ pub async fn run(
                 fps,
                 dialogue: shot.dialogue.clone(),
                 sound: shot.sound.clone(),
+                generated_audio: resolved_generated_audio(&plan, shot),
             },
             conditioning_assets: assets.clone(),
             attempts: Vec::new(),
@@ -1193,8 +1307,6 @@ pub async fn run(
             })?
             .to_owned();
         let mut items = Vec::new();
-        let mut item_records = Vec::new();
-        let mut cursor = 0.0_f64;
         let mut tallest = 0_u32;
         for (shot_id, take, (_, height)) in &rendered {
             let shot = plan
@@ -1207,49 +1319,139 @@ pub async fn run(
                 .filter(|seconds| *seconds > 0.0)
                 .unwrap_or(shot.target_duration_seconds);
             let item_id = format!("item_{}_{}", shot.id.to_ascii_lowercase(), &run_id[4..12]);
-            let end = cursor + length;
+            let job_id = record
+                .shots
+                .iter()
+                .find(|entry| &entry.shot_id == shot_id)
+                .and_then(|entry| entry.attempts.last())
+                .and_then(|attempt| attempt.job_id.clone());
             items.push(json!({
                 "id": item_id,
-                "trackId": "track_main",
+                "trackId": PICTURE_TRACK_ID,
                 "assetId": take.asset_id,
                 "type": "video",
                 "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
                 "sourceIn": 0.0,
                 "sourceOut": length,
-                "timelineStart": cursor,
-                "timelineEnd": end,
+                // Placed by `relayout_timeline` below; the cut order is the plan's.
+                "timelineStart": 0.0,
+                "timelineEnd": length,
                 "speed": 1.0,
                 "fit": "fit",
                 "volume": 1.0,
+                // The resolved policy, written into the timeline itself so the export obeys the
+                // saved document rather than re-deriving anything from the plan (sc-22712).
+                "generatedAudio": resolved_generated_audio(&plan, shot).as_timeline_str(),
                 "versionHistory": [{
                     "assetId": take.asset_id,
                     "source": "original",
-                    "jobId": record.shots.iter().find(|s| &s.shot_id == shot_id)
-                        .and_then(|s| s.attempts.last()).and_then(|a| a.job_id.clone()),
+                    "jobId": job_id,
                     "note": format!("film-harness {run_id} shot {}", shot.id),
                 }],
+                HARNESS_KEY: harness_block(ROLE_PICTURE, &run_id, Some(&shot.id), 0.0),
             }));
-            item_records.push(TimelineItemRecord {
-                shot_id: shot.id.clone(),
-                item_id,
-                asset_id: take.asset_id.clone(),
-                timeline_start: cursor,
-                timeline_end: end,
-            });
-            cursor = end;
             tallest = tallest.max(*height);
         }
-        if let Some(track) = timeline
-            .get_mut("tracks")
-            .and_then(Value::as_array_mut)
-            .and_then(|tracks| {
-                tracks
-                    .iter_mut()
-                    .find(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
-            })
-        {
-            track["items"] = Value::Array(items);
+
+        // Sound: one dialogue clip per shot that has one, and the two beds placed ONCE across the
+        // whole sequence. `relayout_timeline` gives them their positions.
+        let mut dialogue_items = Vec::new();
+        for (shot_id, _, _) in &rendered {
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| &shot.id == shot_id)
+                .expect("rendered shots come from the plan");
+            let Some(clip) = &shot.dialogue_clip else {
+                continue;
+            };
+            let Some(asset) = sound_assets.get(&clip.role) else {
+                continue;
+            };
+            let length = clip
+                .duration_seconds
+                .filter(|seconds| *seconds > 0.0)
+                .or_else(|| {
+                    asset
+                        .duration_seconds
+                        .map(|total| (total - clip.source_in_seconds).max(MIN_ITEM_SECONDS))
+                })
+                .unwrap_or(MIN_ITEM_SECONDS)
+                .max(MIN_ITEM_SECONDS);
+            dialogue_items.push(json!({
+                "id": format!("item_line_{}_{}", shot.id.to_ascii_lowercase(), &run_id[4..12]),
+                "trackId": DIALOGUE_TRACK_ID,
+                "assetId": asset.asset_id,
+                "type": "audio",
+                "displayName": format!("{} — dialogue ({})", shot.id, clip.role).chars().take(160).collect::<String>(),
+                "sourceIn": clip.source_in_seconds,
+                "sourceOut": clip.source_in_seconds + length,
+                "timelineStart": 0.0,
+                "timelineEnd": length,
+                "speed": 1.0,
+                "fit": "fit",
+                "volume": clip.gain.clamp(0.0, 2.0),
+                "fadeInSeconds": clip.fade_in_seconds,
+                "fadeOutSeconds": clip.fade_out_seconds,
+                HARNESS_KEY: harness_block(
+                    ROLE_DIALOGUE,
+                    &run_id,
+                    Some(&shot.id),
+                    clip.offset_seconds,
+                ),
+            }));
         }
+
+        let mut tracks = vec![
+            picture_track(items),
+            audio_track(
+                DIALOGUE_TRACK_ID,
+                "Dialogue",
+                ROLE_DIALOGUE,
+                &plan.sound.dialogue,
+                dialogue_items,
+            ),
+        ];
+        for (track_id, name, role, bed) in [
+            (
+                AMBIENCE_TRACK_ID,
+                "Ambience",
+                ROLE_AMBIENCE,
+                plan.sound.ambience.as_ref(),
+            ),
+            (
+                MUSIC_TRACK_ID,
+                "Music",
+                ROLE_MUSIC,
+                plan.sound.music.as_ref(),
+            ),
+        ] {
+            let Some(bed) = bed else { continue };
+            let Some(asset) = sound_assets.get(&bed.role) else {
+                continue;
+            };
+            tracks.push(bed_track(track_id, name, role, bed, asset, &run_id));
+        }
+        // Keep every track the API created that the harness does not own (the overlay lane and the
+        // editor's default audio lane) so a harness timeline opens in the editor unchanged.
+        if let Some(existing) = timeline.get("tracks").and_then(Value::as_array) {
+            for track in existing {
+                let id = track.get("id").and_then(Value::as_str).unwrap_or_default();
+                if !tracks
+                    .iter()
+                    .any(|kept| kept.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    tracks.push(track.clone());
+                }
+            }
+        }
+        timeline["tracks"] = Value::Array(tracks);
+
+        let plan_order: Vec<String> = rendered
+            .iter()
+            .map(|(shot_id, _, _)| shot_id.clone())
+            .collect();
+        let duration = relayout_timeline(&mut timeline, Some(&plan_order))?;
         client
             .expect_ok(
                 "PUT",
@@ -1257,75 +1459,31 @@ pub async fn run(
                 Some(json!({ "timeline": timeline })),
             )
             .await?;
-        record.timeline = Some(TimelineRecord {
-            timeline_id: timeline_id.clone(),
-            name: timeline_name,
-            aspect_ratio: aspect_ratio.to_owned(),
+        record.timeline = Some(timeline_record(
+            &timeline_id,
+            &timeline_name,
+            aspect_ratio,
             fps,
-            items: item_records,
-        });
+            duration,
+            &timeline,
+            plan.sound.generated_audio,
+            Vec::new(),
+        ));
 
-        let export_job = client
-            .expect_ok(
-                "POST",
-                &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
-                Some(json!({
-                    "resolution": export_resolution_for(tallest),
-                    "fps": fps,
-                    "requestedGpu": "auto",
-                })),
-            )
-            .await?;
-        let export_job_id = export_job
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HarnessError::Transport(format!("export response has no id: {export_job}"))
-            })?
-            .to_owned();
-        let export_started = Instant::now();
-        let (view, poll_stop) = client
-            .wait_for_job(
-                &export_job_id,
-                export_started + shot_budget,
-                run_deadline,
-                options.poll_interval,
-            )
-            .await?;
-        let asset_id = view
-            .result
-            .get("assetIds")
-            .and_then(Value::as_array)
-            .and_then(|ids| ids.first())
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let render_path = view
-            .result
-            .get("renderPath")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let status = match poll_stop {
-            PollStop::Terminal => view.status.clone(),
-            PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
-        };
-        export_ok = status == "completed" && asset_id.is_some();
-        record.export = Some(ExportRecord {
-            job_id: export_job_id,
-            status,
-            asset_id,
-            render_path,
-            error: (!export_ok).then(|| match poll_stop {
-                PollStop::Terminal => view.failure_text(),
-                PollStop::ShotBudget => format!(
-                    "export exceeded the per-job budget of {}s",
-                    plan.limits.max_shot_seconds
-                ),
-                PollStop::RunBudget => format!(
-                    "run exceeded its budget of {}s during the export",
-                    plan.limits.max_run_seconds
-                ),
-            }),
-        });
+        let (export_record, poll_stop) = export_timeline(
+            &client,
+            &project_id,
+            &timeline_id,
+            export_resolution_for(tallest),
+            fps,
+            shot_budget,
+            run_deadline,
+            options.poll_interval,
+            &plan.limits,
+        )
+        .await?;
+        export_ok = export_record.status == "completed" && export_record.asset_id.is_some();
+        record.export = Some(export_record);
         if poll_stop == PollStop::RunBudget {
             stop = Some(RunOutcome::StoppedRunBudget);
         }
@@ -1393,6 +1551,7 @@ fn base_record(
         limits: plan.limits.clone(),
         selected_shot_ids,
         references: Vec::new(),
+        sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -1470,6 +1629,7 @@ fn rejected_record(
         limits,
         selected_shot_ids: options.shot_ids.clone().unwrap_or_default(),
         references: Vec::new(),
+        sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -1546,6 +1706,72 @@ pub fn write_fixture_images(out_dir: &Path) -> Result<Vec<PathBuf>, HarnessError
     for (role, rgb) in FIXTURE_REFERENCES {
         let path = out_dir.join(format!("{role}.png"));
         std::fs::write(&path, fixture_plate_png(role, *rgb)?)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// Placeholder sound for the fixture pack (sc-22712): `(role, seconds, hz, amplitude)`.
+///
+/// The two beds are long enough to play under the WHOLE six-shot sequence (6 x 5.1667s ~= 31s)
+/// without running out, because a bed that stops partway would make the one thing this fixture is
+/// meant to demonstrate — continuous sound across intentional cuts — unobservable.
+pub const FIXTURE_SOUNDS: &[(&str, f64, u32, i16)] = &[
+    ("courier_line", 2.0, 400, 9000),
+    ("recipient_line", 2.0, 500, 9000),
+    ("workshop_room_tone", 32.0, 100, 2600),
+    ("main_theme", 32.0, 250, 3600),
+];
+
+/// Sample rate of every fixture clip. Low on purpose: import transcodes each one to 48 kHz PCM-16
+/// anyway, and a placeholder tone gains nothing from being stored at the higher rate.
+pub const FIXTURE_SOUND_RATE: u32 = 8_000;
+
+/// Write one deterministic placeholder clip: a mono PCM-16 triangle wave.
+///
+/// **Every sample is integer arithmetic, with no floating point anywhere.** A sine would be the
+/// obvious choice and would be wrong: `f64::sin` may differ by an ULP between platforms, which is
+/// enough to change a rounded `i16` and break the byte-for-byte check on the checked-in fixture.
+/// A triangle is exactly reproducible on every host, and is far gentler to listen to than the
+/// square wave that would be the other integer option.
+pub fn fixture_sound_wav(seconds: f64, hz: u32, amplitude: i16) -> Vec<u8> {
+    let rate = FIXTURE_SOUND_RATE;
+    let frames = ((seconds.max(0.0) * f64::from(rate)) as u32).max(1);
+    let period = (rate / hz.max(1)).max(2) as i32;
+    let half = period / 2;
+    let amplitude = i32::from(amplitude);
+    let mut samples = Vec::with_capacity(frames as usize * 2);
+    for index in 0..frames as i32 {
+        let phase = index % period;
+        let ramp = if phase < half { phase } else { period - phase };
+        let value = (amplitude * (2 * ramp - half)) / half.max(1);
+        samples.extend_from_slice(&(value as i16).to_le_bytes());
+    }
+    let data_len = samples.len() as u32;
+    let mut wav = Vec::with_capacity(samples.len() + 44);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1_u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2_u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16_u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
+}
+
+/// Write every fixture clip into `out_dir` as `<role>.wav`.
+pub fn write_fixture_sound(out_dir: &Path) -> Result<Vec<PathBuf>, HarnessError> {
+    std::fs::create_dir_all(out_dir)?;
+    let mut written = Vec::new();
+    for (role, seconds, hz, amplitude) in FIXTURE_SOUNDS {
+        let path = out_dir.join(format!("{role}.wav"));
+        std::fs::write(&path, fixture_sound_wav(*seconds, *hz, *amplitude))?;
         written.push(path);
     }
     Ok(written)
@@ -1679,4 +1905,732 @@ mod unit_tests {
             "unlisted tier falls back to the model state"
         );
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// Editable picture and continuous sound (sc-22712)
+// -------------------------------------------------------------------------------------------
+//
+// The sequence the harness assembles is a SceneWorks timeline and nothing else: a picture track of
+// selected takes in cut order, a dialogue track whose clips sit against their shots, and two beds
+// placed once across the whole thing. Everything the harness needs in order to re-lay that sequence
+// later — which shot an item belongs to, what a dialogue line's offset means, where a bed starts —
+// travels inside the timeline document under `filmHarness`, NOT in the run record.
+//
+// That is deliberate. The timeline is the editable artifact and the thing the export reads; a
+// layout that could only be recomputed from a run record would be a layout the editor could break
+// silently. The store's validators add and validate known keys and never strip unknown ones, so the
+// block survives every round trip through `PUT /timelines/:id`.
+
+/// Track ids the harness owns. The picture id is the store's own default track, so a harness
+/// timeline opens in the editor with its picture where the editor expects it.
+pub const PICTURE_TRACK_ID: &str = "track_main";
+pub const DIALOGUE_TRACK_ID: &str = "track_dialogue";
+pub const AMBIENCE_TRACK_ID: &str = "track_ambience";
+pub const MUSIC_TRACK_ID: &str = "track_music";
+
+/// Where the harness's own annotation lives on a timeline item.
+const HARNESS_KEY: &str = "filmHarness";
+
+const ROLE_PICTURE: &str = "picture";
+const ROLE_DIALOGUE: &str = "dialogue";
+const ROLE_AMBIENCE: &str = "ambience";
+const ROLE_MUSIC: &str = "music";
+
+/// Tag every harness-imported sound clip carries beside its role tag.
+const SOUND_TAG: &str = "film-harness-sound";
+
+/// The store refuses `timelineEnd <= timelineStart`, so every placed item needs a floor. One frame
+/// at 25 fps is a length no edit can round away.
+const MIN_ITEM_SECONDS: f64 = 0.04;
+
+/// A sound file the run imported, as the API reported it back.
+#[derive(Debug, Clone)]
+struct SoundAsset {
+    asset_id: String,
+    /// Measured off the STORED wav by the import route, not claimed by the plan.
+    duration_seconds: Option<f64>,
+}
+
+fn audio_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "aac") => "audio/mp4",
+        Some("flac") => "audio/flac",
+        Some("ogg" | "opus") => "audio/ogg",
+        _ => "audio/wav",
+    }
+}
+
+/// Which generated-audio policy a shot actually runs under: its own if it declared one, the run's
+/// otherwise. Both default to `mute`, which is the only default that cannot double a dialogue clip.
+fn resolved_generated_audio(plan: &ProductionPlan, shot: &film_plan::Shot) -> GeneratedAudio {
+    shot.generated_audio.unwrap_or(plan.sound.generated_audio)
+}
+
+fn harness_block(role: &str, run_id: &str, shot_id: Option<&str>, offset: f64) -> Value {
+    json!({
+        "runId": run_id,
+        "role": role,
+        "shotId": shot_id,
+        "offsetSeconds": offset,
+    })
+}
+
+fn harness_str<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
+    item.get(HARNESS_KEY)?.get(key)?.as_str()
+}
+
+fn harness_f64(item: &Value, key: &str) -> f64 {
+    item.get(HARNESS_KEY)
+        .and_then(|block| block.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0)
+}
+
+fn number(item: &Value, key: &str, fallback: f64) -> f64 {
+    item.get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
+}
+
+/// How long an item occupies the timeline, from its own source range and speed. This — not the
+/// current `timelineStart`/`timelineEnd` — is what survives a trim or a reorder, which is why every
+/// layout is recomputed from it rather than nudged.
+fn item_span(item: &Value) -> f64 {
+    let source_in = number(item, "sourceIn", 0.0).max(0.0);
+    let source_out = number(item, "sourceOut", source_in + MIN_ITEM_SECONDS);
+    let speed = number(item, "speed", 1.0).clamp(0.1, 8.0);
+    ((source_out - source_in) / speed).max(MIN_ITEM_SECONDS)
+}
+
+/// Positions are written UNROUNDED, and one accumulated cursor supplies both an item's end and the
+/// next item's start.
+///
+/// Rounding here would be the bug, not the tidiness: `plan_segments` inserts a black gap wherever
+/// an item does not abut the previous one, so a half-millisecond of rounding drift between two
+/// shots that are supposed to cut straight together becomes a black frame in the export. Writing
+/// the same `f64` to both ends makes the two exactly equal, by construction, at any precision.
+fn ms(value: f64) -> f64 {
+    value
+}
+
+fn picture_track(items: Vec<Value>) -> Value {
+    json!({
+        "id": PICTURE_TRACK_ID,
+        "name": "Main",
+        "kind": "video",
+        "role": ROLE_PICTURE,
+        "locked": false,
+        "muted": false,
+        "gain": 1.0,
+        "items": items,
+    })
+}
+
+fn audio_track(id: &str, name: &str, role: &str, bus: &SoundBus, items: Vec<Value>) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "kind": "audio",
+        "role": role,
+        "locked": false,
+        "muted": bus.muted,
+        "gain": bus.gain.clamp(0.0, 4.0),
+        "items": items,
+    })
+}
+
+/// A bed track carrying exactly one item, placed once for the whole sequence.
+fn bed_track(
+    track_id: &str,
+    name: &str,
+    role: &str,
+    bed: &SoundBed,
+    asset: &SoundAsset,
+    run_id: &str,
+) -> Value {
+    let mut block = harness_block(role, run_id, None, 0.0);
+    block["startSeconds"] = json!(bed.start_seconds);
+    let item = json!({
+        "id": format!("item_{role}_{}", &run_id[4..12]),
+        "trackId": track_id,
+        "assetId": asset.asset_id,
+        "type": "audio",
+        "displayName": format!("{name} — {}", bed.role).chars().take(160).collect::<String>(),
+        "sourceIn": bed.source_in_seconds,
+        // Given its real span by `relayout_timeline`, which is the only place that knows how long
+        // the assembled picture turned out to be.
+        "sourceOut": bed.source_in_seconds + MIN_ITEM_SECONDS,
+        "timelineStart": 0.0,
+        "timelineEnd": MIN_ITEM_SECONDS,
+        "speed": 1.0,
+        "fit": "fit",
+        "volume": 1.0,
+        "fadeInSeconds": bed.fade_in_seconds,
+        "fadeOutSeconds": bed.fade_out_seconds,
+        HARNESS_KEY: block,
+    });
+    json!({
+        "id": track_id,
+        "name": name,
+        "kind": "audio",
+        "role": role,
+        "locked": false,
+        "muted": bed.muted,
+        "gain": bed.gain.clamp(0.0, 4.0),
+        "items": [item],
+    })
+}
+
+/// Re-lay the whole sequence and return its new duration.
+///
+/// This is the single place that decides where anything sits, and every editing command goes
+/// through it rather than adjusting positions itself — which is what makes "trim", "reorder" and
+/// "replace the take" three ways of changing ONE input to the same function instead of three
+/// chances to get the ripple wrong.
+///
+/// 1. Picture items are laid end to end from zero in `order` (or in their current order), each
+///    taking exactly the span its own source range and speed imply. There are no gaps: the cuts are
+///    the cuts.
+/// 2. Each dialogue clip is re-placed at its shot's new start plus the offset it has always had, so
+///    a line stays against its beat no matter what happened to the shots before it.
+/// 3. Each bed is re-spanned from its declared start to the new end of the picture. A bed is placed
+///    ONCE, so it plays straight through the cuts rather than restarting at each one.
+///
+/// Sound is clamped to the picture: a clip that would overrun the last frame is shortened and one
+/// that would start past it is dropped. That is what keeps the saved timeline's duration and the
+/// exported file's duration the same number.
+fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f64, HarnessError> {
+    let tracks = timeline
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| HarnessError::Transport("timeline has no tracks array".to_owned()))?;
+
+    let mut shot_starts: BTreeMap<String, f64> = BTreeMap::new();
+    let mut duration = 0.0_f64;
+    if let Some(track) = tracks
+        .iter_mut()
+        .find(|track| track.get("id").and_then(Value::as_str) == Some(PICTURE_TRACK_ID))
+    {
+        let items = track
+            .get_mut("items")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| HarnessError::Transport("picture track has no items".to_owned()))?;
+        if let Some(order) = order {
+            let present: BTreeSet<String> = items
+                .iter()
+                .filter_map(|item| harness_str(item, "shotId").map(str::to_owned))
+                .collect();
+            let requested: BTreeSet<String> = order.iter().cloned().collect();
+            if present != requested {
+                return Err(HarnessError::Transport(format!(
+                    "the requested order names {:?} but the sequence holds {:?}; a reorder must \
+                     list every shot on the picture track exactly once",
+                    requested, present
+                )));
+            }
+            items.sort_by_key(|item| {
+                harness_str(item, "shotId")
+                    .and_then(|shot| order.iter().position(|id| id == shot))
+                    .unwrap_or(usize::MAX)
+            });
+        } else {
+            items.sort_by(|left, right| {
+                number(left, "timelineStart", 0.0).total_cmp(&number(right, "timelineStart", 0.0))
+            });
+        }
+        let mut cursor = 0.0_f64;
+        for item in items.iter_mut() {
+            let shot_id = harness_str(item, "shotId").map(str::to_owned);
+            let span = item_span(item);
+            let start = ms(cursor);
+            cursor += span;
+            let end = ms(cursor);
+            item["timelineStart"] = json!(start);
+            item["timelineEnd"] = json!(end);
+            if let Some(shot_id) = shot_id {
+                shot_starts.insert(shot_id, start);
+            }
+        }
+        duration = ms(cursor);
+    }
+
+    for track in tracks.iter_mut() {
+        if track.get("kind").and_then(Value::as_str) != Some("audio") {
+            continue;
+        }
+        let Some(items) = track.get_mut("items").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        items.retain_mut(|item| {
+            let role = harness_str(item, "role").unwrap_or_default().to_owned();
+            let (start, end) = match role.as_str() {
+                ROLE_DIALOGUE => {
+                    let Some(shot_start) =
+                        harness_str(item, "shotId").and_then(|shot| shot_starts.get(shot).copied())
+                    else {
+                        // The shot this line belongs to is no longer in the sequence.
+                        return false;
+                    };
+                    let start = shot_start + harness_f64(item, "offsetSeconds");
+                    (start, start + item_span(item))
+                }
+                ROLE_AMBIENCE | ROLE_MUSIC => {
+                    let start = harness_f64(item, "startSeconds");
+                    (start, duration)
+                }
+                // A clip the harness did not place (the editor's own, say) keeps where it is and is
+                // only clamped, because the harness has no idea what it means.
+                _ => {
+                    let start = number(item, "timelineStart", 0.0).max(0.0);
+                    (start, number(item, "timelineEnd", start + item_span(item)))
+                }
+            };
+            if start >= duration - MIN_ITEM_SECONDS {
+                return false;
+            }
+            let end = end.min(duration).max(start + MIN_ITEM_SECONDS);
+            item["timelineStart"] = json!(ms(start));
+            item["timelineEnd"] = json!(ms(end));
+            if matches!(role.as_str(), ROLE_AMBIENCE | ROLE_MUSIC) {
+                // A bed's source range follows its span, so the whole stretch of the file that
+                // plays under the sequence is asked for rather than a fixed four seconds.
+                let source_in = number(item, "sourceIn", 0.0).max(0.0);
+                item["sourceOut"] = json!(ms(source_in + (end - start)));
+            }
+            true
+        });
+    }
+
+    timeline["duration"] = json!(duration);
+    Ok(duration)
+}
+
+fn item_record(item: &Value, track_gain: f64) -> TimelineItemRecord {
+    let source_in = number(item, "sourceIn", 0.0);
+    TimelineItemRecord {
+        shot_id: harness_str(item, "shotId").map(str::to_owned),
+        item_id: item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        asset_id: item
+            .get("assetId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        timeline_start: number(item, "timelineStart", 0.0),
+        timeline_end: number(item, "timelineEnd", 0.0),
+        source_in,
+        source_out: number(item, "sourceOut", source_in),
+        gain: track_gain * number(item, "volume", 1.0),
+        fade_in_seconds: number(item, "fadeInSeconds", 0.0),
+        fade_out_seconds: number(item, "fadeOutSeconds", 0.0),
+        generated_audio: match item.get("generatedAudio").and_then(Value::as_str) {
+            Some("include") => Some(GeneratedAudio::Include),
+            Some("mute") => Some(GeneratedAudio::Mute),
+            _ => None,
+        },
+    }
+}
+
+/// Describe the assembled sequence for the run record, read back off the timeline document rather
+/// than rebuilt from the plan — so the record says what was SAVED, including anything an edit
+/// changed.
+#[allow(clippy::too_many_arguments)]
+fn timeline_record(
+    timeline_id: &str,
+    name: &str,
+    aspect_ratio: &str,
+    fps: u32,
+    duration: f64,
+    timeline: &Value,
+    generated_audio_default: GeneratedAudio,
+    edits: Vec<TimelineEditRecord>,
+) -> TimelineRecord {
+    let mut tracks = Vec::new();
+    let mut picture_items = Vec::new();
+    for track in timeline
+        .get("tracks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let track_id = track
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let kind = track
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("video")
+            .to_owned();
+        let role = track
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("sound")
+            .to_owned();
+        let gain = number(track, "gain", 1.0);
+        let muted = track.get("muted").and_then(Value::as_bool).unwrap_or(false);
+        let items: Vec<TimelineItemRecord> = track
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|item| item_record(item, gain))
+            .collect();
+        if items.is_empty() && track_id != PICTURE_TRACK_ID {
+            continue;
+        }
+        if track_id == PICTURE_TRACK_ID {
+            picture_items = items.clone();
+        }
+        tracks.push(TimelineTrackRecord {
+            track_id,
+            kind,
+            role,
+            gain,
+            muted,
+            items,
+        });
+    }
+    TimelineRecord {
+        timeline_id: timeline_id.to_owned(),
+        name: name.to_owned(),
+        aspect_ratio: aspect_ratio.to_owned(),
+        fps,
+        duration_seconds: duration,
+        items: picture_items,
+        tracks,
+        generated_audio_default,
+        edits,
+    }
+}
+
+/// Dispatch the `timeline_export` job and wait for it under the run's budgets.
+#[allow(clippy::too_many_arguments)]
+async fn export_timeline(
+    client: &Client<'_>,
+    project_id: &str,
+    timeline_id: &str,
+    resolution: u32,
+    fps: u32,
+    shot_budget: Duration,
+    run_deadline: Instant,
+    poll_interval: Duration,
+    limits: &film_plan::PlanLimits,
+) -> Result<(ExportRecord, PollStop), HarnessError> {
+    let export_job = client
+        .expect_ok(
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
+            Some(json!({
+                "resolution": resolution,
+                "fps": fps,
+                "requestedGpu": "auto",
+            })),
+        )
+        .await?;
+    let export_job_id = export_job
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HarnessError::Transport(format!("export response has no id: {export_job}")))?
+        .to_owned();
+    let export_started = Instant::now();
+    let (view, poll_stop) = client
+        .wait_for_job(
+            &export_job_id,
+            export_started + shot_budget,
+            run_deadline,
+            poll_interval,
+        )
+        .await?;
+    let asset_id = view
+        .result
+        .get("assetIds")
+        .and_then(Value::as_array)
+        .and_then(|ids| ids.first())
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let render_path = view
+        .result
+        .get("renderPath")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let status = match poll_stop {
+        PollStop::Terminal => view.status.clone(),
+        PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+    };
+    let ok = status == "completed" && asset_id.is_some();
+    Ok((
+        ExportRecord {
+            job_id: export_job_id,
+            status,
+            asset_id,
+            render_path,
+            error: (!ok).then(|| match poll_stop {
+                PollStop::Terminal => view.failure_text(),
+                PollStop::ShotBudget => format!(
+                    "export exceeded the per-job budget of {}s",
+                    limits.max_shot_seconds
+                ),
+                PollStop::RunBudget => format!(
+                    "run exceeded its budget of {}s during the export",
+                    limits.max_run_seconds
+                ),
+            }),
+        },
+        poll_stop,
+    ))
+}
+
+/// One change to an assembled sequence.
+///
+/// Each of these changes exactly one input to [`relayout_timeline`] and then lets it recompute
+/// every position, which is why a trim ripples, a reorder keeps every line against its beat, and a
+/// replaced take re-times the sequence around its new length — without any of the three knowing
+/// about the other two.
+#[derive(Debug, Clone)]
+pub enum TimelineEdit {
+    /// Change a shot's source range. `None` leaves that end where it is.
+    Trim {
+        shot_id: String,
+        source_in: Option<f64>,
+        source_out: Option<f64>,
+    },
+    /// Put the picture track in this order. Must name every shot on it, exactly once.
+    Reorder { shot_ids: Vec<String> },
+    /// Point a shot at a different take. The asset must already exist in the project — choosing it
+    /// is sc-22711's job, placing it is this one's.
+    ReplaceTake { shot_id: String, asset_id: String },
+}
+
+impl TimelineEdit {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Trim { .. } => "trim",
+            Self::Reorder { .. } => "reorder",
+            Self::ReplaceTake { .. } => "replace_take",
+        }
+    }
+}
+
+/// Everything an edit needs beyond the transport.
+#[derive(Debug, Clone)]
+pub struct EditOptions {
+    /// The `run.json` written by [`run`]. It names the project and the timeline, and it is
+    /// rewritten in place with the edited sequence.
+    pub run_record_path: PathBuf,
+    /// Re-export the MP4 after the edit.
+    pub export: bool,
+    pub poll_interval: Duration,
+}
+
+/// Apply one edit to a run's assembled sequence: change the timeline, save it, rewrite the run
+/// record, and optionally re-export.
+///
+/// Shot -> asset links are never rebuilt from the plan here. The picture item already carries its
+/// shot id and its version history, so a trim or a reorder moves the item that is already bound to
+/// the take a human chose, and a replacement appends to that history instead of overwriting it.
+pub async fn edit_timeline(
+    transport: &dyn ApiTransport,
+    options: &EditOptions,
+    edit: TimelineEdit,
+) -> Result<RunRecord, HarnessError> {
+    let client = Client { transport };
+    let text = std::fs::read_to_string(&options.run_record_path)?;
+    let mut record: RunRecord = serde_json::from_str(&text).map_err(|error| {
+        HarnessError::Io(format!(
+            "{} is not a film-harness run record: {error}",
+            options.run_record_path.display()
+        ))
+    })?;
+    let project_id = record
+        .project_id
+        .clone()
+        .ok_or_else(|| HarnessError::Io("run record has no project id".to_owned()))?;
+    let existing = record.timeline.clone().ok_or_else(|| {
+        HarnessError::Io("run record has no assembled timeline to edit".to_owned())
+    })?;
+    let timeline_id = existing.timeline_id.clone();
+
+    let mut timeline = client
+        .expect_ok(
+            "GET",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            None,
+        )
+        .await?;
+
+    let (order, detail) = match &edit {
+        TimelineEdit::Reorder { shot_ids } => (Some(shot_ids.clone()), shot_ids.join(" -> ")),
+        TimelineEdit::Trim {
+            shot_id,
+            source_in,
+            source_out,
+        } => {
+            let item = picture_item_mut(&mut timeline, shot_id)?;
+            let current_in = number(item, "sourceIn", 0.0);
+            let current_out = number(item, "sourceOut", current_in + MIN_ITEM_SECONDS);
+            let new_in = source_in.unwrap_or(current_in).max(0.0);
+            let new_out = source_out.unwrap_or(current_out);
+            if !new_in.is_finite() || !new_out.is_finite() || new_out <= new_in + MIN_ITEM_SECONDS {
+                return Err(HarnessError::Io(format!(
+                    "trim of {shot_id} would leave a source range of {new_in}..{new_out}; the out \
+                     point must be at least {MIN_ITEM_SECONDS}s after the in point"
+                )));
+            }
+            item["sourceIn"] = json!(ms(new_in));
+            item["sourceOut"] = json!(ms(new_out));
+            (
+                None,
+                format!("{shot_id} source range {new_in:.3}..{new_out:.3}"),
+            )
+        }
+        TimelineEdit::ReplaceTake { shot_id, asset_id } => {
+            // Measure the replacement before touching the timeline, so a bad asset id fails before
+            // the sequence is half-edited.
+            let asset = client
+                .expect_ok(
+                    "GET",
+                    &format!("/api/v1/projects/{project_id}/assets/{asset_id}"),
+                    None,
+                )
+                .await?;
+            let duration = asset
+                .get("file")
+                .and_then(|file| file.get("duration"))
+                .and_then(Value::as_f64)
+                .filter(|seconds| *seconds > 0.0);
+            let item = picture_item_mut(&mut timeline, shot_id)?;
+            let previous = item
+                .get("assetId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let source_in = number(item, "sourceIn", 0.0);
+            let span = duration.unwrap_or_else(|| item_span(item));
+            item["assetId"] = json!(asset_id);
+            item["currentVersionAssetId"] = json!(asset_id);
+            item["sourceIn"] = json!(0.0);
+            item["sourceOut"] = json!(ms(span.max(MIN_ITEM_SECONDS)));
+            if let Some(history) = item.get_mut("versionHistory").and_then(Value::as_array_mut) {
+                history.push(json!({
+                    "assetId": asset_id,
+                    "source": "replacement",
+                    "createdAt": utc_now(),
+                    "note": format!("film-harness take replacement for {shot_id}"),
+                }));
+            }
+            if let Some(versions) = item
+                .get_mut("versionAssetIds")
+                .and_then(Value::as_array_mut)
+            {
+                if !versions.iter().any(|value| value == &json!(asset_id)) {
+                    versions.push(json!(asset_id));
+                }
+            }
+            let _ = source_in;
+            (
+                None,
+                format!("{shot_id} take {previous} -> {asset_id} ({span:.3}s)"),
+            )
+        }
+    };
+
+    let duration = relayout_timeline(&mut timeline, order.as_deref())?;
+    let saved = client
+        .expect_ok(
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            Some(json!({ "timeline": timeline })),
+        )
+        .await?;
+
+    let mut edits = existing.edits.clone();
+    edits.push(TimelineEditRecord {
+        kind: edit.kind().to_owned(),
+        applied_at: utc_now(),
+        detail,
+        duration_seconds: duration,
+    });
+    record.timeline = Some(timeline_record(
+        &timeline_id,
+        &existing.name,
+        &existing.aspect_ratio,
+        existing.fps,
+        duration,
+        &saved,
+        existing.generated_audio_default,
+        edits,
+    ));
+
+    if options.export {
+        let tallest = saved
+            .get("height")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::from(DEFAULT_EXPORT_HEIGHT)) as u32;
+        let budget = Duration::from_secs(record.limits.max_shot_seconds);
+        let (export_record, _) = export_timeline(
+            &client,
+            &project_id,
+            &timeline_id,
+            export_resolution_for(tallest),
+            existing.fps,
+            budget,
+            Instant::now() + Duration::from_secs(record.limits.max_run_seconds),
+            options.poll_interval,
+            &record.limits,
+        )
+        .await?;
+        record.outcome = if export_record.status == "completed" {
+            RunOutcome::Completed
+        } else {
+            RunOutcome::Failed
+        };
+        record.export = Some(export_record);
+    }
+
+    let json = serde_json::to_string_pretty(&record)
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    std::fs::write(&options.run_record_path, format!("{json}\n"))?;
+    Ok(record)
+}
+
+/// Fallback export height when a timeline document does not carry one.
+const DEFAULT_EXPORT_HEIGHT: u32 = 720;
+
+fn picture_item_mut<'a>(
+    timeline: &'a mut Value,
+    shot_id: &str,
+) -> Result<&'a mut Value, HarnessError> {
+    timeline
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .and_then(|tracks| {
+            tracks
+                .iter_mut()
+                .find(|track| track.get("id").and_then(Value::as_str) == Some(PICTURE_TRACK_ID))
+        })
+        .and_then(|track| track.get_mut("items").and_then(Value::as_array_mut))
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| harness_str(item, "shotId") == Some(shot_id))
+        })
+        .ok_or_else(|| {
+            HarnessError::Io(format!(
+                "shot {shot_id:?} is not on the sequence's picture track"
+            ))
+        })
 }
