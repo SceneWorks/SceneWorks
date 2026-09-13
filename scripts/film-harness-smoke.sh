@@ -13,6 +13,15 @@
 #
 # Runs one GPU render at a time; budget the wall clock from the plan's `limits` (7200 s for the
 # fixture). Requires `ffmpeg` on PATH (or SCENEWORKS_FFMPEG) for the export.
+#
+# On macOS this builds the RELEASE profile, so export the RELEASE prebuilt libmlx first or
+# pmetal-mlx-sys runs its ~6 minute cmake build of MLX inside this script:
+#
+#   eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
+#   export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
+#
+# (the fetch script defaults to Debug, which is what `cargo test` consumes — a Debug directory is
+# the wrong key for this build and fails it rather than falling back).
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +33,19 @@ API_URL="http://127.0.0.1:$PORT"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 SMOKE_DIR="${SCENEWORKS_SMOKE_DIR:-$ROOT/film-harness-runs/smoke-$STAMP}"
 PROFILE="${CARGO_PROFILE:-release}"
+# The GPU lane the RENDER worker claims on. `Settings::from_env` defaults `SCENEWORKS_GPU_ID` to
+# "cpu" (crates/sceneworks-worker/src/settings.rs), and a cpu worker spawns the utility pool and
+# advertises no `video_generate` at all — the smoke then always died at its own registration wait
+# with a worker that had started perfectly well. The API's in-process utility worker reads
+# SCENEWORKS_RUST_WORKER_GPU_ID instead, so it stays on cpu and still serves `timeline_export`.
+if [ -z "${SCENEWORKS_GPU_ID:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) GPU_ID="mlx" ;;
+    *) GPU_ID="0" ;;
+  esac
+else
+  GPU_ID="$SCENEWORKS_GPU_ID"
+fi
 
 mkdir -p "$SMOKE_DIR/data" "$SMOKE_DIR/config"
 
@@ -86,8 +108,9 @@ until curl -fsS "$API_URL/api/v1/health" >/dev/null 2>&1; do
   sleep 1
 done
 
-echo "film-harness-smoke: starting the GPU worker"
+echo "film-harness-smoke: starting the GPU worker (SCENEWORKS_GPU_ID=$GPU_ID)"
 SCENEWORKS_WORKER_ONLY=1 SCENEWORKS_API_URL="$API_URL" SCENEWORKS_WORKER_ID="film-harness-smoke-gpu" \
+  SCENEWORKS_GPU_ID="$GPU_ID" \
   "$BIN_DIR/sceneworks-rust-api" >"$SMOKE_DIR/worker.log" 2>&1 &
 WORKER_PID=$!
 

@@ -16,23 +16,23 @@
 //! `run` needs a SceneWorks API with a registered GPU worker (`video_generate`) and a utility
 //! worker (`timeline_export`, e.g. `SCENEWORKS_RUN_UTILITY_INPROCESS=1`). It creates nothing until
 //! the plan, the reference pack, the model's catalog entry and the host all validate; the run
-//! record (`run.json`) is written under `--out` at every state transition, including refusal.
-//!
-//! `run` and `resume` both stop on Ctrl-C (or on `film-harness cancel --out DIR` from another
-//! shell): live jobs are canceled through the API, everything finished stays, and the record says
-//! the run is resumable.
-//!
-//! Exit codes: 0 on a completed run, 2 when the plan was refused before dispatch or the action does
-//! not apply to the record, 3 when the run stopped on a limit / a cancel / a failed shot, 1 on a
+//! record (`run.json`) is written under `--out` on every path, including refusal and a
+//! transport/API failure partway through. Exit codes: 0 on a completed run, 2 when the plan was
+//! refused before dispatch, 3 when the run stopped on a limit or a shot failed, 1 on a
 //! transport/API/io error.
+//!
+//! Ctrl-C cancels the in-flight job through the API, stops dispatching and writes the record,
+//! rather than orphaning a render. `film-harness cancel --out DIR` does the same from another
+//! shell. A cancel is RESUMABLE: `film-harness resume --out DIR` picks the run back up, reusing
+//! every take that finished and adopting every job still in flight (sc-22711).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use sceneworks_core::film_plan::{RunOutcome, RunState};
+use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState};
 use sceneworks_rust_api::film_harness::{
-    self, CancelToken, HarnessError, HttpTransport, ResumeOptions, RunOptions, FIXTURE_REFERENCES,
+    self, HarnessError, HttpTransport, ResumeOptions, RunControl, RunOptions, FIXTURE_REFERENCES,
 };
 
 const USAGE: &str = "\
@@ -134,9 +134,16 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             Err(error) => report_error(error),
         };
     }
-    // Ctrl-C stops dispatch cooperatively rather than orphaning the job in flight.
-    spawn_signal_handler(parsed.options.cancel.clone());
-    match film_harness::run(&transport, &parsed.options).await {
+    // SIGINT cancels the in-flight job through the API and still writes the record. Interrupting a
+    // 45-minute render otherwise leaves it running on the GPU with nothing to say it happened,
+    // which is the opposite of what the plan's cancellation limits exist for.
+    // The run watches its OWN directory too, so `film-harness cancel --out DIR` from another shell
+    // reaches it without a shared handle (sc-22711).
+    let control = parsed.control.clone();
+    let signal = spawn_interrupt_handler(control.clone());
+    let outcome = film_harness::run_with_control(&transport, &parsed.options, &control).await;
+    signal.abort();
+    match outcome {
         Ok(record) => {
             print_record(&record, &parsed.options.out_dir);
             exit_code_for(&record)
@@ -145,21 +152,163 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     }
 }
 
-/// Trip `cancel` on Ctrl-C. A second Ctrl-C is left to the default handler, so an operator who
-/// really wants out is never trapped waiting for a cancel to settle.
-fn spawn_signal_handler(cancel: CancelToken) {
+fn report_error(error: HarnessError) -> ExitCode {
+    eprintln!("film-harness: {error}");
+    match error {
+        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
+        _ => ExitCode::from(1),
+    }
+}
+
+struct Parsed {
+    api_url: String,
+    token: Option<String>,
+    control: RunControl,
+    options: RunOptions,
+}
+
+fn parse_options(args: &[String]) -> Result<Parsed, String> {
+    let mut plan: Option<PathBuf> = None;
+    let mut references: Option<PathBuf> = None;
+    let mut api_url = std::env::var("SCENEWORKS_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let mut token = std::env::var("SCENEWORKS_ACCESS_TOKEN").ok();
+    let mut shots: Option<Vec<String>> = None;
+    let mut project_id: Option<String> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut poll_seconds = 5_u64;
+    let mut export = true;
+    let mut require_installed = true;
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--plan" => plan = Some(PathBuf::from(value()?)),
+            "--references" => references = Some(PathBuf::from(value()?)),
+            "--api" => api_url = value()?,
+            "--token" => token = Some(value()?),
+            "--shots" => {
+                shots = Some(
+                    value()?
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            }
+            "--project-id" => project_id = Some(value()?),
+            "--out" => out = Some(PathBuf::from(value()?)),
+            "--poll-seconds" => {
+                poll_seconds = value()?
+                    .parse::<u64>()
+                    .map_err(|error| format!("--poll-seconds: {error}"))?
+                    .max(1)
+            }
+            "--no-export" => export = false,
+            "--skip-install-check" => require_installed = false,
+            other => return Err(format!("unknown option {other:?}")),
+        }
+    }
+    let plan_path = plan.ok_or("--plan is required")?;
+    let reference_pack_path = references.ok_or("--references is required")?;
+    let out_dir = out.unwrap_or_else(|| {
+        let stamp: String = sceneworks_core::time::utc_now()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        PathBuf::from("film-harness-runs").join(stamp)
+    });
+    let control = RunControl::watching(&out_dir);
+    film_harness::clear_cancel_request(&out_dir).map_err(|error| error.to_string())?;
+    Ok(Parsed {
+        api_url,
+        token,
+        control,
+        options: RunOptions {
+            plan_path,
+            reference_pack_path,
+            project_id,
+            shot_ids: shots,
+            out_dir,
+            poll_interval: Duration::from_secs(poll_seconds),
+            export,
+            require_installed,
+        },
+    })
+}
+
+fn fixture_images(args: &[String]) -> ExitCode {
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--out" => out = iter.next().map(PathBuf::from),
+            other => {
+                eprintln!("film-harness: unknown option {other:?}\n\n{USAGE}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let Some(out) = out else {
+        eprintln!("film-harness: fixture-images needs --out DIR");
+        return ExitCode::from(1);
+    };
+    match film_harness::write_fixture_images(&out) {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
+            println!(
+                "{} plates written ({} roles)",
+                FIXTURE_REFERENCES.len(),
+                FIXTURE_REFERENCES
+                    .iter()
+                    .map(|(role, _)| *role)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Cancel the in-flight run on SIGINT, and exit on a second one.
+///
+/// The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns SIGINT for the
+/// rest of the process, so without it a second Ctrl-C would be swallowed and the operator would
+/// have no way out but another signal.
+fn spawn_interrupt_handler(control: RunControl) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             eprintln!(
-                "film-harness: cancel requested — canceling live jobs and stopping dispatch; \
-                 `film-harness resume --out DIR` picks the run back up"
+                "film-harness: interrupt received — canceling the in-flight job and writing the \
+                 run record; interrupt again to exit now (the render keeps going)"
             );
-            cancel.request();
+            control.cancel();
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!(
+                    "film-harness: second interrupt — exiting without a run record; the worker \
+                     may still be rendering (cancel it in the job list)"
+                );
+                std::process::exit(130);
+            }
         }
-    });
+    })
 }
 
-fn exit_code_for(record: &sceneworks_core::film_plan::RunRecord) -> ExitCode {
+fn exit_code_for(record: &RunRecord) -> ExitCode {
     match record.outcome {
         RunOutcome::Completed => ExitCode::SUCCESS,
         RunOutcome::Rejected => ExitCode::from(2),
@@ -169,7 +318,7 @@ fn exit_code_for(record: &sceneworks_core::film_plan::RunRecord) -> ExitCode {
 
 /// One screen of what a run record says: per-shot selection, attempts, review flags, the export,
 /// and — the part an operator acts on — whether the run can be resumed and why it stopped.
-fn print_record(record: &sceneworks_core::film_plan::RunRecord, out_dir: &std::path::Path) {
+fn print_record(record: &RunRecord, out_dir: &std::path::Path) {
     println!(
         "run {} {} — {:?} ({:.0}s); record at {}",
         record.run_id,
@@ -261,7 +410,7 @@ async fn record_command(command: &str, args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    spawn_signal_handler(parsed.options.cancel.clone());
+    let signal = spawn_interrupt_handler(parsed.options.control.clone());
     let result = match command {
         "resume" => film_harness::resume(&transport, &parsed.options).await,
         _ => {
@@ -272,6 +421,7 @@ async fn record_command(command: &str, args: &[String]) -> ExitCode {
             film_harness::replace_take(&transport, &parsed.options, shot, &parsed.reason).await
         }
     };
+    signal.abort();
     match result {
         Ok(record) => {
             print_record(&record, &parsed.options.out_dir);
@@ -328,14 +478,6 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-fn report_error(error: HarnessError) -> ExitCode {
-    eprintln!("film-harness: {error}");
-    match error {
-        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
-        _ => ExitCode::from(1),
-    }
-}
-
 struct ParsedRecord {
     api_url: String,
     token: Option<String>,
@@ -377,8 +519,6 @@ fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, 
                     .map_err(|error| format!("--poll-seconds: {error}"))?
                     .max(1)
             }
-            // `resume --no-export` skips the export; `replace-take --export` asks for one, so the
-            // same field reads as "should this invocation export" either way.
             "--no-export" => export = false,
             "--export" => export = true,
             "--skip-install-check" => require_installed = false,
@@ -400,129 +540,4 @@ fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, 
         reason,
         options,
     })
-}
-
-struct Parsed {
-    api_url: String,
-    token: Option<String>,
-    options: RunOptions,
-}
-
-fn parse_options(args: &[String]) -> Result<Parsed, String> {
-    let mut plan: Option<PathBuf> = None;
-    let mut references: Option<PathBuf> = None;
-    let mut api_url = std::env::var("SCENEWORKS_API_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
-    let mut token = std::env::var("SCENEWORKS_ACCESS_TOKEN").ok();
-    let mut shots: Option<Vec<String>> = None;
-    let mut project_id: Option<String> = None;
-    let mut out: Option<PathBuf> = None;
-    let mut poll_seconds = 5_u64;
-    let mut export = true;
-    let mut require_installed = true;
-
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        let mut value = || {
-            iter.next()
-                .cloned()
-                .ok_or_else(|| format!("{arg} needs a value"))
-        };
-        match arg.as_str() {
-            "--plan" => plan = Some(PathBuf::from(value()?)),
-            "--references" => references = Some(PathBuf::from(value()?)),
-            "--api" => api_url = value()?,
-            "--token" => token = Some(value()?),
-            "--shots" => {
-                shots = Some(
-                    value()?
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
-                )
-            }
-            "--project-id" => project_id = Some(value()?),
-            "--out" => out = Some(PathBuf::from(value()?)),
-            "--poll-seconds" => {
-                poll_seconds = value()?
-                    .parse::<u64>()
-                    .map_err(|error| format!("--poll-seconds: {error}"))?
-                    .max(1)
-            }
-            "--no-export" => export = false,
-            "--skip-install-check" => require_installed = false,
-            other => return Err(format!("unknown option {other:?}")),
-        }
-    }
-    let plan_path = plan.ok_or("--plan is required")?;
-    let reference_pack_path = references.ok_or("--references is required")?;
-    let out_dir = out.unwrap_or_else(|| {
-        let stamp: String = sceneworks_core::time::utc_now()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        PathBuf::from("film-harness-runs").join(stamp)
-    });
-    // The run watches its own directory, so `film-harness cancel --out DIR` from another shell
-    // reaches it without a shared handle.
-    let cancel = film_harness::CancelToken::watching(&out_dir);
-    film_harness::clear_cancel_request(&out_dir).map_err(|error| error.to_string())?;
-    Ok(Parsed {
-        api_url,
-        token,
-        options: RunOptions {
-            plan_path,
-            reference_pack_path,
-            project_id,
-            shot_ids: shots,
-            out_dir,
-            poll_interval: Duration::from_secs(poll_seconds),
-            export,
-            require_installed,
-            cancel,
-        },
-    })
-}
-
-fn fixture_images(args: &[String]) -> ExitCode {
-    let mut out: Option<PathBuf> = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--out" => out = iter.next().map(PathBuf::from),
-            other => {
-                eprintln!("film-harness: unknown option {other:?}\n\n{USAGE}");
-                return ExitCode::from(1);
-            }
-        }
-    }
-    let Some(out) = out else {
-        eprintln!("film-harness: fixture-images needs --out DIR");
-        return ExitCode::from(1);
-    };
-    match film_harness::write_fixture_images(&out) {
-        Ok(paths) => {
-            for path in paths {
-                println!("{}", path.display());
-            }
-            println!(
-                "{} plates written ({} roles)",
-                FIXTURE_REFERENCES.len(),
-                FIXTURE_REFERENCES
-                    .iter()
-                    .map(|(role, _)| *role)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            ExitCode::from(1)
-        }
-    }
 }
