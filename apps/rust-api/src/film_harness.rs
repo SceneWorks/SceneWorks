@@ -11,25 +11,32 @@
 //! Order of operations, and the guarantee each step gives:
 //!
 //! 1. read + validate the plan and reference pack (structure, cross-references, files on disk);
-//! 2. resolve the model's catalog entry and validate every shot against its declared modes,
-//!    menus, caps and memory minimum ([`sceneworks_core::film_plan`]);
-//! 3. confirm a registered worker advertises `video_generate`, read the host memory it reports,
-//!    and check the plan's memory budget against it —
+//! 2. read the API HOST's platform and memory from `GET /api/v1/host-capabilities` — `--api` may
+//!    point at another machine, so the host's platform, not `cfg!(target_os)`, decides the lane
+//!    and is what the record claims as the render hardware;
+//! 3. resolve the model's catalog entry and validate every shot against its declared modes,
+//!    menus, caps and lane memory minimum ([`sceneworks_core::film_plan`]), plus the enqueue
+//!    route's own platform-reachability and reference-payload gates, and confirm a registered
+//!    worker advertises `video_generate` —
 //!    **no job is created while any finding is outstanding** (the run record is still written,
 //!    with outcome `rejected`);
-//! 4. create/reuse the project and import every approved reference as a project asset tagged
-//!    with its role;
+//! 4. create/reuse the project and import every reference as a project asset tagged with its role
+//!    (an unapproved one is tagged apart and never used as conditioning);
 //! 5. dispatch the selected shots one at a time under the plan's wall-clock, attempt and memory
 //!    limits — a limit that trips cancels the in-flight job (cooperatively, through the API) and
-//!    stops new dispatch;
+//!    stops new dispatch; the observed peak comes from the job's metrics block
+//!    (`GET /api/v1/jobs/:id/metrics`), which is where a real worker reports it;
 //! 6. assemble the rendered takes on a timeline and export it through the `timeline_export` job;
 //! 7. write `run.json` (shot -> attempt -> job -> asset, timeline, export, observed
-//!    model/backend/hardware) beside copies of the two source documents.
+//!    model/backend/hardware) beside copies of the two source documents — on every path past
+//!    step 1, refusals and mid-run failures included.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sceneworks_core::film_plan::{
@@ -46,16 +53,44 @@ use tokio::time::Instant;
 /// Statuses the job store treats as terminal.
 const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 
-/// How long to wait for a canceled job to reach a terminal state before the harness records it as
-/// timed out and moves on. The worker cancels cooperatively between stages, so this bounds the wait
-/// rather than the worker.
+/// How long to wait for a canceled job to reach a terminal state before the harness gives up on it.
+/// The worker cancels cooperatively between stages, so this bounds the wait rather than the worker.
+/// Capped at the plan's own per-shot budget, so a plan that declares a short shot also gets a short
+/// grace.
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
-/// Export resolutions the timeline export route admits (`validate_timeline_export`).
-const EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
+/// How long a TERMINAL job may keep raw `assetWrites` in its result — the window between the
+/// worker's terminal status and the API's asset persistence (`persist_reported_assets`) — before
+/// the harness stops waiting and records the attempt as terminal-but-unsettled. Also capped at the
+/// per-shot budget.
+const ASSET_SETTLE_GRACE: Duration = Duration::from_secs(30);
 
-/// Tag every harness-imported reference carries beside its role tag.
+/// How long to keep re-reading `GET /api/v1/jobs/:id/metrics` after a terminal attempt. The worker
+/// POSTs its metrics block AFTER the terminal progress update, so the first read can legitimately
+/// come back `null`.
+const METRICS_GRACE: Duration = Duration::from_secs(5);
+
+/// Cadence of the metrics re-read inside [`METRICS_GRACE`] (independent of the job poll cadence,
+/// which a real run sets to seconds).
+const METRICS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How close two `ln(w/h)` distances must be to count as a tie when picking a timeline aspect
+/// ratio. 4:3 is EXACTLY equidistant from 1:1 and 16:9 on that scale (4/3 is their geometric
+/// mean), so the tie is real arithmetic, not float noise, and must be broken deliberately.
+const ASPECT_TIE_EPSILON: f64 = 1e-9;
+
+/// Bytes per GB in every memory comparison the harness makes: GiB. `GET /api/v1/host-capabilities`
+/// reports `memoryGb` as the worker's `memoryTotalMb / 1024`, and the manifests' `minMemoryGb` are
+/// written in the same base, so `limits.maxMemoryGb` is a GiB budget and an observed peak in bytes
+/// has to be divided by 1024^3 to be compared with it.
+const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// Tag every harness-imported APPROVED reference carries beside its role tag.
 const REFERENCE_TAG: &str = "film-harness-reference";
+
+/// Tag an imported reference the pack has NOT approved carries instead, so a query for the
+/// conditioning-eligible references cannot pick it up.
+const UNAPPROVED_REFERENCE_TAG: &str = "film-harness-reference-unapproved";
 
 /// One request to the SceneWorks API.
 #[derive(Debug, Clone)]
@@ -164,6 +199,52 @@ pub struct RunOptions {
     pub require_installed: bool,
 }
 
+/// Cooperative cancellation for a run. The `film-harness` binary flips it from its `ctrl_c`
+/// handler; the harness then cancels the in-flight job through the API, stops dispatching, and
+/// still writes the run record — rather than leaving a 45-minute render on the GPU with no record
+/// of it, which is the opposite of what the plan's limits are for.
+#[derive(Debug, Clone, Default)]
+pub struct RunControl {
+    canceled: Arc<AtomicBool>,
+}
+
+impl RunControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the in-flight run to cancel its job and stop dispatching. Idempotent.
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+}
+
+/// The multipart filename for `path`'s basename: every character outside `[A-Za-z0-9._-]` replaced,
+/// so a name can never inject `Content-Disposition` headers. `validate_reference_pack` already
+/// refuses such a basename; this is the second half of the same guard, at the encoder, so no future
+/// caller can reach the header with an unchecked name.
+pub fn sanitize_multipart_filename(filename: &str) -> String {
+    let sanitized: String = filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.trim_matches('.').is_empty() {
+        "reference.png".to_owned()
+    } else {
+        sanitized
+    }
+}
+
 /// Encode a single-file `multipart/form-data` body the asset import route accepts: the `file`
 /// field plus a JSON `provenance` field.
 pub fn encode_asset_upload(
@@ -178,7 +259,7 @@ pub fn encode_asset_upload(
     body.extend_from_slice(
         format!(
             "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            filename.replace('"', "")
+            sanitize_multipart_filename(filename)
         )
         .as_bytes(),
     );
@@ -247,8 +328,25 @@ impl JobView {
     /// as `assets` / `assetIds` (the durable two-phase handoff in `update_job_progress`), so a
     /// poller can observe `completed` with the raw facts still in place. Reading that snapshot as
     /// done would record "completed without an asset".
+    ///
+    /// The persisted side is the positive signal: once `assets` / `assetIds` are present the
+    /// handoff is done, whatever else the result still carries. Waiting on the ABSENCE of
+    /// `assetWrites` alone has no escape hatch — `persist_reported_assets` returns early without
+    /// removing the key when the job row carries no `project_id`, and the recovery loop can retry a
+    /// persistently failing handoff indefinitely — which would poll a finished job until the shot
+    /// budget expired and then report it as a timeout with the take lost.
     fn is_settled(&self) -> bool {
         self.status != "completed"
+            || self
+                .result
+                .get("assets")
+                .and_then(Value::as_array)
+                .is_some()
+            || self
+                .result
+                .get("assetIds")
+                .and_then(Value::as_array)
+                .is_some()
             || self
                 .result
                 .get("assetWrites")
@@ -272,10 +370,30 @@ enum PollStop {
     ShotBudget,
     /// The run's budget ran out.
     RunBudget,
+    /// The operator asked the run to stop (SIGINT on the binary).
+    Operator,
+    /// The job reached a terminal status but the API never finished persisting its reported
+    /// assets, so the result stayed non-final for [`ASSET_SETTLE_GRACE`].
+    AssetsUnsettled,
+}
+
+/// Everything one poll loop is bounded by.
+#[derive(Debug, Clone, Copy)]
+struct PollBounds {
+    shot_deadline: Instant,
+    run_deadline: Instant,
+    poll_interval: Duration,
+    /// How long a canceled job gets to reach a terminal state: [`CANCEL_GRACE`] capped at the
+    /// plan's per-shot budget.
+    cancel_grace: Duration,
+    /// How long a terminal job gets to finish persisting its reported assets:
+    /// [`ASSET_SETTLE_GRACE`] capped at the plan's per-shot budget.
+    settle_grace: Duration,
 }
 
 struct Client<'a> {
     transport: &'a dyn ApiTransport,
+    control: &'a RunControl,
 }
 
 impl Client<'_> {
@@ -323,25 +441,40 @@ impl Client<'_> {
         })
     }
 
-    /// Poll `job_id` until it is terminal or a deadline passes. On a deadline the job is canceled
-    /// through the API and given [`CANCEL_GRACE`] to settle; the returned view is the last one
-    /// observed either way.
+    /// Poll `job_id` until it is terminal or a deadline passes. On a deadline (or an operator
+    /// cancel) the job is canceled through the API and given `bounds.grace` to settle; the returned
+    /// view is the last one observed either way.
+    ///
+    /// A job that is already terminal but whose result the API has not finished persisting is
+    /// waited out separately — never cancelled, since cancelling a finished job is meaningless —
+    /// and bounded by the same grace, after which it comes back as
+    /// [`PollStop::AssetsUnsettled`] rather than as a budget timeout.
     async fn wait_for_job(
         &self,
         job_id: &str,
-        shot_deadline: Instant,
-        run_deadline: Instant,
-        poll_interval: Duration,
+        bounds: PollBounds,
     ) -> Result<(JobView, PollStop), HarnessError> {
+        let mut unsettled_deadline: Option<Instant> = None;
         loop {
             let view = self.get_job(job_id).await?;
-            if view.is_terminal() && view.is_settled() {
-                return Ok((view, PollStop::Terminal));
+            if view.is_terminal() {
+                if view.is_settled() {
+                    return Ok((view, PollStop::Terminal));
+                }
+                let deadline =
+                    *unsettled_deadline.get_or_insert(Instant::now() + bounds.settle_grace);
+                if Instant::now() >= deadline {
+                    return Ok((view, PollStop::AssetsUnsettled));
+                }
+                tokio::time::sleep(bounds.poll_interval.min(bounds.settle_grace)).await;
+                continue;
             }
             let now = Instant::now();
-            let stop = if now >= run_deadline {
+            let stop = if self.control.is_canceled() {
+                Some(PollStop::Operator)
+            } else if now >= bounds.run_deadline {
                 Some(PollStop::RunBudget)
-            } else if now >= shot_deadline {
+            } else if now >= bounds.shot_deadline {
                 Some(PollStop::ShotBudget)
             } else {
                 None
@@ -352,10 +485,10 @@ impl Client<'_> {
                 let _ = self
                     .json("POST", &format!("/api/v1/jobs/{job_id}/cancel"), None)
                     .await?;
-                let grace_deadline = Instant::now() + CANCEL_GRACE;
+                let grace_deadline = Instant::now() + bounds.cancel_grace;
                 let mut last = view;
                 while Instant::now() < grace_deadline {
-                    tokio::time::sleep(poll_interval).await;
+                    tokio::time::sleep(bounds.poll_interval.min(bounds.cancel_grace)).await;
                     last = self.get_job(job_id).await?;
                     if last.is_terminal() && last.is_settled() {
                         break;
@@ -363,18 +496,118 @@ impl Client<'_> {
                 }
                 return Ok((last, stop));
             }
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(bounds.poll_interval).await;
         }
+    }
+
+    /// The job's `generation_metrics` block (`GET /api/v1/jobs/:id/metrics`), retried for
+    /// [`METRICS_GRACE`] because the worker POSTs it AFTER the terminal progress update — the same
+    /// two-phase shape the asset handoff has. `None` once the window closes with nothing recorded
+    /// (a worker whose probe measured nothing posts no block at all), and never an error: telemetry
+    /// must not fail a run that rendered.
+    async fn job_metrics(&self, job_id: &str, poll_interval: Duration) -> Option<Value> {
+        let path = format!("/api/v1/jobs/{job_id}/metrics");
+        let deadline = Instant::now() + METRICS_GRACE;
+        let cadence = poll_interval.min(METRICS_RETRY_INTERVAL);
+        loop {
+            if let Ok(response) = self.json("GET", &path, None).await {
+                if (200..300).contains(&response.status) && !response.body.is_null() {
+                    return Some(response.body);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(cadence).await;
+        }
+    }
+}
+
+/// One attempt's observed memory peak, and which signal it came from.
+#[derive(Debug, Clone, Default)]
+struct MemoryObservation {
+    /// The peak in GiB — what `limits.maxMemoryGb` is compared against.
+    gb: Option<f64>,
+    /// The peak as a percentage of host memory, when the source expressed one.
+    pct: Option<f64>,
+    source: Option<String>,
+}
+
+/// Read an attempt's peak memory, preferring the real production signal.
+///
+/// `GenerationMetrics.peakMemoryBytes` (MLX `get_peak_memory` on macOS, the nvidia-smi high-water
+/// mark on candle) is the only measured peak a shipped worker reports: EVERY `ProgressRequest` in
+/// `sceneworks-worker` sets `peakGpuMemoryPct: None`, so the job snapshot's field is always null on
+/// a real render and is kept here only as a last resort for a future worker that fills it.
+fn memory_observation(
+    metrics: Option<&Value>,
+    view: &JobView,
+    host_memory_gb: Option<f64>,
+) -> MemoryObservation {
+    // A zero peak is "nothing was measured", not "this run used no memory" — the export job's own
+    // metrics row on a real run is exactly that — so it falls through to the next source.
+    let number = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_f64)
+            .filter(|number| number.is_finite() && *number > 0.0)
+    };
+    let metrics_pct = number(metrics.and_then(|metrics| metrics.get("peakMemoryPct")));
+    if let Some(bytes) = number(metrics.and_then(|metrics| metrics.get("peakMemoryBytes"))) {
+        return MemoryObservation {
+            gb: Some(bytes / BYTES_PER_GB),
+            pct: metrics_pct,
+            source: Some("metrics.peakMemoryBytes".to_owned()),
+        };
+    }
+    if let (Some(pct), Some(host)) = (metrics_pct, host_memory_gb) {
+        return MemoryObservation {
+            gb: Some(host * pct / 100.0),
+            pct: Some(pct),
+            source: Some("metrics.peakMemoryPct".to_owned()),
+        };
+    }
+    match (view.peak_gpu_memory_pct, host_memory_gb) {
+        (Some(pct), Some(host)) => MemoryObservation {
+            gb: Some(host * pct / 100.0),
+            pct: Some(pct),
+            source: Some("job.peakGpuMemoryPct".to_owned()),
+        },
+        (Some(pct), None) => MemoryObservation {
+            gb: None,
+            pct: Some(pct),
+            source: Some("job.peakGpuMemoryPct".to_owned()),
+        },
+        _ => MemoryObservation::default(),
     }
 }
 
 /// What the run learned about the host and the worker that will render.
 #[derive(Debug, Clone, Default)]
 struct HostFacts {
+    /// The API HOST's platform (`std::env::consts::OS` spelling), from
+    /// `GET /api/v1/host-capabilities`. `--api` may point at another machine, so this — not
+    /// `cfg!(target_os)` — decides the lane whose `minMemoryGb` the plan is checked against, the
+    /// platform the route's own reachability gate is judged on, and the hardware the record claims.
+    platform: Option<String>,
     host_memory_gb: Option<f64>,
     video_worker_id: Option<String>,
     video_gpu_name: Option<String>,
     export_worker: bool,
+}
+
+impl HostFacts {
+    /// The lane the render host reads its memory minimum from, falling back to this process's own
+    /// platform only when the API reports none.
+    fn lane(&self) -> ModelLane {
+        match self.platform.as_deref() {
+            Some(platform) => ModelLane::for_platform(platform),
+            None => ModelLane::for_current_platform(),
+        }
+    }
+
+    fn platform_or_local(&self) -> &str {
+        self.platform.as_deref().unwrap_or(std::env::consts::OS)
+    }
 }
 
 async fn discover_host(client: &Client<'_>) -> Result<HostFacts, HarnessError> {
@@ -402,6 +635,11 @@ async fn discover_host(client: &Client<'_>) -> Result<HostFacts, HarnessError> {
     let host = client
         .expect_ok("GET", "/api/v1/host-capabilities", None)
         .await?;
+    facts.platform = host
+        .get("platform")
+        .and_then(Value::as_str)
+        .filter(|platform| !platform.trim().is_empty())
+        .map(str::to_owned);
     facts.host_memory_gb = host
         .get("memoryGb")
         .and_then(Value::as_f64)
@@ -585,20 +823,70 @@ fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Optio
     })
 }
 
+/// The timeline aspect ratio a take of this geometry is CREATED at: the admitted ratio closest to
+/// the take's own, derived from the real geometry rather than from its orientation alone.
+///
+/// The timeline route admits only what `sceneworks_core::project_store::TIMELINE_ASPECT_RATIOS`
+/// lists (`16:9` / `9:16` / `1:1`), and the fixture's 576x320 takes are 9:5 — so SOMETHING has to
+/// be coerced, and the export pads the take into the frame (a 576x320 take in a 640-tall 16:9
+/// export lands as 1138x640 with bars). Distance is measured on `ln(w/h)` — the scale-free
+/// comparison, on which 2:1 is as far from 16:9 as 16:9 is from 1.0 — and a tie goes to the
+/// candidate whose ORIENTATION matches the take's, because 4:3 sits exactly halfway between 1:1
+/// and 16:9 on that scale and a landscape take belongs in a landscape frame.
+/// [`reduced_aspect_ratio`] records what the takes actually are, so the record never states the
+/// coerced ratio as a fact about the footage.
 fn aspect_ratio_for(width: u32, height: u32) -> &'static str {
-    match width.cmp(&height) {
-        std::cmp::Ordering::Greater => "16:9",
-        std::cmp::Ordering::Less => "9:16",
-        std::cmp::Ordering::Equal => "1:1",
+    let take = (f64::from(width.max(1)) / f64::from(height.max(1))).ln();
+    let orientation = width.cmp(&height);
+    let mut best: Option<(&'static str, f64, bool)> = None;
+    for (name, candidate_width, candidate_height) in
+        sceneworks_core::project_store::TIMELINE_ASPECT_RATIOS
+    {
+        let distance =
+            (take - (f64::from(*candidate_width) / f64::from(*candidate_height)).ln()).abs();
+        let matches_orientation = candidate_width.cmp(candidate_height) == orientation;
+        let better = match best {
+            None => true,
+            Some((_, best_distance, best_matches)) => {
+                if (distance - best_distance).abs() <= ASPECT_TIE_EPSILON {
+                    matches_orientation && !best_matches
+                } else {
+                    distance < best_distance
+                }
+            }
+        };
+        if better {
+            best = Some((name, distance, matches_orientation));
+        }
     }
+    best.map_or("16:9", |(name, _, _)| name)
+}
+
+/// The takes' own ratio in lowest terms, e.g. `9:5` for 576x320.
+fn reduced_aspect_ratio(width: u32, height: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a.max(1)
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let divisor = gcd(width, height);
+    format!("{}:{}", width / divisor, height / divisor)
 }
 
 fn export_resolution_for(height: u32) -> u32 {
-    EXPORT_RESOLUTIONS
+    crate::TIMELINE_EXPORT_RESOLUTIONS
         .iter()
         .copied()
         .find(|candidate| *candidate >= height)
-        .unwrap_or(1280)
+        .unwrap_or_else(|| {
+            crate::TIMELINE_EXPORT_RESOLUTIONS
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(1280)
+        })
 }
 
 fn seconds_since(start: Instant) -> f64 {
@@ -656,11 +944,18 @@ pub async fn validate(
         return Err(HarnessError::Validation(findings));
     }
     if let Some(transport) = transport {
-        let client = Client { transport };
+        let control = RunControl::default();
+        let client = Client {
+            transport,
+            control: &control,
+        };
+        // The host comes FIRST: its platform decides which lane's `minMemoryGb` the plan is
+        // checked against and which platform the route's reachability gate is judged on, so the
+        // model checks cannot run before it is known.
+        let facts = discover_host(&client).await?;
         let entry = resolve_model_entry(&client, &plan.model.id).await?;
-        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed);
+        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed, &facts);
         if findings.is_empty() {
-            let facts = discover_host(&client).await?;
             findings.extend(host_findings(&plan, &facts, options.export));
         }
         if !findings.is_empty() {
@@ -700,10 +995,59 @@ fn selection_findings(plan: &ProductionPlan, selection: Option<&[String]>) -> Ve
     findings
 }
 
+/// The route's own platform-reachability gate, run before dispatch instead of being discovered as
+/// a 400 at enqueue: `POST /api/v1/video/jobs` calls exactly this function
+/// ([`crate::generation::ensure_video_model_available_on_platform`]) on the resolved manifest
+/// entry, so a plan this validator passes cannot be refused for the reason it checks.
+fn platform_reachability_finding(
+    model_id: &str,
+    entry: &JsonObject<String, Value>,
+    platform: &str,
+) -> Option<PlanDiagnostic> {
+    let value = Value::Object(entry.clone());
+    crate::generation::ensure_video_model_available_on_platform(model_id, &value, platform)
+        .err()
+        .map(|error| PlanDiagnostic::plan("model.id", error.detail))
+}
+
+/// The route's reference-payload gate, run before dispatch on the payload shape each shot will
+/// produce. Placeholder ids stand in for the asset ids the import has not created yet: they are
+/// non-blank and untrimmed-free by construction, so the only questions this can answer are the ones
+/// that depend on the PLAN — how many references a shot carries, and the model/mode spelling.
+fn reference_payload_findings(
+    plan: &ProductionPlan,
+    entry: &JsonObject<String, Value>,
+) -> Vec<PlanDiagnostic> {
+    let value = Value::Object(entry.clone());
+    let mut findings = Vec::new();
+    for shot in &plan.shots {
+        let mut payload = JsonObject::new();
+        payload.insert("model".to_owned(), json!(plan.model.id));
+        payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
+        payload.insert(
+            "referenceAssetIds".to_owned(),
+            Value::Array(
+                (0..shot.conditioning.reference_roles.len())
+                    .map(|index| json!(format!("placeholder_reference_{index}")))
+                    .collect(),
+            ),
+        );
+        if let Err(error) = crate::validate_video_reference_asset_ids_payload(&payload, &value) {
+            findings.push(PlanDiagnostic::shot(
+                &shot.id,
+                "conditioning.referenceRoles",
+                error.detail,
+            ));
+        }
+    }
+    findings
+}
+
 fn model_findings(
     plan: &ProductionPlan,
     entry: Option<&JsonObject<String, Value>>,
     require_installed: bool,
+    facts: &HostFacts,
 ) -> Vec<PlanDiagnostic> {
     let Some(entry) = entry else {
         return vec![PlanDiagnostic::plan(
@@ -733,11 +1077,17 @@ fn model_findings(
             ),
         ));
     }
+    findings.extend(platform_reachability_finding(
+        &plan.model.id,
+        entry,
+        facts.platform_or_local(),
+    ));
     findings.extend(film_plan::validate_plan_against_model(
         plan,
         entry,
-        ModelLane::for_current_platform(),
+        facts.lane(),
     ));
+    findings.extend(reference_payload_findings(plan, entry));
     findings
 }
 
@@ -782,11 +1132,26 @@ pub async fn run(
     transport: &dyn ApiTransport,
     options: &RunOptions,
 ) -> Result<RunRecord, HarnessError> {
+    run_with_control(transport, options, &RunControl::default()).await
+}
+
+/// [`run`] with an operator cancellation handle. The `film-harness` binary passes one so SIGINT
+/// cancels the in-flight job through the API and still leaves a record, instead of orphaning a
+/// render on the GPU.
+///
+/// Every path past document validation writes `run.json` — including a transport/API failure
+/// mid-run, which is exactly when the record matters most: by then the run may have created a
+/// project, imported assets and dispatched jobs, and nothing else remembers that it did.
+pub async fn run_with_control(
+    transport: &dyn ApiTransport,
+    options: &RunOptions,
+    control: &RunControl,
+) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
     let plan_bytes = std::fs::read(&options.plan_path)?;
     let pack_bytes = std::fs::read(&options.reference_pack_path)?;
-    let client = Client { transport };
+    let client = Client { transport, control };
 
     // Steps 1-3: refuse before the first write.
     let (plan, pack) = match validate(None, options).await {
@@ -810,34 +1175,88 @@ pub async fn run(
         }
         Err(other) => return Err(other),
     };
-    let entry = resolve_model_entry(&client, &plan.model.id).await?;
-    let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed);
-    let facts = if findings.is_empty() {
-        let facts = discover_host(&client).await?;
-        findings.extend(host_findings(&plan, &facts, options.export));
-        facts
-    } else {
-        HostFacts::default()
-    };
+
+    let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
+    let outcome = execute_run(
+        &client,
+        transport,
+        options,
+        &plan,
+        &pack,
+        &run_id,
+        started,
+        &mut record,
+    )
+    .await;
+    record.finished_at = Some(utc_now());
+    record.elapsed_seconds = seconds_since(started);
+    match outcome {
+        Ok(()) => {
+            persist_record(
+                &record,
+                &options.out_dir,
+                &options.plan_path,
+                &options.reference_pack_path,
+            )?;
+            Ok(record)
+        }
+        Err(HarnessError::Validation(findings)) => {
+            record.outcome = RunOutcome::Rejected;
+            record.diagnostics = findings.clone();
+            persist_record(
+                &record,
+                &options.out_dir,
+                &options.plan_path,
+                &options.reference_pack_path,
+            )?;
+            Err(HarnessError::Validation(findings))
+        }
+        Err(error) => {
+            record.outcome = RunOutcome::Failed;
+            record.diagnostics.push(PlanDiagnostic::plan(
+                "run",
+                format!("the run stopped on an error: {error}"),
+            ));
+            // Best effort: an io failure while writing the record must not replace the failure
+            // that caused it with a less informative one.
+            let _ = persist_record(
+                &record,
+                &options.out_dir,
+                &options.plan_path,
+                &options.reference_pack_path,
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Steps 3-6 against a record the caller owns, so every early return still leaves a persistable
+/// record behind. `Err(Validation)` means the catalog/host refused the plan before the first write;
+/// any other `Err` is a transport/API failure partway through.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_run(
+    client: &Client<'_>,
+    transport: &dyn ApiTransport,
+    options: &RunOptions,
+    plan: &ProductionPlan,
+    pack: &ReferencePack,
+    run_id: &str,
+    started: Instant,
+    record: &mut RunRecord,
+) -> Result<(), HarnessError> {
+    let facts = discover_host(client).await?;
+    let entry = resolve_model_entry(client, &plan.model.id).await?;
+    let mut findings = model_findings(plan, entry.as_ref(), options.require_installed, &facts);
+    if findings.is_empty() {
+        findings.extend(host_findings(plan, &facts, options.export));
+    }
     if !findings.is_empty() {
-        let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
-        record.outcome = RunOutcome::Rejected;
-        record.diagnostics = findings.clone();
-        record.finished_at = Some(utc_now());
-        record.elapsed_seconds = seconds_since(started);
-        persist_record(
-            &record,
-            &options.out_dir,
-            &options.plan_path,
-            &options.reference_pack_path,
-        )?;
         return Err(HarnessError::Validation(findings));
     }
     let entry = entry.expect("model findings are empty only with an entry");
-    let fps = film_plan::plan_fps(&plan, &entry).expect("validated against the model");
-    let lane = ModelLane::for_current_platform();
+    let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
+    let lane = facts.lane();
 
-    let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
     record.model = Some(ModelRecord {
         id: plan.model.id.clone(),
         tier_requested: plan.model.tier.clone(),
@@ -846,8 +1265,14 @@ pub async fn run(
         backend_observed: None,
         weights: primary_weights(&entry, plan.model.tier.as_deref()),
         hardware: HardwareRecord {
-            platform: std::env::consts::OS.to_owned(),
-            arch: std::env::consts::ARCH.to_owned(),
+            platform: facts.platform_or_local().to_owned(),
+            // The host-capabilities route reports no arch, so this process's arch is the truth
+            // only when the API is on this platform; otherwise claiming one would be a fabrication.
+            arch: if facts.platform_or_local() == std::env::consts::OS {
+                std::env::consts::ARCH.to_owned()
+            } else {
+                "unknown".to_owned()
+            },
             host_memory_gb: facts.host_memory_gb,
             gpu_name: facts.video_gpu_name.clone(),
             worker_id: facts.video_worker_id.clone(),
@@ -953,28 +1378,45 @@ pub async fn run(
                 ))
             })?
             .to_owned();
+        // An unapproved reference is imported (so the record can point at it and a human can
+        // review it) but tagged distinctly, so a query for the conditioning-eligible references
+        // cannot pick it up — AC1 is about APPROVED references staying addressable.
+        let kind_tag = if reference.approved {
+            REFERENCE_TAG
+        } else {
+            UNAPPROVED_REFERENCE_TAG
+        };
         client
             .expect_ok(
                 "PATCH",
                 &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
                 Some(json!({
-                    "tags": [REFERENCE_TAG, format!("role:{}", reference.role), format!("pack:{}", pack.id)]
+                    "tags": [kind_tag, format!("role:{}", reference.role), format!("pack:{}", pack.id)]
                 })),
             )
             .await?;
-        role_assets.insert(reference.role.clone(), asset_id.clone());
+        if reference.approved {
+            // Only approved roles resolve into a shot's conditioning slots. Validation already
+            // refuses a plan that conditions on an unapproved role, so this is the second half of
+            // the same guarantee: even a validator gap cannot put an unapproved plate on the wire.
+            role_assets.insert(reference.role.clone(), asset_id.clone());
+        }
         record.references.push(ReferenceAssetRecord {
             role: reference.role.clone(),
             kind: reference.kind.clone(),
             file: reference.file.clone(),
             sha256,
             asset_id,
+            approved: reference.approved,
         });
     }
 
     // Step 5: shots, one at a time, under the declared limits.
     let run_deadline = started + Duration::from_secs(plan.limits.max_run_seconds);
     let shot_budget = Duration::from_secs(plan.limits.max_shot_seconds);
+    // A cancel must not be given more room to settle than the plan gave the whole attempt.
+    let cancel_grace = CANCEL_GRACE.min(shot_budget);
+    let settle_grace = ASSET_SETTLE_GRACE.min(shot_budget);
     let selected: Vec<&film_plan::Shot> = plan
         .shots
         .iter()
@@ -984,7 +1426,7 @@ pub async fn run(
     let mut rendered: Vec<(String, TakeRecord, (u32, u32))> = Vec::new();
     for shot in &plan.shots {
         let (width, height) =
-            film_plan::shot_resolution(&plan, shot, &entry).expect("validated against the model");
+            film_plan::shot_resolution(plan, shot, &entry).expect("validated against the model");
         let conditioning = &shot.conditioning;
         let assets = ConditioningAssets {
             first_frame_asset_id: conditioning
@@ -1029,6 +1471,14 @@ pub async fn run(
         }
         let mut outcome = ShotOutcome::Failed;
         for attempt in 1..=plan.limits.max_attempts_per_shot {
+            if client.control.is_canceled() {
+                stop = Some(RunOutcome::Failed);
+                record.diagnostics.push(PlanDiagnostic::plan(
+                    "run",
+                    "canceled by operator before this attempt was dispatched",
+                ));
+                break;
+            }
             if Instant::now() >= run_deadline {
                 stop = Some(RunOutcome::StoppedRunBudget);
                 break;
@@ -1042,14 +1492,16 @@ pub async fn run(
                 finished_at: None,
                 elapsed_seconds: 0.0,
                 peak_gpu_memory_pct: None,
+                peak_memory_gb: None,
+                peak_memory_source: None,
                 error: None,
                 take: None,
             };
             let body = video_job_body(&ShotDispatch {
-                plan: &plan,
+                plan,
                 shot,
                 project_id: &project_id,
-                run_id: &run_id,
+                run_id,
                 attempt,
                 fps,
                 width,
@@ -1086,22 +1538,73 @@ pub async fn run(
                 })?
                 .to_owned();
             attempt_record.job_id = Some(job_id.clone());
-            let shot_deadline = attempt_started + shot_budget;
             let (view, poll_stop) = client
-                .wait_for_job(&job_id, shot_deadline, run_deadline, options.poll_interval)
+                .wait_for_job(
+                    &job_id,
+                    PollBounds {
+                        shot_deadline: attempt_started + shot_budget,
+                        run_deadline,
+                        poll_interval: options.poll_interval,
+                        cancel_grace,
+                        settle_grace,
+                    },
+                )
                 .await?;
             attempt_record.finished_at = Some(utc_now());
             attempt_record.elapsed_seconds = seconds_since(attempt_started);
-            attempt_record.peak_gpu_memory_pct = view.peak_gpu_memory_pct;
             attempt_record.status = match poll_stop {
-                PollStop::Terminal => view.status.clone(),
+                PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
                 PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+                PollStop::Operator => "canceled_by_operator".to_owned(),
             };
-            let memory_exceeded = match (view.peak_gpu_memory_pct, facts.host_memory_gb) {
-                (Some(pct), Some(host)) => host * pct / 100.0 > plan.limits.max_memory_gb,
-                _ => false,
-            };
+            // The observed peak comes off the job's metrics block, which the worker POSTs after
+            // its terminal progress — so read it once the attempt is terminal, whatever ended it.
+            let metrics = client.job_metrics(&job_id, options.poll_interval).await;
+            let memory = memory_observation(metrics.as_ref(), &view, facts.host_memory_gb);
+            attempt_record.peak_gpu_memory_pct = memory.pct;
+            attempt_record.peak_memory_gb = memory.gb;
+            attempt_record.peak_memory_source = memory.source.clone();
+            let memory_exceeded = memory
+                .gb
+                .is_some_and(|observed| observed > plan.limits.max_memory_gb);
+            // Whether the cancel the harness posted was actually honoured. A job still running
+            // after the grace is a render in flight that nothing here can stop.
+            let cancel_honoured = view.is_terminal();
             match poll_stop {
+                PollStop::AssetsUnsettled => {
+                    // Terminal, but the API never finished the asset handoff. Retrying would
+                    // dispatch a fresh render against a server-side condition a retry cannot fix.
+                    attempt_record.error = Some(format!(
+                        "job {job_id} reached {} but its assets never settled within {:.0}s (the \
+                         result still carries raw assetWrites): {}",
+                        view.status,
+                        settle_grace.as_secs_f64(),
+                        view.result
+                    ));
+                    shot_record.attempts.push(attempt_record);
+                    outcome = ShotOutcome::Failed;
+                    break;
+                }
+                PollStop::Operator => {
+                    attempt_record.error = Some(if cancel_honoured {
+                        format!("canceled by operator (job {job_id} is {})", view.status)
+                    } else {
+                        format!(
+                            "canceled by operator; job {job_id} was still {} {:.0}s after the \
+                             cancel was posted",
+                            view.status,
+                            cancel_grace.as_secs_f64()
+                        )
+                    });
+                    shot_record.attempts.push(attempt_record);
+                    outcome = ShotOutcome::Failed;
+                    stop = Some(RunOutcome::Failed);
+                    record.diagnostics.push(PlanDiagnostic::plan(
+                        "run",
+                        format!("canceled by operator during shot {}", shot.id),
+                    ));
+                    break;
+                }
                 PollStop::Terminal if view.status == "completed" => {
                     match take_from_result(&view.result, &plan.model.id, view.backend.as_deref()) {
                         Some(take) => {
@@ -1139,12 +1642,30 @@ pub async fn run(
                     }
                 }
                 PollStop::ShotBudget => {
-                    attempt_record.error = Some(format!(
-                        "attempt exceeded the per-shot budget of {}s (last status {})",
-                        plan.limits.max_shot_seconds, view.status
-                    ));
+                    attempt_record.error = Some(if cancel_honoured {
+                        format!(
+                            "attempt exceeded the per-shot budget of {}s (last status {})",
+                            plan.limits.max_shot_seconds, view.status
+                        )
+                    } else {
+                        format!(
+                            "attempt exceeded the per-shot budget of {}s and job {job_id} was \
+                             still {} {:.0}s after the cancel was posted; stopping dispatch \
+                             rather than running a second render against the same memory budget",
+                            plan.limits.max_shot_seconds,
+                            view.status,
+                            cancel_grace.as_secs_f64()
+                        )
+                    });
                     shot_record.attempts.push(attempt_record);
                     outcome = ShotOutcome::TimedOut;
+                    if !cancel_honoured {
+                        // The render is still on the GPU. Neither the next attempt nor the next
+                        // shot may go out beside it: the plan declared ONE memory budget, and two
+                        // MiniMax-H3 renders in flight is exactly what it is there to prevent.
+                        stop = Some(RunOutcome::Failed);
+                        break;
+                    }
                     if memory_exceeded {
                         stop = Some(RunOutcome::StoppedMemoryLimit);
                         break;
@@ -1192,6 +1713,34 @@ pub async fn run(
                 HarnessError::Transport(format!("timeline response has no id: {timeline}"))
             })?
             .to_owned();
+        // The main video track, by id or — if the project store's default track ids ever change —
+        // by kind. Writing the items nowhere and saving an EMPTY timeline while the record still
+        // listed every shot is the one outcome that must not happen: the record would claim a
+        // sequence the project does not hold.
+        let tracks = timeline
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let track_index = tracks
+            .iter()
+            .position(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
+            .or_else(|| {
+                tracks
+                    .iter()
+                    .position(|track| track.get("kind").and_then(Value::as_str) == Some("video"))
+            })
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "timeline {timeline_id} has no track_main and no video track to hold the \
+                     rendered takes: {timeline}"
+                ))
+            })?;
+        let track_id = tracks[track_index]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("track_main")
+            .to_owned();
         let mut items = Vec::new();
         let mut item_records = Vec::new();
         let mut cursor = 0.0_f64;
@@ -1210,7 +1759,7 @@ pub async fn run(
             let end = cursor + length;
             items.push(json!({
                 "id": item_id,
-                "trackId": "track_main",
+                "trackId": track_id,
                 "assetId": take.asset_id,
                 "type": "video",
                 "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
@@ -1239,30 +1788,31 @@ pub async fn run(
             cursor = end;
             tallest = tallest.max(*height);
         }
-        if let Some(track) = timeline
-            .get_mut("tracks")
-            .and_then(Value::as_array_mut)
-            .and_then(|tracks| {
-                tracks
-                    .iter_mut()
-                    .find(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
-            })
-        {
-            track["items"] = Value::Array(items);
-        }
-        client
+        timeline["tracks"][track_index]["items"] = Value::Array(items);
+        let saved = client
             .expect_ok(
                 "PUT",
                 &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
                 Some(json!({ "timeline": timeline })),
             )
             .await?;
+        // Read the items back off the SAVED document rather than trusting the harness's own
+        // intent: the record then cannot describe a timeline that was never persisted.
+        let persisted = persisted_timeline_items(&saved, &item_records).ok_or_else(|| {
+            HarnessError::Transport(format!(
+                "saved timeline {timeline_id} does not hold the {} items the run assembled: {saved}",
+                item_records.len()
+            ))
+        })?;
         record.timeline = Some(TimelineRecord {
             timeline_id: timeline_id.clone(),
             name: timeline_name,
             aspect_ratio: aspect_ratio.to_owned(),
+            source_aspect_ratio: Some(reduced_aspect_ratio(*first_width, *first_height)),
+            source_width: Some(*first_width),
+            source_height: Some(*first_height),
             fps,
-            items: item_records,
+            items: persisted,
         });
 
         let export_job = client
@@ -1287,9 +1837,13 @@ pub async fn run(
         let (view, poll_stop) = client
             .wait_for_job(
                 &export_job_id,
-                export_started + shot_budget,
-                run_deadline,
-                options.poll_interval,
+                PollBounds {
+                    shot_deadline: export_started + shot_budget,
+                    run_deadline,
+                    poll_interval: options.poll_interval,
+                    cancel_grace,
+                    settle_grace,
+                },
             )
             .await?;
         let asset_id = view
@@ -1305,8 +1859,9 @@ pub async fn run(
             .and_then(Value::as_str)
             .map(str::to_owned);
         let status = match poll_stop {
-            PollStop::Terminal => view.status.clone(),
+            PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
             PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+            PollStop::Operator => "canceled_by_operator".to_owned(),
         };
         export_ok = status == "completed" && asset_id.is_some();
         record.export = Some(ExportRecord {
@@ -1316,6 +1871,12 @@ pub async fn run(
             render_path,
             error: (!export_ok).then(|| match poll_stop {
                 PollStop::Terminal => view.failure_text(),
+                PollStop::AssetsUnsettled => format!(
+                    "the export job reached {} but its assets never settled within {:.0}s",
+                    view.status,
+                    settle_grace.as_secs_f64()
+                ),
+                PollStop::Operator => "canceled by operator during the export".to_owned(),
                 PollStop::ShotBudget => format!(
                     "export exceeded the per-job budget of {}s",
                     plan.limits.max_shot_seconds
@@ -1326,8 +1887,16 @@ pub async fn run(
                 ),
             }),
         });
-        if poll_stop == PollStop::RunBudget {
-            stop = Some(RunOutcome::StoppedRunBudget);
+        match poll_stop {
+            PollStop::RunBudget => stop = Some(RunOutcome::StoppedRunBudget),
+            PollStop::Operator => {
+                stop = Some(RunOutcome::Failed);
+                record.diagnostics.push(PlanDiagnostic::plan(
+                    "run",
+                    "canceled by operator during the export",
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -1341,15 +1910,37 @@ pub async fn run(
         None if all_rendered && export_ok => RunOutcome::Completed,
         None => RunOutcome::Failed,
     };
-    record.finished_at = Some(utc_now());
-    record.elapsed_seconds = seconds_since(started);
-    persist_record(
-        &record,
-        &options.out_dir,
-        &options.plan_path,
-        &options.reference_pack_path,
-    )?;
-    Ok(record)
+    Ok(())
+}
+
+/// The timeline items as the SAVE persisted them, in the order the run assembled them, or `None`
+/// when the saved document does not hold exactly the items that were sent (which would mean the
+/// record and the project disagree about what the sequence is).
+fn persisted_timeline_items(
+    saved: &Value,
+    intended: &[TimelineItemRecord],
+) -> Option<Vec<TimelineItemRecord>> {
+    let items: Vec<&Value> = saved
+        .get("tracks")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|track| track.get("items").and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let mut persisted = Vec::with_capacity(intended.len());
+    for record in intended {
+        let item = items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(record.item_id.as_str()))?;
+        persisted.push(TimelineItemRecord {
+            shot_id: record.shot_id.clone(),
+            item_id: record.item_id.clone(),
+            asset_id: item.get("assetId").and_then(Value::as_str)?.to_owned(),
+            timeline_start: item.get("timelineStart").and_then(Value::as_f64)?,
+            timeline_end: item.get("timelineEnd").and_then(Value::as_f64)?,
+        });
+    }
+    (persisted.len() == items.len()).then_some(persisted)
 }
 
 fn base_record(
@@ -1632,6 +2223,189 @@ mod unit_tests {
     }
 
     #[test]
+    fn a_filename_cannot_inject_multipart_headers() {
+        let (_, body) = encode_asset_upload(
+            "plate\r\nX-Injected: 1\r\n\r\nevil.png",
+            "image/png",
+            b"\x89PNG",
+            &json!({}),
+        );
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("X-Injected: 1\r\n"), "{text}");
+        assert!(
+            text.contains("filename=\"plate__X-Injected__1____evil.png\""),
+            "{text}"
+        );
+        assert_eq!(sanitize_multipart_filename("a\"b.png"), "a_b.png");
+        assert_eq!(
+            sanitize_multipart_filename("../../etc/passwd"),
+            ".._.._etc_passwd"
+        );
+        assert_eq!(sanitize_multipart_filename("..."), "reference.png");
+    }
+
+    #[test]
+    fn the_platform_gate_is_the_routes_own_and_follows_the_api_host() {
+        let mac_only: JsonObject<String, Value> =
+            json!({ "id": "some_model", "type": "video", "macOnly": true })
+                .as_object()
+                .cloned()
+                .unwrap();
+        let portable: JsonObject<String, Value> = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let finding = platform_reachability_finding("some_model", &mac_only, "linux")
+            .expect("a mac-only model is unreachable on linux");
+        assert_eq!(finding.field, "model.id");
+        assert!(finding.message.contains("only on macOS"), "{finding}");
+        assert!(platform_reachability_finding("some_model", &mac_only, "macos").is_none());
+        assert!(platform_reachability_finding("some_model", &portable, "linux").is_none());
+    }
+
+    #[test]
+    fn the_reference_payload_gate_is_the_routes_own() {
+        // Ten reference roles: past the route's blanket ceiling of nine, which no per-model
+        // `limits.maxReferenceAssets` can raise. Found here rather than as a 400 at enqueue.
+        let roles: Vec<String> = (0..10).map(|index| format!("role_{index}")).collect();
+        let plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "conditioning": { "mode": "reference_to_video", "referenceRoles": roles }
+            }]
+        }))
+        .expect("plan parses");
+        let entry: JsonObject<String, Value> = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let findings = reference_payload_findings(&plan, &entry);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert!(findings[0].message.contains("at most 9"), "{findings:?}");
+
+        // The shipped shape — no references at all — passes.
+        let plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "conditioning": { "mode": "text_to_video" }
+            }]
+        }))
+        .expect("plan parses");
+        assert!(reference_payload_findings(&plan, &entry).is_empty());
+    }
+
+    #[test]
+    fn the_lane_and_platform_follow_the_api_host_not_this_process() {
+        let remote = HostFacts {
+            platform: Some("linux".to_owned()),
+            ..HostFacts::default()
+        };
+        assert_eq!(remote.lane(), ModelLane::Candle);
+        assert_eq!(remote.platform_or_local(), "linux");
+        let mac = HostFacts {
+            platform: Some("macos".to_owned()),
+            ..HostFacts::default()
+        };
+        assert_eq!(mac.lane(), ModelLane::Mlx);
+        // Only a host that reports no platform at all falls back to this process's own.
+        let unknown = HostFacts::default();
+        assert_eq!(unknown.lane(), ModelLane::for_current_platform());
+        assert_eq!(unknown.platform_or_local(), std::env::consts::OS);
+    }
+
+    #[test]
+    fn the_memory_peak_prefers_the_metrics_route_over_the_job_snapshot() {
+        let view = |pct: Option<f64>| JobView {
+            status: "completed".to_owned(),
+            error: None,
+            message: String::new(),
+            peak_gpu_memory_pct: pct,
+            backend: None,
+            result: Value::Null,
+        };
+        let bytes = json!({ "peakMemoryBytes": 115.2 * BYTES_PER_GB, "peakMemoryPct": 90.0 });
+        let observed = memory_observation(Some(&bytes), &view(Some(10.0)), Some(128.0));
+        assert_eq!(
+            observed.source.as_deref(),
+            Some("metrics.peakMemoryBytes"),
+            "the snapshot's 10% must not win over a measured byte count"
+        );
+        assert!(observed.gb.is_some_and(|gb| (gb - 115.2).abs() < 1e-6));
+
+        let pct_only = json!({ "peakMemoryPct": 50.0 });
+        let observed = memory_observation(Some(&pct_only), &view(None), Some(128.0));
+        assert_eq!(observed.source.as_deref(), Some("metrics.peakMemoryPct"));
+        assert_eq!(observed.gb, Some(64.0));
+
+        // Last resort: the job snapshot's field, which every shipped worker leaves null.
+        let observed = memory_observation(None, &view(Some(25.0)), Some(128.0));
+        assert_eq!(observed.source.as_deref(), Some("job.peakGpuMemoryPct"));
+        assert_eq!(observed.gb, Some(32.0));
+        assert!(memory_observation(None, &view(None), Some(128.0))
+            .gb
+            .is_none());
+        // A zero row (what the cpu export job records on a real run) is "nothing measured".
+        let zeroed = json!({ "peakMemoryBytes": 0, "peakMemoryPct": 0.0 });
+        assert!(memory_observation(Some(&zeroed), &view(None), Some(128.0))
+            .gb
+            .is_none());
+    }
+
+    #[test]
+    fn a_completed_job_is_settled_once_its_assets_are_persisted() {
+        let with_result = |result: Value| JobView {
+            status: "completed".to_owned(),
+            error: None,
+            message: String::new(),
+            peak_gpu_memory_pct: None,
+            backend: None,
+            result,
+        };
+        assert!(!with_result(json!({ "assetWrites": [{ "type": "video" }] })).is_settled());
+        assert!(
+            with_result(json!({ "assetWrites": [{ "type": "video" }], "assets": [] })).is_settled(),
+            "the persisted side is the positive signal, whatever else the result still carries"
+        );
+        assert!(with_result(json!({ "assetIds": ["asset_1"] })).is_settled());
+        assert!(with_result(json!({})).is_settled());
+    }
+
+    #[test]
+    fn timeline_items_are_read_back_off_the_saved_document() {
+        let intended = vec![TimelineItemRecord {
+            shot_id: "SH010".to_owned(),
+            item_id: "item_sh010_abcd1234".to_owned(),
+            asset_id: "asset_1".to_owned(),
+            timeline_start: 0.0,
+            timeline_end: 5.0,
+        }];
+        let saved = json!({ "tracks": [{ "id": "track_main", "items": [{
+            "id": "item_sh010_abcd1234", "assetId": "asset_1",
+            "timelineStart": 0.0, "timelineEnd": 5.1667
+        }] }, { "id": "track_audio", "items": [] }] });
+        let persisted = persisted_timeline_items(&saved, &intended).expect("items read back");
+        assert_eq!(persisted[0].shot_id, "SH010");
+        assert!(
+            (persisted[0].timeline_end - 5.1667).abs() < 1e-9,
+            "the SAVED value wins over the intended one"
+        );
+        // A timeline the save dropped the items from cannot be recorded as if it held them.
+        let empty = json!({ "tracks": [{ "id": "track_main", "items": [] }] });
+        assert!(persisted_timeline_items(&empty, &intended).is_none());
+    }
+
+    #[test]
     fn tier_maps_to_the_shared_mlx_quantize_convention() {
         assert_eq!(mlx_quantize_for_tier("q4"), json!(4));
         assert_eq!(mlx_quantize_for_tier("q8"), json!(8));
@@ -1644,9 +2418,33 @@ mod unit_tests {
         assert_eq!(export_resolution_for(720), 720);
         assert_eq!(export_resolution_for(768), 1024);
         assert_eq!(export_resolution_for(2000), 1280);
+        // The timeline ratio is the admitted one CLOSEST to the take's real geometry, and it is a
+        // coercion whenever the take is not already 16:9 / 9:16 / 1:1: the fixture's 576x320 takes
+        // are 9:5, so the 16:9 timeline pads them (the real smoke's export landed at 1138x640).
         assert_eq!(aspect_ratio_for(576, 320), "16:9");
+        assert_eq!(reduced_aspect_ratio(576, 320), "9:5");
         assert_eq!(aspect_ratio_for(320, 576), "9:16");
+        assert_eq!(reduced_aspect_ratio(320, 576), "5:9");
         assert_eq!(aspect_ratio_for(768, 768), "1:1");
+        assert_eq!(reduced_aspect_ratio(768, 768), "1:1");
+        // 4:3 is exactly equidistant from 1:1 and 16:9 on the log scale (4/3 is their geometric
+        // mean), so the tie-break decides — and a landscape take belongs in a landscape frame.
+        assert_eq!(aspect_ratio_for(1024, 768), "16:9");
+        assert_eq!(aspect_ratio_for(768, 1024), "9:16");
+        assert_eq!(reduced_aspect_ratio(1024, 768), "4:3");
+        // Only an exact match is not a coercion.
+        assert_eq!(aspect_ratio_for(1280, 720), "16:9");
+        assert_eq!(reduced_aspect_ratio(1280, 720), "16:9");
+        assert_eq!(reduced_aspect_ratio(1344, 768), "7:4");
+    }
+
+    #[test]
+    fn the_export_resolution_menu_is_the_routes_own() {
+        assert_eq!(
+            crate::TIMELINE_EXPORT_RESOLUTIONS,
+            &[640, 720, 1024, 1280],
+            "the harness picks from the list validate_timeline_export enforces"
+        );
     }
 
     #[test]
