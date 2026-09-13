@@ -674,12 +674,20 @@ fn select_strategy_with_allowance_credit(
     reserve: ReserveCharge<'_>,
     resident_allowance_credit_bytes: u64,
 ) -> Selection {
-    if !contract.conformance_errors().is_empty()
+    let conformance_errors = contract.conformance_errors();
+    if !conformance_errors.is_empty()
         || contract.runtime.cancellation
             != MemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
         || contract.runtime.error
             != MemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
     {
+        tracing::warn!(
+            route = request.resolved_route,
+            backend = request.backend,
+            ?conformance_errors,
+            runtime = ?contract.runtime,
+            "memory-strategy provider contract is structurally invalid"
+        );
         return Selection::Unverified {
             reason: MemoryEvidenceVerdict::Invalid,
         };

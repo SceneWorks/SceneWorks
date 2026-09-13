@@ -16863,6 +16863,178 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "requires installed SenseNova weights and exclusive Apple/Metal access"]
+    fn installed_sensenova_infographic_request_is_admitted_and_renders() {
+        let root = std::env::var_os("SENSENOVA_ROOT").expect("SENSENOVA_ROOT");
+        let requested_route = std::env::var("SENSENOVA_ROUTE").expect("SENSENOVA_ROUTE");
+        let route = [
+            "sensenova_u1_8b_infographic_v2",
+            "sensenova_u1_8b_infographic_v2_fast",
+            "sensenova_u1_8b_infographic_v3",
+            "sensenova_u1_8b_infographic_v3_fast",
+        ]
+        .into_iter()
+        .find(|route| *route == requested_route)
+        .expect("infographic route");
+        let engine = if route.ends_with("_fast") {
+            "sensenova_u1_8b_fast"
+        } else {
+            "sensenova_u1_8b"
+        };
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .unwrap();
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == route)
+            .unwrap()
+            .as_object()
+            .unwrap();
+        use crate::memory_route_registry::{MemoryRouteMode, MemoryRouteRequestContext};
+        let mode = MemoryRouteMode::TextToImage;
+        let context = MemoryRouteRequestContext {
+            mode,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let spec = LoadSpec::new(WeightsSource::Dir(root.into())).with_resolved_route(route);
+        let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            route,
+            Some("bf16"),
+            Some(mode),
+            entry,
+            spec,
+            context,
+        );
+        let mut spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+            route,
+            Some("bf16"),
+            Some(mode),
+            entry,
+            spec,
+            context,
+        );
+        if spec.load_shape_declaration_result == LoadShapeDeclarationResult::NotEvaluated {
+            spec = crate::memory_route_registry::apply_registered_load_shape(
+                crate::memory_route_registry::MemoryRouteBackend::Mlx,
+                engine,
+                mode,
+                spec,
+                false,
+            );
+        }
+        let contract =
+            runtime_macos::providers::sensenova::memory_strategy::memory_strategy_contract(
+                engine, &spec,
+            )
+            .unwrap();
+        assert_eq!(
+            Some(contract.calibration.as_ref().expect("installed production identity").fingerprint.clone()),
+            runtime_macos::providers::sensenova::memory_strategy::production_calibration_fingerprint(engine, &spec)
+        );
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+        let candidate = RequestGenerator {
+            descriptor: crate::inference_runtime::media_descriptor(engine)
+                .unwrap()
+                .clone(),
+            contract: Some(contract),
+        };
+        let plan = MlxRequestPlan::for_spec_and_manifest(engine, route, &spec, Some(entry), None);
+        let inputs = MlxRequestInputs {
+            count: 2,
+            ..fixture_inputs(2048, 2048)
+        };
+        let evaluation = evaluate_request_with_budget(
+            &candidate,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            spec.offload_policy,
+            MemoryBudget {
+                total_bytes: gib_to_bytes(128.0),
+                committed_bytes: 28,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: gib_to_bytes(2.0),
+            },
+            request_total_peak_bytes(&plan, request_geometry(&inputs)),
+            0,
+            &[],
+        )
+        .expect("the reported infographic request must enter a valid memory strategy");
+        assert!(
+            evaluation.process_limit_bytes.is_none(),
+            "historical identities must not claim a current measured ceiling"
+        );
+        assert_ne!(
+            evaluation.context.optimization_authority,
+            MemoryOptimizationAuthority::Calibrated
+        );
+        assert_eq!(
+            evaluation.context.geometry.batch, 1,
+            "job outputs run serially"
+        );
+        eprintln!(
+            "{route}: {:?}, {:.2} GiB",
+            evaluation.context.selection,
+            evaluation.context.predicted_peak_bytes as f64 / BYTES_PER_GIB
+        );
+        if std::env::var_os("SENSENOVA_RENDER").is_none() {
+            return;
+        }
+        let generator = crate::inference_runtime::load(engine, &spec).unwrap();
+        for index in 0..2 {
+            let mut scope = generator
+                .begin_memory_strategy_request(&evaluation.context)
+                .unwrap()
+                .unwrap();
+            let mut request = gen_core::GenerationRequest {
+                prompt: "A simple infographic explaining the water cycle with clouds, rain, a lake and clear arrows".into(),
+                width: 2048, height: 2048, count: 1, seed: Some(1234 + index),
+                steps: Some(2), memory: Some(evaluation.memory), ..Default::default()
+            };
+            scope.configure_request(&mut request).unwrap();
+            let output = generator
+                .generate(&request, &mut |event| {
+                    if matches!(
+                        event,
+                        gen_core::Progress::Step { .. } | gen_core::Progress::Decoding
+                    ) {
+                        eprintln!("{route} image {index}: {event:?}");
+                    }
+                })
+                .unwrap();
+            let gen_core::GenerationOutput::Images(images) = output else {
+                panic!("expected images")
+            };
+            assert_eq!(images.len(), 1);
+            let image = &images[0];
+            assert_eq!((image.width, image.height), (2048, 2048));
+            assert!(image.pixels.iter().any(|pixel| *pixel != image.pixels[0]));
+            if let Some(dir) = std::env::var_os("SENSENOVA_OUTPUT_DIR") {
+                let dir = std::path::PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                image::save_buffer(
+                    dir.join(format!("{route}-{index}.png")),
+                    &image.pixels,
+                    image.width,
+                    image.height,
+                    image::ColorType::Rgb8,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     #[ignore = "requires installed Flux2 Dev bf16 metadata; no tensors are loaded"]
     fn installed_flux2_dev_request_uses_the_staged_ladder() {
         let root = std::env::var_os("FLUX2_DEV_DIR").expect("FLUX2_DEV_DIR");

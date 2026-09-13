@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "290fa1f3e7dbf2039dd7f7434cf58f3c29eec35f",
+  "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -13456,7 +13456,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "ab8f30b5a60684c48326708a8254a66626b965a527f9f360c87ad91aab1bc754",
+      "digest": "7c936afaf6dfca08489d35c12e574b7d844ffcd9e5002570958f29a0e1a44c0f",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -13542,7 +13542,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "41d74b46cd3781e343a7a5925a7433079ad646a7ad4ea91f43d09275124dd044",
+      "digest": "fb25c90f2bb9ee7d60c9c662d38e6f2034184dc8315423861269ca9973c94321",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -13635,7 +13635,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "d9e160f13fb7180eddb590afc100b6aefb4f6c65e93e79a5e359643df97cd9e3",
+      "digest": "32dbe2b4f8b42324278fbc9f9110d8edae896019be535c238c6fce0bfe5d2612",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -13721,7 +13721,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "5a589a88a5b70168fda35dcfda7a72883d58e265e46bfc148a53ae4a4ebf3be3",
+      "digest": "52ed6af05da720f208733c4d92c44f293dfc268466a02c9bfff03078069cc245",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -13815,7 +13815,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "1088df921a50e31e934d313b5e4ae9c2f51efea035f79053cd0cbc083944bb20",
+      "digest": "108ce0e13926f55b0e472e863bb014729fb50fef2299c92095db69a23db017dd",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -13902,7 +13902,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "c40accb0a94b6ed013625acedf6bd92b8224249fca4ec7e33dcfaa91bf4cebb9",
+      "digest": "b81fc3b7642c5b543b6286b04b66204f4607560a55eb5857293df402d4308b23",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -13996,7 +13996,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "dd2f24ebfb7e24d992fcea3cec0135a5ec627505b1cf7355dd0e6e7de0a6f50b",
+      "digest": "ad2e2afd3cbdd97ba0ee038d9c610b11d4b30dc12bad0b5119cbf5cddf2ef0fc",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -14083,7 +14083,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "73408aaecda389b53a2eff11f15b327f33775e73b0158d36d3e10f42d99209fc",
+      "digest": "025c6c3d42fba71d330e28f8c97c647496cd8a3d7acb4046b5dc48f1ba9a6cad",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -14177,7 +14177,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "ac7e04261be922398e08eba09cd9d76b375a2965a33566342d14224577c69443",
+      "digest": "93c7db0c03f2cdd8a2b99ad144c6d79abbda4b7de669affdf6831e2740ef82a4",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -14264,7 +14264,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "0f0a069086eba2b4595404e4d7ff12edf4524ec668d2cc308673ee386ac1c82a",
+      "digest": "46a0d49a9c3e608818d2f9636427d2d4bcdc6ac3f0e86c9e101316091810d739",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -14358,7 +14358,7 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "cb6181ccef3fbd3493a8a8a0d366e64773a081917fc135bd2a74618af226a3b1",
+      "digest": "930e89afce48d331bbf8c0184c2bfb4667d551e0eacfea0c2538cb85e94bdcc5",
       "closureFileCount": 76,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
@@ -14445,7 +14445,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "e402fa43ca305ee749293b2b0cb161a2616d7c5d2b8c5cc45c70c841a485e2ea",
+      "digest": "45f4c875b48593daed88284bd523f5a7db58f96af585fb0cfe9b9e9ae2562a30",
       "closureFileCount": 83,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",

@@ -20096,7 +20096,11 @@ fn sensenova_calibration_fingerprint(arm: SenseNovaArm, tier: &str) -> String {
             runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
-        (_, tier) => format!("sensenova-u1-{}-{tier}-mlx-shared-ladder-v1", arm.slug),
+        (_, tier) => format!(
+            "sensenova-u1-{}-{tier}-mlx-shared-ladder-v1",
+            runtime_macos::providers::sensenova::memory_strategy::route_label(arm.model_id)
+                .expect("registered SenseNova route")
+        ),
     }
 }
 
@@ -32211,12 +32215,6 @@ mod sensenova_tests {
         use runtime_macos::providers::sensenova::memory_strategy as engine;
         let revision = "0123456789abcdef0123456789abcdef01234567";
         for arm in SENSENOVA_FAMILY {
-            assert_eq!(
-                engine::route_label(arm.model_id),
-                Some(arm.slug),
-                "{}",
-                arm.model_id
-            );
             for tier in ["bf16", "q4", "q8"] {
                 let root = PathBuf::from(format!(
                     "/cache/models--{}/snapshots/{revision}/{tier}",
