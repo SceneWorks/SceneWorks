@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cdeec2abb0daf0a8f7fc4c09ce342b53fafa0e6eefcf22fca69b8c58219a8195",
+    "sceneWorksRevision": "source-tree:1c1f03068dd2c7ad68c70e8a47b67ac7cc5bb3c8cb1e3f572b4494c5141edba3",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "f91b7cd794f9dd5276064e8b55500bccd82eef92b06c4f24a70349a38be8cba5"
+        "sha256": "6e6152c129f323aa0f94dbdb4f2c153afe9326fb4b46e3c312011d2686ddebfa"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "17c1c023635ca2281bd2674295436ea7e6c19f2e0b8a9ffd5bba53b19355fffb"
+        "sha256": "8a632c6fe2d4837df0d7ece432f4448be4bf30b7a3a30bc2cf53324e59df4da9"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9390,
-    "publishedCells": 3774,
-    "elidedCells": 5616,
+    "publishedCells": 3786,
+    "elidedCells": 5604,
     "elidedByState": {
-      "Implemented": 1200,
+      "Implemented": 1188,
       "Missing": 4416
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 244,
-    "analyticOnlyCells": 99,
-    "anchoredCells": 3774,
+    "anchors": 245,
+    "analyticOnlyCells": 98,
+    "anchoredCells": 3786,
     "staleAnchors": 92,
     "attestedAnchors": 4,
     "fullModels": 0
@@ -8746,6 +8746,24 @@
       "current": true,
       "currencyAttestation": null,
       "cells": 18
+    },
+    {
+      "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+      "modelId": "wan_2_2",
+      "backend": "candle",
+      "tier": "bf16",
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 12
     },
     {
       "id": "z_image_edit:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-dee3a878c25d4157317f",
@@ -18582,11 +18600,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 36,
-      "published": 0,
-      "elided": 36,
+      "published": 12,
+      "elided": 24,
       "implemented": 36,
       "states": {
-        "Implemented": 36
+        "Anchored/underived": 12,
+        "Implemented": 24
       }
     },
     {
@@ -218116,6 +218135,738 @@
       }
     },
     {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "extend_clip",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "extend_clip",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:first_last_frame:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "first_last_frame",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:first_last_frame:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "first_last_frame",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:image_to_video:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_video",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:image_to_video:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:replace_person:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "replace_person",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:replace_person:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "replace_person",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:text_to_video:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_video",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:text_to_video:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:video_bridge:lora:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "video_bridge",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:video_bridge:none:resident",
+      "modelId": "wan_2_2",
+      "resolvedRoute": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "video_bridge",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "832x480",
+        "resolutions": [
+          "832x480",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "hardMaxDuration": 8,
+        "defaultFps": 24,
+        "fps": [
+          16,
+          24
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197"
+          }
+        ]
+      }
+    },
+    {
       "id": "z_image_edit:z_image_turbo:candle:bf16:edit_image:lora:bounded_attention",
       "modelId": "z_image_edit",
       "resolvedRoute": "z_image_turbo",
@@ -239954,7 +240705,20 @@
       "sensenova_u1_8b_infographic_v3_fast:sensenova_u1_8b_fast:mlx:q8:text_to_image:none:staged_residency"
     ],
     "svd": [],
-    "wan_2_2": [],
+    "wan_2_2": [
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:none:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:first_last_frame:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:first_last_frame:none:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:image_to_video:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:image_to_video:none:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:replace_person:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:replace_person:none:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:text_to_video:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:text_to_video:none:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:video_bridge:lora:resident",
+      "wan_2_2:wan2_2_ti2v_5b:candle:bf16:video_bridge:none:resident"
+    ],
     "wan_2_2_i2v_14b": [],
     "wan_2_2_t2v_14b": [],
     "wan_2_2_vace_fun_14b": [],
