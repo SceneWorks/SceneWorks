@@ -5577,6 +5577,51 @@
       "overallAllocatorEnvelopeBytes": 13863223296
     },
     {
+      "id": "mage_flow_edit:candle:q4:base:base:mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3:imc-e583941a427e9c05eef4",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json",
+        "sha256": "f76465e281cb8980e4e47efa9a299c646c745e8ef3ffdd2e4a12c3b1cdec9460",
+        "recordId": "imc-e583941a427e9c05eef4",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3",
+        "loaderClosureDigest": "5be81d5ac62b4fe641df7e393305064d90726aaed1140649852276b538e989d4"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5600444416,
+        "denoise": 8955887616,
+        "decode": 8385462272
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5600444416,
+        "denoise": 8955887616,
+        "decode": 8385462272
+      },
+      "overallAllocatorEnvelopeBytes": 8955887616
+    },
+    {
       "id": "mage_flow_edit:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3:imc-87979d8e4a564a1dec16",
       "modelId": "mage_flow_edit",
       "modelFamily": "mage-flow",
@@ -11861,17 +11906,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:candle:q4",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
