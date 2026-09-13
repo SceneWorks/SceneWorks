@@ -30,6 +30,20 @@ API_URL="http://127.0.0.1:$PORT"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 SMOKE_DIR="${SCENEWORKS_SMOKE_DIR:-$ROOT/film-harness-runs/plan-smoke-$STAMP}"
 PROFILE="${CARGO_PROFILE:-release}"
+# The lane the PLANNING worker claims on. `Settings::from_env` defaults `SCENEWORKS_GPU_ID` to
+# "cpu" (crates/sceneworks-worker/src/settings.rs), and a cpu worker spawns the utility pool, which
+# advertises no `prompt_refine` — so this script died at its own 180 s registration wait with a
+# worker that had started perfectly well (sc-22713 smoke run 1). Same block as
+# scripts/film-harness-smoke.sh; planning loads no video weights on either lane, only the
+# ~16 GB prompt-refine checkpoint.
+if [ -z "${SCENEWORKS_GPU_ID:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) GPU_ID="mlx" ;;
+    *) GPU_ID="0" ;;
+  esac
+else
+  GPU_ID="$SCENEWORKS_GPU_ID"
+fi
 
 mkdir -p "$SMOKE_DIR/data" "$SMOKE_DIR/config"
 
@@ -85,8 +99,9 @@ until curl -fsS "$API_URL/api/v1/health" >/dev/null 2>&1; do
   sleep 1
 done
 
-echo "film-harness-plan-smoke: starting the worker (prompt_refine)"
+echo "film-harness-plan-smoke: starting the worker (prompt_refine, SCENEWORKS_GPU_ID=$GPU_ID)"
 SCENEWORKS_WORKER_ONLY=1 SCENEWORKS_API_URL="$API_URL" SCENEWORKS_WORKER_ID="film-harness-plan-smoke" \
+  SCENEWORKS_GPU_ID="$GPU_ID" \
   "$BIN_DIR/sceneworks-rust-api" >"$SMOKE_DIR/worker.log" 2>&1 &
 WORKER_PID=$!
 
@@ -116,10 +131,19 @@ echo "film-harness-plan-smoke: planning $BRIEF (max $MAX_REPAIR_ROUNDS repair ro
   --skip-install-check
 
 echo "film-harness-plan-smoke: validating the generated plan against the live catalog"
+# `--no-export` and `--skip-install-check` for the same reason the plan step skips the install
+# check: this smoke PLANS and renders nothing, so it starts a prompt_refine worker and no utility
+# worker. Without --no-export, `validate` reports the missing `timeline_export` worker and the
+# smoke fails on a machine where the planner did its job perfectly (sc-22713 smoke run 4); without
+# --skip-install-check it would demand the video weights that planning deliberately does not need.
+# Everything else `validate` checks — the documents, the catalog entry, the declared menus, the
+# compiled requests against the plan they claim — still runs.
 "$BIN_DIR/film-harness" validate \
   --plan "$SMOKE_DIR/planned/plan.json" \
   --references "$REFERENCES" \
   --compiled "$SMOKE_DIR/planned/compiled.json" \
-  --api "$API_URL"
+  --api "$API_URL" \
+  --no-export \
+  --skip-install-check
 
 echo "film-harness-plan-smoke: OK — $SMOKE_DIR/planned/plan.json and compiled.json validate"

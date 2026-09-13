@@ -781,7 +781,14 @@ fn compiled_for_run(
 ) -> Result<CompiledPlan, HarnessError> {
     match supplied {
         Some(compiled) => {
-            let findings = compiled.staleness_findings(plan, plan_sha256);
+            // Two questions, in order: were these requests compiled from THIS plan, and do they
+            // still say what compiling it would say? The second is what keeps a hand-edited
+            // `compiled.json` — the document every dispatched field but the prompt is read from —
+            // from reaching the route unjudged, since `validate_all` only ever reads the plan.
+            let mut findings = compiled.staleness_findings(plan, plan_sha256);
+            if findings.is_empty() {
+                findings = compiled.conformance_findings(plan, entry, lane);
+            }
             if findings.is_empty() {
                 Ok(compiled)
             } else {
@@ -962,21 +969,12 @@ pub async fn validate(
     findings.extend(selection_findings(&plan, options.shot_ids.as_deref()));
     // Compiled requests are checked against the plan they claim: a plan edited after the compile
     // would otherwise dispatch the prompts it no longer holds.
-    if let Some((compiled, path)) = read_compiled_for(options)? {
+    let compiled = read_compiled_for(options)?;
+    if let Some((compiled, path)) = compiled.as_ref() {
         let plan_bytes = std::fs::read(&options.plan_path)?;
         let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes));
         if !stale.is_empty() {
-            stale.insert(
-                0,
-                PlanDiagnostic::plan(
-                    "compiled",
-                    format!(
-                        "the compiled requests at {} do not match this plan; every finding below \
-                         is about that document",
-                        path.display()
-                    ),
-                ),
-            );
+            stale.insert(0, compiled_document_header(path));
             findings.append(&mut stale);
         }
     }
@@ -998,11 +996,36 @@ pub async fn validate(
         if findings.is_empty() {
             findings.extend(host_findings(&plan, &facts, options.export));
         }
+        // The document that is DISPATCHED, judged against the installed capabilities — not just
+        // the plan it was compiled from. `--compiled FILE` takes a document from any path and
+        // `execute_run` reads every field but the prompt straight out of it, so this is the only
+        // place a hand-edited request meets the model's declared menus (sc-22713 review).
+        if findings.is_empty() {
+            if let (Some((compiled, path)), Some(entry)) = (compiled.as_ref(), entry.as_ref()) {
+                let mut conformance = compiled.conformance_findings(&plan, entry, facts.lane());
+                if !conformance.is_empty() {
+                    findings.push(compiled_document_header(path));
+                    findings.append(&mut conformance);
+                }
+            }
+        }
         if !findings.is_empty() {
             return Err(HarnessError::Validation(findings));
         }
     }
     Ok((plan, pack))
+}
+
+/// The finding that says the findings after it are about the compiled document, not the plan.
+fn compiled_document_header(path: &Path) -> PlanDiagnostic {
+    PlanDiagnostic::plan(
+        "compiled",
+        format!(
+            "the compiled requests at {} do not match this plan; every finding below is about \
+             that document",
+            path.display()
+        ),
+    )
 }
 
 /// The compiled requests this run should use, with the path they came from: the explicit
@@ -1344,16 +1367,18 @@ async fn execute_run(
     // else the plan's own prompts compiled in memory (sc-22713). `record.plan.sha256` is the hash
     // of the plan file as read, which is what a compiled document pins.
     let supplied_compiled = read_compiled_for(options)?;
-    record.compiled = supplied_compiled
-        .as_ref()
-        .map(|(compiled, path)| SourceDocument {
+    record.compiled = match supplied_compiled.as_ref() {
+        // The hash is what makes the run reproducible, so an unreadable file is an error rather
+        // than an empty string on the record. It was read successfully microseconds ago in
+        // `read_compiled_for`, so `?` here can only surface a real io failure.
+        Some((compiled, path)) => Some(SourceDocument {
             id: compiled.plan_id.clone(),
             version: compiled.plan_version,
             path: path.display().to_string(),
-            sha256: std::fs::read(path)
-                .map(|bytes| sha256_hex(&bytes))
-                .unwrap_or_default(),
-        });
+            sha256: sha256_hex(&std::fs::read(path)?),
+        }),
+        None => None,
+    };
     let compiled = compiled_for_run(
         plan,
         pack,

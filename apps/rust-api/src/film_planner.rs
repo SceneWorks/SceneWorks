@@ -33,8 +33,8 @@ use sceneworks_core::film_compile::{
 };
 use sceneworks_core::film_plan::{self, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack};
 use sceneworks_core::film_planner::{
-    build_planner_request, build_repair_request, capabilities_for, draft_to_plan,
-    parse_planner_output, plan_coverage_findings, read_brief_file, validate_brief,
+    brief_pack_findings, build_planner_request, build_repair_request, capabilities_for,
+    draft_to_plan, parse_planner_output, plan_coverage_findings, read_brief_file, validate_brief,
     validate_generated_plan, PlannerCapabilities, ProductionBrief,
 };
 use sceneworks_core::time::utc_now;
@@ -94,6 +94,10 @@ pub struct LlmRequest {
     /// The TARGET model the answer is for — what selects the model-keyed refinement asset.
     pub model_id: Option<String>,
     pub workflow: String,
+    /// The model's own prompt guide, forwarded exactly as Video Studio's "Refine" button forwards
+    /// it. The worker appends it to the rewrite's system turn under `# Model prompt guide`; with
+    /// none, the rewrite runs on the guide-less system prompt.
+    pub guide: Option<String>,
 }
 
 pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<String, HarnessError>> + Send + 'a>>;
@@ -139,6 +143,13 @@ impl PlannerLlm for SceneWorksLlm<'_> {
             }
             if let Some(model_id) = request.model_id.as_deref() {
                 body["modelId"] = json!(model_id);
+            }
+            if let Some(guide) = request
+                .guide
+                .as_deref()
+                .filter(|guide| !guide.trim().is_empty())
+            {
+                body["guide"] = json!(guide);
             }
             let created = crate::film_harness::expect_ok_on(
                 self.transport,
@@ -315,6 +326,9 @@ pub struct PlannerOptions {
     pub max_repair_rounds: u32,
     /// Run each planned prompt through the model's own prompt refinement when compiling.
     pub refine_prompts: bool,
+    /// The model's prompt guide to forward on each rewrite (`--prompt-guide FILE`). `None` falls
+    /// back to the guide the catalog entry names, when that file is on disk beside this checkout.
+    pub prompt_guide_path: Option<PathBuf>,
     /// Refuse a model the catalog does not report installed.
     pub require_installed: bool,
     /// The API base URL, for the local-only check. Empty skips it (in-process tests).
@@ -433,6 +447,9 @@ async fn prepare(
     }
     findings.extend(validate_brief(&brief));
     findings.extend(film_plan::validate_reference_pack(&pack));
+    // A beat that requires a role this pack does not approve can never be satisfied by any draft,
+    // so it is caught here rather than after `1 + rounds` decodes of trying.
+    findings.extend(brief_pack_findings(&brief, &pack));
     findings.extend(film_plan::validate_reference_pack_files(
         &pack,
         &pack_dir(&options.reference_pack_path),
@@ -443,11 +460,42 @@ async fn prepare(
     let facts = crate::film_harness::host_facts_for(transport).await?;
     let (entry, caps) =
         resolve_envelope(transport, &brief, options.require_installed, &facts).await?;
+    let findings = brief_model_findings(&brief, &entry, facts.lane());
+    if !findings.is_empty() {
+        return Err(HarnessError::Validation(findings));
+    }
     let findings = refiner_findings(transport).await?;
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
     Ok((brief, pack, entry, caps, facts))
+}
+
+/// The PLAN-level half of [`film_plan::validate_plan_against_model`], run against the brief's own
+/// model block before the first decode.
+///
+/// Those rules — an fps off the model's declared menu, a plan resolution off its resolution menu, a
+/// `limits.maxMemoryGb` below the lane's `minMemoryGb` — are properties of the brief, not of
+/// anything the planner writes, and the brief dictates all three to every draft. Left to fire on
+/// the first draft they would cost `1 + rounds` full local decodes and then blame the planner for
+/// an input it was never allowed to change. A plan with no shots is exactly the plan-level subset
+/// of that validator, so this is the same rules on the same code, not a second copy of them.
+fn brief_model_findings(
+    brief: &ProductionBrief,
+    entry: &JsonObject<String, Value>,
+    lane: ModelLane,
+) -> Vec<PlanDiagnostic> {
+    let probe = ProductionPlan {
+        schema_version: film_plan::PLAN_SCHEMA_VERSION,
+        id: brief.id.clone(),
+        version: brief.version,
+        title: brief.title.clone(),
+        synopsis: brief.synopsis.clone(),
+        model: brief.model.clone(),
+        limits: brief.limits.clone(),
+        shots: Vec::new(),
+    };
+    film_plan::validate_plan_against_model(&probe, entry, lane)
 }
 
 fn pack_dir(pack_path: &Path) -> PathBuf {
@@ -476,6 +524,10 @@ pub async fn generate(
                 prompt: request.clone(),
                 model_id: Some(brief.model.id.clone()),
                 workflow: "video".to_owned(),
+                // No guide: the film-plan task's system turn is the plan contract, not the
+                // model's prompt-writing guide, and the whole capability envelope is already in
+                // the request the planner composes.
+                guide: None,
             })
             .await?;
         last_reply = reply.clone();
@@ -539,6 +591,7 @@ pub async fn generate(
     };
 
     let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
+    copy_brief_beside_plan(options)?;
     let (compiled, compiled_path) = compile_and_write(
         llm,
         options,
@@ -605,7 +658,9 @@ pub async fn compile_existing(
     // A brief is not required to recompile a hand-authored plan. When one is available AND the plan
     // carries the beat ids a generated plan records, the coverage is re-checked by identity so a
     // hand edit cannot quietly delete a required beat.
-    if let Some(brief) = sibling_brief(plan_path, &options.brief_path) {
+    if let Some(brief) =
+        sibling_brief(plan_path, &options.brief_path).map_err(HarnessError::Validation)?
+    {
         let coverage = plan_coverage_findings(&brief, &plan);
         if !coverage.is_empty() {
             return Err(HarnessError::Validation(coverage));
@@ -639,16 +694,58 @@ pub async fn compile_existing(
 
 /// The brief to re-check an edited plan against: the one the caller named, else one sitting beside
 /// the plan.
-fn sibling_brief(plan_path: &Path, brief_path: &Path) -> Option<ProductionBrief> {
+///
+/// A brief the caller NAMED is a demand for the coverage check, so a malformed one, a stale
+/// `schemaVersion` or a typo'd path that happens to exist is an error rather than a silent skip:
+/// "the brief could not be read" and "coverage verified" must not look the same. The silent `None`
+/// is kept only for the DISCOVERED sibling, where the absence of a usable brief is the ordinary
+/// hand-authored case rather than a mistake.
+fn sibling_brief(
+    plan_path: &Path,
+    brief_path: &Path,
+) -> Result<Option<ProductionBrief>, Vec<PlanDiagnostic>> {
     if brief_path.is_file() {
-        return read_brief_file(brief_path).ok();
+        let brief = read_brief_file(brief_path).map_err(|finding| vec![finding])?;
+        let findings = validate_brief(&brief);
+        if !findings.is_empty() {
+            return Err(findings);
+        }
+        return Ok(Some(brief));
     }
-    let dir = plan_path.parent()?;
-    ["brief.json", "brief.jsonc"]
+    let Some(dir) = plan_path.parent() else {
+        return Ok(None);
+    };
+    Ok(["brief.json", "brief.jsonc"]
         .iter()
         .map(|name| dir.join(name))
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| read_brief_file(&candidate).ok())
+        .and_then(|candidate| read_brief_file(&candidate).ok()))
+}
+
+/// Copy the brief into the output directory as `brief.json`, beside the plan it produced.
+///
+/// This is what makes the documented correction loop (`plan --out DIR`, edit `DIR/plan.json`,
+/// `compile --plan DIR/plan.json --out DIR`) re-check beat coverage without the user having to
+/// remember `--brief`: [`sibling_brief`] looks for exactly this file. Without it the recompile that
+/// AC3 asks a human to run would accept an edit that deletes a required beat, which is the one
+/// thing the brief is a contract about. The bytes are copied verbatim (JSONC and all) so the brief
+/// the plan answers to travels with it.
+fn copy_brief_beside_plan(options: &PlannerOptions) -> Result<(), HarnessError> {
+    let destination = options.out_dir.join("brief.json");
+    // Planning straight into the brief's own directory must not rewrite the brief with itself.
+    if same_file(&options.brief_path, &destination) {
+        return Ok(());
+    }
+    std::fs::write(&destination, std::fs::read(&options.brief_path)?)?;
+    Ok(())
+}
+
+/// Whether two paths name the same existing file (canonicalized, so `./a` and `a` are one file).
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Write the freshly generated plan, refusing to clobber one the user has since edited — that file
@@ -691,16 +788,21 @@ async fn compile_and_write(
     std::fs::create_dir_all(&options.out_dir)?;
     let mut refined = BTreeMap::new();
     if options.refine_prompts {
+        // Read once, not once per shot: the guide is the same for every rewrite in this compile.
+        let guide = resolve_prompt_guide(options, entry)?;
         for shot in &plan.shots {
-            // The model-keyed refinement asset is selected by `modelId`, so this is the SAME
-            // rewrite Video Studio's "Refine" button runs for this model — not a second prompt
-            // pipeline.
+            // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
+            // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
+            // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
+            // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
+            // names it).
             let text = llm
                 .complete(LlmRequest {
                     task: None,
                     prompt: shot.prompt.clone(),
                     model_id: Some(plan.model.id.clone()),
                     workflow: "video".to_owned(),
+                    guide: guide.clone(),
                 })
                 .await?;
             refined.insert(shot.id.clone(), text);
@@ -726,6 +828,61 @@ async fn compile_and_write(
             + "\n",
     )?;
     Ok((compiled, compiled_path))
+}
+
+/// The prompt guide to forward on every rewrite of this compile.
+///
+/// `--prompt-guide FILE` wins and is an ERROR when unreadable — a guide the caller named and did
+/// not get is not the same run as one they never asked for. Otherwise the catalog entry's own
+/// `ui.promptGuide.path` is resolved against this checkout's web assets, so a local run gets the
+/// guide with no flag; the rust-api serves that path only in an `embed-web` build, so it cannot be
+/// fetched from `--api` in general and is read from disk or not at all.
+fn resolve_prompt_guide(
+    options: &PlannerOptions,
+    entry: &JsonObject<String, Value>,
+) -> Result<Option<String>, HarnessError> {
+    if let Some(path) = options.prompt_guide_path.as_deref() {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            HarnessError::Validation(vec![PlanDiagnostic::plan(
+                "planner.promptGuide",
+                format!(
+                    "cannot read the prompt guide at {}: {error}",
+                    path.display()
+                ),
+            )])
+        })?;
+        return Ok(Some(text));
+    }
+    Ok(declared_prompt_guide_path(entry).and_then(|path| std::fs::read_to_string(path).ok()))
+}
+
+/// Where this checkout keeps the web asset a catalog entry's `ui.promptGuide.path` names, if the
+/// file is there. `path` is a URL path under `/prompt-guides/`, so it is taken apart component by
+/// component and refused unless every one is a plain name — it comes from a manifest, and a
+/// manifest is data.
+fn declared_prompt_guide_path(entry: &JsonObject<String, Value>) -> Option<PathBuf> {
+    let declared = entry
+        .get("ui")
+        .and_then(Value::as_object)?
+        .get("promptGuide")
+        .and_then(Value::as_object)?
+        .get("path")
+        .and_then(Value::as_str)?
+        .trim_start_matches('/');
+    let relative = Path::new(declared);
+    if declared.is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    // Vite copies `apps/web/public` into `apps/web/dist`, so either is the same guide; both are
+    // resolved against the working directory, which is the checkout for the documented invocation.
+    ["apps/web/public", "apps/web/dist"]
+        .iter()
+        .map(|root| Path::new(root).join(relative))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Read a compiled request document (strict: unknown fields refused).
@@ -794,6 +951,7 @@ mod tests {
             out_dir: PathBuf::from("out"),
             max_repair_rounds: rounds,
             refine_prompts: true,
+            prompt_guide_path: None,
             require_installed: true,
             api_url: String::new(),
             force: false,

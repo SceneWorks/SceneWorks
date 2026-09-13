@@ -54,6 +54,8 @@ OPTIONS (plan / compile):
   --out DIR              Where plan.json and compiled.json are written
   --max-repair-rounds N  Repair rounds after the first draft (default 2, ceiling 5)
   --no-refine            Compile the plan's own prompts instead of running prompt refinement
+  --prompt-guide FILE    Model prompt guide forwarded on each rewrite (default: the guide the
+                         catalog entry names, when it is on disk in this checkout)
   --force                Replace an existing plan.json that differs from the generated one
   --llm-timeout-seconds N  Give up on one LLM job after N seconds (default 1200)
 
@@ -294,6 +296,7 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
     let mut references: Option<PathBuf> = None;
     let mut max_repair_rounds = DEFAULT_MAX_REPAIR_ROUNDS;
     let mut refine_prompts = true;
+    let mut prompt_guide: Option<PathBuf> = None;
     let mut force = false;
     let mut llm_timeout = DEFAULT_LLM_JOB_TIMEOUT;
     let mut api_url = std::env::var("SCENEWORKS_API_URL")
@@ -325,6 +328,7 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
                     .map_err(|error| format!("--max-repair-rounds: {error}"))?
             }
             "--no-refine" => refine_prompts = false,
+            "--prompt-guide" => prompt_guide = Some(PathBuf::from(value()?)),
             "--force" => force = true,
             "--llm-timeout-seconds" => {
                 llm_timeout = Duration::from_secs(
@@ -399,6 +403,7 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             out_dir: out_dir.clone(),
             max_repair_rounds,
             refine_prompts,
+            prompt_guide_path: prompt_guide,
             require_installed,
             api_url,
             force,

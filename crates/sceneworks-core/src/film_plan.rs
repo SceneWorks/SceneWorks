@@ -385,15 +385,25 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         // A declared continuity chain must point BACKWARDS at a shot this plan already established,
         // so the intent is readable in plan order and cannot form a cycle.
         if let Some(target) = shot.conditioning.chain_from_shot_id.as_deref() {
-            let known_earlier = plan.shots[..index].iter().any(|prior| prior.id == target);
-            if !known_earlier {
+            // Not merely "some earlier shot": the shot IMMEDIATELY before this one. "Continues
+            // from" is a claim about adjacency in the cut, and a chain that skips over the shots
+            // between reads as continuity the sequence does not have — a planner that chains every
+            // shot back to the first one says nothing while looking like it says something
+            // (sc-22713 real-LLM smoke).
+            let previous = plan.shots[..index].last().map(|prior| prior.id.as_str());
+            if previous != Some(target) {
                 findings.push(PlanDiagnostic::shot(
                     &shot.id,
                     "conditioning.chainFromShotId",
-                    format!(
-                        "{target:?} is not an earlier shot in this plan; a continuity chain names \
-                         a shot that precedes this one"
-                    ),
+                    match previous {
+                        Some(previous) => format!(
+                            "{target:?} is not the shot immediately before this one ({previous:?}); \
+                             a continuity chain names the shot it cuts from, or is omitted"
+                        ),
+                        None => format!(
+                            "{target:?} cannot be chained from: this is the first shot in the plan"
+                        ),
+                    },
                 ));
             }
         }
@@ -530,6 +540,29 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
             format!("mode {mode} does not take a last-frame role"),
         )),
         _ => {}
+    }
+    // A first/last-frame shot whose two keyframes are the SAME reference asks the engine to start
+    // and end on one still — the clip is told to go nowhere, and whatever motion it invents has to
+    // return to the frame it began on. It is the degenerate way to satisfy the slot shape without
+    // planning a shot, and it is what the local planner reached for on every shot of the first
+    // real-LLM draft (sc-22713).
+    if wants_last {
+        if let (Some(first), Some(last)) = (
+            conditioning.first_frame_role.as_deref(),
+            conditioning.last_frame_role.as_deref(),
+        ) {
+            if first == last {
+                findings.push(PlanDiagnostic::shot(
+                    id,
+                    "conditioning.lastFrameRole",
+                    format!(
+                        "the first and last frame are both {first:?}, so this shot is asked to end \
+                         exactly where it started; use two different reference roles, or a mode \
+                         that takes one keyframe (image_to_video) or none (text_to_video)"
+                    ),
+                ));
+            }
+        }
     }
     match (wants_references, conditioning.reference_roles.is_empty()) {
         (true, true) => findings.push(PlanDiagnostic::shot(
@@ -1502,7 +1535,7 @@ mod tests {
             "{findings:?}"
         );
 
-        // A chain that does not name an earlier shot is a structural finding.
+        // A chain on the FIRST shot has nothing to chain from.
         let mut value = plan_json();
         value["shots"][0]["conditioning"] =
             json!({ "mode": "text_to_video", "chainFromShotId": "SH020" });
@@ -1510,7 +1543,28 @@ mod tests {
         let findings = messages(&validate_plan_structure(&plan));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
-            findings[0].contains("conditioning.chainFromShotId") && findings[0].contains("SH020"),
+            findings[0].contains("conditioning.chainFromShotId")
+                && findings[0].contains("first shot"),
+            "{findings:?}"
+        );
+
+        // A chain that skips over the shot between is refused: "continues from" is a claim about
+        // the cut, and a planner that chains everything back to SH010 says nothing (sc-22713).
+        let mut value = plan_json();
+        let third = json!({
+            "id": "SH030", "beat": "leave", "framing": "wide", "prompt": "the courier leaves",
+            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty",
+            "conditioning": { "mode": "text_to_video", "chainFromShotId": "SH010" },
+            "continuityRoles": ["red_parcel"]
+        });
+        value["shots"].as_array_mut().unwrap().push(third);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("[SH030]")
+                && findings[0].contains("not the shot immediately before")
+                && findings[0].contains("\"SH020\""),
             "{findings:?}"
         );
 
@@ -1524,6 +1578,36 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         assert!(validate_plan_structure(&plan).is_empty());
         assert!(validate_plan_against_pack(&plan, &pack()).is_empty());
+    }
+
+    #[test]
+    fn a_first_last_frame_shot_cannot_start_and_end_on_the_same_reference() {
+        // What the real local planner produced on every shot of its first draft: the slot shape
+        // satisfied by the same plate twice, so the clip is told to end where it began (sc-22713).
+        let mut value = plan_json();
+        value["shots"][1]["conditioning"] = json!({
+            "mode": "first_last_frame",
+            "firstFrameRole": "workshop_plate",
+            "lastFrameRole": "workshop_plate"
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH020] conditioning.lastFrameRole:")
+                && findings[0].contains("end exactly where it started"),
+            "{findings:?}"
+        );
+
+        // Two different roles is the shape the mode is for.
+        let mut value = plan_json();
+        value["shots"][1]["conditioning"] = json!({
+            "mode": "first_last_frame",
+            "firstFrameRole": "workshop_plate",
+            "lastFrameRole": "red_parcel"
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
     }
 
     #[test]

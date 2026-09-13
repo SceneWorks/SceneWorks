@@ -87,6 +87,15 @@ pub struct RequiredBeat {
     /// identity rather than by matching prose.
     pub id: String,
     pub summary: String,
+    /// Approved pack roles this beat is ABOUT: the subject, the prop the story turns on, whoever
+    /// has to be on screen for the beat to have happened. The shots covering the beat must bind
+    /// every one of them, so "the beat is covered" cannot be satisfied by a shot of the right
+    /// length in the right place that leaves the parcel out of the delivery (sc-22713).
+    ///
+    /// Empty means "the brief makes no claim", which is the pre-sc-22713 behaviour and what a brief
+    /// written before this field says.
+    #[serde(default)]
+    pub required_roles: Vec<String>,
 }
 
 /// Read and parse a brief document (JSONC tolerated).
@@ -178,6 +187,20 @@ pub fn validate_brief(brief: &ProductionBrief) -> Vec<PlanDiagnostic> {
                 format!("brief.requiredBeats[{index}].summary"),
                 "a beat needs a summary",
             ));
+        }
+        let mut roles = BTreeSet::new();
+        for role in &beat.required_roles {
+            if !crate::film_plan::is_safe_plan_id(role) {
+                findings.push(PlanDiagnostic::plan(
+                    format!("brief.requiredBeats[{index}].requiredRoles"),
+                    format!("role {role:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+                ));
+            } else if !roles.insert(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    format!("brief.requiredBeats[{index}].requiredRoles"),
+                    format!("role {role:?} is listed twice"),
+                ));
+            }
         }
     }
     if brief.max_shots == 0 || brief.max_shots > MAX_PLANNER_SHOTS {
@@ -345,6 +368,25 @@ impl PlannerCapabilities {
                     .to_owned(),
             );
         }
+        // Which mode to REACH FOR, not merely which are legal. Without this the planner satisfies
+        // the slot shape the cheapest way it can see — every shot first_last_frame with the same
+        // plate at both ends, which asks each clip to finish exactly where it began (sc-22713).
+        if self.modes.iter().any(|mode| mode == "first_last_frame") {
+            lines.push(
+                "Choosing a mode: text_to_video is the default and the right answer for most \
+                 shots. Use image_to_video when a shot should BEGIN on a specific approved plate. \
+                 Use first_last_frame only when you have TWO DIFFERENT approved roles for the \
+                 first and the last frame — the same role in both slots is refused, because it \
+                 asks the shot to end exactly where it started."
+                    .to_owned(),
+            );
+        } else if self.modes.iter().any(|mode| mode == "image_to_video") {
+            lines.push(
+                "Choosing a mode: text_to_video is the default and the right answer for most \
+                 shots. Use image_to_video when a shot should BEGIN on a specific approved plate."
+                    .to_owned(),
+            );
+        }
         lines.join("\n")
     }
 }
@@ -389,8 +431,17 @@ pub struct PlannerDraft {
     pub shots: Vec<DraftShot>,
 }
 
-/// Isolate the outermost `{ … }` span of a model reply and parse it strictly. A reply with prose
-/// around the object still parses; a reply with an unknown or misspelled field does not.
+/// Isolate the outermost `{ … }` span of a model reply, normalise the shapes a local planner
+/// reliably gets slightly wrong, and parse the result strictly.
+///
+/// Strict where it matters: an unknown or misspelled field is still refused outright, because a
+/// field the schema does not know is data the plan would silently lose. Lenient where the model's
+/// mistake carries no ambiguity ([`normalize_draft`]).
+///
+/// A failure names the FIELD PATH (`shots[3].startState`) rather than a line and column. The
+/// consumer of this message is a local 8B model being asked to correct itself: it never sees the
+/// text it emitted as numbered lines, so "at line 10 column 20" is unusable and cost the sc-22713
+/// smoke all three of its decodes.
 pub fn parse_planner_output(text: &str) -> Result<PlannerDraft, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -405,7 +456,158 @@ pub fn parse_planner_output(text: &str) -> Result<PlannerDraft, String> {
     if end <= start {
         return Err("the planner's JSON object is not closed".to_owned());
     }
-    serde_json::from_str(&trimmed[start..=end]).map_err(|error| error.to_string())
+    let mut value: Value = serde_json::from_str(&trimmed[start..=end])
+        .map_err(|error| format!("the JSON does not parse: {error}"))?;
+    normalize_draft(&mut value);
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let inner = error.inner().to_string();
+        if path.is_empty() || path == "." {
+            inner
+        } else {
+            format!("{path}: {inner}")
+        }
+    })
+}
+
+/// The unambiguous shape repairs applied to a draft before it is parsed.
+///
+/// Each one exists because the local planner made it on a real run and there is exactly one thing
+/// it could have meant, so bouncing it would cost a full decode to be told what a `match` arm can
+/// say for free. Nothing here changes WHAT the plan says — only how it is spelled:
+///
+/// * `startState`/`endState` written as a role→description object, or as a list of phrases,
+///   become one string. An object's keys are sorted (see [`flatten_to_prose`] for why explicitly),
+///   so the same draft always normalises to the same plan and the plan's sha256 is reproducible.
+/// * an optional field written as the empty string — `dialogue: ""`, `chainFromShotId: ""`,
+///   `firstFrameRole: ""` — is REMOVED, which is what the contract asks for ("omit an optional
+///   field rather than writing null, \"\" or a placeholder") and what the model meant. Left in
+///   place, `chainFromShotId: ""` is a chain to a shot named "" and `firstFrameRole: ""` a
+///   reference role that is not in any pack — two findings for one placeholder.
+/// * a keyframe slot on a mode that takes none — `firstFrameRole` on a `text_to_video` shot — is
+///   REMOVED. The mode is the shot's actual statement about its conditioning; the slots are
+///   subordinate to it, and one the mode cannot use conditions nothing. Every draft of the
+///   sc-22713 smoke filled both slots on every `text_to_video` shot and all three rounds were
+///   refused for it and nothing else — the model was copying the shape of the contract's own
+///   template, which now shows the slot-free form.
+///
+/// Anything else stays wrong and is reported. In particular a NON-EMPTY `referenceRoles` on a
+/// keyframe mode is never dropped: unlike a keyframe slot, which names one frame, that is a list of
+/// subjects the shot claims to be conditioned on, and silently deleting it would change what the
+/// plan asks for.
+fn normalize_draft(value: &mut Value) {
+    let Some(shots) = value
+        .get_mut("shots")
+        .and_then(|shots| shots.as_array_mut())
+    else {
+        return;
+    };
+    for shot in shots {
+        let Some(shot) = shot.as_object_mut() else {
+            continue;
+        };
+        for field in ["startState", "endState", "beat", "framing", "prompt"] {
+            if let Some(entry) = shot.get_mut(field) {
+                if let Some(flattened) = flatten_to_prose(entry) {
+                    *entry = Value::String(flattened);
+                }
+            }
+        }
+        for field in [
+            "dialogue",
+            "sound",
+            "negativePrompt",
+            "resolution",
+            "beatId",
+        ] {
+            drop_if_blank(shot, field);
+        }
+        if let Some(conditioning) = shot
+            .get_mut("conditioning")
+            .and_then(|value| value.as_object_mut())
+        {
+            for field in ["firstFrameRole", "lastFrameRole", "chainFromShotId"] {
+                drop_if_blank(conditioning, field);
+            }
+            let mode = conditioning
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if mode != "image_to_video" && mode != "first_last_frame" {
+                conditioning.remove("firstFrameRole");
+            }
+            if mode != "first_last_frame" {
+                conditioning.remove("lastFrameRole");
+            }
+            // An EMPTY list on a mode that takes no references is the same empty statement the
+            // schema's own default is; a non-empty one is left to be reported.
+            if conditioning
+                .get("referenceRoles")
+                .and_then(Value::as_array)
+                .is_some_and(|roles| roles.is_empty())
+            {
+                conditioning.remove("referenceRoles");
+            }
+        }
+    }
+}
+
+/// A string-valued field the model filled with a blank placeholder is removed outright. `beatId` is
+/// deliberately included even though it is required: "" is not a beat id, and `beatId` missing is a
+/// finding that names the field, where `beatId: ""` is one that names a beat nobody declared.
+fn drop_if_blank(object: &mut Map<String, Value>, field: &str) {
+    let blank = match object.get(field) {
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Null) => true,
+        _ => false,
+    };
+    if blank {
+        object.remove(field);
+    }
+}
+
+/// One line of prose for a value the schema wants as a string but the model wrote as an object or a
+/// list. `None` for a value that is already a string (or anything else, which stays a type error).
+///
+/// An object's keys are sorted HERE rather than taken in `Map` order. `serde_json`'s map is a
+/// `BTreeMap` or an `IndexMap` depending on whether anything in the build graph turns on
+/// `preserve_order` — which this workspace's graph does — so relying on its iteration order would
+/// make the normalised text, and with it the plan's sha256, depend on a transitive feature flag.
+/// Sorting here is the only way the same draft normalises to the same plan in every build.
+fn flatten_to_prose(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(fields) => Some({
+            // Collected through a BTreeMap so the order is key-sorted by construction.
+            let entries: BTreeMap<&str, &Value> = fields
+                .iter()
+                .map(|(key, field)| (key.as_str(), field))
+                .collect();
+            entries
+                .into_iter()
+                .filter_map(|(key, field)| {
+                    let text = match field {
+                        Value::String(text) => text.trim().to_owned(),
+                        other => other.to_string(),
+                    };
+                    (!text.is_empty()).then(|| format!("{key}: {text}"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        }),
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| match item {
+                    Value::String(text) => text.trim().to_owned(),
+                    other => other.to_string(),
+                })
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        _ => None,
+    }
 }
 
 /// Assemble a [`ProductionPlan`] from the brief and a parsed draft. Everything outside the shots —
@@ -565,6 +767,104 @@ pub fn plan_coverage_findings(
             }
         }
     }
+    // A hand edit can also hollow a beat out without deleting it — the shot stays, the subject
+    // stops being named — so the roles are re-checked on the same pass as the beats.
+    findings.extend(role_coverage_findings(brief, plan));
+    findings
+}
+
+/// Every approved pack role one shot binds: the roles it declares it depicts, plus whatever its
+/// conditioning slots name. A role bound in either place is on screen by the plan's own account.
+fn bound_roles(shot: &Shot) -> BTreeSet<&str> {
+    let mut roles: BTreeSet<&str> = shot
+        .continuity_roles
+        .iter()
+        .map(String::as_str)
+        .chain(shot.conditioning.reference_roles.iter().map(String::as_str))
+        .collect();
+    roles.extend(shot.conditioning.first_frame_role.as_deref());
+    roles.extend(shot.conditioning.last_frame_role.as_deref());
+    roles
+}
+
+/// Beat ROLE coverage: for every beat that declares `requiredRoles`, the shots covering that beat
+/// must between them bind each one.
+///
+/// Beat coverage alone only asks that a beat has a shot. It cannot tell a delivery from a shot of
+/// an empty workbench, which is exactly what the first real-LLM draft produced: the parcel bound on
+/// two of six shots, the courier absent from their own departure (sc-22713). The brief is where
+/// "this beat is ABOUT the parcel" belongs, because only the brief knows the story.
+pub fn role_coverage_findings(
+    brief: &ProductionBrief,
+    plan: &ProductionPlan,
+) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    for beat in &brief.required_beats {
+        if beat.required_roles.is_empty() {
+            continue;
+        }
+        let covering: Vec<&Shot> = plan
+            .shots
+            .iter()
+            .filter(|shot| shot.beat_id.as_deref() == Some(beat.id.as_str()))
+            .collect();
+        if covering.is_empty() {
+            // "No shot at all" is `coverage_findings`' report; do not say it twice.
+            continue;
+        }
+        let bound: BTreeSet<&str> = covering.iter().flat_map(|shot| bound_roles(shot)).collect();
+        let missing: Vec<&str> = beat
+            .required_roles
+            .iter()
+            .map(String::as_str)
+            .filter(|role| !bound.contains(role))
+            .collect();
+        if !missing.is_empty() {
+            findings.push(PlanDiagnostic::shot(
+                &covering[0].id,
+                "continuityRoles",
+                format!(
+                    "beat {:?} is about {} — no shot covering it binds {}; name the missing \
+                     role(s) in continuityRoles of the shot that shows them (and write them into \
+                     that shot's prompt)",
+                    beat.id,
+                    beat.required_roles.join(", "),
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// Findings about the brief read against the reference pack it will be planned with: a beat cannot
+/// require a role the pack does not approve, because no draft could ever satisfy it. Checked before
+/// the first decode, so an unsatisfiable brief is a refusal rather than `1 + rounds` decodes that
+/// were never going to converge.
+pub fn brief_pack_findings(brief: &ProductionBrief, pack: &ReferencePack) -> Vec<PlanDiagnostic> {
+    let approved: BTreeSet<&str> = pack
+        .references
+        .iter()
+        .filter(|entry| entry.approved)
+        .map(|entry| entry.role.as_str())
+        .collect();
+    let mut findings = Vec::new();
+    for (index, beat) in brief.required_beats.iter().enumerate() {
+        for role in &beat.required_roles {
+            if !approved.contains(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    format!("brief.requiredBeats[{index}].requiredRoles"),
+                    format!(
+                        "beat {:?} requires role {role:?}, which reference pack {:?} does not \
+                         approve (approved: {})",
+                        beat.id,
+                        pack.id,
+                        approved.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+        }
+    }
     findings
 }
 
@@ -618,6 +918,7 @@ pub fn validate_generated_plan(
     model_entry: Option<(&Map<String, Value>, ModelLane)>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = coverage_findings(brief, draft);
+    findings.extend(role_coverage_findings(brief, plan));
     findings.extend(shape_findings(brief, plan));
     findings.extend(validate_all(plan, pack, pack_dir, model_entry));
     findings
@@ -656,7 +957,16 @@ pub fn build_planner_request(
          time fit.\n\n",
     );
     for beat in &brief.required_beats {
-        out.push_str(&format!("- {}: {}\n", beat.id, beat.summary.trim()));
+        out.push_str(&format!("- {}: {}", beat.id, beat.summary.trim()));
+        if !beat.required_roles.is_empty() {
+            // Named as a requirement, not as colour: this is checked mechanically after the reply.
+            out.push_str(&format!(
+                " [this beat MUST show: {}. Name them in that shot's continuityRoles AND describe \
+                 them in its prompt.]",
+                beat.required_roles.join(", ")
+            ));
+        }
+        out.push('\n');
     }
 
     out.push_str("\n# Approved reference roles\n\n");
@@ -686,9 +996,16 @@ pub fn build_planner_request(
     out
 }
 
-/// The user turn for a repair round: the draft that was refused and the findings it was refused
-/// for, verbatim. Nothing is summarised — the planner is corrected with the same text a human
-/// running `film-harness validate` would read.
+/// The user turn for a repair round: what to change, the beats that must survive the change, the
+/// draft being corrected, and the contract. Nothing is summarised — the planner is corrected with
+/// the same text a human running `film-harness validate` would read.
+///
+/// The ORDER is load-bearing. The first version of this prompt led with the findings and then
+/// handed over the whole rejected draft; on the real 8B planner all three rounds came back byte
+/// for byte identical (sc-22713), because the last thing the model read was a complete, fluent
+/// answer to the question and copying it is the likeliest continuation. So the draft is framed as
+/// raw material rather than as an answer, and the findings are repeated after it as the last thing
+/// read before the contract.
 pub fn build_repair_request(
     brief: &ProductionBrief,
     previous_output: &str,
@@ -698,21 +1015,36 @@ pub fn build_repair_request(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "# Repair round {round} of {max_rounds}\n\nYour previous answer was rejected by the \
-         validator. Fix EVERY finding below and return the whole plan again as one JSON object in \
-         the same format. Do not drop a shot or a beat to make a finding go away: the required \
-         beats are\n\n"
+        "# Repair round {round} of {max_rounds}\n\nYour previous answer was REJECTED. Below are \
+         the changes it needs, the beats it must still cover, and the text to correct. Return the \
+         WHOLE plan as one JSON object with those changes made. Returning the same answer again \
+         fails the round: every finding names a field, and every field it names must come back \
+         different.\n\n"
     ));
-    for beat in &brief.required_beats {
-        out.push_str(&format!("- {}: {}\n", beat.id, beat.summary.trim()));
-    }
-    out.push_str("\n# Findings\n\n");
+    out.push_str("# Changes to make\n\n");
     for finding in findings {
         out.push_str(&format!("- {finding}\n"));
     }
-    out.push_str("\n# Your previous answer\n\n");
+    out.push_str("\n# Beats the corrected plan must still cover (in order)\n\n");
+    out.push_str(
+        "Fixing a finding never removes a beat, shortens the film or drops a shot's subject.\n\n",
+    );
+    for beat in &brief.required_beats {
+        out.push_str(&format!("- {}: {}", beat.id, beat.summary.trim()));
+        if !beat.required_roles.is_empty() {
+            out.push_str(&format!(" [MUST show: {}]", beat.required_roles.join(", ")));
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "\n# The text to correct (this is a DRAFT with the faults listed above, not an answer)\n\n",
+    );
     out.push_str(previous_output.trim());
-    out.push_str("\n\n# Output contract\n\n");
+    out.push_str("\n\n# Before you answer, re-read these and fix each one\n\n");
+    for finding in findings {
+        out.push_str(&format!("- {finding}\n"));
+    }
+    out.push_str("\n# Output contract\n\n");
     out.push_str(PLAN_JSON_CONTRACT);
     out
 }
@@ -735,13 +1067,7 @@ Answer with ONE JSON object and nothing else — no prose, no markdown fence, no
       \"endState\": \"<the world at the last frame>\",
       \"sound\": \"<the diegetic sound of this shot>\",
       \"dialogue\": \"<a spoken line, or omit the field>\",
-      \"conditioning\": {
-        \"mode\": \"<one of the allowed modes>\",
-        \"firstFrameRole\": \"<a role, only for image_to_video and first_last_frame>\",
-        \"lastFrameRole\": \"<a role, only for first_last_frame>\",
-        \"referenceRoles\": [],
-        \"chainFromShotId\": \"<an earlier shot id this one continues from, or omit the field>\"
-      },
+      \"conditioning\": { \"mode\": \"<one of the allowed modes>\" },
       \"seed\": <an integer, optional>,
       \"continuityRoles\": [\"<the approved roles this shot depicts>\"]
     }
@@ -752,11 +1078,49 @@ Rules:
 - Shot ids ascend in tens: SH010, SH020, SH030 ...
 - Every field name is spelled exactly as above. An extra or misspelled field is rejected outright.
 - Omit an optional field rather than writing null, \"\" or a placeholder.
-- firstFrameRole/lastFrameRole appear only on the keyframe modes that take them, and referenceRoles \
-only on reference_to_video. A shot never carries both kinds.
-- chainFromShotId records that a shot continues an earlier one. It is never a substitute for \
-continuityRoles: a chained shot still names the approved roles it depicts.
-- Every shot needs at least one approved role in continuityRoles.";
+- beat, framing, prompt, startState and endState are STRINGS — one piece of prose each. Never an \
+object, never a list, and never a role-by-role breakdown.
+- startState and endState describe WHAT THE CAMERA SEES in the first and the last frame of this \
+shot: who is in frame, where they are, and where the objects that matter are. They are different \
+from each other — if they are not, the shot has no action in it.
+- conditioning carries NOTHING BUT \"mode\" unless the mode itself takes a slot. A text_to_video \
+shot's conditioning object is exactly { \"mode\": \"text_to_video\" } — writing firstFrameRole, \
+lastFrameRole, referenceRoles or chainFromShotId on it is a fault, not extra detail. The four \
+slot-bearing forms, and there are no others:
+    image_to_video:      { \"mode\": \"image_to_video\", \"firstFrameRole\": \"<a role>\" }
+    first_last_frame:    { \"mode\": \"first_last_frame\", \"firstFrameRole\": \"<a role>\", \
+\"lastFrameRole\": \"<a DIFFERENT role>\" }
+    reference_to_video:  { \"mode\": \"reference_to_video\", \"referenceRoles\": [\"<a role>\"] }
+    any of the above, continuing the shot just before it: add \
+\"chainFromShotId\": \"<the previous shot's id>\"
+- A shot never carries keyframe roles and reference roles together; they are different \
+conditioning tasks.
+- first_last_frame needs TWO DIFFERENT roles. The same role in both slots is refused.
+- chainFromShotId names the shot IMMEDIATELY BEFORE this one, or is omitted. It is never a \
+substitute for continuityRoles: a chained shot still names the approved roles it depicts.
+- Every shot needs at least one approved role in continuityRoles, and a shot lists every approved \
+role that is on screen in it — the character, the prop the beat turns on, the location.
+
+One filled shot, for shape only. It is from a DIFFERENT film: copy the spelling and the level of \
+detail, never the content.
+
+{
+  \"id\": \"SH020\",
+  \"beatId\": \"handover\",
+  \"beat\": \"The mechanic hands the key across the counter and the customer takes it.\",
+  \"framing\": \"Medium two-shot, eye level, locked off\",
+  \"prompt\": \"A cramped garage office in hard noon light. A mechanic in an oil-stained shirt \
+slides a brass key across a steel counter; the customer's hand closes around it and lifts it away. \
+Dust turns in the light from the roller door behind them. The camera does not move.\",
+  \"targetDurationSeconds\": 5.1667,
+  \"startState\": \"The mechanic stands behind the counter with the brass key flat under their \
+palm; the customer waits opposite with both hands at their sides.\",
+  \"endState\": \"The counter is empty and the customer holds the brass key at chest height; the \
+mechanic's hand is withdrawn.\",
+  \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
+  \"conditioning\": { \"mode\": \"text_to_video\" },
+  \"continuityRoles\": [\"mechanic\", \"customer\", \"brass_key\"]
+}";
 
 #[cfg(test)]
 mod tests {
@@ -901,6 +1265,199 @@ mod tests {
         ))
         .expect("isolated object parses");
         assert_eq!(draft.shots.len(), 3);
+    }
+
+    #[test]
+    fn a_parse_failure_names_the_field_path_the_planner_can_act_on() {
+        // The real sc-22713 smoke failure: `startState` as an object on a shot whose fields are
+        // otherwise fine. The 8B planner never sees its answer as numbered lines, so "line 10
+        // column 20" told it nothing and all three decodes came back identical.
+        let error = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "conditioning": {"mode": "text_to_video"}},
+                {"id": "SH020", "beatId": "delivery", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s",
+                "endState": 12, "conditioning": {"mode": "text_to_video"}}]}"#,
+        )
+        .expect_err("a wrong type is refused");
+        assert!(
+            error.contains("shots[1].endState") && error.contains("expected a string"),
+            "{error}"
+        );
+        assert!(!error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn a_structurally_close_draft_is_normalised_rather_than_bounced() {
+        // Verbatim shapes from the refused real-LLM draft (run2-planner-refused): the states as
+        // role -> description objects, and `dialogue`/`chainFromShotId` as empty-string
+        // placeholders the contract asks to be omitted.
+        let draft = parse_planner_output(
+            r#"{"shots": [{
+                "id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.1667,
+                "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
+                "endState": ["the courier fills the doorway", "the parcel is against their chest"],
+                "dialogue": "", "sound": "  ",
+                "conditioning": {
+                    "mode": "text_to_video", "firstFrameRole": "", "lastFrameRole": "",
+                    "referenceRoles": [], "chainFromShotId": ""
+                },
+                "continuityRoles": ["courier"]
+            }]}"#,
+        )
+        .expect("a near-miss draft parses");
+        let shot = &draft.shots[0];
+        // Deterministic: keys SORTED, joined into one line. Not `Map` order — `serde_json`'s map is
+        // a BTreeMap or an IndexMap depending on whether anything in the build graph enables
+        // `preserve_order`, so the same draft would otherwise normalise to a different plan (and a
+        // different plan sha256) in a different build. The reversed spelling below is the same
+        // object written the other way round and must normalise identically.
+        assert_eq!(
+            shot.start_state,
+            "courier: not yet in frame; workshop_plate: empty workshop"
+        );
+        let reversed = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667,
+                "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
+                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+        )
+        .expect("parses");
+        let forwards = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667,
+                "startState": {"courier": "not yet in frame", "workshop_plate": "empty workshop"},
+                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(reversed.shots[0].start_state, forwards.shots[0].start_state);
+        assert_eq!(
+            shot.end_state,
+            "the courier fills the doorway; the parcel is against their chest"
+        );
+        // A blank placeholder is an omission, not a value: `chainFromShotId: ""` would otherwise be
+        // a chain to a shot named "" and `firstFrameRole: ""` a role no pack can contain.
+        assert_eq!(shot.dialogue, None);
+        assert_eq!(shot.sound, None);
+        assert_eq!(shot.conditioning.chain_from_shot_id, None);
+        assert_eq!(shot.conditioning.first_frame_role, None);
+        assert_eq!(shot.conditioning.last_frame_role, None);
+        // Normalisation never invents: a state object with nothing in it stays empty, and the
+        // ordinary structural validator reports it as the missing field it is.
+        let draft = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": {}, "endState": "e",
+                "conditioning": {"mode": "text_to_video"}}]}"#,
+        )
+        .expect("an empty object flattens");
+        assert_eq!(draft.shots[0].start_state, "");
+
+        // The fault EVERY draft of the sc-22713 smoke made on EVERY shot, through all three
+        // rounds: keyframe slots filled on a text_to_video shot. The mode is what the shot says
+        // about its conditioning; a slot the mode cannot use conditions nothing.
+        let draft = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "conditioning": {
+                    "mode": "text_to_video", "firstFrameRole": "workshop_plate",
+                    "lastFrameRole": "courier", "referenceRoles": []
+                },
+                "continuityRoles": ["courier"]}]}"#,
+        )
+        .expect("a text_to_video shot with filled keyframe slots parses");
+        assert_eq!(draft.shots[0].conditioning.first_frame_role, None);
+        assert_eq!(draft.shots[0].conditioning.last_frame_role, None);
+
+        // A slot the mode DOES take is untouched, and so is the second slot's absence.
+        let draft = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "conditioning": {
+                    "mode": "image_to_video", "firstFrameRole": "workshop_plate",
+                    "lastFrameRole": "courier"
+                },
+                "continuityRoles": ["courier"]}]}"#,
+        )
+        .expect("an image_to_video shot parses");
+        assert_eq!(
+            draft.shots[0].conditioning.first_frame_role.as_deref(),
+            Some("workshop_plate")
+        );
+        assert_eq!(draft.shots[0].conditioning.last_frame_role, None);
+
+        // A NON-EMPTY referenceRoles list is a claim about what the shot depicts, so it survives
+        // normalisation and is reported by the validator instead of being deleted.
+        let draft = parse_planner_output(
+            r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "conditioning": { "mode": "text_to_video", "referenceRoles": ["courier"] },
+                "continuityRoles": ["courier"]}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(draft.shots[0].conditioning.reference_roles, ["courier"]);
+        let plan = draft_to_plan(&brief(), &draft);
+        assert!(
+            messages(&crate::film_plan::validate_plan_structure(&plan))
+                .iter()
+                .any(|message| message.contains("does not take reference roles")),
+            "the surviving list is reported"
+        );
+    }
+
+    #[test]
+    fn a_beat_that_names_required_roles_is_not_covered_by_a_shot_that_omits_them() {
+        let mut brief = brief();
+        brief.required_beats[1].required_roles =
+            vec!["red_parcel".to_owned(), "courier".to_owned()];
+        let draft = good_draft();
+        let mut plan = draft_to_plan(&brief, &draft);
+        // The shot for the beat is present and names one of the two roles.
+        plan.shots[1].continuity_roles = vec!["courier".to_owned()];
+        let findings = messages(&role_coverage_findings(&brief, &plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("beat \"delivery\"") && findings[0].contains("red_parcel"),
+            "{findings:?}"
+        );
+        // Only the role that is actually missing is reported as missing; `courier` appears in the
+        // message only as part of what the beat is about.
+        assert!(findings[0].contains("binds red_parcel;"), "{findings:?}");
+
+        // Bound in a conditioning slot rather than continuityRoles still counts as on screen.
+        plan.shots[1].conditioning.mode = "image_to_video".to_owned();
+        plan.shots[1].conditioning.first_frame_role = Some("red_parcel".to_owned());
+        assert!(role_coverage_findings(&brief, &plan).is_empty());
+
+        // A beat with no declared roles makes no claim, which is what every pre-sc-22713 brief is.
+        brief.required_beats[1].required_roles.clear();
+        plan.shots[1].conditioning.first_frame_role = None;
+        plan.shots[1].conditioning.mode = "text_to_video".to_owned();
+        assert!(role_coverage_findings(&brief, &plan).is_empty());
+    }
+
+    #[test]
+    fn a_brief_cannot_require_a_role_the_pack_does_not_approve() {
+        let clean = brief();
+        let mut brief = brief();
+        brief.required_beats[0].required_roles = vec![
+            "courier".to_owned(),
+            "draft_look".to_owned(),
+            "wolf".to_owned(),
+        ];
+        let findings = messages(&brief_pack_findings(&brief, &pack()));
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        // `draft_look` is in the pack but unapproved, so it is as unusable as one that is absent.
+        assert!(
+            findings.iter().any(|m| m.contains("\"draft_look\"")),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|m| m.contains("\"wolf\"")),
+            "{findings:?}"
+        );
+        assert!(brief_pack_findings(&clean, &pack()).is_empty());
     }
 
     #[test]

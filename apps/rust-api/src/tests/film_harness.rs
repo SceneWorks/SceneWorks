@@ -1743,6 +1743,21 @@ const BRIEF_BEATS: &[&str] = &[
     "opening",
 ];
 
+/// The roles the checked-in brief declares each beat must show (`requiredBeats[].requiredRoles`).
+/// A scripted draft binds them because the validator checks them — the same demand the real
+/// planner is held to (sc-22713).
+fn beat_roles(beat_id: &str) -> Vec<&'static str> {
+    let mut roles = match beat_id {
+        "arrival" => vec!["courier", "red_parcel", "workshop_location"],
+        "discovery" => vec!["recipient", "red_parcel", "workbench_table"],
+        "opening" => vec!["recipient", "red_parcel"],
+        // approach / handover / departure, and anything a test invents.
+        _ => vec!["courier", "red_parcel", "workbench_table"],
+    };
+    roles.push("house_style");
+    roles
+}
+
 /// One shot of a scripted planner draft, on the H3 envelope (24 fps, 576x320, 5.1667s).
 fn draft_shot(id: &str, beat_id: &str) -> Value {
     json!({
@@ -1757,7 +1772,7 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
         "sound": "room tone, distant birds",
         "conditioning": { "mode": "text_to_video" },
         "seed": 22713,
-        "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+        "continuityRoles": beat_roles(beat_id)
     })
 }
 
@@ -1783,6 +1798,7 @@ fn planner_options(harness: &Harness, out: &str) -> film_planner::PlannerOptions
         out_dir: harness.temp_dir.path().join(out),
         max_repair_rounds: 2,
         refine_prompts: false,
+        prompt_guide_path: None,
         require_installed: false,
         // Empty: the in-process transport has no URL. The local-only rule is exercised as a unit
         // test in `film_planner` and end to end below.
@@ -2287,6 +2303,309 @@ async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_p
             "{payload}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_hand_edited_compiled_request_is_refused_instead_of_dispatched() {
+    // The compiled document — not the plan — is what becomes the job body: `execute_run` takes the
+    // mode, model, duration, fps, geometry, seed, negative prompt and every role slot straight out
+    // of it. An edit here therefore reaches the engine unless something judges THIS document, and
+    // 9.0s is the case that would not even fail loudly: it is inside H3's hard bounds, so the
+    // engine snaps it up onto the 17n+5 lattice and renders a length the plan never claimed.
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = full_draft();
+    draft["shots"].as_array_mut().unwrap().truncate(2);
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["requiredBeats"].as_array_mut().unwrap().truncate(2);
+    brief["targetTotalSeconds"] = json!({ "min": 10.0, "max": 12.0 });
+    let brief_path = harness.temp_dir.path().join("tamper-brief.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    let mut options = planner_options(&harness, "tamper");
+    options.brief_path = brief_path;
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+
+    // Edit ONE field of ONE compiled request, leaving the plan and its sha256 untouched, so the
+    // staleness check has nothing to say.
+    let mut compiled: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json"),
+    )
+    .expect("compiled.json parses");
+    let tampered_shot = compiled["requests"][1]["shotId"]
+        .as_str()
+        .expect("a second request")
+        .to_owned();
+    compiled["requests"][1]["durationSeconds"] = json!(9.0);
+    std::fs::write(
+        &artifacts.compiled_path,
+        serde_json::to_string_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
+
+    let run_options = RunOptions {
+        plan_path: artifacts.plan_path.clone(),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        compiled_path: Some(artifacts.compiled_path.clone()),
+        project_id: None,
+        shot_ids: None,
+        out_dir: harness.temp_dir.path().join("tamper-run"),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let findings = findings_of(
+        film_harness::run(&harness.transport, &run_options)
+            .await
+            .expect_err("a hand-edited compiled request is refused"),
+    );
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains(&format!("[{tampered_shot}]"))
+                && finding.contains("compiled.durationSeconds")
+                && finding.contains("9s")
+        }),
+        "{findings:?}"
+    );
+    // Refused BEFORE dispatch: nothing rendered.
+    assert!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .all(|job| job["type"] == "prompt_refine"),
+        "a video job was created for a request that was refused"
+    );
+    // `validate` refuses it on the same grounds, so the operator sees it without starting a run.
+    let findings = findings_of(
+        film_harness::validate(Some(&harness.transport), &run_options)
+            .await
+            .expect_err("validate refuses it too"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("compiled.durationSeconds")),
+        "{findings:?}"
+    );
+
+    // Restored, the same documents run.
+    compiled["requests"][1]["durationSeconds"] = json!(5.1667);
+    std::fs::write(
+        &artifacts.compiled_path,
+        serde_json::to_string_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
+    film_harness::validate(Some(&harness.transport), &run_options)
+        .await
+        .expect("the untampered document validates");
+}
+
+#[tokio::test]
+async fn a_brief_the_model_cannot_render_is_refused_before_a_single_decode() {
+    // fps 30 is a property of the BRIEF, which every draft copies verbatim — the planner is not
+    // allowed to change it. Discovered on the first draft it would cost 1 + rounds full local
+    // decodes (minutes each on an 8B) and then blame the planner for its input.
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["model"]["fps"] = json!(30);
+    let brief_path = harness.temp_dir.path().join("off-menu-fps-brief.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    let mut options = planner_options(&harness, "off-menu-fps");
+    options.brief_path = brief_path.clone();
+
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("an unrenderable brief is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("model.fps") && finding.contains("30 fps")),
+        "{findings:?}"
+    );
+    assert_eq!(harness.script.lock().plan_calls, 0, "a decode was spent");
+    assert!(harness.jobs().await.is_empty(), "a job was created");
+
+    // The memory budget is judged the same way, against the lane the API HOST renders on.
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["limits"]["maxMemoryGb"] = json!(8.0);
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("a budget below the model's minimum is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("limits.maxMemoryGb")),
+        "{findings:?}"
+    );
+    assert_eq!(harness.script.lock().plan_calls, 0);
+}
+
+#[tokio::test]
+async fn the_default_correction_loop_rechecks_beat_coverage_without_a_brief_flag() {
+    // The documented loop is `plan --out DIR`, edit `DIR/plan.json`, `compile --plan DIR/plan.json
+    // --out DIR`. `compile` looks for a brief beside the plan, so `plan` has to leave one there —
+    // otherwise the recompile AC3 asks a human to run performs NO coverage check and a hand edit
+    // that deletes a required beat compiles and dispatches silently.
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let options = planner_options(&harness, "loop");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+    let sibling = options.out_dir.join("brief.json");
+    assert!(sibling.is_file(), "the brief travels with the plan");
+    assert_eq!(
+        std::fs::read(&sibling).unwrap(),
+        std::fs::read(BRIEF_FIXTURE).unwrap(),
+        "the brief is copied byte for byte, comments and all"
+    );
+
+    // Now the human deletes a beat's shot, and compiles WITHOUT naming a brief.
+    let mut plan: Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifacts.plan_path).unwrap()).unwrap();
+    plan["shots"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|shot| shot["beatId"] != "handover");
+    std::fs::write(
+        &artifacts.plan_path,
+        serde_json::to_string_pretty(&plan).unwrap(),
+    )
+    .unwrap();
+    let mut blind = options.clone();
+    blind.brief_path = harness.temp_dir.path().join("no-such-brief.json");
+    let findings = findings_of(
+        film_planner::compile_existing(
+            &harness.transport,
+            &planner_llm(&harness),
+            &blind,
+            &artifacts.plan_path,
+        )
+        .await
+        .expect_err("the deleted beat is caught by the discovered sibling brief"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("\"handover\"")),
+        "{findings:?}"
+    );
+
+    // A brief the caller NAMED but that cannot be read is an error, not a silent skip: a typo in
+    // `--brief` must not be indistinguishable from "coverage verified".
+    let malformed = harness.temp_dir.path().join("malformed-brief.json");
+    std::fs::write(&malformed, "{ \"schemaVersion\": 1, ").unwrap();
+    let mut named = options.clone();
+    named.brief_path = malformed.clone();
+    let findings = findings_of(
+        film_planner::compile_existing(
+            &harness.transport,
+            &planner_llm(&harness),
+            &named,
+            &artifacts.plan_path,
+        )
+        .await
+        .expect_err("a malformed named brief is an error"),
+    );
+    assert!(
+        findings.iter().any(|finding| finding.contains("brief")),
+        "{findings:?}"
+    );
+
+    // So is one that parses but is not a brief this build accepts.
+    let mut stale: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    stale["schemaVersion"] = json!(99);
+    std::fs::write(&malformed, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+    let findings = findings_of(
+        film_planner::compile_existing(
+            &harness.transport,
+            &planner_llm(&harness),
+            &named,
+            &artifacts.plan_path,
+        )
+        .await
+        .expect_err("a stale schema version is an error"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("brief schema version 99")),
+        "{findings:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_guide_reaches_the_rewrite_the_way_video_studio_sends_it() {
+    // The per-shot rewrite is only the SAME rewrite the "Refine" button runs if the model's prompt
+    // guide rides with it: the web forwards `guide`, and the worker appends it to the H3 system
+    // turn under `# Model prompt guide`. The harness cannot fetch it from `--api` (the rust-api
+    // serves `/prompt-guides/` only in an `embed-web` build), so it is read from disk.
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = full_draft();
+    draft["shots"].as_array_mut().unwrap().truncate(1);
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["requiredBeats"].as_array_mut().unwrap().truncate(1);
+    brief["targetTotalSeconds"] = json!({ "min": 5.0, "max": 6.0 });
+    let brief_path = harness.temp_dir.path().join("one-beat-brief.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    let guide_path = harness.temp_dir.path().join("h3-guide.md");
+    std::fs::write(&guide_path, "# H3\nWrite one paragraph.").unwrap();
+
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    let mut options = planner_options(&harness, "guided");
+    options.brief_path = brief_path;
+    options.refine_prompts = true;
+    options.prompt_guide_path = Some(guide_path);
+    film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+
+    let jobs = refine_job_payloads(&harness, false);
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    // The planning turn carries no guide: its system turn is the plan contract, not prompt advice.
+    assert!(jobs[0].get("guide").is_none(), "{:?}", jobs[0]);
+    assert_eq!(jobs[1]["guide"], "# H3\nWrite one paragraph.");
+
+    // A guide the caller NAMED and that is not there is an error, not a guide-less rewrite.
+    let mut missing = options.clone();
+    missing.out_dir = harness.temp_dir.path().join("guide-missing");
+    missing.prompt_guide_path = Some(harness.temp_dir.path().join("no-such-guide.md"));
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &missing)
+            .await
+            .expect_err("an unreadable named guide is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("cannot read the prompt guide")),
+        "{findings:?}"
+    );
 }
 
 #[test]

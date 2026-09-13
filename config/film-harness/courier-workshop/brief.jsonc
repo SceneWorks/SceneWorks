@@ -23,27 +23,33 @@
   "requiredBeats": [
     {
       "id": "arrival",
-      "summary": "Establish the empty workshop; the door opens and the courier appears in the doorway with the red parcel."
+      "summary": "Establish the empty workshop; the door opens and the courier appears in the doorway with the red parcel.",
+      "requiredRoles": ["courier", "red_parcel", "workshop_location"]
     },
     {
       "id": "approach",
-      "summary": "The courier crosses the workshop to the workbench, still carrying the parcel."
+      "summary": "The courier crosses the workshop to the workbench, still carrying the parcel.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
     },
     {
       "id": "handover",
-      "summary": "The courier sets the red parcel down on the workbench and lets go."
+      "summary": "The courier sets the red parcel down on the workbench and lets go.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
     },
     {
       "id": "departure",
-      "summary": "The courier leaves and closes the door; the parcel stays on the bench in the empty workshop."
+      "summary": "The courier leaves and closes the door; the parcel stays on the bench in the empty workshop.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
     },
     {
       "id": "discovery",
-      "summary": "The recipient enters, notices the parcel on the bench and walks to it."
+      "summary": "The recipient enters, notices the parcel on the bench and walks to it.",
+      "requiredRoles": ["recipient", "red_parcel", "workbench_table"]
     },
     {
       "id": "opening",
-      "summary": "The recipient opens the parcel and a soft warm glow from inside lights her hands and face."
+      "summary": "The recipient opens the parcel and a soft warm glow from inside lights her hands and face.",
+      "requiredRoles": ["recipient", "red_parcel"]
     }
   ],
   "model": {

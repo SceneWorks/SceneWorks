@@ -1200,7 +1200,7 @@ pub(crate) async fn run_prompt_refine_job(
         source: weights_dir.to_string_lossy().into_owned(),
         quantize: None,
     };
-    // Whether the decode is JSON-grammar-constrained (the caption tasks and the film plan, sc-22713)
+    // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
     // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
     // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture
     // set minimal.
@@ -1286,7 +1286,16 @@ pub(crate) async fn run_prompt_refine_job(
                     // free-text rewrite is unconstrained. (On the candle lane this constraint actually
                     // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
                     // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
-                    // costs a whole repair round the grammar can prevent outright.
+                    // costs a whole repair round this prevents outright.
+                    //
+                    // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
+                    // JSON — and says nothing about the object's shape (core-llm has no schema or
+                    // grammar variant; `Json` is the only one). So a well-formed reply with a field
+                    // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
+                    // duly produced one: `startState` as an object on every shot. The plan schema is
+                    // enforced after the decode by `film_planner::parse_planner_output`, which is the
+                    // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
+                    // where the FilmPlan task should take it.
                     constraint: emits_json.then_some(Constraint::Json),
                     cancel: blocking_cancel.clone(),
                     ..Default::default()

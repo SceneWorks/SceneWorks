@@ -26,6 +26,13 @@ references ──┘                          │                        │
 | Compiled requests | `sceneworks_core::film_compile::CompiledPlan` | written to `--out/compiled.json` |
 | Run record | `sceneworks_core::film_plan::RunRecord` | written to `--out/run.json` and `<project>/film-harness/<run_id>/run.json` |
 
+A brief's `requiredBeats[].requiredRoles` names the approved roles a beat is ABOUT — the subject,
+the prop the story turns on. The shots covering that beat must bind every one of them (in
+`continuityRoles` or a conditioning slot), so "the beat is covered" cannot be satisfied by a shot of
+the right length in the right place that leaves the parcel out of the delivery. A beat that declares
+none makes no claim. A beat that requires a role the pack does not approve is refused before the
+first decode, since no draft could satisfy it.
+
 A plan carries stable shot ids, narrative beat, framing, prompt, target duration, intended start/end
 state, dialogue/sound intent and the conditioning each shot wants, expressed as **reference roles**
 (`firstFrameRole`, `lastFrameRole`, `referenceRoles`). The reference pack maps roles to approved
@@ -42,7 +49,10 @@ headers.
 Each conditioning mode fixes which slots it takes — `text_to_video` none, `image_to_video` a first
 frame, `first_last_frame` first and last, `reference_to_video` references only — which is how a
 plan stays honest about MiniMax-H3's rule that keyframes and references are different tasks on
-different checkpoints.
+different checkpoints. Two shapes that satisfy the slot rule but say nothing are refused as well: a
+`first_last_frame` shot whose first and last roles are the SAME reference (the clip is asked to end
+exactly where it began), and a `chainFromShotId` that names anything but the shot immediately
+before this one (a chain is a claim about the cut, not a pointer to any earlier shot).
 
 **Continuity is canonical.** Every shot must bind at least one approved role from the pack
 (`continuityRoles`, plus its conditioning slots where the mode takes them); a shot that binds none
@@ -60,10 +70,17 @@ draft that drops a beat is refused, never accepted as a shorter film.
 
 - **The planner is the shipped LLM seam.** `POST /api/v1/prompts/refine` with
   `task: "film_plan"`, which the worker (`prompt_refine_jobs.rs`) classifies into
-  `RefineTask::FilmPlan`: the embedded `film_plan_v1.txt` contract as the system turn, a
-  JSON-grammar-constrained decode, and the same native `TextLlm` provider every other refine task
-  uses (MLX on macOS, candle on the Windows/CUDA build; `TheDrummer/Anubis-Mini-8B-v1` unless the
-  job overrides `model`).
+  `RefineTask::FilmPlan`: the embedded `film_plan_v1.txt` contract as the system turn, a decode
+  constrained to **valid JSON** (`core-llm`'s only constraint — object shape is NOT enforced by it,
+  so the plan schema is enforced after the decode by `parse_planner_output`), and the same native
+  `TextLlm` provider every other refine task uses (MLX on macOS, candle on the Windows/CUDA build;
+  `TheDrummer/Anubis-Mini-8B-v1` unless the job overrides `model`).
+- **A near-miss draft is repaired, not bounced.** `parse_planner_output` normalises the shapes a
+  local planner gets unambiguously wrong — a `startState`/`endState` written as a role→description
+  object or a list becomes one string, an optional field written as `""` is treated as omitted —
+  and reports what it cannot fix by FIELD PATH (`shots[3].startState: invalid type: map, expected a
+  string`), because the model being asked to correct itself cannot see line numbers. An unknown or
+  misspelled field is still refused outright.
 - **No hosted path.** The planner refuses before its first token if the environment carries a hosted
   LLM credential or endpoint (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SCENEWORKS_LLM_BASE_URL`, …)
   or if `--api` is not loopback, a private-network address, an `.local` name or a bare hostname.
@@ -71,9 +88,21 @@ draft that drops a beat is refused, never accepted as a shorter film.
   plan again. `--max-repair-rounds` (default 2, ceiling 5) bounds the loop; on exhaustion the run
   fails with the outstanding findings and writes the refused answer to `planner-rejected.txt`. No
   round drops a beat, shortens the film or rounds a duration to make a finding go away.
+- **Refused before the first token.** Everything about the brief that no draft could change is
+  checked before a decode is spent: the hosted-credential/remote-API ban, the brief's structure, the
+  pack and its files, the model's catalog entry (present, a video model, installed, reachable on the
+  render host's platform), a beat requiring a role the pack does not approve, and the brief's own
+  model block against the installed menus — an `fps` off the declared menu or a `limits.maxMemoryGb`
+  below the lane's `minMemoryGb` fails here rather than after `1 + rounds` full local decodes that
+  then blame the planner for its input.
 - **Human correction.** `plan.json` is the correction surface. Edit it, then `film-harness compile`
   to rebuild the requests and `film-harness validate` to check them. `plan` refuses to overwrite a
-  `plan.json` that differs from what it just generated unless `--force`.
+  `plan.json` that differs from what it just generated unless `--force`. `plan` also copies the
+  brief to `<out>/brief.json`, which is what makes the default loop re-check beat coverage: with no
+  `--brief`, `compile` picks that sibling up, so a hand edit that deletes a required beat is
+  refused instead of compiled. A `--brief` the caller names and that cannot be read (missing field,
+  stale `schemaVersion`, malformed JSON) is an ERROR — "the brief could not be read" must not look
+  like "coverage verified" — while a merely absent sibling stays the ordinary hand-authored case.
 
 ## Compiled requests
 
@@ -87,6 +116,14 @@ make it worth its own file:
   beside it as `authoredPrompt`. `--no-refine` compiles the plan's own prompts instead. A refined
   prompt that comes back empty or over the route's 4000-character limit is a finding naming the
   shot; it is never truncated and never silently swapped back.
+  `--prompt-guide FILE` forwards the model's prompt guide on each rewrite as the `guide` field,
+  which is what Video Studio's "Refine" button sends and what the worker appends to the H3 system
+  turn under `# Model prompt guide`. With no flag the harness reads the guide the catalog entry
+  names (`ui.promptGuide.path`, e.g. `/prompt-guides/minimax-h3.md`) from `apps/web/public` or
+  `apps/web/dist` relative to the working directory, so a run from the checkout gets it for free;
+  with neither, the rewrite is that same rewrite MINUS the guide. The rust-api serves
+  `/prompt-guides/` only in an `embed-web` build, so it cannot be fetched from `--api` in general.
+  A guide named with `--prompt-guide` that cannot be read is an error, not a guide-less rewrite.
 - **It is the only place a job body is built.** `CompiledRequest::to_job_body` produces the
   `POST /api/v1/video/jobs` payload for the generated and the hand-authored path alike, so what a
   reviewer reads in `compiled.json` and what the API receives cannot drift.

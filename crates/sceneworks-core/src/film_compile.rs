@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
-use crate::film_plan::{shot_resolution, PlanDiagnostic, ProductionPlan, ReferencePack, Shot};
+use crate::film_plan::{
+    shot_resolution, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
+};
 use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
@@ -327,6 +329,13 @@ impl CompiledRequest {
             // conditioning: the keyframe/reference slots above are the only anchors.
             provenance["chainFromShotId"] = json!(chain);
         }
+        if !self.continuity_roles.is_empty() {
+            // The canonical roles this shot was written to depict. Recorded for the same reason as
+            // the chain and with the same status — traceability, never conditioning — so a take's
+            // provenance can say which approved references it was meant to carry even on a model
+            // whose declared `maxReferenceAssets` is 0 and whose shots are all `text_to_video`.
+            provenance["continuityRoles"] = json!(self.continuity_roles);
+        }
         advanced.insert("filmHarness".to_owned(), provenance);
         let mut body = json!({
             "projectId": context.project_id,
@@ -420,6 +429,200 @@ impl CompiledPlan {
         }
         findings
     }
+
+    /// Findings that make these requests a different ASK than the plan describes.
+    ///
+    /// [`staleness_findings`](Self::staleness_findings) proves the requests were compiled from
+    /// THIS plan; this proves they still say what compiling it now would say. It matters because
+    /// the compiled document — not the plan — is what becomes the job body: `--compiled FILE`
+    /// accepts one from any path, and every dispatched field but the prompt is taken from it. A
+    /// hand-edited `durationSeconds` the engine would silently snap onto its frame lattice, a
+    /// swapped `model`, a `mode` the checkpoint does not declare or a `negativePrompt` on a model
+    /// that has none would otherwise reach the route unjudged, because the document validators only
+    /// ever read the plan.
+    ///
+    /// Only `prompt`, `promptSource` and `authoredPrompt` may differ from a fresh compile: those
+    /// three ARE the compile's output (the model's own rewrite), and everything else is a
+    /// transcription of the plan. The expected request is produced by the compiler itself rather
+    /// than by a second list of rules, so the two cannot drift.
+    pub fn conformance_findings(
+        &self,
+        plan: &ProductionPlan,
+        entry: &JsonObject<String, Value>,
+        lane: ModelLane,
+    ) -> Vec<PlanDiagnostic> {
+        let mut findings = Vec::new();
+        if self.model.id != plan.model.id {
+            findings.push(PlanDiagnostic::plan(
+                "compiled.model.id",
+                format!(
+                    "the compiled requests target model {:?}, but the plan renders through {:?}",
+                    self.model.id, plan.model.id
+                ),
+            ));
+        }
+        if self.model.tier != plan.model.tier {
+            findings.push(PlanDiagnostic::plan(
+                "compiled.model.tier",
+                format!(
+                    "the compiled requests declare tier {:?}, but the plan asks for {:?}",
+                    self.model.tier, plan.model.tier
+                ),
+            ));
+        }
+        if self.model.lane != lane.manifest_key() {
+            findings.push(PlanDiagnostic::plan(
+                "compiled.model.lane",
+                format!(
+                    "these requests were compiled for the {:?} lane, but this run's host renders \
+                     on {:?}; re-run `film-harness compile` against this host",
+                    self.model.lane,
+                    lane.manifest_key()
+                ),
+            ));
+        }
+        let Some(fps) = crate::film_plan::plan_fps(plan, entry) else {
+            findings.push(PlanDiagnostic::plan(
+                "model.fps",
+                format!(
+                    "{} declares no default fps; set model.fps in the plan before dispatching",
+                    plan.model.id
+                ),
+            ));
+            return findings;
+        };
+        if self.model.fps != fps {
+            findings.push(PlanDiagnostic::plan(
+                "compiled.model.fps",
+                format!(
+                    "the compiled requests declare {} fps, but the plan renders at {fps}",
+                    self.model.fps
+                ),
+            ));
+        }
+        let empty = BTreeMap::new();
+        let inputs = CompileInputs {
+            model_entry: entry,
+            lane: lane.manifest_key(),
+            plan_sha256: &self.plan_sha256,
+            compiled_at: &self.compiled_at,
+            refined_prompts: &empty,
+        };
+        for shot in &plan.shots {
+            // A shot with no request at all is `staleness_findings`' finding, not a second one.
+            let Some(request) = self.request(&shot.id) else {
+                continue;
+            };
+            match compile_shot(plan, shot, &inputs, fps) {
+                Ok(expected) => findings.extend(request_differences(request, &expected)),
+                Err(mut shot_findings) => findings.append(&mut shot_findings),
+            }
+        }
+        findings
+    }
+}
+
+/// Every field of `actual` that a fresh compile would have written differently, except the three
+/// the compile itself produces (`prompt`, `promptSource`, `authoredPrompt`).
+///
+/// `expected` is destructured exhaustively on purpose: a field added to [`CompiledRequest`] fails
+/// to compile here until it is either compared or deliberately exempted, so the guarantee this
+/// function states cannot quietly narrow as the request grows.
+fn request_differences(
+    actual: &CompiledRequest,
+    expected: &CompiledRequest,
+) -> Vec<PlanDiagnostic> {
+    let CompiledRequest {
+        shot_id,
+        beat,
+        mode,
+        model,
+        prompt: _,
+        prompt_source: _,
+        authored_prompt: _,
+        negative_prompt,
+        duration_seconds,
+        fps,
+        width,
+        height,
+        seed,
+        first_frame_role,
+        last_frame_role,
+        reference_roles,
+        chain_from_shot_id,
+        continuity_roles,
+    } = expected;
+    let mut findings = Vec::new();
+    let mut differ = |field: &str, found: String, planned: String| {
+        if found != planned {
+            findings.push(PlanDiagnostic::shot(
+                shot_id,
+                field,
+                format!(
+                    "the compiled request asks for {found}, but the plan says {planned}; re-run \
+                     `film-harness compile` (only the prompt may differ from the plan)"
+                ),
+            ));
+        }
+    };
+    differ("compiled.model", quoted(&actual.model), quoted(model));
+    differ("compiled.beat", quoted(&actual.beat), quoted(beat));
+    differ("compiled.mode", quoted(&actual.mode), quoted(mode));
+    differ(
+        "compiled.durationSeconds",
+        format!("{}s", actual.duration_seconds),
+        format!("{duration_seconds}s"),
+    );
+    differ(
+        "compiled.fps",
+        format!("{} fps", actual.fps),
+        format!("{fps} fps"),
+    );
+    differ(
+        "compiled.resolution",
+        format!("{}x{}", actual.width, actual.height),
+        format!("{width}x{height}"),
+    );
+    differ(
+        "compiled.seed",
+        format!("{:?}", actual.seed),
+        format!("{seed:?}"),
+    );
+    differ(
+        "compiled.negativePrompt",
+        format!("{:?}", actual.negative_prompt),
+        format!("{negative_prompt:?}"),
+    );
+    differ(
+        "compiled.firstFrameRole",
+        format!("{:?}", actual.first_frame_role),
+        format!("{first_frame_role:?}"),
+    );
+    differ(
+        "compiled.lastFrameRole",
+        format!("{:?}", actual.last_frame_role),
+        format!("{last_frame_role:?}"),
+    );
+    differ(
+        "compiled.referenceRoles",
+        format!("{:?}", actual.reference_roles),
+        format!("{reference_roles:?}"),
+    );
+    differ(
+        "compiled.chainFromShotId",
+        format!("{:?}", actual.chain_from_shot_id),
+        format!("{chain_from_shot_id:?}"),
+    );
+    differ(
+        "compiled.continuityRoles",
+        format!("{:?}", actual.continuity_roles),
+        format!("{continuity_roles:?}"),
+    );
+    findings
+}
+
+fn quoted(value: &str) -> String {
+    format!("{value:?}")
 }
 
 #[cfg(test)]
@@ -568,6 +771,13 @@ mod tests {
             .get("promptSource")
             .is_none());
 
+        // The declared continuity roles ride the provenance too, so a take can say which approved
+        // references it was meant to depict even when the model takes no reference conditioning.
+        assert_eq!(
+            body["advanced"]["filmHarness"]["continuityRoles"],
+            json!(["courier"])
+        );
+
         let body = compiled
             .request("SH020")
             .unwrap()
@@ -575,7 +785,19 @@ mod tests {
             .unwrap();
         assert_eq!(body["sourceAssetId"], "asset_plate");
         assert_eq!(body["advanced"]["filmHarness"]["chainFromShotId"], "SH010");
+        assert_eq!(
+            body["advanced"]["filmHarness"]["continuityRoles"],
+            json!(["courier", "red_parcel"])
+        );
         assert!(body.get("referenceAssetIds").is_none());
+
+        // A shot that declares no continuity roles claims none in its provenance.
+        let mut bare = compiled.request("SH010").unwrap().clone();
+        bare.continuity_roles.clear();
+        let body = bare.to_job_body(&context).unwrap();
+        assert!(body["advanced"]["filmHarness"]
+            .get("continuityRoles")
+            .is_none());
 
         // A role that was never imported refuses the dispatch instead of sending a body with a
         // missing keyframe.
@@ -686,6 +908,125 @@ mod tests {
             .staleness_findings(&plan, "abc123def456")
             .iter()
             .any(|finding| finding.field == "compiled.planId"));
+    }
+
+    #[test]
+    fn a_hand_edited_request_is_refused_even_when_it_pins_the_right_plan() {
+        let plan = parse_plan(&plan_text()).unwrap();
+        let entry = entry();
+        let clean = compiled(BTreeMap::new());
+        assert!(clean
+            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .is_empty());
+        // The compile's own output is exempt: a refined prompt is why the document exists.
+        let refined = compiled(
+            [("SH010".to_owned(), "a rewritten courier".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(refined
+            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .is_empty());
+
+        // Every other field is a transcription of the plan, and an edit to one is named.
+        // (field the finding must name, the hand edit, a fragment of the message it must carry)
+        type TamperCase = (&'static str, fn(&mut CompiledRequest), &'static str);
+        let cases: Vec<TamperCase> = vec![
+            (
+                "compiled.durationSeconds",
+                |request| request.duration_seconds = 9.0,
+                "9s",
+            ),
+            (
+                "compiled.mode",
+                |request| request.mode = "image_to_video".to_owned(),
+                "image_to_video",
+            ),
+            (
+                "compiled.model",
+                |request| request.model = "ltx_2_5".to_owned(),
+                "ltx_2_5",
+            ),
+            ("compiled.fps", |request| request.fps = 30, "30 fps"),
+            (
+                "compiled.resolution",
+                |request| request.width = 1344,
+                "1344x320",
+            ),
+            ("compiled.seed", |request| request.seed = Some(8), "Some(8)"),
+            (
+                "compiled.negativePrompt",
+                |request| request.negative_prompt = Some("blurry".to_owned()),
+                "blurry",
+            ),
+            (
+                "compiled.firstFrameRole",
+                |request| request.first_frame_role = Some("workshop_plate".to_owned()),
+                "workshop_plate",
+            ),
+            (
+                "compiled.lastFrameRole",
+                |request| request.last_frame_role = Some("workshop_plate".to_owned()),
+                "workshop_plate",
+            ),
+            (
+                "compiled.referenceRoles",
+                |request| request.reference_roles = vec!["courier".to_owned()],
+                "courier",
+            ),
+            (
+                "compiled.chainFromShotId",
+                |request| request.chain_from_shot_id = Some("SH020".to_owned()),
+                "SH020",
+            ),
+            (
+                "compiled.continuityRoles",
+                |request| request.continuity_roles.clear(),
+                "[]",
+            ),
+            (
+                "compiled.beat",
+                |request| request.beat = "exit".to_owned(),
+                "exit",
+            ),
+        ];
+        for (field, edit, expected) in cases {
+            let mut tampered = clean.clone();
+            edit(&mut tampered.requests[0]);
+            let findings = tampered.conformance_findings(&plan, &entry, ModelLane::Mlx);
+            assert_eq!(findings.len(), 1, "{field}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{field}");
+            assert_eq!(findings[0].field, field, "{findings:?}");
+            assert!(
+                findings[0].message.contains(expected),
+                "{field}: {findings:?}"
+            );
+        }
+
+        // The document's own model block is checked too: a swapped model, tier, fps or lane.
+        let mut tampered = clean.clone();
+        tampered.model.id = "ltx_2_5".to_owned();
+        tampered.model.tier = Some("q8".to_owned());
+        tampered.model.fps = 30;
+        let fields: Vec<String> = tampered
+            .conformance_findings(&plan, &entry, ModelLane::Candle)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert!(
+            fields.contains(&"compiled.model.id".to_owned())
+                && fields.contains(&"compiled.model.tier".to_owned())
+                && fields.contains(&"compiled.model.fps".to_owned())
+                && fields.contains(&"compiled.model.lane".to_owned()),
+            "{fields:?}"
+        );
+
+        // A shot the compile does not cover is `staleness_findings`' report, not a second one here.
+        let mut short = clean;
+        short.requests.retain(|request| request.shot_id != "SH020");
+        assert!(short
+            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .is_empty());
     }
 
     #[test]

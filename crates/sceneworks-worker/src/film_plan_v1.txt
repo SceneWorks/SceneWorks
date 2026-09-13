@@ -12,10 +12,16 @@ caller-side (`sceneworks_core::film_planner::build_planner_request`) and arrives
 This asset carries only what is true of EVERY planning request, so the two cannot drift: the caller
 owns the film, this block owns the contract.
 
-The three bans below are the ones a planner reliably breaks: prose around the JSON (which makes the
-answer unparseable), a dropped beat (which silently shortens the film), and a rounded duration
-(which makes the engine render a length the plan does not claim). Each is also enforced in ordinary
-code after the reply — the instruction is advisory, the validator is the guarantee.
+The bans below are the ones a planner reliably breaks: prose around the JSON (which makes the
+answer unparseable), a dropped beat (which silently shortens the film), a rounded duration (which
+makes the engine render a length the plan does not claim), a structured value where the schema
+wants a sentence, and degenerate conditioning (the same plate as both the first and the last frame,
+which asks a clip to end where it began). Each is also enforced in ordinary code after the reply —
+the instruction is advisory, the validator is the guarantee.
+
+The decode is constrained to VALID JSON only (`core-llm`'s `Constraint::Json`; there is no schema
+or grammar variant). It cannot enforce the object's shape, so every rule here has to be carried by
+the instruction and checked afterwards by `film_planner::parse_planner_output`.
 
 [SYSTEM]
 You are a film planner. You turn a brief into a shot plan that a specific video model can actually
@@ -39,8 +45,19 @@ Rules:
 - Every shot names, in continuityRoles, the approved roles it depicts. Continuity comes from those
   canonical references; a shot that merely continues the previous one is not anchored to anything.
 - Each shot is one completed action that starts and finishes inside its own clip. Write its
-  startState and endState as the world at the first and last frame, so the next shot can pick up
-  from a state rather than from a guess.
+  startState and endState as SENTENCES describing what the camera sees in the first and the last
+  frame — who is in shot, where they are, where the objects that matter are — so the next shot can
+  pick up from a state rather than from a guess. They must differ from each other; a shot whose
+  first and last frame describe the same thing has no action in it.
+- beat, framing, prompt, startState and endState are plain strings, one piece of prose each. Never
+  an object, never a list, never a role-by-role breakdown. An optional field you have nothing to
+  say for is OMITTED, not written as "" or null.
+- Name every approved role that is on screen in a shot in that shot's continuityRoles — the people,
+  the prop the beat turns on, the location — and describe them in the prompt too. A beat the brief
+  says must show something is not covered by a shot that leaves it out.
+- Reach for text_to_video first; it is the right mode for most shots. Use a keyframe mode only when
+  a specific approved plate belongs in a specific frame, and never put the same role in both the
+  first and the last slot.
 - Write prompts as the model's own prompt guidance asks: one paragraph per shot, positive
   statements only, describing subject, action, setting, light, shot size and camera movement.
 - If something the brief asks for cannot be expressed inside the stated limits, still return the
