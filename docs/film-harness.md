@@ -1,9 +1,9 @@
 # Local filmmaking harness (`film-harness`)
 
-Epic 22708 / sc-22710. Renders a hand-authored production plan into a SceneWorks sequence through
-the existing API seams — projects, asset import, `POST /api/v1/video/jobs`, job polling, timelines
-and the `timeline_export` job — and leaves a versioned run record behind. No new UI, no parallel
-renderer: every take is produced by whatever GPU worker claims the job.
+Epic 22708 / sc-22710, sc-22711. Renders a hand-authored production plan into a SceneWorks sequence
+through the existing API seams — projects, asset import, `POST /api/v1/video/jobs`, job polling,
+timelines and the `timeline_export` job — and leaves a versioned run record behind. No new UI, no
+parallel renderer: every take is produced by whatever GPU worker claims the job.
 
 ## Documents
 
@@ -23,6 +23,88 @@ Each conditioning mode fixes which slots it takes — `text_to_video` none, `ima
 frame, `first_last_frame` first and last, `reference_to_video` references only — which is how a
 plan stays honest about MiniMax-H3's rule that keyframes and references are different tasks on
 different checkpoints.
+
+### Dependencies (plan schema 2)
+
+A shot may declare `dependsOn: [{ shotId, kind, note }]`, with `kind` either:
+
+| kind | meaning | what a changed take upstream means |
+| --- | --- | --- |
+| `conditioning` | this shot's conditioning came out of that shot's **selected take** (last-frame chaining, a plate cut from a take) | the input this shot was built on is gone |
+| `continuity` | this shot's `startState` is that shot's `endState` | the take is still valid input-wise, but the story state it continues from may not match |
+
+Edges must name another shot in the same plan and may not form a cycle. They are declarations, not
+wiring: nothing here reaches the model. Their one job is to tell the harness who to **flag** when a
+selected take changes — see *Replacing a take* below. A schema 1 plan reads unchanged and declares
+no edges.
+
+## Durable run state, resume and take replacement
+
+`run.json` is the run's state, not a report: it is rewritten (atomically) at every transition —
+before a job is created, once its id is known, once a take is adopted, after the timeline, after the
+export. `state` is `running` while a controller holds it, so a record left by a killed controller
+says so.
+
+Every attempt carries an **idempotency key** (`<runId>:<shotId>:a<attempt>`), written into the
+record *before* the job is created and stamped into the job payload
+(`advanced.filmHarness.idempotencyKey`). That closes the one window a record alone cannot: a
+controller that died between creating the job and recording its id finds its own job by the key
+instead of enqueuing a second one. References are adopted the same way, by the `filmHarness`
+provenance the import stamps; the project by the `<title> (<runId>)` name it was created under; the
+export job by the timeline it renders.
+
+`film-harness resume --out DIR` picks a run up:
+
+- every recorded take is reused; no shot with a selected take is re-dispatched;
+- every job the record names is read back from the API and adopted at whatever state it reached —
+  completed jobs become takes, failed ones count as spent attempts, running ones are polled again
+  under what is left of their budget;
+- the plan and reference pack are re-read and must still hash to what the run recorded. **An edited
+  plan is refused**: that is a new run, not a resume;
+- the wall-clock budget is cumulative across controllers (`elapsedSeconds` accumulates) and the
+  per-shot attempt cap counts every automatic attempt ever made, so restarting cannot turn a bounded
+  run into an unbounded one.
+
+Only a resumable stop can be resumed. A cancel or a crash is resumable; an exhausted wall-clock
+budget, an over-budget memory peak or an exhausted attempt cap is **terminal**, and `stop.detail`
+says which plan value to change. `film-harness status --out DIR` prints all of this without touching
+the API.
+
+**One controller per run directory.** The record is rewritten by whichever controller holds it, and
+nothing locks it: running `run` and `resume` against the same `--out` at the same time interleaves
+their writes. The idempotency keys stop a *sequential* replay from duplicating work; they are not a
+substitute for a lock between two live controllers. `replace-take` refuses outright while the shot
+still has an unsettled attempt, and points at `resume`. Cancel the run, or let it finish, before
+starting another command against its directory.
+
+### Cancellation
+
+`film-harness cancel --out DIR` (or Ctrl-C in the running shell) stops new dispatch, cancels the
+in-flight job through the existing cancel route, leaves every finished take in the project, skips
+the timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already
+spent are not re-spent: a cancel is not a retry.
+
+### Replacing a take
+
+A shot keeps **all** its takes with their provenance; at most one is `selectedAttempt`. The first
+usable take of a shot is selected, and nothing but an explicit replacement ever moves it — replay
+and resume never do.
+
+```text
+film-harness replace-take --out DIR --shot SH030 --reason "the parcel is the wrong red" [--export]
+```
+
+marks the take the shot is carrying `rejection: { at, reason }` (it stays in the record, and its
+asset stays in the project), and dispatches **exactly one** new attempt for that shot. The
+replacement is `humanRequested`, so it neither spends nor respects the plan's automatic attempt cap;
+it does not loop, and a failed replacement stops with `replacement_failed` rather than trying again.
+Every other shot's takes, jobs and assets are untouched.
+
+When the replacement lands, shots that **declared a dependency** on it are flagged `needsReview`
+with the reason and the dependency kind, and the timeline item for that shot is rewritten in place
+(a PUT — no job, and no other item moves). Flagged shots are never re-rendered: that is a decision
+for the person who read the flag. Without `--export` the existing export is marked `stale`; with it,
+one re-export runs.
 
 ## Validation before dispatch
 
@@ -48,17 +130,22 @@ including refusal (`outcome: rejected` with the findings).
 
 ```text
 cargo build -p sceneworks-rust-api --bin film-harness
-target/debug/film-harness validate --plan PLAN --references REFS [--api URL] [--shots A,B]
-target/debug/film-harness run      --plan PLAN --references REFS [--api URL] [--shots A,B]
-                                   [--project-id ID] [--out DIR] [--poll-seconds N]
-                                   [--no-export] [--skip-install-check]
+target/debug/film-harness validate     --plan PLAN --references REFS [--api URL] [--shots A,B]
+target/debug/film-harness run          --plan PLAN --references REFS [--api URL] [--shots A,B]
+                                       [--project-id ID] [--out DIR] [--poll-seconds N]
+                                       [--no-export] [--skip-install-check]
+target/debug/film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
+target/debug/film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export]
+target/debug/film-harness cancel       --out DIR
+target/debug/film-harness status       --out DIR
 target/debug/film-harness fixture-images --out DIR
 ```
 
 `run` needs a SceneWorks API (default `http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from
 `$SCENEWORKS_ACCESS_TOKEN`) with a registered GPU worker and a utility worker for the ffmpeg export
 (`SCENEWORKS_RUN_UTILITY_INPROCESS=1` on the API). Exit codes: 0 completed, 2 refused before
-dispatch, 3 stopped on a limit or a shot failed, 1 transport/API/io error.
+dispatch or the action does not apply to the record, 3 stopped on a limit / a cancel / a failed shot
+(and from `status`, a run that can still be resumed), 1 transport/API/io error.
 
 `scripts/film-harness-smoke.sh` builds this checkout, starts the API and the native GPU worker
 against a scratch data dir, waits for both to register, renders `SH010,SH020` of the fixture on

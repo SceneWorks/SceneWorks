@@ -26,10 +26,22 @@
 // suspenders since it links the same contract types).
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The target volume is keyed by the checkout it builds, because EVERY checkout mounts at the same
+// container path `/workspace`. A single shared target volume therefore makes cargo's fingerprints
+// collide across worktrees: whichever checkout built last leaves artifacts the next one reuses, and
+// the check reports errors from source it is not looking at ("no field `x` on type `y`" for a field
+// that is plainly there). The toolchain, registry and VCS volumes stay shared — those are keyed by
+// content, not by checkout, and they are the expensive ones.
+const TARGET_VOLUME = `sceneworks-neither-target-${createHash("sha256")
+  .update(repoRoot)
+  .digest("hex")
+  .slice(0, 12)}`;
 
 // The parity lane's clippy, scoped to the crates that carry the macOS/candle-gated code.
 const CLIPPY_ARGS = [
@@ -107,7 +119,7 @@ function runDocker() {
     "-v",
     "sceneworks-neither-git:/usr/local/cargo/git",
     "-v",
-    "sceneworks-neither-target:/workspace/target",
+    `${TARGET_VOLUME}:/workspace/target`,
     RUST_IMAGE,
     "bash",
     "-euc",

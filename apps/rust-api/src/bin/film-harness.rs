@@ -2,35 +2,49 @@
 //! running SceneWorks API (epic 22708, sc-22710).
 //!
 //! ```text
-//! film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL]
-//! film-harness run      --plan PLAN.json --references REFERENCES.json [--api URL] [--shots SH010,SH020]
-//!                       [--project-id ID] [--out DIR] [--poll-seconds N] [--no-export]
-//!                       [--skip-install-check]
+//! film-harness validate     --plan PLAN.json --references REFERENCES.json [--api URL]
+//! film-harness run          --plan PLAN.json --references REFERENCES.json [--api URL] [--shots SH010,SH020]
+//!                           [--project-id ID] [--out DIR] [--poll-seconds N] [--no-export]
+//!                           [--skip-install-check]
+//! film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
+//! film-harness replace-take --out DIR --shot SH030 [--reason TEXT] [--export]
+//! film-harness cancel       --out DIR
+//! film-harness status       --out DIR
 //! film-harness fixture-images --out DIR
 //! ```
 //!
 //! `run` needs a SceneWorks API with a registered GPU worker (`video_generate`) and a utility
 //! worker (`timeline_export`, e.g. `SCENEWORKS_RUN_UTILITY_INPROCESS=1`). It creates nothing until
 //! the plan, the reference pack, the model's catalog entry and the host all validate; the run
-//! record (`run.json`) is written under `--out` on every path, including refusal. Exit codes: 0 on
-//! a completed run, 2 when the plan was refused before dispatch, 3 when the run stopped on a limit
-//! or a shot failed, 1 on a transport/API/io error.
+//! record (`run.json`) is written under `--out` at every state transition, including refusal.
+//!
+//! `run` and `resume` both stop on Ctrl-C (or on `film-harness cancel --out DIR` from another
+//! shell): live jobs are canceled through the API, everything finished stays, and the record says
+//! the run is resumable.
+//!
+//! Exit codes: 0 on a completed run, 2 when the plan was refused before dispatch or the action does
+//! not apply to the record, 3 when the run stopped on a limit / a cancel / a failed shot, 1 on a
+//! transport/API/io error.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use sceneworks_core::film_plan::RunOutcome;
+use sceneworks_core::film_plan::{RunOutcome, RunState};
 use sceneworks_rust_api::film_harness::{
-    self, HarnessError, HttpTransport, RunOptions, FIXTURE_REFERENCES,
+    self, CancelToken, HarnessError, HttpTransport, ResumeOptions, RunOptions, FIXTURE_REFERENCES,
 };
 
 const USAGE: &str = "\
 film-harness — render a hand-authored production plan into a SceneWorks sequence
 
 USAGE:
-  film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL] [--shots IDS]
-  film-harness run      --plan PLAN.json --references REFERENCES.json [OPTIONS]
+  film-harness validate     --plan PLAN.json --references REFERENCES.json [--api URL] [--shots IDS]
+  film-harness run          --plan PLAN.json --references REFERENCES.json [OPTIONS]
+  film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
+  film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export] [--api URL]
+  film-harness cancel       --out DIR
+  film-harness status       --out DIR
   film-harness fixture-images --out DIR
 
 OPTIONS (run):
@@ -42,6 +56,16 @@ OPTIONS (run):
   --poll-seconds N       Job polling cadence in seconds (default 5)
   --no-export            Skip the timeline assembly and MP4 export
   --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
+
+resume       picks a run up from its record: finished takes are reused, jobs still in flight are
+             adopted, and what is left of the plan's wall-clock budget and per-shot attempt cap is
+             what bounds it. The selected take of every shot is left alone.
+replace-take rejects the take a shot is carrying and renders exactly ONE more for that shot, with
+             --reason recorded beside it. Other shots' takes, jobs and assets are untouched; shots
+             that declared a dependency on it are flagged needs_review, never re-rendered. Without
+             --export the existing export is only marked stale.
+cancel       asks a run in another shell to stop; status prints what a record says without touching
+             the API.
 ";
 
 fn main() -> ExitCode {
@@ -63,6 +87,9 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     };
     match command {
         "validate" | "run" => {}
+        "resume" | "replace-take" => return record_command(command, &args[1..]).await,
+        "cancel" => return cancel_command(&args[1..]),
+        "status" => return status_command(&args[1..]),
         "fixture-images" => return fixture_images(&args[1..]),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -107,63 +134,272 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             Err(error) => report_error(error),
         };
     }
+    // Ctrl-C stops dispatch cooperatively rather than orphaning the job in flight.
+    spawn_signal_handler(parsed.options.cancel.clone());
     match film_harness::run(&transport, &parsed.options).await {
         Ok(record) => {
-            let record_path = parsed.options.out_dir.join("run.json");
-            println!(
-                "run {} finished: {:?} ({:.0}s); record at {}",
-                record.run_id,
-                record.outcome,
-                record.elapsed_seconds,
-                record_path.display()
+            print_record(&record, &parsed.options.out_dir);
+            exit_code_for(&record)
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// Trip `cancel` on Ctrl-C. A second Ctrl-C is left to the default handler, so an operator who
+/// really wants out is never trapped waiting for a cancel to settle.
+fn spawn_signal_handler(cancel: CancelToken) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!(
+                "film-harness: cancel requested — canceling live jobs and stopping dispatch; \
+                 `film-harness resume --out DIR` picks the run back up"
             );
-            for shot in &record.shots {
-                let last = shot.attempts.last();
-                println!(
-                    "  {:<8} {:<15} attempts={} job={} asset={}{}",
-                    shot.shot_id,
-                    format!("{:?}", shot.outcome),
-                    shot.attempts.len(),
-                    last.and_then(|attempt| attempt.job_id.as_deref())
-                        .unwrap_or("-"),
-                    last.and_then(|attempt| attempt.take.as_ref())
-                        .map(|take| take.asset_id.as_str())
-                        .unwrap_or("-"),
-                    last.and_then(|attempt| attempt.error.as_deref())
-                        .map(|error| format!("  error: {error}"))
-                        .unwrap_or_default()
-                );
+            cancel.request();
+        }
+    });
+}
+
+fn exit_code_for(record: &sceneworks_core::film_plan::RunRecord) -> ExitCode {
+    match record.outcome {
+        RunOutcome::Completed => ExitCode::SUCCESS,
+        RunOutcome::Rejected => ExitCode::from(2),
+        _ => ExitCode::from(3),
+    }
+}
+
+/// One screen of what a run record says: per-shot selection, attempts, review flags, the export,
+/// and — the part an operator acts on — whether the run can be resumed and why it stopped.
+fn print_record(record: &sceneworks_core::film_plan::RunRecord, out_dir: &std::path::Path) {
+    println!(
+        "run {} {} — {:?} ({:.0}s); record at {}",
+        record.run_id,
+        match record.state {
+            RunState::Running => "RUNNING",
+            RunState::Finished => "finished",
+        },
+        record.outcome,
+        record.elapsed_seconds,
+        out_dir.join(film_harness::RUN_RECORD_FILE).display()
+    );
+    for shot in &record.shots {
+        let selected = shot.selected();
+        println!(
+            "  {:<8} {:<15} attempts={} selected={} job={} asset={}{}",
+            shot.shot_id,
+            format!("{:?}", shot.outcome),
+            shot.attempts.len(),
+            shot.selected_attempt
+                .map(|attempt| attempt.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            selected
+                .or_else(|| shot.attempts.last())
+                .and_then(|attempt| attempt.job_id.as_deref())
+                .unwrap_or("-"),
+            selected
+                .and_then(|attempt| attempt.take.as_ref())
+                .map(|take| take.asset_id.as_str())
+                .unwrap_or("-"),
+            shot.attempts
+                .last()
+                .and_then(|attempt| attempt.error.as_deref())
+                .map(|error| format!("  error: {error}"))
+                .unwrap_or_default()
+        );
+        for attempt in shot.attempts.iter().filter(|a| a.rejection.is_some()) {
+            let rejection = attempt.rejection.as_ref().expect("filtered");
+            println!(
+                "           rejected attempt {} ({}): {}",
+                attempt.attempt, rejection.at, rejection.reason
+            );
+        }
+        for flag in &shot.needs_review {
+            println!("           NEEDS REVIEW: {}", flag.reason);
+        }
+    }
+    if let Some(export) = &record.export {
+        println!(
+            "  export   {:<15} job={} asset={} path={}{}{}",
+            export.status,
+            export.job_id,
+            export.asset_id.as_deref().unwrap_or("-"),
+            export.render_path.as_deref().unwrap_or("-"),
+            if export.stale { "  STALE" } else { "" },
+            export
+                .error
+                .as_deref()
+                .map(|error| format!("  error: {error}"))
+                .unwrap_or_default()
+        );
+    }
+    if let Some(stop) = &record.stop {
+        println!(
+            "  stopped: {} — {}\n  {}",
+            stop.reason,
+            stop.detail,
+            if stop.resumable {
+                "resumable: `film-harness resume --out DIR`"
+            } else {
+                "terminal: this run will not dispatch again"
             }
-            if let Some(export) = &record.export {
-                println!(
-                    "  export   {:<15} job={} asset={} path={}{}",
-                    export.status,
-                    export.job_id,
-                    export.asset_id.as_deref().unwrap_or("-"),
-                    export.render_path.as_deref().unwrap_or("-"),
-                    export
-                        .error
-                        .as_deref()
-                        .map(|error| format!("  error: {error}"))
-                        .unwrap_or_default()
-                );
-            }
-            match record.outcome {
-                RunOutcome::Completed => ExitCode::SUCCESS,
-                RunOutcome::Rejected => ExitCode::from(2),
-                _ => ExitCode::from(3),
+        );
+    }
+}
+
+/// `resume` and `replace-take`: both continue an existing record through the API.
+async fn record_command(command: &str, args: &[String]) -> ExitCode {
+    let parsed = match parse_record_options(command, args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("film-harness: {message}\n\n{USAGE}");
+            return ExitCode::from(1);
+        }
+    };
+    let transport = match HttpTransport::new(&parsed.api_url, parsed.token.clone()) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    spawn_signal_handler(parsed.options.cancel.clone());
+    let result = match command {
+        "resume" => film_harness::resume(&transport, &parsed.options).await,
+        _ => {
+            let Some(shot) = parsed.shot.as_deref() else {
+                eprintln!("film-harness: replace-take needs --shot SHxxx\n\n{USAGE}");
+                return ExitCode::from(1);
+            };
+            film_harness::replace_take(&transport, &parsed.options, shot, &parsed.reason).await
+        }
+    };
+    match result {
+        Ok(record) => {
+            print_record(&record, &parsed.options.out_dir);
+            exit_code_for(&record)
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+fn cancel_command(args: &[String]) -> ExitCode {
+    let Some(out_dir) = flag_value(args, "--out") else {
+        eprintln!("film-harness: cancel needs --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    match film_harness::request_cancel(&PathBuf::from(out_dir)) {
+        Ok(path) => {
+            println!(
+                "cancel requested ({}); the run stops within one poll interval and its record says \
+                 whether it can be resumed",
+                path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn status_command(args: &[String]) -> ExitCode {
+    let Some(out_dir) = flag_value(args, "--out") else {
+        eprintln!("film-harness: status needs --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let out_dir = PathBuf::from(out_dir);
+    match film_harness::read_run_record(&out_dir) {
+        Ok(record) => {
+            print_record(&record, &out_dir);
+            if record.is_resumable() {
+                ExitCode::from(3)
+            } else {
+                exit_code_for(&record)
             }
         }
         Err(error) => report_error(error),
     }
 }
 
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
 fn report_error(error: HarnessError) -> ExitCode {
     eprintln!("film-harness: {error}");
     match error {
-        HarnessError::Validation(_) => ExitCode::from(2),
+        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
         _ => ExitCode::from(1),
     }
+}
+
+struct ParsedRecord {
+    api_url: String,
+    token: Option<String>,
+    shot: Option<String>,
+    reason: String,
+    options: ResumeOptions,
+}
+
+fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, String> {
+    let mut out: Option<PathBuf> = None;
+    let mut api_url = std::env::var("SCENEWORKS_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let mut token = std::env::var("SCENEWORKS_ACCESS_TOKEN").ok();
+    let mut shot: Option<String> = None;
+    let mut reason = String::new();
+    let mut poll_seconds = 5_u64;
+    // `resume` finishes the run, so it exports by default. `replace-take` re-renders ONE shot; the
+    // export is other work, so it only happens when asked for and is otherwise marked stale.
+    let mut export = command == "resume";
+    let mut require_installed = true;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--out" => out = Some(PathBuf::from(value()?)),
+            "--api" => api_url = value()?,
+            "--token" => token = Some(value()?),
+            "--shot" => shot = Some(value()?),
+            "--reason" => reason = value()?,
+            "--poll-seconds" => {
+                poll_seconds = value()?
+                    .parse::<u64>()
+                    .map_err(|error| format!("--poll-seconds: {error}"))?
+                    .max(1)
+            }
+            // `resume --no-export` skips the export; `replace-take --export` asks for one, so the
+            // same field reads as "should this invocation export" either way.
+            "--no-export" => export = false,
+            "--export" => export = true,
+            "--skip-install-check" => require_installed = false,
+            other => return Err(format!("unknown option {other:?}")),
+        }
+    }
+    let out_dir = out.ok_or("--out is required")?;
+    if reason.trim().is_empty() {
+        reason = "replaced by hand".to_owned();
+    }
+    let mut options = ResumeOptions::new(out_dir);
+    options.poll_interval = Duration::from_secs(poll_seconds);
+    options.export = export;
+    options.require_installed = require_installed;
+    Ok(ParsedRecord {
+        api_url,
+        token,
+        shot,
+        reason,
+        options,
+    })
 }
 
 struct Parsed {
@@ -231,6 +467,10 @@ fn parse_options(args: &[String]) -> Result<Parsed, String> {
             .collect();
         PathBuf::from("film-harness-runs").join(stamp)
     });
+    // The run watches its own directory, so `film-harness cancel --out DIR` from another shell
+    // reaches it without a shared handle.
+    let cancel = film_harness::CancelToken::watching(&out_dir);
+    film_harness::clear_cancel_request(&out_dir).map_err(|error| error.to_string())?;
     Ok(Parsed {
         api_url,
         token,
@@ -243,6 +483,7 @@ fn parse_options(args: &[String]) -> Result<Parsed, String> {
             poll_interval: Duration::from_secs(poll_seconds),
             export,
             require_installed,
+            cancel,
         },
     })
 }

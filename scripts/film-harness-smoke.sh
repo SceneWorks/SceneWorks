@@ -116,3 +116,8 @@ echo "film-harness-smoke: rendering $SHOTS"
   --shots "$SHOTS" \
   --out "$SMOKE_DIR/run" \
   --poll-seconds 10
+
+# Ctrl-C during the render above, or `film-harness cancel --out "$SMOKE_DIR/run"` from another
+# shell, stops dispatch and cancels the live job; `film-harness resume --out "$SMOKE_DIR/run"`
+# picks it back up without re-rendering anything that finished, and `film-harness status --out
+# "$SMOKE_DIR/run"` prints where it got to.

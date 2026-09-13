@@ -34,12 +34,17 @@ use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
 };
 
-/// Schema version of [`ProductionPlan`] documents this module reads and writes.
-pub const PLAN_SCHEMA_VERSION: u32 = 1;
+/// Schema version of [`ProductionPlan`] documents this module reads and writes. Version 2 (sc-22711)
+/// adds `shots[].dependsOn`; a version 1 plan reads unchanged and simply declares no edges.
+pub const PLAN_SCHEMA_VERSION: u32 = 2;
+/// Plan schema versions this build accepts.
+pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[1, 2];
 /// Schema version of [`ReferencePack`] documents this module reads and writes.
 pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
-/// Schema version of [`RunRecord`] documents this module writes.
-pub const RUN_RECORD_SCHEMA_VERSION: u32 = 1;
+/// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
+/// durable resume state: `state`, `stop`, per-attempt idempotency keys and rejections, per-shot
+/// take selection and review flags, and the human decision log.
+pub const RUN_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// Conditioning modes a shot may declare. Each mode fixes which reference slots it takes, which
 /// is what keeps a plan honest about model-specific constraints: a first/last-frame model pins
@@ -54,6 +59,18 @@ pub const SHOT_CONDITIONING_MODES: &[&str] = &[
 
 /// Reference kinds a pack entry may declare.
 pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style", "plate"];
+
+/// Dependency kinds one shot may declare on another (sc-22711).
+///
+/// * `conditioning` — this shot's conditioning is derived from the other shot's **selected take**
+///   (last-frame chaining, a plate cut from a take). Re-selecting the other shot's take changes
+///   what this shot was conditioned on.
+/// * `continuity` — this shot's `startState` is the other shot's `endState`: the take is still
+///   valid input-wise, but the story state it continues from may no longer match.
+///
+/// Either way a changed selection downstream is a **review** signal, never an automatic
+/// regeneration: the harness flags the dependent and stops there.
+pub const SHOT_DEPENDENCY_KINDS: &[&str] = &["conditioning", "continuity"];
 
 /// Image extensions a reference file may carry; the import route accepts any `image/*` but the
 /// pack is checked in, so the list stays explicit.
@@ -138,6 +155,24 @@ pub struct Shot {
     /// must exist in the pack.
     #[serde(default)]
     pub continuity_roles: Vec<String>,
+    /// Shots this one depends on (sc-22711). Declaring the edge is what lets the harness flag this
+    /// shot for review when the shot it depends on gets a different selected take; nothing here is
+    /// sent to the model and nothing is ever regenerated automatically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<ShotDependency>,
+}
+
+/// One declared edge from a shot to a shot it depends on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShotDependency {
+    /// Id of the shot depended on. Must be another shot in the same plan.
+    pub shot_id: String,
+    /// One of [`SHOT_DEPENDENCY_KINDS`].
+    pub kind: String,
+    /// Why the edge exists, shown verbatim on the review flag it raises.
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,11 +315,11 @@ pub fn parse_resolution(value: &str) -> Option<(u32, u32)> {
 /// slot shape each conditioning mode demands.
 pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
-    if plan.schema_version != PLAN_SCHEMA_VERSION {
+    if !SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&plan.schema_version) {
         findings.push(PlanDiagnostic::plan(
             "schemaVersion",
             format!(
-                "unsupported plan schema version {} (this build reads {PLAN_SCHEMA_VERSION})",
+                "unsupported plan schema version {} (this build reads {SUPPORTED_PLAN_SCHEMA_VERSIONS:?})",
                 plan.schema_version
             ),
         ));
@@ -356,7 +391,138 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         }
         findings.extend(validate_shot_structure(shot));
     }
+    findings.extend(validate_dependencies(plan));
     findings
+}
+
+/// Dependency edges need the whole plan: every target must be another shot in it, an edge may not
+/// be declared twice, and the graph may not contain a cycle (a cycle would make "flag everything
+/// downstream of this shot" unbounded).
+fn validate_dependencies(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    let ids: BTreeSet<&str> = plan.shots.iter().map(|shot| shot.id.as_str()).collect();
+    for shot in &plan.shots {
+        let mut seen = BTreeSet::new();
+        for edge in &shot.depends_on {
+            if !SHOT_DEPENDENCY_KINDS.contains(&edge.kind.as_str()) {
+                findings.push(PlanDiagnostic::shot(
+                    &shot.id,
+                    "dependsOn.kind",
+                    format!(
+                        "unknown dependency kind {:?}; expected one of {}",
+                        edge.kind,
+                        SHOT_DEPENDENCY_KINDS.join(", ")
+                    ),
+                ));
+            }
+            if edge.shot_id == shot.id {
+                findings.push(PlanDiagnostic::shot(
+                    &shot.id,
+                    "dependsOn.shotId",
+                    "a shot cannot depend on itself",
+                ));
+            } else if !ids.contains(edge.shot_id.as_str()) {
+                findings.push(PlanDiagnostic::shot(
+                    &shot.id,
+                    "dependsOn.shotId",
+                    format!("{:?} is not a shot in this plan", edge.shot_id),
+                ));
+            }
+            if !seen.insert(edge.shot_id.as_str()) {
+                findings.push(PlanDiagnostic::shot(
+                    &shot.id,
+                    "dependsOn.shotId",
+                    format!("shot {:?} is depended on twice", edge.shot_id),
+                ));
+            }
+        }
+    }
+    if findings.is_empty() {
+        if let Some(cycle) = dependency_cycle(plan) {
+            findings.push(PlanDiagnostic::plan(
+                "shots.dependsOn",
+                format!("dependency cycle: {}", cycle.join(" -> ")),
+            ));
+        }
+    }
+    findings
+}
+
+/// The first dependency cycle in `plan`, as the shot ids on it (closing back on the first), or
+/// `None` when the graph is acyclic. Iterative depth-first search so a long chain cannot blow the
+/// stack.
+fn dependency_cycle(plan: &ProductionPlan) -> Option<Vec<String>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Open,
+        Done,
+    }
+    let edges: BTreeMap<&str, Vec<&str>> = plan
+        .shots
+        .iter()
+        .map(|shot| {
+            (
+                shot.id.as_str(),
+                shot.depends_on
+                    .iter()
+                    .map(|edge| edge.shot_id.as_str())
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut marks: BTreeMap<&str, Mark> = BTreeMap::new();
+    for root in edges.keys().copied() {
+        if marks.contains_key(root) {
+            continue;
+        }
+        // (shot, index of the next edge to walk) — the stack IS the current path.
+        let mut stack: Vec<(&str, usize)> = vec![(root, 0)];
+        marks.insert(root, Mark::Open);
+        while let Some((shot, index)) = stack.pop() {
+            let Some(next) = edges.get(shot).and_then(|targets| targets.get(index)) else {
+                marks.insert(shot, Mark::Done);
+                continue;
+            };
+            stack.push((shot, index + 1));
+            match marks.get(next) {
+                Some(Mark::Done) => {}
+                Some(Mark::Open) => {
+                    let start = stack
+                        .iter()
+                        .position(|(id, _)| id == next)
+                        .unwrap_or_default();
+                    let mut cycle: Vec<String> = stack[start..]
+                        .iter()
+                        .map(|(id, _)| (*id).to_owned())
+                        .collect();
+                    cycle.push((*next).to_owned());
+                    return Some(cycle);
+                }
+                None => {
+                    marks.insert(next, Mark::Open);
+                    stack.push((next, 0));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Shots that declare a direct dependency on `shot_id`, in plan order. Direct only: a dependent's
+/// own take did not change, so the change does not propagate past one hop on its own.
+pub fn direct_dependents<'a>(
+    plan: &'a ProductionPlan,
+    shot_id: &str,
+) -> Vec<(&'a Shot, &'a ShotDependency)> {
+    plan.shots
+        .iter()
+        .filter_map(|shot| {
+            shot.depends_on
+                .iter()
+                .find(|edge| edge.shot_id == shot_id)
+                .map(|edge| (shot, edge))
+        })
+        .collect()
 }
 
 fn validate_limits(limits: &PlanLimits) -> Vec<PlanDiagnostic> {
@@ -935,8 +1101,79 @@ pub enum RunOutcome {
     StoppedRunBudget,
     /// An attempt's observed peak memory exceeded the budget; no further shots were dispatched.
     StoppedMemoryLimit,
+    /// A cancel was requested; live jobs were canceled and no further shot was dispatched.
+    Canceled,
     /// At least one selected shot did not render (or the export failed) within its limits.
     Failed,
+}
+
+/// Whether a record on disk is one a controller is (or was) working, or one that is done with it.
+///
+/// This is the field a resume reads first: a `running` record means the controller either is alive
+/// or died mid-run, and either way the shots, jobs and takes it names are the ones to reconcile
+/// against the API rather than re-create. It is written at EVERY state transition, so the record is
+/// never further behind the API than one transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    /// A controller holds this run. `outcome` is not meaningful yet.
+    Running,
+    /// No controller holds this run; `outcome` and `stop` describe how it ended.
+    Finished,
+}
+
+/// Why a run stopped dispatching, and whether it can be picked up again.
+///
+/// `resumable` is the whole point of the field: a cancel or a crash leaves work a `resume` can
+/// finish under the SAME declared limits, while an exhausted budget or attempt cap does not —
+/// continuing those would be exactly the unbounded retry the limits exist to prevent, so they are
+/// terminal and say what the human would have to change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStop {
+    /// Stable code: `canceled`, `run_budget`, `memory_limit`, `attempts_exhausted`,
+    /// `export_failed`, `interrupted`.
+    pub reason: String,
+    /// What happened, in one sentence, including what to change when it is not resumable.
+    pub detail: String,
+    /// Whether `film-harness resume` can continue this run under its declared limits.
+    pub resumable: bool,
+}
+
+/// A human's rejection of a take. The take, its job and its asset all stay in the record: this is
+/// the decision, not a deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeRejection {
+    pub at: String,
+    pub reason: String,
+}
+
+/// A dependent shot that must be looked at because something it declared a dependency on changed.
+/// Raised only by an explicit human action (a take replacement); never by replay, and never
+/// accompanied by an automatic re-render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFlag {
+    pub raised_at: String,
+    /// The shot whose selected take changed.
+    pub source_shot_id: String,
+    /// The declared [`SHOT_DEPENDENCY_KINDS`] edge that carried the change.
+    pub dependency: String,
+    pub reason: String,
+}
+
+/// One human decision, in the order the decisions were made: the provenance half of the production
+/// record. Replay adds nothing here — only a person's `resume`, `cancel` or `replace-take` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionDecision {
+    pub at: String,
+    /// `resume`, `cancel`, or `replace_take`.
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shot_id: Option<String>,
+    pub detail: String,
 }
 
 /// Outcome of one shot within a run.
@@ -946,6 +1183,9 @@ pub enum ShotOutcome {
     Rendered,
     Failed,
     TimedOut,
+    /// The attempt in flight was canceled. Distinct from `Failed`: nothing went wrong with it, and
+    /// the shot still has its remaining attempts.
+    Canceled,
     /// Selected but never dispatched because a run-level limit stopped dispatch first.
     NotDispatched,
     /// In the plan but not in this run's selection.
@@ -1060,8 +1300,15 @@ pub struct TakeRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AttemptRecord {
     pub attempt: u32,
+    /// `<runId>:<shotId>:a<attempt>` — written into the job payload and into this record BEFORE the
+    /// job is created, so a controller that died between the two finds its own job on replay
+    /// instead of enqueuing a second one.
+    #[serde(default)]
+    pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
+    /// `canceled` when a limit or a cancel ended the wait.
     pub status: String,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1073,6 +1320,21 @@ pub struct AttemptRecord {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<TakeRecord>,
+    /// Set when a human rejected this take. The take, job and asset stay recorded; this only says a
+    /// person asked for a different one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<TakeRejection>,
+    /// True for the one attempt an explicit `replace-take` authorised. It is not an automatic
+    /// retry, so it is not counted against `limits.maxAttemptsPerShot`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human_requested: bool,
+}
+
+impl AttemptRecord {
+    /// Whether this attempt produced a take that is still a candidate for selection.
+    pub fn has_live_take(&self) -> bool {
+        self.take.is_some() && self.rejection.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1083,8 +1345,51 @@ pub struct ShotRunRecord {
     pub intended: IntendedState,
     #[serde(default)]
     pub conditioning_assets: ConditioningAssets,
+    /// Every attempt this shot ever made, with its provenance. Nothing is ever removed: a rejected
+    /// take stays beside the one that replaced it.
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    /// The [`AttemptRecord::attempt`] whose take represents this shot. At most one, and only ever
+    /// set when it was `None` (first successful take) or changed by an explicit `replace-take`:
+    /// resuming a run NEVER moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_attempt: Option<u32>,
+    /// Raised when a shot this one declared a dependency on got a different selected take. The
+    /// human resolves these; the harness never regenerates a flagged shot on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs_review: Vec<ReviewFlag>,
+}
+
+impl ShotRunRecord {
+    /// The selected take's attempt, if this shot has one.
+    pub fn selected(&self) -> Option<&AttemptRecord> {
+        let attempt = self.selected_attempt?;
+        self.attempts
+            .iter()
+            .find(|candidate| candidate.attempt == attempt)
+    }
+
+    /// Automatic attempts made so far — a `replace-take` attempt is a human decision, not a retry,
+    /// so it does not spend the plan's attempt cap.
+    pub fn automatic_attempts(&self) -> u32 {
+        u32::try_from(
+            self.attempts
+                .iter()
+                .filter(|attempt| !attempt.human_requested)
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
+    /// The next attempt number for this shot (attempt numbers never repeat within a shot).
+    pub fn next_attempt_number(&self) -> u32 {
+        self.attempts
+            .iter()
+            .map(|attempt| attempt.attempt)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1112,6 +1417,10 @@ pub struct TimelineRecord {
 pub struct ExportRecord {
     pub job_id: String,
     pub status: String,
+    /// True once a selected take changed after this export ran: the MP4 no longer matches the
+    /// selected takes. Flag only — re-exporting is an explicit request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1120,9 +1429,25 @@ pub struct ExportRecord {
     pub error: Option<String>,
 }
 
-/// The production record of one run: shot -> attempt -> job -> asset, the timeline, the export,
-/// and the observed model/backend/hardware. Written at the end (and on refusal), so a partial run
-/// still leaves a diagnosable document.
+/// An export the controller is about to dispatch, written BEFORE the job is created so a
+/// controller that died in between adopts its own export job instead of starting a second render.
+/// `supersedes` is the export job this one replaces (a re-export after a take changed), which is
+/// what tells a resume apart the old finished job from the new one on the same timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportPending {
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+}
+
+/// The production record of one run: shot -> attempt -> job -> asset, the takes and which one is
+/// selected, the human decisions, the timeline, the export, and the observed model/backend/hardware.
+///
+/// This is the **durable state of the run**, not a report written at the end: it is rewritten at
+/// every state transition (before a job is created, after its id is known, after a take is
+/// adopted, after the timeline and after the export), so a controller killed at any point leaves a
+/// record that `resume` can reconcile against the API without re-dispatching anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
@@ -1131,7 +1456,12 @@ pub struct RunRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// `running` while a controller holds the run — the field a resume reads first.
+    pub state: RunState,
     pub outcome: RunOutcome,
+    /// Why dispatch stopped and whether a resume may continue. `None` on a clean completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<RunStop>,
     pub plan: SourceDocument,
     pub reference_pack: SourceDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1150,8 +1480,16 @@ pub struct RunRecord {
     pub timeline: Option<TimelineRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportRecord>,
+    /// Set while an export job has been asked for but its id is not recorded yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_pending: Option<ExportPending>,
     #[serde(default)]
     pub diagnostics: Vec<PlanDiagnostic>,
+    /// Every human decision taken on this run, oldest first.
+    #[serde(default)]
+    pub decisions: Vec<ProductionDecision>,
+    /// Wall-clock the run has spent across every controller that has held it, so the plan's
+    /// `limits.maxRunSeconds` bounds the run and not merely one attempt at it.
     pub elapsed_seconds: f64,
 }
 
@@ -1159,6 +1497,25 @@ impl RunRecord {
     /// Serialize with stable key order for diffs.
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or_else(|_| json!({}))
+    }
+
+    /// The shot record for `shot_id`, if the run has one.
+    pub fn shot(&self, shot_id: &str) -> Option<&ShotRunRecord> {
+        self.shots.iter().find(|shot| shot.shot_id == shot_id)
+    }
+
+    /// Mutable access to the shot record for `shot_id`.
+    pub fn shot_mut(&mut self, shot_id: &str) -> Option<&mut ShotRunRecord> {
+        self.shots.iter_mut().find(|shot| shot.shot_id == shot_id)
+    }
+
+    /// Whether a controller may pick this run up again: it either died holding it (`running`) or
+    /// stopped for a reason that left work to do under the same declared limits.
+    pub fn is_resumable(&self) -> bool {
+        match self.state {
+            RunState::Running => self.outcome != RunOutcome::Rejected,
+            RunState::Finished => self.stop.as_ref().is_some_and(|stop| stop.resumable),
+        }
     }
 }
 
@@ -1478,7 +1835,13 @@ mod tests {
             run_id: "run_1".into(),
             created_at: "2026-09-13T00:00:00Z".into(),
             finished_at: None,
+            state: RunState::Finished,
             outcome: RunOutcome::Rejected,
+            stop: Some(RunStop {
+                reason: "interrupted".into(),
+                detail: "refused".into(),
+                resumable: false,
+            }),
             plan: SourceDocument {
                 id: "p".into(),
                 version: 1,
@@ -1500,12 +1863,190 @@ mod tests {
             shots: vec![],
             timeline: None,
             export: None,
+            export_pending: None,
             diagnostics: vec![PlanDiagnostic::shot("SH010", "prompt", "empty")],
+            decisions: vec![ProductionDecision {
+                at: "2026-09-13T00:00:01Z".into(),
+                action: "cancel".into(),
+                shot_id: None,
+                detail: "operator".into(),
+            }],
             elapsed_seconds: 0.0,
         };
         let json = record.to_json();
         assert_eq!(json["outcome"], "rejected");
+        assert_eq!(json["state"], "finished");
+        assert_eq!(json["stop"]["resumable"], false);
         let back: RunRecord = serde_json::from_value(json).unwrap();
         assert_eq!(back, record);
+        assert!(!back.is_resumable());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-22711 — dependency edges
+    // -----------------------------------------------------------------------------------------
+
+    fn plan_with_edges(edges: Value) -> ProductionPlan {
+        let mut value = plan_json();
+        value["schemaVersion"] = json!(2);
+        value["shots"][1]["dependsOn"] = edges;
+        serde_json::from_value(value).expect("plan parses")
+    }
+
+    #[test]
+    fn a_v1_plan_still_reads_and_declares_no_edges() {
+        let plan = plan();
+        assert_eq!(plan.schema_version, 1);
+        assert!(validate_plan_structure(&plan).is_empty());
+        assert!(plan.shots.iter().all(|shot| shot.depends_on.is_empty()));
+    }
+
+    #[test]
+    fn dependency_edges_must_name_another_shot_in_the_plan_with_a_known_kind() {
+        let plan = plan_with_edges(json!([
+            { "shotId": "SH010", "kind": "continuity", "note": "carries the parcel in" }
+        ]));
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+        assert_eq!(direct_dependents(&plan, "SH010").len(), 1);
+        assert_eq!(direct_dependents(&plan, "SH020").len(), 0);
+
+        let plan = plan_with_edges(json!([
+            { "shotId": "SH999", "kind": "continuity" },
+            { "shotId": "SH020", "kind": "continuity" },
+            { "shotId": "SH010", "kind": "vibes" },
+            { "shotId": "SH010", "kind": "continuity" }
+        ]));
+        let findings = messages(&validate_plan_structure(&plan));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("dependsOn.shotId") && m.contains("not a shot in this plan")),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("cannot depend on itself")),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("dependsOn.kind") && m.contains("vibes")),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|m| m.contains("depended on twice")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_cycle_is_refused() {
+        let mut value = plan_json();
+        value["schemaVersion"] = json!(2);
+        value["shots"][0]["dependsOn"] = json!([{ "shotId": "SH020", "kind": "conditioning" }]);
+        value["shots"][1]["dependsOn"] = json!([{ "shotId": "SH010", "kind": "continuity" }]);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("dependency cycle") && findings[0].contains("SH010"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_acyclic_chain_is_accepted() {
+        let shots: Vec<Value> = (0..200)
+            .map(|index| {
+                let mut shot = plan_json()["shots"][0].clone();
+                shot["id"] = json!(format!("SH{index:03}"));
+                if index > 0 {
+                    shot["dependsOn"] =
+                        json!([{ "shotId": format!("SH{:03}", index - 1), "kind": "continuity" }]);
+                }
+                shot
+            })
+            .collect();
+        let mut value = plan_json();
+        value["schemaVersion"] = json!(2);
+        value["shots"] = Value::Array(shots);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+    }
+
+    #[test]
+    fn take_selection_and_attempt_accounting_ignore_human_requested_attempts() {
+        let attempt = |number: u32, human: bool, take: bool| AttemptRecord {
+            attempt: number,
+            idempotency_key: format!("run_1:SH010:a{number}"),
+            job_id: Some(format!("job{number}")),
+            status: "completed".into(),
+            started_at: "t".into(),
+            finished_at: None,
+            elapsed_seconds: 1.0,
+            peak_gpu_memory_pct: None,
+            error: None,
+            take: take.then(|| TakeRecord {
+                asset_id: format!("asset{number}"),
+                media_path: "p".into(),
+                encoded_duration_seconds: None,
+                encoded_fps: None,
+                encoded_frame_count: None,
+                has_audio: None,
+                seed: None,
+                adapter: None,
+                backend: None,
+                model: "m".into(),
+                raw_adapter_settings: Value::Null,
+            }),
+            rejection: None,
+            human_requested: human,
+        };
+        let mut shot = ShotRunRecord {
+            shot_id: "SH010".into(),
+            outcome: ShotOutcome::Rendered,
+            intended: IntendedState {
+                mode: "text_to_video".into(),
+                start_state: "a".into(),
+                end_state: "b".into(),
+                target_duration_seconds: 5.0,
+                width: 576,
+                height: 320,
+                fps: 24,
+                dialogue: None,
+                sound: None,
+            },
+            conditioning_assets: ConditioningAssets::default(),
+            attempts: vec![attempt(1, false, false), attempt(2, false, true)],
+            selected_attempt: Some(2),
+            needs_review: Vec::new(),
+        };
+        assert_eq!(shot.automatic_attempts(), 2);
+        assert_eq!(shot.next_attempt_number(), 3);
+        assert_eq!(shot.selected().map(|a| a.attempt), Some(2));
+
+        shot.attempts.push(attempt(3, true, true));
+        assert_eq!(
+            shot.automatic_attempts(),
+            2,
+            "a human-requested attempt does not spend the cap"
+        );
+        assert_eq!(shot.next_attempt_number(), 4);
+        shot.attempts[1].rejection = Some(TakeRejection {
+            at: "t".into(),
+            reason: "wrong parcel".into(),
+        });
+        assert!(!shot.attempts[1].has_live_take());
+        assert!(shot.attempts[2].has_live_take());
     }
 }

@@ -8,7 +8,14 @@
   // lengths from 5.1667s, and the 576x320 canvas — the cheapest one, ~14 min per 5.17s clip
   // against ~2 h at the default 1344x768. Keyframe modes take a first (and last) frame; the base
   // checkpoint has no reference conditioning, so no shot here lists referenceRoles.
-  "schemaVersion": 1,
+  //
+  // `dependsOn` (schema 2, sc-22711) declares what each shot carries forward. Every edge here is
+  // `continuity`: the shot's startState IS the previous shot's endState, so replacing an earlier
+  // shot's selected take is a reason to LOOK at the later ones, never a reason to re-render them.
+  // (A `conditioning` edge means the conditioning itself came out of another shot's selected take —
+  // last-frame chaining. No shot here does that: the keyframe shots condition on the approved
+  // `workshop_plate` from the reference pack, which no take can change.)
+  "schemaVersion": 2,
   "id": "courier-workshop",
   "version": 1,
   "title": "Courier at the Workshop",
@@ -50,6 +57,7 @@
       "sound": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone.",
       "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
       "seed": 22711,
+      "dependsOn": [{ "shotId": "SH010", "kind": "continuity", "note": "The courier and the parcel enter in SH010; SH020 starts from that doorway." }],
       "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
     },
     {
@@ -63,6 +71,7 @@
       "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
       "conditioning": { "mode": "text_to_video" },
       "seed": 22712,
+      "dependsOn": [{ "shotId": "SH020", "kind": "continuity", "note": "SH030 starts with the parcel in the hands SH020 brought to the bench." }],
       "continuityRoles": ["workbench_table", "courier", "red_parcel", "house_style"]
     },
     {
@@ -76,6 +85,7 @@
       "sound": "Footsteps receding, door creak and latch, then room tone.",
       "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
       "seed": 22713,
+      "dependsOn": [{ "shotId": "SH030", "kind": "continuity", "note": "SH040 starts from the parcel SH030 left resting on the workbench." }],
       "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
     },
     {
@@ -90,6 +100,7 @@
       "sound": "Door opening, footsteps, a rag dropped on the bench, room tone.",
       "conditioning": { "mode": "text_to_video" },
       "seed": 22714,
+      "dependsOn": [{ "shotId": "SH040", "kind": "continuity", "note": "SH050 starts from the empty workshop SH040 closed the door on." }],
       "continuityRoles": ["workshop_location", "workbench_table", "recipient", "red_parcel", "house_style"]
     },
     {
@@ -104,6 +115,7 @@
       "sound": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
       "conditioning": { "mode": "text_to_video" },
       "seed": 22715,
+      "dependsOn": [{ "shotId": "SH050", "kind": "continuity", "note": "SH060 opens the parcel SH050 found sealed on the bench." }],
       "continuityRoles": ["workbench_table", "recipient", "red_parcel", "house_style"]
     }
   ]
