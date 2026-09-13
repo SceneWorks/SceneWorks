@@ -223,6 +223,35 @@ anywhere — pointing a real vision model at them measures nothing. `real-takes.
 frames of the two real MiniMax-H3 takes from the sc-22710 smoke; its `mediaRoot` points outside the
 repository and a missing frame is a refusal, never a silent zero.
 
+### Vision review smoke
+
+The one command that puts real weights behind the reviewer. It needs a SceneWorks API with the
+native GPU worker registered (`image_vqa`), which `scripts/film-harness-smoke.sh` already knows how
+to stand up; it renders nothing and loads only SenseNova-U1-8B.
+
+```sh
+target/release/film-harness review-eval \
+  --set config/film-harness/review-eval/real-takes.jsonc \
+  --out ~/SceneWorks/film-harness-evidence/sc-22714/review-eval-real \
+  --api http://127.0.0.1:8000
+```
+
+Twenty-four `image_vqa` calls over the six checked frames of the two takes. Budget **20–35 minutes**
+end to end on the dev Mac: the first call pays the ~16 GB bf16 load, the rest run 20–40 s each under
+the review plan's `maxAnswerSeconds: 180`. Outputs, all under `--out`:
+
+| file | what it holds |
+| --- | --- |
+| `review-eval.json` | totals and per-question / per-topic / per-case counts |
+| `review-eval.txt` | the printed report, ending with the assistive notice |
+| `real_sh010.observed.json`, `real_sh020.observed.json` | every question, answer, confidence and flag, with the frames cited |
+
+Two labels are expected to be *hard*, and the report saying so is the point: SH020's first frame is
+the flat conditioning plate (so its `frames: "all"` questions are honestly mismatch/unobserved), and
+`sh020_cut` is labeled `mismatch` because SH020 is a different workshop from SH010 — which the
+shipped question, asking only what KIND of room it is, cannot see. Expect that one to be reported as
+a **miss**.
+
 ## Validation before dispatch
 
 `film-harness` creates nothing until every check passes; findings name the shot and the field:
