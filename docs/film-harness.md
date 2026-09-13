@@ -69,7 +69,15 @@ export job by the timeline it renders.
   plan is refused**: that is a new run, not a resume;
 - the wall-clock budget is cumulative across controllers (`elapsedSeconds` accumulates) and the
   per-shot attempt cap counts every automatic attempt ever made, so restarting cannot turn a bounded
-  run into an unbounded one.
+  run into an unbounded one;
+- an attempt that has a job is charged the wall clock since its `startedAt`, because the job kept
+  running while nothing was watching it. An attempt with **no** job — recorded before the POST that
+  never reached the API — has spent nothing, and its clock starts when the job is really created:
+  otherwise a resume the next morning would find `spent > maxShotSeconds`, dispatch a real render
+  and cancel it on the first poll, spending the shot's attempt on nothing;
+- a timeline the run already created is adopted by the `<title> (<runId>)` name it was created
+  under, so a controller killed between `POST /timelines` and the record write does not leave the
+  project holding two identical sequences.
 
 Only a resumable stop can be resumed. A cancel or a crash is resumable; an exhausted wall-clock
 budget, an over-budget memory peak or an exhausted attempt cap is **terminal**, and `stop.detail`
@@ -81,7 +89,25 @@ nothing locks it: running `run` and `resume` against the same `--out` at the sam
 their writes. The idempotency keys stop a *sequential* replay from duplicating work; they are not a
 substitute for a lock between two live controllers. `replace-take` refuses outright while the shot
 still has an unsettled attempt, and points at `resume`. Cancel the run, or let it finish, before
-starting another command against its directory.
+starting another command against its directory. The same line is in `film-harness --help` and in the
+`film_harness` module doc, because it is a property of the design and not of this page.
+
+**`run` refuses a directory that already holds a record.** A second `run` over the same `--out`
+would mint a new run id over the previous run's takes, decisions and provenance — while the
+`plan.json` / `references.json` copies beside the record are written once and then left alone, so
+the surviving documents would belong to the run that was overwritten and the record's hashes to the
+new one, and a later resume would refuse or mis-hash. `scripts/film-harness-smoke.sh` pins
+`--out "$SMOKE_DIR/run"`, so a second invocation is exactly this case: `resume`, `status`, or a
+different `--out`. A refused run still writes its own record, so a refusal also claims the
+directory.
+
+**What adoption cannot see: a cleared job.** Every lookup that finds a job this run created — the
+idempotency-key lookup and the export lookup — goes through `GET /api/v1/jobs`, which filters
+`cleared_at is null` on every path. A job the operator cleared out of the queue is therefore
+invisible, and a replay will enqueue that attempt again. The same route clamps `limit` at 500 and
+takes no offset, so a full page is widened by asking for each status separately and merging on job
+id; the common case is still a single request. Both are why the record — not the queue — is the run's
+state.
 
 ### Cancellation
 
@@ -89,6 +115,11 @@ starting another command against its directory.
 in-flight job through the existing cancel route, leaves every finished take in the project, skips
 the timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already
 spent are not re-spent: a cancel is not a retry.
+
+A directory with no `run.json` in it is **refused** (exit 2), not created: a mistyped `--out` that
+printed "cancel requested" and exited 0 while the render kept going is the one thing a cancel must
+never do. A run writes its record before its first API call, so any directory holding a live run has
+one.
 
 ### Replacing a take
 
@@ -109,8 +140,20 @@ Every other shot's takes, jobs and assets are untouched.
 When the replacement lands, shots that **declared a dependency** on it are flagged `needsReview`
 with the reason and the dependency kind, and the timeline item for that shot is rewritten in place
 (a PUT — no job, and no other item moves). Flagged shots are never re-rendered: that is a decision
-for the person who read the flag. Without `--export` the existing export is marked `stale`; with it,
-one re-export runs.
+for the person who read the flag. A flag is raised once per `(sourceShotId, dependency)` and nothing
+clears it — replacing the same upstream take twice is the same unread signal, not two, and only a
+human decision retires one (the review verbs are sc-22714). Without `--export` the existing export is
+marked `stale`; with it, one re-export runs — a re-export always dispatches a NEW job, because every
+export job the record has ever held is excluded from the lookup that adopts one.
+
+A replacement is scoped to **one shot**, including how it closes:
+
+- a run that stopped with a resumable stop (a cancel, a crash, a failed export) and still has other
+  selected shots without a take keeps that stop and stays resumable — replacing one take never
+  re-classifies the run as `attempts_exhausted`;
+- a replacement that FAILS leaves the shot with no selected take, and the timeline is deliberately
+  not rewritten (that would drop the shot out of the sequence) — so the sequence and the MP4 still
+  carry the **rejected** take. The export is marked `stale` and the stop and decision log say so.
 
 ## Validation before dispatch
 
@@ -144,7 +187,9 @@ The observed peak is read off the job's metrics block (`GET /api/v1/jobs/:id/met
 `peakMemoryBytes`, which the worker POSTs after its terminal progress), compared in GiB against
 `limits.maxMemoryGb`; `peakMemoryPct × hostMemoryGb` and finally the job snapshot's
 `peakGpuMemoryPct` are fallbacks, and each attempt records which one it used
-(`peakMemorySource`).
+(`peakMemorySource`). The budget is judged on the evidence, not on who was watching: an attempt a
+resume **adopts** from a dead controller is measured and stops the run exactly as one the controller
+watched land.
 
 The run record is written at **every state transition** past document validation, not once at the
 end: refusal (`outcome: rejected` with the findings), a limit that stopped the run, an operator

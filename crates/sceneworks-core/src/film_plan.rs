@@ -1505,6 +1505,10 @@ pub struct ExportRecord {
 /// controller that died in between adopts its own export job instead of starting a second render.
 /// `supersedes` is the export job this one replaces (a re-export after a take changed), which is
 /// what tells a resume apart the old finished job from the new one on the same timeline.
+///
+/// `supersedes` names only the MOST RECENT one; the full exclusion set a lookup needs is
+/// [`RunRecord::superseded_export_job_ids`], because a second re-export has to exclude the first
+/// export as well as the second.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPending {
@@ -1555,6 +1559,15 @@ pub struct RunRecord {
     /// Set while an export job has been asked for but its id is not recorded yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_pending: Option<ExportPending>,
+    /// EVERY export job this record has ever held and then superseded, oldest first.
+    ///
+    /// The export route carries no field of the harness's own, so an export job is recognised by
+    /// the timeline it renders — and the run's timeline is the same one for every export it ever
+    /// dispatches. Excluding only the most recently superseded job would let the SECOND re-export
+    /// adopt the FIRST export: a finished job whose asset is the timeline from before both
+    /// replacements, recorded as current. The whole history is the exclusion set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_export_job_ids: Vec<String>,
     #[serde(default)]
     pub diagnostics: Vec<PlanDiagnostic>,
     /// Every human decision taken on this run, oldest first.
@@ -1961,6 +1974,7 @@ mod tests {
             timeline: None,
             export: None,
             export_pending: None,
+            superseded_export_job_ids: Vec::new(),
             diagnostics: vec![PlanDiagnostic::shot("SH010", "prompt", "empty")],
             decisions: vec![ProductionDecision {
                 at: "2026-09-13T00:00:01Z".into(),

@@ -25,6 +25,9 @@
 //! rather than orphaning a render. `film-harness cancel --out DIR` does the same from another
 //! shell. A cancel is RESUMABLE: `film-harness resume --out DIR` picks the run back up, reusing
 //! every take that finished and adopting every job still in flight (sc-22711).
+//!
+//! One controller per run directory: nothing locks `run.json`, so `run`, `resume` and
+//! `replace-take` must not be held against the same `--out` at the same time.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -65,7 +68,12 @@ replace-take rejects the take a shot is carrying and renders exactly ONE more fo
              that declared a dependency on it are flagged needs_review, never re-rendered. Without
              --export the existing export is only marked stale.
 cancel       asks a run in another shell to stop; status prints what a record says without touching
-             the API.
+             the API. A directory with no run.json in it is refused, not created.
+
+ONE CONTROLLER PER RUN DIRECTORY: run, resume and replace-take each rewrite --out/run.json as they
+go and nothing locks it, so two held against the same directory at once interleave their writes.
+The idempotency keys make a SEQUENTIAL replay safe; they are not a lock. `run` refuses a directory
+that already holds a record — use resume, or a different --out.
 ";
 
 fn main() -> ExitCode {
@@ -445,10 +453,8 @@ fn cancel_command(args: &[String]) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            ExitCode::from(1)
-        }
+        // A mistyped --out is refused (exit 2) rather than reported as a cancel nobody receives.
+        Err(error) => report_error(error),
     }
 }
 
