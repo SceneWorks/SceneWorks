@@ -61,30 +61,34 @@ const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 1024;
-// Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
-// per-task default (caption tasks need the larger cap so the JSON closes; the prose-describe task sits
-// in between).
+// A whole shot plan is the longest reply this job ever emits — one JSON object carrying every shot's
+// prompt, states, framing and sound (sc-22713). Truncation there is not a degraded plan but an
+// unparseable one, so it takes the same generous ceiling the captions take.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_max_new_tokens(
-    payload: &serde_json::Map<String, Value>,
-    is_caption_task: bool,
-    is_image_describe: bool,
-) -> u32 {
+const DEFAULT_FILM_PLAN_MAX_NEW_TOKENS: u32 = 4096;
+// Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
+// per-task default (the JSON tasks need the larger cap so the object closes; the prose-describe task
+// sits in between). Keyed on the task value itself rather than on booleans re-derived per call site.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: RefineTask) -> u32 {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(if is_caption_task {
-            DEFAULT_CAPTION_MAX_NEW_TOKENS
-        } else if is_image_describe {
-            DEFAULT_DESCRIBE_MAX_NEW_TOKENS
-        } else {
-            DEFAULT_REFINE_MAX_NEW_TOKENS
+        .unwrap_or(match task {
+            RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
+            RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
+            RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
+            RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
         })
 }
 
@@ -109,6 +113,10 @@ pub(crate) enum RefineTask {
     MagicPrompt,
     ImageCaption,
     ImageDescribe,
+    /// A brief -> ONE strict JSON shot plan (sc-22713, epic 22708). Text in, JSON out, no image.
+    /// Selected by the `task` discriminator like the caption tasks, because a plan is a different
+    /// JOB from a prompt rewrite rather than a different target model.
+    FilmPlan,
 }
 
 #[cfg(any(
@@ -124,6 +132,7 @@ impl RefineTask {
             t if t.eq_ignore_ascii_case("magic_prompt") => RefineTask::MagicPrompt,
             t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
             t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
+            t if t.eq_ignore_ascii_case("film_plan") => RefineTask::FilmPlan,
             _ => RefineTask::Rewrite,
         }
     }
@@ -141,12 +150,22 @@ impl RefineTask {
         matches!(self, RefineTask::MagicPrompt | RefineTask::ImageCaption)
     }
 
+    /// Whether the reply is a JSON document rather than prose, and so is cleaned by isolating the
+    /// outermost `{ … }` instead of unwrapping surrounding quotes. The caption tasks and the film
+    /// plan are; the free-text rewrite and the prose describe are not.
+    pub(crate) fn emits_json(self) -> bool {
+        self.is_caption() || matches!(self, RefineTask::FilmPlan)
+    }
+
     /// Sampling temperature: the caption tasks and the prose describe sample cool for a faithful,
     /// steady description; the free-text rewrite stays warmer for creative variation.
     pub(crate) fn temperature(self) -> f32 {
         match self {
             RefineTask::Rewrite => 0.7,
             RefineTask::MagicPrompt | RefineTask::ImageCaption | RefineTask::ImageDescribe => 0.4,
+            // A plan is a structured document checked field by field, and a repair round costs a
+            // whole decode: sample cooler still so field names and menu values come back exactly.
+            RefineTask::FilmPlan => 0.3,
         }
     }
 
@@ -156,6 +175,7 @@ impl RefineTask {
             RefineTask::ImageCaption => "Captioning image…",
             RefineTask::ImageDescribe => "Describing image…",
             RefineTask::MagicPrompt => "Expanding to a caption…",
+            RefineTask::FilmPlan => "Planning shots…",
             RefineTask::Rewrite => "Refining prompt…",
         }
     }
@@ -165,6 +185,7 @@ impl RefineTask {
         match self {
             RefineTask::MagicPrompt | RefineTask::ImageCaption => "Caption ready.",
             RefineTask::ImageDescribe => "Description ready.",
+            RefineTask::FilmPlan => "Shot plan ready.",
             RefineTask::Rewrite => "Prompt refined.",
         }
     }
@@ -371,6 +392,39 @@ fn build_minimax_h3_refine_system_prompt(guide: Option<&str>) -> String {
     }
 }
 
+// ----------------------------------------------------------------------------------------------
+// Film plan (epic 22708, sc-22713) — the local filmmaking harness's planner. Same shape as the
+// Ideogram magic-prompt branch: an embedded, versioned system prompt driving the SAME `prompt_refine`
+// TextLlm, selected by the payload's `task` discriminator because a shot plan is a different JOB from
+// a prompt rewrite. Everything film-specific (the brief, its required beats, the approved reference
+// roles and the installed model's declared menus) is composed caller-side and arrives as the user
+// turn, so this asset carries only the contract every planning request shares.
+// ----------------------------------------------------------------------------------------------
+
+/// The film-plan system prompt, embedded verbatim and parsed for its `[SYSTEM]` block by the same
+/// [`magic_section_from`] the other assets use. There is no `[USER]` block: the user turn is the
+/// request the harness composed.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const FILM_PLAN_V1: &str = include_str!("film_plan_v1.txt");
+
+/// The `(system, user)` pair for a film-plan request: the embedded contract, plus the caller's
+/// composed brief as the user turn.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn build_film_plan_messages(request: &str) -> (String, String) {
+    (
+        magic_section_from(FILM_PLAN_V1, "SYSTEM"),
+        request.to_owned(),
+    )
+}
+
 /// Select the rewrite `system` message: the tailored MiniMax-H3 prompt for an H3 target model, the
 /// generic medium-keyed rewrite rules for everything else. The generic
 /// [`build_refine_system_prompt`] is untouched, so no other model's refinement changes.
@@ -442,8 +496,8 @@ fn strip_untrained_markers(text: &str) -> String {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn finalize_refined_output(raw: &str, is_caption_task: bool, model_id: Option<&str>) -> String {
-    let cleaned = if is_caption_task {
+fn finalize_refined_output(raw: &str, emits_json: bool, model_id: Option<&str>) -> String {
+    let cleaned = if emits_json {
         clean_json_output(raw)
     } else {
         clean_refine_output(raw)
@@ -1051,11 +1105,7 @@ pub(crate) async fn run_prompt_refine_job(
         .get("modelId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let max_new_tokens = resolve_max_new_tokens(
-        payload,
-        task.is_caption(),
-        task == RefineTask::ImageDescribe,
-    );
+    let max_new_tokens = resolve_max_new_tokens(payload, task);
     let temperature = task.temperature();
     let work_message = task.work_message();
     let done_message = task.done_message();
@@ -1081,6 +1131,9 @@ pub(crate) async fn run_prompt_refine_job(
                 .unwrap_or("1:1");
             build_magic_prompt_messages(&original_prompt, aspect_ratio)
         }
+        // sc-22713: the composed planning request IS the user turn; the embedded asset carries the
+        // JSON contract. No guide/workflow assembly — a plan is not a prompt rewrite.
+        RefineTask::FilmPlan => build_film_plan_messages(&original_prompt),
         RefineTask::Rewrite => {
             let guide = payload
                 .get("guide")
@@ -1147,16 +1200,17 @@ pub(crate) async fn run_prompt_refine_job(
         source: weights_dir.to_string_lossy().into_owned(),
         quantize: None,
     };
-    // Whether the decode is JSON-grammar-constrained (the caption tasks) and whether a reference image
-    // rides the user turn (the vision tasks) — copied out of the `Copy` `RefineTask` into plain bools so
-    // the blocking closure below names no enum, keeping its capture set minimal.
-    let is_caption_task = task.is_caption();
+    // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
+    // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
+    // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture
+    // set minimal.
+    let emits_json = task.emits_json();
     let is_vision_task = task.is_vision();
     // Resolution requirements (see the sc-8105 note below): only the request's output constraint —
-    // the JSON grammar for a caption task, NONE for the prose `image_describe`/rewrite tasks. Built
-    // out here so it doubles as the cache key alongside the weights dir.
+    // the JSON grammar for the JSON-emitting tasks, NONE for the prose `image_describe`/rewrite
+    // tasks. Built out here so it doubles as the cache key alongside the weights dir.
     let mut refine_reqs = gen_core::core_llm::ModelRequirements::default();
-    if is_caption_task {
+    if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
     }
     let blocking = tokio::spawn(crate::refine_model_cache::with_cached_refiner(
@@ -1231,7 +1285,18 @@ pub(crate) async fn run_prompt_refine_job(
                     // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
                     // free-text rewrite is unconstrained. (On the candle lane this constraint actually
                     // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
-                    constraint: is_caption_task.then_some(Constraint::Json),
+                    // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
+                    // costs a whole repair round this prevents outright.
+                    //
+                    // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
+                    // JSON — and says nothing about the object's shape (core-llm has no schema or
+                    // grammar variant; `Json` is the only one). So a well-formed reply with a field
+                    // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
+                    // duly produced one: `startState` as an object on every shot. The plan schema is
+                    // enforced after the decode by `film_planner::parse_planner_output`, which is the
+                    // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
+                    // where the FilmPlan task should take it.
+                    constraint: emits_json.then_some(Constraint::Json),
                     cancel: blocking_cancel.clone(),
                     ..Default::default()
                 };
@@ -1379,9 +1444,10 @@ pub(crate) async fn run_prompt_refine_job(
             return Err(error);
         }
     };
-    // A caption task isolates the JSON object (the web parses + validates it; image_caption validates
-    // here too); the free-text rewrite cleans to prose.
-    let refined = finalize_refined_output(&raw, is_caption_task, target_model_id.as_deref());
+    // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
+    // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
+    // prose.
+    let refined = finalize_refined_output(&raw, emits_json, target_model_id.as_deref());
     if refined.is_empty() {
         return Err(WorkerError::Engine(
             "The prompt-refinement model returned an empty prompt.".to_owned(),
@@ -1626,50 +1692,107 @@ mod tests {
         // Caption tasks (magic-prompt + image_caption) get the larger default so the JSON closes
         // (sc-8210: 2048 truncated rich captions mid-`elements`).
         let obj = |value: serde_json::Value| value.as_object().unwrap().clone();
+        for task in [RefineTask::MagicPrompt, RefineTask::ImageCaption] {
+            assert_eq!(
+                resolve_max_new_tokens(&obj(serde_json::json!({})), task),
+                4096
+            );
+        }
+        // A whole shot plan (sc-22713) takes the same generous ceiling.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), true, false),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::FilmPlan),
             4096
         );
         // The prose-describe task (epic 8203) gets the in-between default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), false, true),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe),
             1024
         );
         // The free-text rewrite stays at the small default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), false, false),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite),
             512
         );
         // An explicit positive override wins for any task.
-        assert_eq!(
-            resolve_max_new_tokens(
-                &obj(serde_json::json!({ "maxNewTokens": 6000 })),
-                true,
-                false
-            ),
-            6000
-        );
-        assert_eq!(
-            resolve_max_new_tokens(
-                &obj(serde_json::json!({ "maxNewTokens": 6000 })),
-                false,
-                true
-            ),
-            6000
-        );
+        for task in [
+            RefineTask::MagicPrompt,
+            RefineTask::ImageDescribe,
+            RefineTask::FilmPlan,
+        ] {
+            assert_eq!(
+                resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 6000 })), task),
+                6000
+            );
+        }
         // Zero / invalid overrides fall back to the per-task default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 0 })), true, false),
+            resolve_max_new_tokens(
+                &obj(serde_json::json!({ "maxNewTokens": 0 })),
+                RefineTask::MagicPrompt
+            ),
             4096
         );
         assert_eq!(
             resolve_max_new_tokens(
                 &obj(serde_json::json!({ "maxNewTokens": "nope" })),
-                false,
-                false
+                RefineTask::Rewrite
             ),
             512
         );
+    }
+
+    #[test]
+    fn film_plan_task_is_classified_json_constrained_and_carries_its_own_contract() {
+        // Selected by the discriminator, case-insensitively, like every other task.
+        assert_eq!(
+            RefineTask::from_payload(Some(" Film_Plan ")),
+            RefineTask::FilmPlan
+        );
+        assert_eq!(
+            RefineTask::from_payload(Some("film_plan")),
+            RefineTask::FilmPlan
+        );
+        // It is text-in/JSON-out: no reference image, not an Ideogram caption, but grammar-masked.
+        assert!(!RefineTask::FilmPlan.is_vision());
+        assert!(!RefineTask::FilmPlan.is_caption());
+        assert!(RefineTask::FilmPlan.emits_json());
+        assert!(RefineTask::MagicPrompt.emits_json());
+        assert!(RefineTask::ImageCaption.emits_json());
+        assert!(!RefineTask::Rewrite.emits_json());
+        assert!(!RefineTask::ImageDescribe.emits_json());
+        assert_eq!(RefineTask::FilmPlan.temperature(), 0.3);
+        assert_eq!(RefineTask::FilmPlan.work_message(), "Planning shots…");
+        assert_eq!(RefineTask::FilmPlan.done_message(), "Shot plan ready.");
+
+        // The asset parses into a system block and the user turn is the caller's request verbatim —
+        // the film-specific content is composed caller-side, so this asset must not restate it.
+        let (system, user) = build_film_plan_messages("# Brief\n\nTitle: Courier");
+        assert_eq!(user, "# Brief\n\nTitle: Courier");
+        assert!(system.contains("You are a film planner"), "{system}");
+        assert!(system.contains("Output ONE JSON object"), "{system}");
+        assert!(system.contains("NEVER drop"), "{system}");
+        assert!(
+            system.contains("fixed menu, not a range"),
+            "durations must never be rounded: {system}"
+        );
+        // The `[META]` rationale block never reaches the model.
+        assert!(!system.contains("[META]"), "{system}");
+        assert!(!system.contains("sc-22713"), "{system}");
+        // No film-specific content leaked into the shared asset.
+        for leaked in ["courier", "parcel", "minimax", "576x320"] {
+            assert!(
+                !system.to_lowercase().contains(leaked),
+                "{leaked:?} leaked into the shared asset: {system}"
+            );
+        }
+
+        // A JSON reply is isolated by the shared cleaner, exactly as a caption is.
+        let cleaned = finalize_refined_output(
+            "Here you go:\n```json\n{\"shots\": []}\n```",
+            RefineTask::FilmPlan.emits_json(),
+            Some("minimax_h3"),
+        );
+        assert_eq!(cleaned, "{\"shots\": []}");
     }
 
     #[test]

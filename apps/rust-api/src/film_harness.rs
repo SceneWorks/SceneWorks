@@ -46,6 +46,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use sceneworks_core::film_compile::{
+    compile_plan, CompileInputs, CompiledPlan, DispatchContext, ResolvedConditioning,
+};
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, HardwareRecord,
     IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionDecision, ProductionPlan,
@@ -218,6 +221,10 @@ impl From<std::io::Error> for HarnessError {
 pub struct RunOptions {
     pub plan_path: PathBuf,
     pub reference_pack_path: PathBuf,
+    /// Compiled requests to dispatch. `None` looks for `compiled.json` beside the plan and, failing
+    /// that, compiles the plan's own prompts in memory — which is exactly what a hand-authored plan
+    /// has always done.
+    pub compiled_path: Option<PathBuf>,
     /// Reuse this project instead of creating one named after the plan.
     pub project_id: Option<String>,
     /// Render only these shot ids (plan order is kept). `None` renders every shot.
@@ -455,9 +462,58 @@ fn newest_export_job(
     candidates.last().map(|(id, _)| (*id).to_owned())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// One request that must succeed, against a bare transport. The planner (sc-22713) drives the same
+/// API through this, so both halves of the harness treat a non-2xx answer identically. Planning is
+/// not cancellable mid-decode the way a render is, so it carries a fresh, never-flipped
+/// [`RunControl`].
+pub(crate) async fn expect_ok_on(
+    transport: &dyn ApiTransport,
+    method: &'static str,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, HarnessError> {
+    let control = RunControl::new();
+    Client {
+        transport,
+        control: &control,
+    }
+    .expect_ok(method, path, body)
+    .await
+}
+
+/// The catalog entry for `model_id`, against a bare transport.
+pub(crate) async fn model_entry_for(
+    transport: &dyn ApiTransport,
+    model_id: &str,
+) -> Result<Option<JsonObject<String, Value>>, HarnessError> {
+    let control = RunControl::new();
+    resolve_model_entry(
+        &Client {
+            transport,
+            control: &control,
+        },
+        model_id,
+    )
+    .await
+}
+
+/// The API host's facts, against a bare transport: the platform whose lane and reachability gate a
+/// plan is judged on, and the memory the host reports. The planner needs them for the same reasons
+/// the run does, and reads them through this rather than keeping its own copy.
+pub(crate) async fn host_facts_for(
+    transport: &dyn ApiTransport,
+) -> Result<HostFacts, HarnessError> {
+    let control = RunControl::new();
+    discover_host(&Client {
+        transport,
+        control: &control,
+    })
+    .await
 }
 
 fn api_detail(body: &Value) -> String {
@@ -847,9 +903,10 @@ fn memory_observation(
     }
 }
 
-/// What the run learned about the host and the worker that will render.
+/// What the run learned about the host and the worker that will render. Shared with the planner
+/// (sc-22713), which judges a plan against the same host rather than against this process.
 #[derive(Debug, Clone, Default)]
-struct HostFacts {
+pub(crate) struct HostFacts {
     /// The API HOST's platform (`std::env::consts::OS` spelling), from
     /// `GET /api/v1/host-capabilities`. `--api` may point at another machine, so this — not
     /// `cfg!(target_os)` — decides the lane whose `minMemoryGb` the plan is checked against, the
@@ -864,14 +921,14 @@ struct HostFacts {
 impl HostFacts {
     /// The lane the render host reads its memory minimum from, falling back to this process's own
     /// platform only when the API reports none.
-    fn lane(&self) -> ModelLane {
+    pub(crate) fn lane(&self) -> ModelLane {
         match self.platform.as_deref() {
             Some(platform) => ModelLane::for_platform(platform),
             None => ModelLane::for_current_platform(),
         }
     }
 
-    fn platform_or_local(&self) -> &str {
+    pub(crate) fn platform_or_local(&self) -> &str {
         self.platform.as_deref().unwrap_or(std::env::consts::OS)
     }
 }
@@ -976,96 +1033,59 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
     }))
 }
 
-fn mlx_quantize_for_tier(tier: &str) -> Value {
-    match tier {
-        "bf16" => json!(0),
-        "q8" => json!(8),
-        _ => json!(4),
+/// The compiled requests this run dispatches: the document beside the plan when there is one, else
+/// the plan compiled in memory with its authored prompts (the hand-authored path). Either way the
+/// job bodies come from [`CompiledRequest::to_job_body`], so what a reviewer reads in
+/// `compiled.json` is what the API receives.
+fn compiled_for_run(
+    plan: &ProductionPlan,
+    pack: &ReferencePack,
+    entry: &JsonObject<String, Value>,
+    lane: ModelLane,
+    plan_sha256: &str,
+    supplied: Option<CompiledPlan>,
+) -> Result<CompiledPlan, HarnessError> {
+    match supplied {
+        Some(compiled) => {
+            // Two questions, in order: were these requests compiled from THIS plan, and do they
+            // still say what compiling it would say? The second is what keeps a hand-edited
+            // `compiled.json` — the document every dispatched field but the prompt is read from —
+            // from reaching the route unjudged, since `validate_all` only ever reads the plan.
+            let mut findings = compiled.staleness_findings(plan, plan_sha256);
+            if findings.is_empty() {
+                findings = compiled.conformance_findings(plan, entry, lane);
+            }
+            if findings.is_empty() {
+                Ok(compiled)
+            } else {
+                Err(HarnessError::Validation(findings))
+            }
+        }
+        None => compile_plan(
+            plan,
+            pack,
+            &CompileInputs {
+                model_entry: entry,
+                lane: lane.manifest_key(),
+                plan_sha256,
+                compiled_at: &utc_now(),
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .map_err(HarnessError::Validation),
     }
-}
-
-/// The `POST /api/v1/video/jobs` body for one attempt of `shot`, with every reference role already
-/// resolved to the asset id the harness imported.
-/// One attempt of one shot, resolved to everything the video route needs.
-struct ShotDispatch<'a> {
-    plan: &'a ProductionPlan,
-    shot: &'a film_plan::Shot,
-    project_id: &'a str,
-    run_id: &'a str,
-    attempt: u32,
-    /// [`idempotency_key`] for this attempt, recorded before the job is created and stamped into
-    /// the payload so a replay can recognise its own job (sc-22711).
-    idempotency_key: &'a str,
-    fps: u32,
-    width: u32,
-    height: u32,
-    assets: &'a ConditioningAssets,
 }
 
 /// The key one attempt of one shot dispatches under. Stable across restarts because every part of
 /// it is: the run id is in the record, the shot id is in the plan, and attempt numbers never repeat
 /// within a shot (sc-22711).
+///
+/// It is stamped into the dispatched body's `advanced.filmHarness` block (sc-22713's
+/// [`CompiledRequest::to_job_body_with`] carries it through [`DispatchContext`]), which is what lets
+/// a controller that died between the POST and the record write find its OWN job instead of
+/// enqueuing a second render for the same attempt.
 pub fn idempotency_key(run_id: &str, shot_id: &str, attempt: u32) -> String {
     format!("{run_id}:{shot_id}:a{attempt}")
-}
-
-fn video_job_body(dispatch: &ShotDispatch<'_>) -> Value {
-    let ShotDispatch {
-        plan,
-        shot,
-        project_id,
-        run_id,
-        attempt,
-        idempotency_key,
-        fps,
-        width,
-        height,
-        assets,
-    } = *dispatch;
-    let mut advanced = JsonObject::new();
-    if let Some(tier) = plan.model.tier.as_deref() {
-        advanced.insert("mlxQuantize".to_owned(), mlx_quantize_for_tier(tier));
-    }
-    advanced.insert(
-        "filmHarness".to_owned(),
-        json!({
-            "runId": run_id,
-            "planId": plan.id,
-            "planVersion": plan.version,
-            "shotId": shot.id,
-            "attempt": attempt,
-            "idempotencyKey": idempotency_key,
-        }),
-    );
-    let mut body = json!({
-        "projectId": project_id,
-        "mode": shot.conditioning.mode,
-        "model": plan.model.id,
-        "prompt": shot.prompt,
-        "duration": shot.target_duration_seconds,
-        "fps": fps,
-        "width": width,
-        "height": height,
-        "fitMode": "crop",
-        "requestedGpu": "auto",
-        "advanced": advanced,
-    });
-    if let Some(negative) = shot.negative_prompt.as_deref() {
-        body["negativePrompt"] = json!(negative);
-    }
-    if let Some(seed) = shot.seed {
-        body["seed"] = json!(seed);
-    }
-    if let Some(first) = &assets.first_frame_asset_id {
-        body["sourceAssetId"] = json!(first);
-    }
-    if let Some(last) = &assets.last_frame_asset_id {
-        body["lastFrameAssetId"] = json!(last);
-    }
-    if !assets.reference_asset_ids.is_empty() {
-        body["referenceAssetIds"] = json!(assets.reference_asset_ids);
-    }
-    body
 }
 
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
@@ -1197,6 +1217,13 @@ fn persist_record(
             }
         }
     }
+    // The compiled requests travel with the record too: without them the run record says which
+    // prompts were dispatched only by reference.
+    if let Some(compiled) = record.compiled.as_ref() {
+        if let Ok(text) = std::fs::read(&compiled.path) {
+            std::fs::write(out_dir.join("compiled.json"), text)?;
+        }
+    }
     if let Some(project_path) = record.project_path.as_deref().map(Path::new) {
         if project_path.is_dir() {
             let project_record_dir = project_path.join("film-harness").join(&record.run_id);
@@ -1253,6 +1280,17 @@ pub async fn validate(
         .unwrap_or_else(|| PathBuf::from("."));
     let mut findings = film_plan::validate_all(&plan, &pack, Some(&pack_dir), None);
     findings.extend(selection_findings(&plan, options.shot_ids.as_deref()));
+    // Compiled requests are checked against the plan they claim: a plan edited after the compile
+    // would otherwise dispatch the prompts it no longer holds.
+    let compiled = read_compiled_for(options)?;
+    if let Some((compiled, path)) = compiled.as_ref() {
+        let plan_bytes = std::fs::read(&options.plan_path)?;
+        let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes));
+        if !stale.is_empty() {
+            stale.insert(0, compiled_document_header(path));
+            findings.append(&mut stale);
+        }
+    }
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
@@ -1271,11 +1309,61 @@ pub async fn validate(
         if findings.is_empty() {
             findings.extend(host_findings(&plan, &facts, options.export));
         }
+        // The document that is DISPATCHED, judged against the installed capabilities — not just
+        // the plan it was compiled from. `--compiled FILE` takes a document from any path and
+        // `execute_run` reads every field but the prompt straight out of it, so this is the only
+        // place a hand-edited request meets the model's declared menus (sc-22713 review).
+        if findings.is_empty() {
+            if let (Some((compiled, path)), Some(entry)) = (compiled.as_ref(), entry.as_ref()) {
+                let mut conformance = compiled.conformance_findings(&plan, entry, facts.lane());
+                if !conformance.is_empty() {
+                    findings.push(compiled_document_header(path));
+                    findings.append(&mut conformance);
+                }
+            }
+        }
         if !findings.is_empty() {
             return Err(HarnessError::Validation(findings));
         }
     }
     Ok((plan, pack))
+}
+
+/// The finding that says the findings after it are about the compiled document, not the plan.
+fn compiled_document_header(path: &Path) -> PlanDiagnostic {
+    PlanDiagnostic::plan(
+        "compiled",
+        format!(
+            "the compiled requests at {} do not match this plan; every finding below is about \
+             that document",
+            path.display()
+        ),
+    )
+}
+
+/// The compiled requests this run should use, with the path they came from: the explicit
+/// `--compiled` document, else a `compiled.json` sitting beside the plan, else nothing.
+fn read_compiled_for(
+    options: &RunOptions,
+) -> Result<Option<(CompiledPlan, PathBuf)>, HarnessError> {
+    let path = match &options.compiled_path {
+        Some(path) => path.clone(),
+        None => {
+            let sibling = options
+                .plan_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("compiled.json");
+            if !sibling.is_file() {
+                return Ok(None);
+            }
+            sibling
+        }
+    };
+    let compiled = crate::film_planner::read_compiled_file(&path)
+        .map_err(|finding| HarnessError::Validation(vec![finding]))?;
+    Ok(Some((compiled, path)))
 }
 
 fn selection_findings(plan: &ProductionPlan, selection: Option<&[String]>) -> Vec<PlanDiagnostic> {
@@ -1356,45 +1444,64 @@ fn reference_payload_findings(
     findings
 }
 
-fn model_findings(
-    plan: &ProductionPlan,
+/// Findings about the catalog ENTRY: present, a video model, installed, and reachable on the render
+/// host's platform. Shared with the planner (sc-22713), which must refuse an absent, uninstalled or
+/// unreachable model before it spends a decode on a plan that could never be dispatched — rather
+/// than keeping a second copy of these rules.
+pub(crate) fn model_entry_findings(
+    model_id: &str,
     entry: Option<&JsonObject<String, Value>>,
+    tier: Option<&str>,
     require_installed: bool,
     facts: &HostFacts,
 ) -> Vec<PlanDiagnostic> {
     let Some(entry) = entry else {
         return vec![PlanDiagnostic::plan(
             "model.id",
-            format!("{:?} is not in this API's model catalog", plan.model.id),
+            format!("{model_id:?} is not in this API's model catalog"),
         )];
     };
     let mut findings = Vec::new();
     if entry.get("type").and_then(Value::as_str) != Some("video") {
         findings.push(PlanDiagnostic::plan(
             "model.id",
-            format!("{:?} is not a video model", plan.model.id),
+            format!("{model_id:?} is not a video model"),
         ));
     }
-    if require_installed && !model_tier_installed(entry, plan.model.tier.as_deref()) {
+    if require_installed && !model_tier_installed(entry, tier) {
         findings.push(PlanDiagnostic::plan(
             "model.tier",
             format!(
-                "{}{} is not installed on this host (catalog installState is not \"installed\"); \
-                 download it in the Model Manager first",
-                plan.model.id,
-                plan.model
-                    .tier
-                    .as_deref()
-                    .map(|tier| format!(" tier {tier}"))
-                    .unwrap_or_default()
+                "{model_id}{} is not installed on this host (catalog installState is not \
+                 \"installed\"); download it in the Model Manager first",
+                tier.map(|tier| format!(" tier {tier}")).unwrap_or_default()
             ),
         ));
     }
     findings.extend(platform_reachability_finding(
-        &plan.model.id,
+        model_id,
         entry,
         facts.platform_or_local(),
     ));
+    findings
+}
+
+fn model_findings(
+    plan: &ProductionPlan,
+    entry: Option<&JsonObject<String, Value>>,
+    require_installed: bool,
+    facts: &HostFacts,
+) -> Vec<PlanDiagnostic> {
+    let mut findings = model_entry_findings(
+        &plan.model.id,
+        entry,
+        plan.model.tier.as_deref(),
+        require_installed,
+        facts,
+    );
+    let Some(entry) = entry else {
+        return findings;
+    };
     findings.extend(film_plan::validate_plan_against_model(
         plan,
         entry,
@@ -1543,7 +1650,11 @@ struct Session<'a> {
     export: bool,
     plan: ProductionPlan,
     pack: ReferencePack,
-    entry: JsonObject<String, Value>,
+    /// The requests this session dispatches (sc-22713): the compiled document beside the plan, or
+    /// the plan compiled in memory. Every job body comes from here, so what a reviewer reads in
+    /// `compiled.json` is what the API receives — on a resume and a replacement exactly as on the
+    /// first run.
+    compiled: CompiledPlan,
     facts: HostFacts,
     fps: u32,
     record: RunRecord,
@@ -1929,21 +2040,25 @@ impl Session<'_> {
                 ordered.push(self.record.shots.remove(index));
                 continue;
             }
-            let (width, height) = film_plan::shot_resolution(&self.plan, shot, &self.entry)
-                .expect("validated against the model");
+            // Geometry, timing and mode come from the COMPILED request, not from the plan read a
+            // second time: the compiled document is what the job body is built from (sc-22713), so
+            // the record's `intended` has to be the same document or it describes something the
+            // route was never asked for.
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            let (width, height) = (request.width, request.height);
             let assets = ConditioningAssets {
-                first_frame_asset_id: shot
-                    .conditioning
+                first_frame_asset_id: request
                     .first_frame_role
                     .as_ref()
                     .and_then(|role| self.role_assets.get(role).cloned()),
-                last_frame_asset_id: shot
-                    .conditioning
+                last_frame_asset_id: request
                     .last_frame_role
                     .as_ref()
                     .and_then(|role| self.role_assets.get(role).cloned()),
-                reference_asset_ids: shot
-                    .conditioning
+                reference_asset_ids: request
                     .reference_roles
                     .iter()
                     .filter_map(|role| self.role_assets.get(role).cloned())
@@ -1953,13 +2068,13 @@ impl Session<'_> {
                 shot_id: shot.id.clone(),
                 outcome: ShotOutcome::NotSelected,
                 intended: IntendedState {
-                    mode: shot.conditioning.mode.clone(),
+                    mode: request.mode.clone(),
                     start_state: shot.start_state.clone(),
                     end_state: shot.end_state.clone(),
-                    target_duration_seconds: shot.target_duration_seconds,
+                    target_duration_seconds: request.duration_seconds,
                     width,
                     height,
-                    fps: self.fps,
+                    fps: request.fps,
                     dialogue: shot.dialogue.clone(),
                     sound: shot.sound.clone(),
                 },
@@ -2127,19 +2242,32 @@ impl Session<'_> {
         let created_here = job_id.is_none();
         if job_id.is_none() {
             let assets = self.record.shots[shot_index].conditioning_assets.clone();
-            let intended = self.record.shots[shot_index].intended.clone();
-            let body = video_job_body(&ShotDispatch {
-                plan: &self.plan,
-                shot,
-                project_id: &project_id,
-                run_id: &self.record.run_id,
-                attempt: attempt_number,
-                idempotency_key: &key,
-                fps: self.fps,
-                width: intended.width,
-                height: intended.height,
-                assets: &assets,
-            });
+            // The body is the COMPILED request's, always (sc-22713): the document a reviewer reads
+            // in `compiled.json` is what the route receives, on a resume and a replacement exactly
+            // as on the first run. The record's own resolved conditioning is passed in rather than
+            // re-resolved, so an attempt dispatched after a crash conditions on the same assets the
+            // record already names.
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            let body = request.to_job_body_with(
+                &DispatchContext {
+                    project_id: &project_id,
+                    run_id: &self.record.run_id,
+                    plan_id: &self.plan.id,
+                    plan_version: self.plan.version,
+                    attempt: attempt_number,
+                    tier: self.plan.model.tier.as_deref(),
+                    idempotency_key: Some(&key),
+                    role_assets: &self.role_assets,
+                },
+                &ResolvedConditioning {
+                    first_frame_asset_id: assets.first_frame_asset_id.clone(),
+                    last_frame_asset_id: assets.last_frame_asset_id.clone(),
+                    reference_asset_ids: assets.reference_asset_ids.clone(),
+                },
+            );
             let response = self
                 .client
                 .json("POST", "/api/v1/video/jobs", Some(body))
@@ -3177,6 +3305,32 @@ pub async fn run_with_control(
     };
     let lane = prepared.facts.lane();
     let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
+    // The requests this run dispatches: the compiled document beside the plan when there is one,
+    // else the plan's own prompts compiled in memory (sc-22713). `record.plan.sha256` is the hash
+    // of the plan file as read, which is what a compiled document pins. A resume re-reads the same
+    // document and re-checks the same hash, so the requests a replay dispatches are the ones the
+    // first controller did.
+    let supplied_compiled = read_compiled_for(options)?;
+    record.compiled = match supplied_compiled.as_ref() {
+        // The hash is what makes the run reproducible, so an unreadable file is an error rather
+        // than an empty string on the record. It was read successfully microseconds ago in
+        // `read_compiled_for`, so `?` here can only surface a real io failure.
+        Some((compiled, path)) => Some(SourceDocument {
+            id: compiled.plan_id.clone(),
+            version: compiled.plan_version,
+            path: path.display().to_string(),
+            sha256: sha256_hex(&std::fs::read(path)?),
+        }),
+        None => None,
+    };
+    let compiled = compiled_for_run(
+        &plan,
+        &pack,
+        &prepared.entry,
+        lane,
+        &record.plan.sha256,
+        supplied_compiled.map(|(compiled, _)| compiled),
+    )?;
     record.model = Some(ModelRecord {
         id: plan.model.id.clone(),
         tier_requested: plan.model.tier.clone(),
@@ -3209,7 +3363,7 @@ pub async fn run_with_control(
         export: options.export,
         plan,
         pack,
-        entry: prepared.entry,
+        compiled,
         facts: prepared.facts,
         fps: prepared.fps,
         record,
@@ -3231,6 +3385,10 @@ struct Continued {
     record: RunRecord,
     plan: ProductionPlan,
     pack: ReferencePack,
+    /// The requests the run was dispatching, re-read from the document the record names (and
+    /// re-checked against its recorded hash) or recompiled from the plan when it named none — so a
+    /// resume dispatches what the first controller did, not a fresh compilation of an edited file.
+    compiled: CompiledPlan,
     plan_path: PathBuf,
     pack_path: PathBuf,
     prepared: Prepared,
@@ -3296,10 +3454,49 @@ async fn continue_run(
     let prepared = prepare(&client, &plan, options.export, options.require_installed)
         .await?
         .map_err(HarnessError::Validation)?;
+    // The requests the run was dispatching. A record that named a compiled document is held to it,
+    // hash and all — re-reading the file the run started from is what keeps a resume from
+    // dispatching an edited `compiled.json` under the takes the first controller already made, the
+    // same rule the plan and the pack are held to. A record that named none compiles the plan in
+    // memory exactly as the first controller did (sc-22713).
+    let supplied = match &record.compiled {
+        Some(document) => {
+            let (_, bytes) = read_source(
+                Path::new(&document.path),
+                &options.out_dir.join("compiled.json"),
+                "compiled requests",
+            )?;
+            let actual = sha256_hex(&bytes);
+            if actual != document.sha256 {
+                return Err(HarnessError::Refused(format!(
+                    "the compiled requests changed since run {} started (recorded {}, found                      {actual}); recompile and start a new run",
+                    record.run_id, document.sha256
+                )));
+            }
+            Some(
+                serde_json::from_str::<CompiledPlan>(
+                    &sceneworks_core::jsonc::strip_jsonc_comments(
+                        std::str::from_utf8(&bytes).unwrap_or_default(),
+                    ),
+                )
+                .map_err(|error| HarnessError::Refused(format!("compiled requests: {error}")))?,
+            )
+        }
+        None => None,
+    };
+    let compiled = compiled_for_run(
+        &plan,
+        &pack,
+        &prepared.entry,
+        prepared.facts.lane(),
+        &record.plan.sha256,
+        supplied,
+    )?;
     Ok(Continued {
         record,
         plan,
         pack,
+        compiled,
         plan_path,
         pack_path,
         prepared,
@@ -3345,7 +3542,7 @@ fn session_from<'a>(
         export: options.export,
         plan: continued.plan,
         pack: continued.pack,
-        entry: continued.prepared.entry,
+        compiled: continued.compiled,
         facts: continued.prepared.facts,
         fps: continued.prepared.fps,
         prior_elapsed: continued.record.elapsed_seconds,
@@ -3694,6 +3891,7 @@ fn base_record(
             path: options.reference_pack_path.display().to_string(),
             sha256: sha256_hex(pack_bytes),
         },
+        compiled: None,
         project_id: options.project_id.clone(),
         project_path: None,
         model: None,
@@ -3782,6 +3980,7 @@ fn rejected_record(
             path: options.reference_pack_path.display().to_string(),
             sha256: sha256_hex(pack_bytes),
         },
+        compiled: None,
         project_id: options.project_id.clone(),
         project_path: None,
         model: None,
@@ -4135,12 +4334,8 @@ mod unit_tests {
         assert!(persisted_timeline_items(&empty, &intended).is_none());
     }
 
-    #[test]
-    fn tier_maps_to_the_shared_mlx_quantize_convention() {
-        assert_eq!(mlx_quantize_for_tier("q4"), json!(4));
-        assert_eq!(mlx_quantize_for_tier("q8"), json!(8));
-        assert_eq!(mlx_quantize_for_tier("bf16"), json!(0));
-    }
+    // `tier_maps_to_the_shared_mlx_quantize_convention` moved to `sceneworks_core::film_compile`
+    // with `mlx_quantize_for_tier` itself, which now builds every video job body (sc-22713).
 
     #[test]
     fn export_resolution_is_the_smallest_admitted_value_covering_the_takes() {
