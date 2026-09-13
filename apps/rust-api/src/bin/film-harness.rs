@@ -19,9 +19,13 @@
 //! `run` needs a SceneWorks API with a registered GPU worker (`video_generate`) and a utility
 //! worker (`timeline_export`, e.g. `SCENEWORKS_RUN_UTILITY_INPROCESS=1`). It creates nothing until
 //! the plan, the reference pack, the model's catalog entry and the host all validate; the run
-//! record (`run.json`) is written under `--out` on every path, including refusal. Exit codes: 0 on
-//! a completed run, 2 when the plan was refused before dispatch, 3 when the run stopped on a limit
-//! or a shot failed, 1 on a transport/API/io error.
+//! record (`run.json`) is written under `--out` on every path, including refusal and a
+//! transport/API failure partway through. Exit codes: 0 on a completed run, 2 when the plan was
+//! refused before dispatch, 3 when the run stopped on a limit or a shot failed, 1 on a
+//! transport/API/io error.
+//!
+//! Ctrl-C cancels the in-flight job through the API, stops dispatching and writes the record with
+//! `outcome: failed` and a "canceled by operator" diagnostic, rather than orphaning a render.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -131,7 +135,35 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             Err(error) => report_error(error),
         };
     }
-    match film_harness::run(&transport, &parsed.options).await {
+    // SIGINT cancels the in-flight job through the API and still writes the record. Interrupting a
+    // 45-minute render otherwise leaves it running on the GPU with nothing to say it happened,
+    // which is the opposite of what the plan's cancellation limits exist for.
+    let control = film_harness::RunControl::new();
+    let signal = tokio::spawn({
+        let control = control.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!(
+                    "film-harness: interrupt received — canceling the in-flight job and writing \
+                     the run record; interrupt again to exit now (the render keeps going)"
+                );
+                control.cancel();
+                // The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns
+                // SIGINT for the rest of the process, so without this a second Ctrl-C would be
+                // swallowed and the operator would have no way out but another signal.
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    eprintln!(
+                        "film-harness: second interrupt — exiting without a run record; the \
+                         worker may still be rendering (cancel it in the job list)"
+                    );
+                    std::process::exit(130);
+                }
+            }
+        }
+    });
+    let outcome = film_harness::run_with_control(&transport, &parsed.options, &control).await;
+    signal.abort();
+    match outcome {
         Ok(record) => {
             let record_path = parsed.options.out_dir.join("run.json");
             println!(

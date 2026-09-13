@@ -18,9 +18,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
-use crate::film_plan::{
-    shot_resolution, PlanDiagnostic, ProductionPlan, ReferencePack, Shot, MAX_PROMPT_CHARS,
-};
+use crate::film_plan::{shot_resolution, PlanDiagnostic, ProductionPlan, ReferencePack, Shot};
+use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
 pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 1;

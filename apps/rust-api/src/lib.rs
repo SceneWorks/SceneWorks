@@ -390,7 +390,10 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
 // `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
 // `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
-const MAX_PROMPT_CHARS: usize = 4000;
+// Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
+// `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
+// the number and drifting.
+pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. 64 KiB is generous for legitimate advanced settings.
@@ -4462,8 +4465,13 @@ fn optional_number_to_f64(
     number.map(|value| number_to_f64(value, field)).transpose()
 }
 
+/// The only output heights `POST /api/v1/projects/:id/timelines/:id/exports` admits. One
+/// declaration (sc-22710): the film harness picks an export resolution before it dispatches, and a
+/// second hand-copied list would turn a pre-dispatch diagnostic into a 400 at enqueue on drift.
+pub(crate) const TIMELINE_EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
+
 fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiError> {
-    if ![640, 720, 1024, 1280].contains(&payload.resolution) {
+    if !TIMELINE_EXPORT_RESOLUTIONS.contains(&payload.resolution) {
         return Err(ApiError::bad_request(
             "Resolution must be one of 640, 720, 1024, or 1280.",
         ));

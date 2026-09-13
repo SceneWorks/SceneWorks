@@ -41,7 +41,7 @@ use sceneworks_core::time::utc_now;
 use serde_json::{json, Map as JsonObject, Value};
 use tokio::time::Instant;
 
-use crate::film_harness::{sha256_hex, ApiTransport, HarnessError};
+use crate::film_harness::{sha256_hex, ApiTransport, HarnessError, HostFacts};
 
 /// Repair rounds the planner takes by default when a draft is refused. Small on purpose: a local
 /// 8B refiner that has not satisfied the validator in two corrections is not converging, and every
@@ -358,19 +358,24 @@ async fn resolve_envelope(
     transport: &dyn ApiTransport,
     brief: &ProductionBrief,
     require_installed: bool,
+    facts: &HostFacts,
 ) -> Result<(JsonObject<String, Value>, PlannerCapabilities), HarnessError> {
     let entry = crate::film_harness::model_entry_for(transport, &brief.model.id).await?;
+    // The SAME entry-level gate the dispatch path runs — catalog presence, video type, install
+    // state, and the route's own platform-reachability check — rather than a second copy of it.
     let findings = crate::film_harness::model_entry_findings(
         &brief.model.id,
         entry.as_ref(),
         brief.model.tier.as_deref(),
         require_installed,
+        facts,
     );
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
     let entry = entry.expect("findings are empty only with an entry");
-    let caps = capabilities_for(&brief.model, &entry, ModelLane::for_current_platform());
+    // The lane follows the API HOST's platform, not this process's: `--api` may be another machine.
+    let caps = capabilities_for(&brief.model, &entry, facts.lane());
     Ok((entry, caps))
 }
 
@@ -412,6 +417,7 @@ async fn prepare(
         ReferencePack,
         JsonObject<String, Value>,
         PlannerCapabilities,
+        HostFacts,
     ),
     HarnessError,
 > {
@@ -434,12 +440,14 @@ async fn prepare(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    let (entry, caps) = resolve_envelope(transport, &brief, options.require_installed).await?;
+    let facts = crate::film_harness::host_facts_for(transport).await?;
+    let (entry, caps) =
+        resolve_envelope(transport, &brief, options.require_installed, &facts).await?;
     let findings = refiner_findings(transport).await?;
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    Ok((brief, pack, entry, caps))
+    Ok((brief, pack, entry, caps, facts))
 }
 
 fn pack_dir(pack_path: &Path) -> PathBuf {
@@ -456,7 +464,7 @@ pub async fn generate(
     llm: &dyn PlannerLlm,
     options: &PlannerOptions,
 ) -> Result<PlannerArtifacts, HarnessError> {
-    let (brief, pack, entry, caps) = prepare(transport, options).await?;
+    let (brief, pack, entry, caps, facts) = prepare(transport, options).await?;
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
     let mut last_reply;
@@ -480,7 +488,7 @@ pub async fn generate(
                     &plan,
                     &pack,
                     Some(&pack_dir(&options.reference_pack_path)),
-                    Some((&entry, ModelLane::for_current_platform())),
+                    Some((&entry, facts.lane())),
                 );
                 if findings.is_empty() {
                     break plan;
@@ -531,8 +539,16 @@ pub async fn generate(
     };
 
     let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
-    let (compiled, compiled_path) =
-        compile_and_write(llm, options, &plan, &pack, &entry, &plan_bytes).await?;
+    let (compiled, compiled_path) = compile_and_write(
+        llm,
+        options,
+        &plan,
+        &pack,
+        &entry,
+        facts.lane(),
+        &plan_bytes,
+    )
+    .await?;
     Ok(PlannerArtifacts {
         plan,
         plan_path,
@@ -564,12 +580,14 @@ pub async fn compile_existing(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
+    let facts = crate::film_harness::host_facts_for(transport).await?;
     let entry = crate::film_harness::model_entry_for(transport, &plan.model.id).await?;
     let mut findings = crate::film_harness::model_entry_findings(
         &plan.model.id,
         entry.as_ref(),
         plan.model.tier.as_deref(),
         options.require_installed,
+        &facts,
     );
     if findings.is_empty() {
         let entry = entry.as_ref().expect("entry present when findings empty");
@@ -577,7 +595,7 @@ pub async fn compile_existing(
             &plan,
             &pack,
             Some(&pack_dir(&options.reference_pack_path)),
-            Some((entry, ModelLane::for_current_platform())),
+            Some((entry, facts.lane())),
         ));
     }
     if !findings.is_empty() {
@@ -600,8 +618,16 @@ pub async fn compile_existing(
         }
     }
     let plan_bytes = std::fs::read(plan_path)?;
-    let (compiled, compiled_path) =
-        compile_and_write(llm, options, &plan, &pack, &entry, &plan_bytes).await?;
+    let (compiled, compiled_path) = compile_and_write(
+        llm,
+        options,
+        &plan,
+        &pack,
+        &entry,
+        facts.lane(),
+        &plan_bytes,
+    )
+    .await?;
     Ok(PlannerArtifacts {
         plan,
         plan_path: plan_path.to_path_buf(),
@@ -659,6 +685,7 @@ async fn compile_and_write(
     plan: &ProductionPlan,
     pack: &ReferencePack,
     entry: &JsonObject<String, Value>,
+    lane: ModelLane,
     plan_bytes: &[u8],
 ) -> Result<(CompiledPlan, PathBuf), HarnessError> {
     std::fs::create_dir_all(&options.out_dir)?;
@@ -684,7 +711,7 @@ async fn compile_and_write(
         pack,
         &CompileInputs {
             model_entry: entry,
-            lane: ModelLane::for_current_platform().manifest_key(),
+            lane: lane.manifest_key(),
             plan_sha256: &sha256_hex(plan_bytes),
             compiled_at: &utc_now(),
             refined_prompts: &refined,
