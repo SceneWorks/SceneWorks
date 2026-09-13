@@ -7004,9 +7004,24 @@ const QWEN_EDIT_ID: &str = "qwen_image_edit";
 /// captures of one anchor are the same request.
 const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
 /// The production true-CFG guidance the worker resolves for the multi-step edit path
-/// (`resolve_qwen_edit_guidance`, manifest `variationStrength.default`). Ignored on the Lightning
-/// path, which the engine forces CFG-off.
+/// (`resolve_qwen_edit_guidance`, manifest `variationStrength.default`). Lightning requires 1.0
+/// explicitly: the engine rejects other guidance values rather than overriding them.
 const QWEN_EDIT_GUIDANCE: f32 = 4.0;
+
+fn qwen_edit_generation_recipe(arm: QwenEditArm) -> QwenEditRequest {
+    QwenEditRequest {
+        prompt: QWEN_EDIT_PROMPT.to_owned(),
+        negative: String::new(),
+        steps: arm.steps,
+        guidance: if arm.lightning {
+            1.0
+        } else {
+            QWEN_EDIT_GUIDANCE
+        },
+        lightning: arm.lightning,
+        ..Default::default()
+    }
+}
 
 fn qwen_edit_arm(request: &Value) -> Result<QwenEditArm, String> {
     let planned = protocol::planned(request)?;
@@ -7345,14 +7360,9 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
     vram.end_load(load_sample);
 
     let generation = QwenEditRequest {
-        prompt: QWEN_EDIT_PROMPT.to_owned(),
-        negative: String::new(),
         width,
         height,
-        steps: arm.steps,
-        guidance: QWEN_EDIT_GUIDANCE,
         seed,
-        lightning: arm.lightning,
         stage_residency,
         memory: Some(GenerationMemory {
             stage_residency,
@@ -7365,7 +7375,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
             transformer_window_size: selection.parameters.transformer_window_size,
             ..Default::default()
         }),
-        ..Default::default()
+        ..qwen_edit_generation_recipe(arm)
     };
     let references = [qwen_edit_reference(width, height)];
 
@@ -9330,6 +9340,21 @@ mod tests {
     }
 
     const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
+
+    #[test]
+    fn qwen_edit_generation_uses_the_lightning_recipe_only_for_the_distilled_arm() {
+        let lightning = qwen_edit_generation_recipe(QWEN_EDIT_LIGHTNING_ARM);
+        assert!(lightning.lightning);
+        assert_eq!(lightning.steps, 4);
+        assert_eq!(lightning.guidance, 1.0);
+        assert!(lightning.negative.is_empty());
+
+        let base = qwen_edit_generation_recipe(QWEN_EDIT_ARM);
+        assert!(!base.lightning);
+        assert_eq!(base.steps, 2);
+        assert_eq!(base.guidance, 4.0);
+        assert_eq!(base.prompt, lightning.prompt);
+    }
 
     fn qwen_edit_scratch_dir(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
