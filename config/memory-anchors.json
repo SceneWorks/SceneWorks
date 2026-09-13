@@ -12096,9 +12096,20 @@
       "route": "pulid_flux",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'pulid_flux'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json",
+        "sha256": "ece93c4688cb00e582ffb5d9f9fe521b12e48ed67282af1509683f5ce05a72de",
+        "recordId": "imc-7709075e035c9bb00cdf",
+        "envelopeBytes": 30465327104,
+        "values": {
+          "provider": "pulid_flux",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:pulid_flux_dev:mlx:bf16",
