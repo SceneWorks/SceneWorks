@@ -1330,9 +1330,11 @@ async fn observed_memory_over_budget_stops_new_dispatch() {
         )],
     )
     .await;
+    // Sound-free: this test is about the memory budget, and importing the pack's clips transcodes
+    // through ffmpeg, which the hosted macOS lane does not have. Same reasoning as `edited_plan`.
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let record = film_harness::run(&harness.transport, &options)
@@ -1546,9 +1548,11 @@ async fn a_timeline_with_no_video_track_fails_the_run_instead_of_saving_nothing(
             body["tracks"] = json!([{ "id": "track_audio", "kind": "audio", "items": [] }]);
         }
     });
+    // Sound-free for the same reason as the budget test above: nothing here is about sound, and the
+    // import transcodes through an ffmpeg the hosted macOS lane does not have.
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     let error = film_harness::run(&transport, &options)
@@ -2295,6 +2299,243 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
     assert!(
         message.contains("SH020") && message.contains("exactly once"),
         "{message}"
+    );
+}
+
+/// AC1, bounded: a trim is measured against the take it cuts, not taken on faith.
+///
+/// An out point past the end of the media used to be accepted in silence. `relayout_timeline` then
+/// wrote a `timelineEnd` longer than the file, `render_item_segment` returned the DECLARED duration
+/// while `-t` gave ffmpeg a short segment, and the exported picture came out shorter than the saved
+/// sequence — sound drifting against picture, and a duration in the render sidecar that no file
+/// has. `ReplaceTake` always measured its asset first; `Trim` now does the same.
+#[tokio::test]
+async fn a_trim_past_the_end_of_the_take_is_clamped_to_the_takes_real_length() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let take_asset = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is in the sequence")
+        .asset_id
+        .clone();
+    let (status, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{take_asset}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+    let take_seconds = asset["file"]["duration"]
+        .as_f64()
+        .expect("the imported take carries a measured duration");
+
+    let edit_options = film_harness::EditOptions {
+        run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+        export: false,
+        poll_interval: Duration::from_millis(250),
+    };
+    let trimmed = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(0.5),
+            // Far past the end of a take this caller never measured.
+            source_out: Some(take_seconds * 10.0),
+        },
+    )
+    .await
+    .expect("a trim past the end of the take is clamped, not refused");
+    let trimmed_item = trimmed
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is still in the sequence")
+        .clone();
+    assert!(
+        close(trimmed_item.source_out, take_seconds),
+        "the out point must be clamped to the take's real {take_seconds}s, got {}",
+        trimmed_item.source_out
+    );
+    assert!(
+        close(
+            trimmed_item.timeline_end - trimmed_item.timeline_start,
+            take_seconds - 0.5
+        ),
+        "and the slot the sequence gives the shot must be the media that exists: {trimmed_item:#?}"
+    );
+
+    // The saved timeline says the same thing — this is what the exporter reads.
+    let saved = saved_timeline(
+        &harness.app,
+        &project_id,
+        &record.timeline.as_ref().expect("timeline").timeline_id,
+    )
+    .await;
+    let saved_item = items_of(&saved, "track_main")
+        .iter()
+        .find(|item| item["filmHarness"]["shotId"] == json!("SH010"))
+        .expect("SH010 on the saved picture track")
+        .clone();
+    assert!(
+        close(saved_item["sourceOut"].as_f64().unwrap(), take_seconds),
+        "{saved_item}"
+    );
+
+    // A range that lands entirely past the end is an error rather than a clamp, and it says how
+    // long the take actually is so the caller can pick a real number.
+    let error = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(take_seconds + 5.0),
+            source_out: Some(take_seconds + 9.0),
+        },
+    )
+    .await
+    .expect_err("an in point past the end of the take has no usable range");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("{take_seconds:.3}")),
+        "the refusal must name the take's real length: {message}"
+    );
+}
+
+/// A re-layout is not a licence to delete the editor's own clips (sc-22712 review).
+///
+/// The harness re-places what IT placed — a line follows its shot, a bed re-spans the sequence —
+/// and a harness-owned clip with nowhere left to go is dropped because the plan can put it back.
+/// A clip the harness did not place is none of its business: it is clamped into the sequence and
+/// kept. The shared drop used to apply to both, so any editor clip sitting within 40 ms of the end
+/// was destroyed by the next edit, with no diagnostic and no undo.
+#[tokio::test]
+async fn a_relayout_keeps_an_editor_placed_clip_the_harness_never_put_there() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let total = saved["duration"].as_f64().expect("duration");
+    let asset_id = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported")
+        .asset_id
+        .clone();
+
+    // A clip the editor placed: no `filmHarness` block, sitting right at the end of the sequence
+    // and overhanging it.
+    let mut edited = saved.clone();
+    edited["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .iter_mut()
+        .find(|track| track["id"] == json!("track_dialogue"))
+        .expect("the editor's dialogue lane")["items"]
+        .as_array_mut()
+        .expect("items")
+        .push(json!({
+            "id": "editor_clip",
+            "trackId": "track_dialogue",
+            "assetId": asset_id,
+            "type": "audio",
+            "displayName": "an editor's own clip",
+            "sourceIn": 0.0,
+            "sourceOut": 1.0,
+            "timelineStart": total - 0.02,
+            "timelineEnd": total + 0.5,
+            "speed": 1.0,
+            "fit": "fit",
+            "volume": 1.0,
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
+        }));
+    let (status, body) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": edited }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+    // A reorder does not change the sequence's length, so nothing about this clip is stale.
+    film_harness::edit_timeline(
+        &harness.transport,
+        &film_harness::EditOptions {
+            run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+            export: false,
+            poll_interval: Duration::from_millis(250),
+        },
+        film_harness::TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let kept = items_of(&saved, "track_dialogue")
+        .iter()
+        .find(|item| item["id"] == json!("editor_clip"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the harness deleted a clip it never placed. A re-layout may re-place the \
+                 harness's own dialogue, ambience and music items; the editor's belong to the \
+                 editor: {saved}"
+            )
+        })
+        .clone();
+    assert!(
+        close(kept["timelineStart"].as_f64().unwrap(), total - 0.02),
+        "an unowned clip keeps where the editor put it: {kept}"
+    );
+    assert!(
+        close(kept["timelineEnd"].as_f64().unwrap(), total),
+        "clamped to the sequence, never stretching it: {kept} against {total}"
     );
 }
 

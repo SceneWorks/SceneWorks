@@ -2085,7 +2085,9 @@ pub(crate) async fn run_timeline_export_job(
             "Timeline has no main video items to export.".to_owned(),
         ));
     }
-    let (plan, duration) = plan_segments(&items)?;
+    // The plan's own duration is the timeline's span; the EXPORT's duration is read off the
+    // rendered segments in `finalize`, because a crossfade makes the two different numbers.
+    let (plan, _) = plan_segments(&items)?;
 
     let temp_dir = tempfile::Builder::new()
         .prefix(&format!(
@@ -2114,7 +2116,7 @@ pub(crate) async fn run_timeline_export_job(
         spec,
     };
     let segments = export.render(&plan, &tmp_path).await?;
-    export.finalize(&segments, &tmp_path, duration).await?;
+    export.finalize(&segments, &tmp_path).await?;
     Ok(())
 }
 
@@ -2269,9 +2271,9 @@ impl TimelineExport<'_> {
     /// deliverable, and losing the whole export because one clip turned out to be silent would be
     /// a worse answer than an export with one fewer layer. Everything dropped is logged with the
     /// track it came from, so a missing layer is diagnosable from the job log.
-    async fn resolve_audio_sources(&self, duration: f64) -> Vec<ResolvedAudioSource> {
+    async fn resolve_audio_sources(&self, timing: &PictureTiming) -> Vec<ResolvedAudioSource> {
         let mut resolved = Vec::new();
-        for placement in audio_placements(&self.timeline, duration) {
+        for placement in audio_placements(&self.timeline, timing) {
             let Ok(asset) = self
                 .store
                 .get_asset(&self.request.project_id, &placement.asset_id)
@@ -2344,12 +2346,17 @@ impl TimelineExport<'_> {
     /// `-map_metadata -1` explicitly; `mux_with_crossfades_args` records the measurement, and
     /// `a_crossfaded_export_does_not_inherit_a_clips_recipe` in this file
     /// (`export_metadata_tests`) fails if either regresses.
-    async fn finalize(
-        &self,
-        segments: &[TimelineSegment],
-        tmp_path: &Path,
-        duration: f64,
-    ) -> WorkerResult<()> {
+    ///
+    /// # The picture's own clock, not the plan's (sc-22712)
+    ///
+    /// The length is read off the SEGMENTS through [`PictureTiming`] rather than taken from
+    /// `plan_segments`, which sums item spans and knows nothing about crossfades. A crossfaded
+    /// picture is shorter than its timeline by the crossfade duration per transition, so the plan's
+    /// number would give the mix a ceiling that is too generous, delay every clip past the
+    /// transition, and put a duration in the sidecar that the file does not have.
+    async fn finalize(&self, segments: &[TimelineSegment], tmp_path: &Path) -> WorkerResult<()> {
+        let timing = PictureTiming::from_segments(segments);
+        let duration = timing.duration();
         let output_rel = format!(
             "assets/renders/{}_{}_{}.mp4",
             &now_rfc3339()[..10],
@@ -2380,7 +2387,7 @@ impl TimelineExport<'_> {
         // over the finished picture rather than a wider first pass, because the picture pass joins
         // pre-rendered segments whose timing has nothing to do with where a bed or a line sits —
         // a bed spanning three cuts cannot be expressed as a property of any one segment.
-        let audio = self.resolve_audio_sources(duration).await;
+        let audio = self.resolve_audio_sources(&timing).await;
         if audio.is_empty() {
             mux_segments(
                 "ffmpeg",
@@ -3054,21 +3061,99 @@ pub(crate) struct TimelineSegment {
     transition_duration: f64,
 }
 
-pub(crate) fn main_track_items(timeline: &Value) -> Vec<Value> {
+/// Index of the track whose items become the PICTURE — `track_main` by id, or the first
+/// `kind: "video"` track. One definition, because two places need the same answer: the render plan
+/// (what is drawn) and [`audio_placements`] (whose generated audio may be mixed). An item on any
+/// other track is not rendered into the picture, so its own audio has nothing to sit behind.
+pub(crate) fn picture_track_index(timeline: &Value) -> Option<usize> {
     timeline
         .get("tracks")
         .and_then(Value::as_array)
         .and_then(|tracks| {
-            tracks
-                .iter()
-                .find(|track| {
-                    track.get("id").and_then(Value::as_str) == Some("track_main")
-                        || track.get("kind").and_then(Value::as_str) == Some("video")
-                })
-                .and_then(|track| track.get("items").and_then(Value::as_array))
+            tracks.iter().position(|track| {
+                track.get("id").and_then(Value::as_str) == Some("track_main")
+                    || track.get("kind").and_then(Value::as_str) == Some("video")
+            })
         })
+}
+
+pub(crate) fn main_track_items(timeline: &Value) -> Vec<Value> {
+    picture_track_index(timeline)
+        .and_then(|index| timeline["tracks"][index].get("items"))
+        .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// How the saved timeline's seconds map onto the EXPORTED PICTURE's seconds (sc-22712).
+///
+/// They are not the same clock the moment a shot carries a crossfade. `crossfade_filter_complex`
+/// overlaps each crossfaded segment with the one before it, so the picture comes out SHORTER than
+/// the timeline by the crossfade duration once per transition, and every shot after a transition
+/// begins that much EARLIER in the file than the timeline says.
+///
+/// Measured with ffmpeg 9.0.1: two 2 s clips with a 1.0 s crossfade at offset 1.0 produce a 3.000 s
+/// file over a timeline that spans 4.0 s. Handing that 4.0 to [`audio_placements`] gave the mix a
+/// ceiling a second too generous, `adelay`ed a line keyed to the second shot a second after the
+/// shot it belongs to, and `-shortest` then cut the tail of the mix off — three symptoms of the one
+/// missing conversion.
+///
+/// The accumulation is deliberately the same arithmetic `crossfade_filter_complex` performs
+/// (`current_duration += segment.duration - duration`);
+/// `picture_timing_matches_the_crossfade_graphs_own_arithmetic` fails if the two ever disagree.
+#[derive(Debug, Clone)]
+pub(crate) struct PictureTiming {
+    duration: f64,
+    /// `(timeline second a segment starts at, crossfade seconds absorbed before it)`, ascending.
+    absorbed: Vec<(f64, f64)>,
+}
+
+impl PictureTiming {
+    /// A picture exactly as long as the timeline says: no crossfades, nothing absorbed.
+    #[cfg(test)]
+    pub(crate) fn flat(duration: f64) -> Self {
+        Self {
+            duration: duration.max(0.0),
+            absorbed: Vec::new(),
+        }
+    }
+
+    /// Read the real picture clock off the segments the mux is about to join.
+    pub(crate) fn from_segments(segments: &[TimelineSegment]) -> Self {
+        let mut absorbed = Vec::new();
+        let mut timeline_cursor = 0.0_f64;
+        let mut total = 0.0_f64;
+        for (index, segment) in segments.iter().enumerate() {
+            if index > 0 {
+                if segment.transition.as_deref() == Some("crossfade") {
+                    total += crossfade_duration(segment.transition_duration);
+                }
+                absorbed.push((timeline_cursor, total));
+            }
+            timeline_cursor += segment.duration;
+        }
+        Self {
+            duration: (timeline_cursor - total).max(0.0),
+            absorbed,
+        }
+    }
+
+    /// Length of the picture the mux actually produces — the mix's hard ceiling.
+    pub(crate) fn duration(&self) -> f64 {
+        self.duration
+    }
+
+    /// Where a timeline second lands in the exported picture.
+    pub(crate) fn picture_time(&self, timeline_time: f64) -> f64 {
+        let absorbed = self
+            .absorbed
+            .iter()
+            .take_while(|(start, _)| *start <= timeline_time + 1e-9)
+            .map(|(_, absorbed)| *absorbed)
+            .last()
+            .unwrap_or(0.0);
+        (timeline_time - absorbed).max(0.0)
+    }
 }
 
 /// Sample format every mixed source is converted to before `amix` sees it. Fixed rather than
@@ -3076,6 +3161,21 @@ pub(crate) fn main_track_items(timeline: &Value) -> Vec<Value> {
 /// every host — an `amix` over inputs with different layouts is a source of host-dependent output,
 /// and this export is supposed to be reproducible from the saved timeline alone.
 const AUDIO_MIX_FORMAT: &str = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+
+/// The headroom guard on the summed mix (sc-22712).
+///
+/// `amix=normalize=0` is a straight sum, so N buses at the gains the timeline asked for can — and
+/// with the film harness's own defaults (dialogue 1.0 + ambience 0.35 + music 0.2, peaking at 1.55)
+/// routinely do — exceed full scale, and the AAC encoder answers that by hard-clipping. Measured
+/// with ffmpeg 9.0.1: a two-bus mix peaking at 1.24 round-trips through AAC with 180 samples pinned
+/// at ±1.0; the same mix through this filter peaks at 0.961.
+///
+/// `level=disabled` turns off `alimiter`'s auto-level, which is ON by default and scales the output
+/// by `1/limit` — putting the ceiling back at exactly 1.0, which is the value the encoder clips at.
+/// Measured on the same two-bus mix: 0.968 with auto-level, 0.961 without. It is a gain applied to
+/// the whole mix either way, so it changes no bus's level RELATIVE to another; what it costs is the
+/// headroom this filter is here to buy.
+const MIX_LIMITER: &str = "alimiter=level=disabled:limit=0.98";
 
 /// One audio source placed on the timeline, resolved to the numbers ffmpeg needs (sc-22712).
 ///
@@ -3091,8 +3191,12 @@ pub(crate) struct AudioPlacement {
     /// Range taken from the SOURCE file, in source seconds.
     pub(crate) source_in: f64,
     pub(crate) source_out: f64,
-    /// Where the clip lands on the timeline, and how long its slot is.
-    pub(crate) timeline_start: f64,
+    /// Where the clip lands in the EXPORTED PICTURE, and how long its slot is.
+    ///
+    /// Picture seconds, not timeline seconds: a crossfade pulls everything after it earlier in the
+    /// file, and this is the number `adelay` is given, so it has to be the one the picture keeps.
+    /// See [`PictureTiming`].
+    pub(crate) picture_start: f64,
     pub(crate) span: f64,
     pub(crate) speed: f64,
     /// Track gain multiplied by the item's own `volume`.
@@ -3112,20 +3216,28 @@ pub(crate) struct ResolvedAudioSource {
 
 /// Walk the saved timeline into the ordered list of audio sources the export must mix.
 ///
-/// Pure: no store, no ffmpeg. `picture_duration` is the length of the picture the video pass
-/// produced, and it is a HARD CEILING — a clip that starts past the last frame is dropped and one
-/// that overruns it is shortened. That is what makes "the exported duration and the audio
+/// Pure: no store, no ffmpeg. `timing` is the clock of the picture the video pass ACTUALLY
+/// produced, and its duration is a HARD CEILING — a clip that starts past the last frame is dropped
+/// and one that overruns it is shortened. That is what makes "the exported duration and the audio
 /// synchronisation match the saved timeline" a single claim rather than two: the mix cannot extend
 /// the file, so the export is exactly as long as the picture the timeline describes.
 ///
-/// Order is `(timelineStart, trackId, assetId)` so the generated filter graph — and therefore the
+/// Every position is converted through [`PictureTiming::picture_time`] rather than used raw,
+/// because a crossfaded picture is shorter than its timeline and everything after the transition
+/// sits earlier in the file than the timeline says. Skipping that conversion is the whole of the
+/// sc-22712 crossfade drift: the ceiling is too generous, the sound bed lands late by the
+/// accumulated crossfade time, and `-shortest` cuts the overhang off the end.
+///
+/// Order is `(pictureStart, trackId, assetId)` so the generated filter graph — and therefore the
 /// exported bytes — do not depend on the order tracks happen to sit in the document.
-pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<AudioPlacement> {
+pub(crate) fn audio_placements(timeline: &Value, timing: &PictureTiming) -> Vec<AudioPlacement> {
     let mut placements = Vec::new();
+    let picture_duration = timing.duration();
     let Some(tracks) = timeline.get("tracks").and_then(Value::as_array) else {
         return placements;
     };
-    for track in tracks {
+    let picture_track = picture_track_index(timeline);
+    for (track_index, track) in tracks.iter().enumerate() {
         if track.get("muted").and_then(Value::as_bool).unwrap_or(false) {
             continue;
         }
@@ -3146,6 +3258,13 @@ pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<A
             .to_owned();
         let track_gain = item_f64(track, "gain", 1.0).clamp(0.0, 4.0);
         let is_audio_track = kind == "audio";
+        // Only the PICTURE track's items can contribute their own generated audio. An overlay item
+        // is never rendered into the picture (`main_track_items` reads one track), so mixing its
+        // take's audio in would put sound in the export with no picture behind it.
+        let is_picture_track = picture_track == Some(track_index);
+        if !is_audio_track && !is_picture_track {
+            continue;
+        }
         let Some(items) = track.get("items").and_then(Value::as_array) else {
             continue;
         };
@@ -3159,10 +3278,18 @@ pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<A
             };
             let timeline_start = item_f64(item, "timelineStart", 0.0).max(0.0);
             let timeline_end = item_f64(item, "timelineEnd", 0.0);
-            if timeline_end <= timeline_start || timeline_start >= picture_duration {
+            if timeline_end <= timeline_start {
                 continue;
             }
-            let span = (timeline_end.min(picture_duration) - timeline_start).max(0.0);
+            let picture_start = timing.picture_time(timeline_start);
+            if picture_start >= picture_duration {
+                continue;
+            }
+            // The clip itself is not retimed by a crossfade — only moved — so its slot keeps its
+            // own length, cut short only by the end of the picture.
+            let span = (timeline_end - timeline_start)
+                .min(picture_duration - picture_start)
+                .max(0.0);
             if span <= 0.0 {
                 continue;
             }
@@ -3185,7 +3312,7 @@ pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<A
                 role: role.clone(),
                 source_in,
                 source_out,
-                timeline_start,
+                picture_start,
                 span,
                 speed,
                 gain,
@@ -3196,8 +3323,8 @@ pub(crate) fn audio_placements(timeline: &Value, picture_duration: f64) -> Vec<A
         }
     }
     placements.sort_by(|left, right| {
-        left.timeline_start
-            .total_cmp(&right.timeline_start)
+        left.picture_start
+            .total_cmp(&right.picture_start)
             .then_with(|| left.track_id.cmp(&right.track_id))
             .then_with(|| left.asset_id.cmp(&right.asset_id))
     });
@@ -3257,7 +3384,7 @@ pub(crate) fn audio_source_filter(input: usize, source: &ResolvedAudioSource) ->
             placement.fade_out
         ));
     }
-    let delay_ms = (placement.timeline_start * 1000.0).round().max(0.0) as i64;
+    let delay_ms = (placement.picture_start * 1000.0).round().max(0.0) as i64;
     if delay_ms > 0 {
         chain.push(format!("adelay={delay_ms}:all=1"));
     }
@@ -3274,6 +3401,10 @@ pub(crate) fn audio_source_filter(input: usize, source: &ResolvedAudioSource) ->
 /// `apad` closes the other half: the mix is padded with silence so it always outlasts the picture,
 /// and `-shortest` then cuts the file at the last video frame. Without the pad, `-shortest` would
 /// end the FILE when the audio ran out and truncate the picture.
+///
+/// [`MIX_LIMITER`] is the third leg. `normalize=0` sums N inputs, and the harness's own defaults
+/// (dialogue 1.0 + ambience 0.35 + music 0.2) peak at 1.55 — the AAC encoder hard-clips anything
+/// above full scale, and clipping distortion is not "their gain choices, audibly" (sc-22712).
 pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
     let mut chains: Vec<String> = sources
         .iter()
@@ -3284,10 +3415,10 @@ pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
         .map(|index| format!("[a{index}]"))
         .collect();
     if sources.len() == 1 {
-        chains.push(format!("{labels}apad[aout]"));
+        chains.push(format!("{labels}{MIX_LIMITER},apad[aout]"));
     } else {
         chains.push(format!(
-            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,apad[aout]",
+            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,{MIX_LIMITER},apad[aout]",
             sources.len()
         ));
     }
@@ -3774,7 +3905,9 @@ pub(crate) fn build_render_asset(
                 "role": placement.role,
                 "assetId": placement.asset_id,
                 "generated": placement.generated,
-                "timelineStart": (placement.timeline_start * 1000.0).round() / 1000.0,
+                // Where the layer sits in the EXPORTED file. Not the item's `timelineStart`: a
+                // crossfade absorbs time out of the picture, so the two differ by design.
+                "pictureStart": (placement.picture_start * 1000.0).round() / 1000.0,
                 "durationSeconds": (placement.span * 1000.0).round() / 1000.0,
                 "gain": (placement.gain * 10000.0).round() / 10000.0,
                 "fadeInSeconds": placement.fade_in,
@@ -6143,6 +6276,36 @@ mod timeline_audio_mix_tests {
         (samples.iter().map(|value| value * value).sum::<f64>() / samples.len() as f64).sqrt()
     }
 
+    /// Peak sample of the whole export, decoded at the file's OWN channel count.
+    ///
+    /// Deliberately NOT [`decode_window`]'s `-ac 1`: swresample normalises the downmix matrix when
+    /// the output format is an integer one, so a mix that is pinned at ±1.0 in stereo comes back
+    /// from a mono decode politely scaled down and the clipping is invisible. Measured both ways on
+    /// the same unlimited two-bus export: peak 1.000 with 360 clipped samples at `-ac 2`, peak
+    /// 0.959 and not one clipped sample at `-ac 1`. A headroom assertion has to ask the first
+    /// question, not the second.
+    fn decoded_peak(path: &Path) -> f64 {
+        let program = resolve_probe_program("ffmpeg");
+        let output = std::process::Command::new(program)
+            .args([
+                "-v",
+                "error",
+                "-i",
+                &path.display().to_string(),
+                "-vn",
+                "-f",
+                "s16le",
+                "-",
+            ])
+            .output()
+            .expect("ffmpeg decodes the export");
+        output
+            .stdout
+            .chunks_exact(2)
+            .map(|pair| (i16::from_le_bytes([pair[0], pair[1]]) as f64 / 32768.0).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
     /// Normalised magnitude of `frequency` in `samples` — a single-bin DFT (Goertzel).
     fn tone_level(samples: &[f64], frequency: f64) -> f64 {
         let count = samples.len();
@@ -6229,11 +6392,13 @@ mod timeline_audio_mix_tests {
 
     /// Run the production export sequence over a hand-built timeline: plan the main track, render
     /// each segment, mux the picture, then mix the audio. Returns the exported file and the
-    /// planned duration.
+    /// PICTURE's duration — the same number `finalize` writes into the sidecar, which is not the
+    /// plan's span once a crossfade absorbs time out of it.
     ///
     /// This is the real path minus the store and the API — `plan_segments`, `render_item_segment`,
-    /// `mux_segments` and `mux_audio` are the same functions `TimelineExport` calls, in the same
-    /// order, with the same arguments.
+    /// `PictureTiming::from_segments`, `audio_placements`, the `source_has_audio_stream` filter
+    /// `resolve_audio_sources` applies, `mux_segments` and `mux_audio` are the same functions
+    /// `TimelineExport` calls, in the same order, with the same arguments.
     async fn export(
         dir: &Path,
         timeline: &Value,
@@ -6244,7 +6409,7 @@ mod timeline_audio_mix_tests {
         items.sort_by(|left, right| {
             item_f64(left, "timelineStart", 0.0).total_cmp(&item_f64(right, "timelineStart", 0.0))
         });
-        let (plan, duration) = plan_segments(&items).expect("main track plans");
+        let (plan, _) = plan_segments(&items).expect("main track plans");
 
         let mut segments = Vec::new();
         for (index, planned) in plan.iter().enumerate() {
@@ -6286,24 +6451,31 @@ mod timeline_audio_mix_tests {
             });
         }
 
-        let sources: Vec<ResolvedAudioSource> = audio_placements(timeline, duration)
-            .into_iter()
-            .map(|placement| {
-                let asset = assets
-                    .iter()
-                    .find(|(id, _)| *id == placement.asset_id)
-                    .map(|(_, value)| value.clone())
-                    .expect("audio asset is in the fixture set");
-                let relative = asset["file"]["path"]
-                    .as_str()
-                    .expect("asset path")
-                    .to_owned();
-                ResolvedAudioSource {
-                    placement,
-                    media_path: dir.join(relative),
-                }
-            })
-            .collect();
+        let timing = PictureTiming::from_segments(&segments);
+        let duration = timing.duration();
+        let mut sources: Vec<ResolvedAudioSource> = Vec::new();
+        for placement in audio_placements(timeline, &timing) {
+            let asset = assets
+                .iter()
+                .find(|(id, _)| *id == placement.asset_id)
+                .map(|(_, value)| value.clone())
+                .expect("audio asset is in the fixture set");
+            let relative = asset["file"]["path"]
+                .as_str()
+                .expect("asset path")
+                .to_owned();
+            let media_path = dir.join(relative);
+            // The same drop-rather-than-fail filter `resolve_audio_sources` applies. Without it
+            // these tests would never reach the guard, and one silent opted-in take fails the
+            // WHOLE ffmpeg command — `[N:a]` against a file with no audio stream does not degrade.
+            if !source_has_audio_stream("ffmpeg", &media_path).await {
+                continue;
+            }
+            sources.push(ResolvedAudioSource {
+                placement,
+                media_path,
+            });
+        }
 
         let output = dir.join("export.mp4");
         if sources.is_empty() {
@@ -6347,7 +6519,7 @@ mod timeline_audio_mix_tests {
                 ])),
             ],
         });
-        let placements = audio_placements(&timeline, 4.0);
+        let placements = audio_placements(&timeline, &PictureTiming::flat(4.0));
         let selected: Vec<(&str, bool)> = placements
             .iter()
             .map(|placement| (placement.asset_id.as_str(), placement.generated))
@@ -6374,7 +6546,7 @@ mod timeline_audio_mix_tests {
                 ])),
             ],
         });
-        let placements = audio_placements(&timeline, 4.0);
+        let placements = audio_placements(&timeline, &PictureTiming::flat(4.0));
         assert_eq!(placements.len(), 1, "the muted music bus must be dropped");
         assert_eq!(placements[0].asset_id, "asset_x");
         assert!(
@@ -6395,13 +6567,96 @@ mod timeline_audio_mix_tests {
                 ])),
             ],
         });
-        let placements = audio_placements(&timeline, 4.0);
+        let placements = audio_placements(&timeline, &PictureTiming::flat(4.0));
         assert_eq!(
             placements.len(),
             1,
             "a clip that starts after the last frame has no slot at all: {placements:#?}"
         );
         assert!((placements[0].span - 4.0).abs() < 1e-9, "{placements:#?}");
+    }
+
+    /// An overlay item is never drawn into the picture, so its take's audio has nothing to sit
+    /// behind — `generatedAudio: include` on one must not put sound into the export.
+    ///
+    /// `main_track_items` reads ONE track, so the picture is only ever the main track's items; the
+    /// generated branch has to be keyed on that same track rather than on "not an audio track".
+    #[test]
+    fn an_overlay_items_generated_audio_never_reaches_the_mix() {
+        let timeline = json!({
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "asset_a", "video", 0.0, 2.0, 0.0, 2.0,
+                         json!({"generatedAudio": "include"})),
+                ])),
+                track("track_overlay", "overlay", "overlay", false, 1.0, json!([
+                    item("item_o", "track_overlay", "asset_o", "video", 0.0, 2.0, 0.0, 2.0,
+                         json!({"generatedAudio": "include"})),
+                ])),
+            ],
+        });
+        let placements = audio_placements(&timeline, &PictureTiming::flat(4.0));
+        let selected: Vec<&str> = placements
+            .iter()
+            .map(|placement| placement.asset_id.as_str())
+            .collect();
+        assert_eq!(
+            selected,
+            vec!["asset_a"],
+            "only the PICTURE track's opted-in item may contribute its own audio; the overlay \
+             item's take is never rendered into the picture"
+        );
+    }
+
+    /// The picture clock is the crossfade graph's own arithmetic, not the plan's span.
+    ///
+    /// `crossfade_filter_complex` overlaps each crossfaded segment with the one before it
+    /// (`current_duration += segment.duration - duration`), so two 2 s shots with a 1 s crossfade
+    /// are a 3 s picture and everything in the second shot happens a second earlier than the
+    /// timeline says. Both halves are read here: the length, and the mapping.
+    #[test]
+    fn picture_timing_matches_the_crossfade_graphs_own_arithmetic() {
+        let segment = |duration: f64, transition: Option<&str>| TimelineSegment {
+            path: PathBuf::from("segment.mp4"),
+            duration,
+            transition: transition.map(str::to_owned),
+            transition_duration: 1.0,
+        };
+        let plain = PictureTiming::from_segments(&[segment(2.0, None), segment(2.0, Some("cut"))]);
+        assert!(
+            (plain.duration() - 4.0).abs() < 1e-9 && (plain.picture_time(2.0) - 2.0).abs() < 1e-9,
+            "a straight cut absorbs nothing: {plain:?}"
+        );
+
+        let faded =
+            PictureTiming::from_segments(&[segment(2.0, None), segment(2.0, Some("crossfade"))]);
+        assert!(
+            (faded.duration() - 3.0).abs() < 1e-9,
+            "two 2s shots with a 1s crossfade are a 3s picture (measured with ffmpeg 9.0.1 in \
+             `a_crossfaded_export_places_sound_against_the_picture_it_actually_produced`); this \
+             timing says {}",
+            faded.duration()
+        );
+        for (timeline_second, expected) in [(0.0, 0.0), (1.5, 1.5), (2.0, 1.0), (4.0, 3.0)] {
+            let measured = faded.picture_time(timeline_second);
+            assert!(
+                (measured - expected).abs() < 1e-9,
+                "timeline {timeline_second}s lands at {expected}s in the picture, not {measured}s"
+            );
+        }
+
+        // Two crossfades accumulate, and the shortening applies to everything after each one.
+        let twice = PictureTiming::from_segments(&[
+            segment(2.0, None),
+            segment(2.0, Some("crossfade")),
+            segment(2.0, Some("crossfade")),
+        ]);
+        assert!(
+            (twice.duration() - 4.0).abs() < 1e-9
+                && (twice.picture_time(4.0) - 2.0).abs() < 1e-9
+                && (twice.picture_time(2.0) - 1.0).abs() < 1e-9,
+            "{twice:?}"
+        );
     }
 
     /// `atempo` is specified for 0.5..=2.0 per instance; the timeline admits 0.1..=8.0.
@@ -6449,7 +6704,7 @@ mod timeline_audio_mix_tests {
                     role: "dialogue".to_owned(),
                     source_in: 0.0,
                     source_out: 1.0,
-                    timeline_start: 0.0,
+                    picture_start: 0.0,
                     span: 1.0,
                     speed: 1.0,
                     gain: 1.0,
@@ -6482,7 +6737,7 @@ mod timeline_audio_mix_tests {
                 role: "music".to_owned(),
                 source_in: 0.0,
                 source_out: 1.0,
-                timeline_start: 0.0,
+                picture_start: 0.0,
                 span: 1.0,
                 speed: 1.0,
                 gain: 1.0,
@@ -6916,10 +7171,13 @@ mod timeline_audio_mix_tests {
         );
     }
 
-    /// A source with no audio stream is detected, so the mix can drop it instead of dying.
+    /// A source with no audio stream is detected AND the export survives it (sc-22712).
     ///
     /// `[N:a]` against a file with no audio stream fails the WHOLE ffmpeg command, so a single
-    /// silent take that opted in would otherwise take the entire export down with it.
+    /// silent take that opted in would otherwise take the entire export down with it. The predicate
+    /// is read first, then the same silent take is put on a real two-shot timeline with
+    /// `generatedAudio: include` — the export must still be produced, and must still carry the
+    /// dialogue clip that had nothing to do with the silent take.
     #[tokio::test]
     async fn a_silent_source_is_detected_rather_than_failing_the_whole_export() {
         if !ffmpeg_reachable() {
@@ -6936,6 +7194,202 @@ mod timeline_audio_mix_tests {
         assert!(
             source_has_audio_stream("ffmpeg", &root.join("voiced.mp4")).await,
             "a clip with a sine track does"
+        );
+
+        assert!(tone_wav(&root.join("line.wav"), 1.0, 440).await);
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    // The opted-in take that turns out to have no audio at all.
+                    item("item_silent", "track_main", "silent", "video", 0.0, 1.0, 0.0, 1.0,
+                         json!({"generatedAudio": "include"})),
+                    item("item_voiced", "track_main", "voiced", "video", 0.0, 1.0, 1.0, 2.0,
+                         json!({"generatedAudio": "include"})),
+                ])),
+                track("track_dialogue", "audio", "dialogue", false, 1.0, json!([
+                    item("item_line", "track_dialogue", "line", "audio", 0.0, 1.0, 0.0, 1.0, json!({})),
+                ])),
+            ],
+        });
+        let assets = [
+            ("silent", asset("video", "silent.mp4", "video/mp4")),
+            ("voiced", asset("video", "voiced.mp4", "video/mp4")),
+            ("line", asset("audio", "line.wav", "audio/wav")),
+        ];
+        let (export_path, _) = export(
+            root,
+            &timeline,
+            &assets,
+            RenderSpec {
+                width: 320,
+                height: 180,
+                fps: 24,
+            },
+        )
+        .await;
+        assert!(
+            export_path.exists(),
+            "one silent opted-in take must cost the export that layer, NOT the whole file"
+        );
+        let window = decode_window(&export_path, 0.2, 0.6);
+        let line = tone_level(&window, 440.0);
+        assert!(
+            line > 0.02,
+            "the layers that CAN be read must still be in the export; the dialogue clip measured \
+             {line:.5}"
+        );
+        let voiced = tone_level(&decode_window(&export_path, 1.2, 0.6), 900.0);
+        assert!(
+            voiced > 0.02,
+            "so must the second take's own audio, which is readable; measured {voiced:.5}"
+        );
+    }
+
+    /// AC3 on a crossfaded sequence: sound is placed against the picture that was ACTUALLY built.
+    ///
+    /// `crossfade_filter_complex` overlaps the shots, so this 4 s timeline exports as a 3 s picture
+    /// and the second shot begins at 1.0 s in the file rather than 2.0 s. A line keyed to that shot
+    /// has to travel with it. Before sc-22712's fix the mix was handed the plan's 4.0: the line was
+    /// `adelay`ed to 2.0 s — a full second after the shot it belongs to, and inside the last second
+    /// that `-shortest` then cut off.
+    #[tokio::test]
+    async fn a_crossfaded_export_places_sound_against_the_picture_it_actually_produced() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_crossfade_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 2.0, 900).await);
+        assert!(picture_clip(&root.join("shot_b.mp4"), 2.0, 900).await);
+        assert!(tone_wav(&root.join("line.wav"), 1.0, 440).await);
+
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "shot_a", "video", 0.0, 2.0, 0.0, 2.0, json!({})),
+                    item("item_b", "track_main", "shot_b", "video", 0.0, 2.0, 2.0, 4.0,
+                         json!({"transitionIn": {"type": "crossfade", "duration": 1.0}})),
+                ])),
+                track("track_dialogue", "audio", "dialogue", false, 1.0, json!([
+                    // Keyed to the top of the second shot.
+                    item("item_line", "track_dialogue", "line", "audio", 0.0, 1.0, 2.0, 3.0, json!({})),
+                ])),
+            ],
+        });
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("shot_b", asset("video", "shot_b.mp4", "video/mp4")),
+            ("line", asset("audio", "line.wav", "audio/wav")),
+        ];
+        let (export_path, duration) = export(
+            root,
+            &timeline,
+            &assets,
+            RenderSpec {
+                width: 320,
+                height: 180,
+                fps: 24,
+            },
+        )
+        .await;
+        assert!(
+            (duration - 3.0).abs() < 1e-6,
+            "the picture the export reports is the one the crossfade graph builds: 2 + 2 - 1 = 3, \
+             got {duration}"
+        );
+        let measured = probe_source_duration("ffmpeg", &export_path)
+            .await
+            .expect("the crossfaded export has a duration");
+        assert!(
+            (measured - 3.0).abs() < 0.09,
+            "two 2s shots with a 1.0s crossfade measure 3.000s, not the timeline's 4.0; measured \
+             {measured}s"
+        );
+
+        let at_shot_b = tone_level(&decode_window(&export_path, 1.1, 0.6), 440.0);
+        let at_timeline_start = tone_level(&decode_window(&export_path, 0.2, 0.6), 440.0);
+        assert!(
+            at_shot_b > 0.02,
+            "the line must play where its SHOT is — 1.0s into the picture, not 2.0s; measured \
+             {at_shot_b:.5} there"
+        );
+        assert!(
+            at_timeline_start < at_shot_b / 10.0,
+            "and nowhere else: {at_timeline_start:.5} at the head of the film against \
+             {at_shot_b:.5} under its own shot"
+        );
+    }
+
+    /// The mix has headroom: a deliberately hot two-bus sum does not reach the encoder's ceiling.
+    ///
+    /// `amix=normalize=0` is a straight sum — the thing that makes the timeline's gains mean
+    /// something — so N loud buses can exceed full scale and the AAC encoder answers by clipping.
+    /// Measured without [`MIX_LIMITER`], this mix round-trips with 180 samples pinned at ±1.0.
+    /// Clipping distortion is not "their gain choices, audibly" (AC2).
+    #[tokio::test]
+    async fn a_hot_two_bus_mix_stays_below_full_scale() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("sceneworks_mix_hot_");
+        let root = dir.path();
+        assert!(picture_clip(&root.join("shot_a.mp4"), 2.0, 900).await);
+        assert!(tone_wav(&root.join("line.wav"), 2.0, 440).await);
+        assert!(tone_wav(&root.join("room.wav"), 2.0, 300).await);
+
+        let timeline = json!({
+            "aspectRatio": "16:9",
+            "tracks": [
+                track("track_main", "video", "picture", false, 1.0, json!([
+                    item("item_a", "track_main", "shot_a", "video", 0.0, 2.0, 0.0, 2.0, json!({})),
+                ])),
+                // Gain 4.0 x volume 2.0 = 8, and 4.0 x 1.5 = 6: the top of what the timeline
+                // admits on two buses at once.
+                track("track_dialogue", "audio", "dialogue", false, 4.0, json!([
+                    item("item_line", "track_dialogue", "line", "audio", 0.0, 2.0, 0.0, 2.0,
+                         json!({"volume": 2.0})),
+                ])),
+                track("track_ambience", "audio", "ambience", false, 4.0, json!([
+                    item("item_room", "track_ambience", "room", "audio", 0.0, 2.0, 0.0, 2.0,
+                         json!({"volume": 1.5})),
+                ])),
+            ],
+        });
+        let assets = [
+            ("shot_a", asset("video", "shot_a.mp4", "video/mp4")),
+            ("line", asset("audio", "line.wav", "audio/wav")),
+            ("room", asset("audio", "room.wav", "audio/wav")),
+        ];
+        let (export_path, _) = export(
+            root,
+            &timeline,
+            &assets,
+            RenderSpec {
+                width: 320,
+                height: 180,
+                fps: 24,
+            },
+        )
+        .await;
+
+        let samples = decode_window(&export_path, 0.2, 1.5);
+        assert!(!samples.is_empty(), "the hot mix must decode");
+        let peak = decoded_peak(&export_path);
+        assert!(
+            peak < 0.999,
+            "the summed mix must be limited BEFORE the encoder sees it — these two buses sum to \
+             1.24 and an unlimited export decodes with 360 samples pinned at ±1.0. Peak measured \
+             {peak:.5}"
+        );
+        // The limiter is a gain on the whole mix, so the louder bus is still the louder one.
+        let line = tone_level(&samples, 440.0);
+        let room = tone_level(&samples, 300.0);
+        assert!(
+            line > room * 1.1,
+            "headroom control must not flatten the gains it is protecting: dialogue {line:.5} \
+             against ambience {room:.5}"
         );
     }
 }

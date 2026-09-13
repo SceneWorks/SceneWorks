@@ -49,9 +49,20 @@ The assembled timeline therefore has four tracks: `track_main` (picture), `track
 `track_ambience` and `track_music`. Each audio track is a bus with its own `gain` and `muted`;
 **the beds are placed once for the whole sequence**, so they play straight through the cuts instead
 of restarting at each one. The export mixes every non-muted audio track — gain is
-`track.gain * item.volume`, clips are delayed to their `timelineStart`, per-item
-`fadeInSeconds`/`fadeOutSeconds` become `afade`, and the mix is padded so the file ends on the last
-picture frame. Sound never extends the export: a clip that would overrun the picture is shortened.
+`track.gain * item.volume`, clips are delayed to where they land in the exported picture, per-item
+`fadeInSeconds`/`fadeOutSeconds` become `afade`, the summed mix passes through a limiter so the
+timeline's gains cannot add up past the encoder's ceiling and clip, and the mix is padded so the
+file ends on the last picture frame. Sound never extends the export: a clip that would overrun the
+picture is shortened.
+
+**Timeline seconds are not picture seconds when a shot carries a crossfade.** The picture pass
+overlaps a crossfaded shot with the one before it, so the exported file is shorter than the timeline
+by the crossfade duration once per transition and every shot after a transition begins that much
+earlier in the file. The mix is placed against the picture that was actually built: the ceiling is
+the real exported length, and a clip keyed to a shot is delayed to where that shot IS, not to where
+the timeline says it starts. Two 2 s shots with a 1 s crossfade export as a 3.000 s file with the
+second shot's line at 1.0 s. Only the picture track's items can contribute their own generated
+audio; an overlay item is never rendered into the picture, so its take's audio is not mixed in.
 
 **Generated clip audio** (`generatedAudio`, `include` | `mute`, default `mute`) decides whether a
 take's own audio joins the mix. The default is the doubling guard: a take whose model spoke the
@@ -96,6 +107,17 @@ re-span the new duration. Shot → asset links are never rebuilt from the plan �
 carries its own shot id and version history, so `replace-take` appends to that history rather than
 overwriting it, and the take that was there stays addressable. A reorder that does not name every
 shot exactly once is refused rather than silently dropping one.
+
+`trim` measures the take before it cuts, the same way `replace-take` measures its replacement: an
+out point past the end of the media is clamped to the take's real length, and a range that starts
+past the end is refused with the length named. An unbounded out point used to be accepted in
+silence and produced a sequence longer than the file it points at — picture shorter than the saved
+timeline, sound drifting against it, and a duration in the render sidecar that no file has.
+
+A re-layout only re-places what the harness placed. A dialogue, ambience or music item the harness
+put there is re-derived from the plan (and dropped when the re-layout leaves it no room, because the
+plan can put it back); an audio clip the harness did not place — the editor's own — is clamped into
+the new duration and **kept**, and dropped only when it starts past the end of the re-laid sequence.
 
 Each conditioning mode fixes which slots it takes — `text_to_video` none, `image_to_video` a first
 frame, `first_last_frame` first and last, `reference_to_video` references only — which is how a

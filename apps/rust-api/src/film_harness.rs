@@ -3024,6 +3024,37 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
         };
         items.retain_mut(|item| {
             let role = harness_str(item, "role").unwrap_or_default().to_owned();
+            match role.as_str() {
+                ROLE_DIALOGUE | ROLE_AMBIENCE | ROLE_MUSIC => {}
+                // A clip the harness did not place — the editor's own — is NOT the harness's to
+                // delete. Dropping anything that merely lands near the new end (which the shared
+                // rule below does, for items the harness owns and can re-place from the plan)
+                // would destroy a user's own work with no diagnostic and no undo, so an unowned
+                // clip is only clamped into the sequence, and dropped only when the re-layout
+                // leaves it no room at all.
+                _ => {
+                    let start = number(item, "timelineStart", 0.0).max(0.0);
+                    let end = number(item, "timelineEnd", start + item_span(item)).min(duration);
+                    if start >= duration || end <= start {
+                        let item_id = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        tracing::warn!(
+                            item_id,
+                            start,
+                            duration,
+                            "film-harness: an editor-placed audio clip starts past the end of the \
+                             re-laid sequence and has been dropped"
+                        );
+                        return false;
+                    }
+                    item["timelineStart"] = json!(ms(start));
+                    item["timelineEnd"] = json!(ms(end));
+                    return true;
+                }
+            }
             let (start, end) = match role.as_str() {
                 ROLE_DIALOGUE => {
                     let Some(shot_start) =
@@ -3035,15 +3066,10 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
                     let start = shot_start + harness_f64(item, "offsetSeconds");
                     (start, start + item_span(item))
                 }
-                ROLE_AMBIENCE | ROLE_MUSIC => {
+                // ROLE_AMBIENCE | ROLE_MUSIC, the only other arm the match above admits.
+                _ => {
                     let start = harness_f64(item, "startSeconds");
                     (start, duration)
-                }
-                // A clip the harness did not place (the editor's own, say) keeps where it is and is
-                // only clamped, because the harness has no idea what it means.
-                _ => {
-                    let start = number(item, "timelineStart", 0.0).max(0.0);
-                    (start, number(item, "timelineEnd", start + item_span(item)))
                 }
             };
             if start >= duration - MIN_ITEM_SECONDS {
@@ -3342,11 +3368,53 @@ pub async fn edit_timeline(
             source_in,
             source_out,
         } => {
+            // Measure the take FIRST, the way `ReplaceTake` does. An out point past the end of the
+            // media is silent otherwise: `relayout_timeline` writes a `timelineEnd` longer than the
+            // file, `render_item_segment` reports the DECLARED duration while `-t` yields a short
+            // segment, and the picture then comes out shorter than the sequence it was saved from —
+            // the same drift a crossfade used to cause, plus a wrong duration in the sidecar.
+            let take_id = picture_item_mut(&mut timeline, shot_id)?
+                .get("assetId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let take_seconds = if take_id.is_empty() {
+                None
+            } else {
+                client
+                    .expect_ok(
+                        "GET",
+                        &format!("/api/v1/projects/{project_id}/assets/{take_id}"),
+                        None,
+                    )
+                    .await?
+                    .get("file")
+                    .and_then(|file| file.get("duration"))
+                    .and_then(Value::as_f64)
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            };
             let item = picture_item_mut(&mut timeline, shot_id)?;
             let current_in = number(item, "sourceIn", 0.0);
             let current_out = number(item, "sourceOut", current_in + MIN_ITEM_SECONDS);
             let new_in = source_in.unwrap_or(current_in).max(0.0);
-            let new_out = source_out.unwrap_or(current_out);
+            let requested_out = source_out.unwrap_or(current_out);
+            // Clamp rather than refuse when there is still a usable range left: "keep everything
+            // from 1s on" is a reasonable thing to ask of a take whose length the caller does not
+            // know. Only a range that lands entirely past the end of the media is an error, and it
+            // says how long the take actually is.
+            let new_out = match take_seconds {
+                Some(seconds) if requested_out > seconds => {
+                    if new_in + MIN_ITEM_SECONDS >= seconds {
+                        return Err(HarnessError::Io(format!(
+                            "trim of {shot_id} asks for {new_in:.3}..{requested_out:.3} but its \
+                             take is only {seconds:.3}s long; the in point must be at least \
+                             {MIN_ITEM_SECONDS}s before the end of the take"
+                        )));
+                    }
+                    seconds
+                }
+                _ => requested_out,
+            };
             if !new_in.is_finite() || !new_out.is_finite() || new_out <= new_in + MIN_ITEM_SECONDS {
                 return Err(HarnessError::Io(format!(
                     "trim of {shot_id} would leave a source range of {new_in}..{new_out}; the out \
@@ -3381,7 +3449,6 @@ pub async fn edit_timeline(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let source_in = number(item, "sourceIn", 0.0);
             let span = duration.unwrap_or_else(|| item_span(item));
             item["assetId"] = json!(asset_id);
             item["currentVersionAssetId"] = json!(asset_id);
@@ -3403,7 +3470,6 @@ pub async fn edit_timeline(
                     versions.push(json!(asset_id));
                 }
             }
-            let _ = source_in;
             (
                 None,
                 format!("{shot_id} take {previous} -> {asset_id} ({span:.3}s)"),
