@@ -1,13 +1,20 @@
-//! `film-harness` — render a hand-authored production plan into a SceneWorks sequence through a
-//! running SceneWorks API (epic 22708, sc-22710).
+//! `film-harness` — plan, compile and render a production plan into a SceneWorks sequence through a
+//! running SceneWorks API (epic 22708, sc-22710 + sc-22713).
 //!
 //! ```text
+//! film-harness plan     --brief BRIEF.json --references REFERENCES.json --out DIR [--api URL]
+//! film-harness compile  --plan PLAN.json --references REFERENCES.json --out DIR [--api URL]
 //! film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL]
 //! film-harness run      --plan PLAN.json --references REFERENCES.json [--api URL] [--shots SH010,SH020]
 //!                       [--project-id ID] [--out DIR] [--poll-seconds N] [--no-export]
 //!                       [--skip-install-check]
 //! film-harness fixture-images --out DIR
 //! ```
+//!
+//! The intended loop is `plan` -> read and edit `plan.json` -> `compile` -> `validate` -> `run`.
+//! `plan` drives the LOCAL LLM through the shipped `prompt_refine` seam; it writes the plan and the
+//! compiled per-shot requests as two versioned documents and touches nothing else. A hand-authored
+//! plan skips straight to `validate`/`run` exactly as before.
 //!
 //! `run` needs a SceneWorks API with a registered GPU worker (`video_generate`) and a utility
 //! worker (`timeline_export`, e.g. `SCENEWORKS_RUN_UTILITY_INPROCESS=1`). It creates nothing until
@@ -26,20 +33,36 @@ use std::time::Duration;
 
 use sceneworks_core::film_plan::RunOutcome;
 use sceneworks_rust_api::film_harness::{
-    self, HarnessError, HttpTransport, RunOptions, FIXTURE_REFERENCES,
+    self, ApiTransport, HarnessError, HttpTransport, RunOptions, FIXTURE_REFERENCES,
+};
+use sceneworks_rust_api::film_planner::{
+    self, PlannerOptions, SceneWorksLlm, DEFAULT_LLM_JOB_TIMEOUT, DEFAULT_MAX_REPAIR_ROUNDS,
 };
 
 const USAGE: &str = "\
-film-harness — render a hand-authored production plan into a SceneWorks sequence
+film-harness — plan, compile and render a production plan into a SceneWorks sequence
 
 USAGE:
+  film-harness plan     --brief BRIEF.json --references REFERENCES.json --out DIR [OPTIONS]
+  film-harness compile  --plan PLAN.json --references REFERENCES.json --out DIR [OPTIONS]
   film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL] [--shots IDS]
   film-harness run      --plan PLAN.json --references REFERENCES.json [OPTIONS]
   film-harness fixture-images --out DIR
 
+OPTIONS (plan / compile):
+  --brief BRIEF.json     The brief to plan from (plan); re-checked for dropped beats (compile)
+  --out DIR              Where plan.json and compiled.json are written
+  --max-repair-rounds N  Repair rounds after the first draft (default 2, ceiling 5)
+  --no-refine            Compile the plan's own prompts instead of running prompt refinement
+  --prompt-guide FILE    Model prompt guide forwarded on each rewrite (default: the guide the
+                         catalog entry names, when it is on disk in this checkout)
+  --force                Replace an existing plan.json that differs from the generated one
+  --llm-timeout-seconds N  Give up on one LLM job after N seconds (default 1200)
+
 OPTIONS (run):
   --api URL              SceneWorks API base URL (default http://127.0.0.1:8000, or $SCENEWORKS_API_URL)
   --token TOKEN          API token (default $SCENEWORKS_ACCESS_TOKEN; sent as X-SceneWorks-Token)
+  --compiled FILE        Compiled requests to dispatch (default: compiled.json beside the plan)
   --shots A,B            Render only these shot ids, in plan order (default: every shot)
   --project-id ID        Reuse an existing project instead of creating one named after the plan
   --out DIR              Run record directory (default film-harness-runs/<utc-timestamp>)
@@ -66,7 +89,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
         return ExitCode::from(1);
     };
     match command {
-        "validate" | "run" => {}
+        "validate" | "run" | "plan" | "compile" => {}
         "fixture-images" => return fixture_images(&args[1..]),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -77,7 +100,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    let parsed = match parse_options(&args[1..]) {
+    let parsed = match parse_options(command, &args[1..]) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("film-harness: {message}\n\n{USAGE}");
@@ -91,6 +114,9 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if command == "plan" || command == "compile" {
+        return plan_or_compile(command, &transport, &parsed).await;
+    }
     if command == "validate" {
         return match film_harness::validate(Some(&transport), &parsed.options).await {
             Ok((plan, pack)) => {
@@ -202,11 +228,77 @@ struct Parsed {
     api_url: String,
     token: Option<String>,
     options: RunOptions,
+    planner: PlannerOptions,
+    /// `--plan` as given, so `compile` can tell "no plan named" from "the default".
+    plan_given: Option<PathBuf>,
 }
 
-fn parse_options(args: &[String]) -> Result<Parsed, String> {
+/// Generate a plan from a brief, or recompile an existing (possibly edited) one. Both drive the
+/// local LLM through the shipped `prompt_refine` seam; neither creates a job, a project or an asset.
+async fn plan_or_compile(command: &str, transport: &HttpTransport, parsed: &Parsed) -> ExitCode {
+    let llm = SceneWorksLlm::new(
+        transport as &dyn ApiTransport,
+        parsed.options.poll_interval,
+        parsed.planner.job_timeout,
+    );
+    let result = if command == "plan" {
+        film_planner::generate(transport, &llm, &parsed.planner).await
+    } else {
+        let Some(plan_path) = parsed.plan_given.clone() else {
+            eprintln!("film-harness: compile needs --plan PLAN.json\n\n{USAGE}");
+            return ExitCode::from(1);
+        };
+        film_planner::compile_existing(transport, &llm, &parsed.planner, &plan_path).await
+    };
+    match result {
+        Ok(artifacts) => {
+            println!(
+                "plan {:?} v{} ({} shots, {} repair round(s)) written to {}",
+                artifacts.plan.id,
+                artifacts.plan.version,
+                artifacts.plan.shots.len(),
+                artifacts.repair_rounds,
+                artifacts.plan_path.display()
+            );
+            println!(
+                "{} compiled request(s) for {} written to {}",
+                artifacts.compiled.requests.len(),
+                artifacts.compiled.model.id,
+                artifacts.compiled_path.display()
+            );
+            for request in &artifacts.compiled.requests {
+                println!(
+                    "  {:<8} {:<16} {:>7.4}s {}x{} {:?} prompt={} chars",
+                    request.shot_id,
+                    request.mode,
+                    request.duration_seconds,
+                    request.width,
+                    request.height,
+                    request.prompt_source,
+                    request.prompt.chars().count()
+                );
+            }
+            println!(
+                "edit {} by hand if you want to change it, then re-run `film-harness compile` and \
+                 `film-harness validate`",
+                artifacts.plan_path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
     let mut plan: Option<PathBuf> = None;
+    let mut brief: Option<PathBuf> = None;
+    let mut compiled: Option<PathBuf> = None;
     let mut references: Option<PathBuf> = None;
+    let mut max_repair_rounds = DEFAULT_MAX_REPAIR_ROUNDS;
+    let mut refine_prompts = true;
+    let mut prompt_guide: Option<PathBuf> = None;
+    let mut force = false;
+    let mut llm_timeout = DEFAULT_LLM_JOB_TIMEOUT;
     let mut api_url = std::env::var("SCENEWORKS_API_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -228,6 +320,24 @@ fn parse_options(args: &[String]) -> Result<Parsed, String> {
         };
         match arg.as_str() {
             "--plan" => plan = Some(PathBuf::from(value()?)),
+            "--brief" => brief = Some(PathBuf::from(value()?)),
+            "--compiled" => compiled = Some(PathBuf::from(value()?)),
+            "--max-repair-rounds" => {
+                max_repair_rounds = value()?
+                    .parse::<u32>()
+                    .map_err(|error| format!("--max-repair-rounds: {error}"))?
+            }
+            "--no-refine" => refine_prompts = false,
+            "--prompt-guide" => prompt_guide = Some(PathBuf::from(value()?)),
+            "--force" => force = true,
+            "--llm-timeout-seconds" => {
+                llm_timeout = Duration::from_secs(
+                    value()?
+                        .parse::<u64>()
+                        .map_err(|error| format!("--llm-timeout-seconds: {error}"))?
+                        .max(1),
+                )
+            }
             "--references" => references = Some(PathBuf::from(value()?)),
             "--api" => api_url = value()?,
             "--token" => token = Some(value()?),
@@ -254,21 +364,57 @@ fn parse_options(args: &[String]) -> Result<Parsed, String> {
             other => return Err(format!("unknown option {other:?}")),
         }
     }
-    let plan_path = plan.ok_or("--plan is required")?;
     let reference_pack_path = references.ok_or("--references is required")?;
-    let out_dir = out.unwrap_or_else(|| {
-        let stamp: String = sceneworks_core::time::utc_now()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        PathBuf::from("film-harness-runs").join(stamp)
-    });
+    let plan_given = plan.clone();
+    let out_dir = match out {
+        Some(out) => out,
+        None if command == "plan" || command == "compile" => {
+            return Err(format!("{command} needs --out DIR"))
+        }
+        None => {
+            let stamp: String = sceneworks_core::time::utc_now()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            PathBuf::from("film-harness-runs").join(stamp)
+        }
+    };
+    // `plan` writes the plan it is about to generate; every other command reads one.
+    let plan_path = match (command, plan) {
+        (_, Some(path)) => path,
+        ("plan", None) => out_dir.join("plan.json"),
+        _ => return Err("--plan is required".to_owned()),
+    };
+    let brief_path = match (command, brief) {
+        (_, Some(path)) => path,
+        ("plan", None) => return Err("plan needs --brief BRIEF.json".to_owned()),
+        // `compile` re-checks beat coverage when a brief sits beside the plan; absent is fine.
+        _ => plan_path
+            .parent()
+            .map(|dir| dir.join("brief.json"))
+            .unwrap_or_else(|| PathBuf::from("brief.json")),
+    };
     Ok(Parsed {
-        api_url,
+        api_url: api_url.clone(),
         token,
+        planner: PlannerOptions {
+            brief_path,
+            reference_pack_path: reference_pack_path.clone(),
+            out_dir: out_dir.clone(),
+            max_repair_rounds,
+            refine_prompts,
+            prompt_guide_path: prompt_guide,
+            require_installed,
+            api_url,
+            force,
+            poll_interval: Duration::from_secs(poll_seconds),
+            job_timeout: llm_timeout,
+        },
+        plan_given,
         options: RunOptions {
             plan_path,
             reference_pack_path,
+            compiled_path: compiled,
             project_id,
             shot_ids: shots,
             out_dir,

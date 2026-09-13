@@ -1,0 +1,68 @@
+{
+  // The courier / workshop / red parcel BRIEF — the input to the local planner (epic 22708,
+  // sc-22713). `film-harness plan --brief config/film-harness/courier-workshop/brief.jsonc
+  // --references config/film-harness/courier-workshop/references.jsonc --out DIR` turns this plus
+  // the approved reference pack into a plan in the SAME schema as the hand-authored `plan.jsonc`
+  // beside it. That hand-authored plan is the comparison baseline and is NOT written by the
+  // planner: a generated plan goes to the `--out` directory.
+  //
+  // `requiredBeats` is the contract. Every beat here must be covered by at least one shot of any
+  // generated plan; a draft that drops one is refused and fed back as a repair round, never
+  // accepted as a shorter film. Schema: crates/sceneworks-core/src/film_planner.rs.
+  //
+  // The model block and the limits are copied into the generated plan verbatim, so the planner can
+  // never widen a budget or swap the model: MiniMax-H3 on the MLX lane, q4, 24 fps, 576x320 (the
+  // cheapest declared canvas, ~14 min per 5.17 s clip).
+  "schemaVersion": 1,
+  "id": "courier-workshop-planned",
+  "version": 1,
+  "title": "Courier at the Workshop",
+  "synopsis": "A courier enters a cluttered woodworking workshop carrying a small bright red parcel, sets it on the workbench and leaves. The recipient — a woman in a grey work apron — comes in, notices the parcel and opens it, and a soft warm glow lights her face.",
+  "styleNotes": "Warm late-afternoon light through a dusty window, natural colour, visible sawdust in the air, film grain. Handheld only where the camera follows a person; otherwise locked off. No music until the parcel opens.",
+  "targetTotalSeconds": { "min": 30.0, "max": 60.0 },
+  "requiredBeats": [
+    {
+      "id": "arrival",
+      "summary": "Establish the empty workshop; the door opens and the courier appears in the doorway with the red parcel.",
+      "requiredRoles": ["courier", "red_parcel", "workshop_location"]
+    },
+    {
+      "id": "approach",
+      "summary": "The courier crosses the workshop to the workbench, still carrying the parcel.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
+    },
+    {
+      "id": "handover",
+      "summary": "The courier sets the red parcel down on the workbench and lets go.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
+    },
+    {
+      "id": "departure",
+      "summary": "The courier leaves and closes the door; the parcel stays on the bench in the empty workshop.",
+      "requiredRoles": ["courier", "red_parcel", "workbench_table"]
+    },
+    {
+      "id": "discovery",
+      "summary": "The recipient enters, notices the parcel on the bench and walks to it.",
+      "requiredRoles": ["recipient", "red_parcel", "workbench_table"]
+    },
+    {
+      "id": "opening",
+      "summary": "The recipient opens the parcel and a soft warm glow from inside lights her hands and face.",
+      "requiredRoles": ["recipient", "red_parcel"]
+    }
+  ],
+  "model": {
+    "id": "minimax_h3",
+    "tier": "q4",
+    "fps": 24,
+    "resolution": "576x320"
+  },
+  "limits": {
+    "maxRunSeconds": 7200,
+    "maxShotSeconds": 2700,
+    "maxAttemptsPerShot": 1,
+    "maxMemoryGb": 96
+  },
+  "maxShots": 8
+}
