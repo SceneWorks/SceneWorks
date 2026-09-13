@@ -815,6 +815,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json"),
     ),
