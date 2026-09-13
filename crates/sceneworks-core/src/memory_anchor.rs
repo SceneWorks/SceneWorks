@@ -613,6 +613,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json"),
     ),
@@ -645,6 +649,12 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-candle-evidence.json"
+        ),
+    ),
+    (
         "docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json"),
     ),
@@ -665,6 +675,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     (
         "docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json",
@@ -691,6 +705,12 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q4-candle-evidence.json"
+        ),
+    ),
+    (
         "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json",
         include_str!(
             "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json"
@@ -707,6 +727,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!(
             "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json"
         ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json",
@@ -729,6 +753,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     (
         "docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json",
@@ -767,12 +795,32 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-bf16-candle-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/minimax-h3-ref-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q4-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/minimax-h3-ref-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json",
@@ -1217,6 +1265,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json"),
     ),
@@ -1239,8 +1291,16 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sc-22738/wan-2-2-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json",
