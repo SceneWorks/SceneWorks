@@ -6396,6 +6396,51 @@
       "overallAllocatorEnvelopeBytes": 10138681344
     },
     {
+      "id": "mage_flow_turbo:candle:q4:base:base:mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3:imc-06f743f0a6e52985ad15",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json",
+        "sha256": "f497678426cd08a3cba86daa9ac913ce8be0beca889bed71fa3ab03748bb675b",
+        "recordId": "imc-06f743f0a6e52985ad15",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3",
+        "loaderClosureDigest": "e030ead287abb9adab2c26f160159668e39276c05238a0cf9cafcd24d70e7e6e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5600444416,
+        "denoise": 5902434304,
+        "decode": 5904531456
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5600444416,
+        "denoise": 5902434304,
+        "decode": 5904531456
+      },
+      "overallAllocatorEnvelopeBytes": 5904531456
+    },
+    {
       "id": "mage_flow_turbo:candle:q8:base:base:mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3:imc-330b765612862a80a79b",
       "modelId": "mage_flow_turbo",
       "modelFamily": "mage-flow",
@@ -11996,17 +12041,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:candle:q4",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
