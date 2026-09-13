@@ -58,7 +58,7 @@ use sceneworks_core::film_review::{
     tally, validate_eval_set, validate_review_plan, AdjacentTake, CaseOutcome, EvalCase,
     EvalResults, EvalSet, FrameAnswer, FrameEvidence, IntendedRef, MismatchFlag, Observation,
     ObservedState, ReviewBackendRecord, ReviewLimits, ReviewPlan, ReviewQuestion, ReviewSourceRef,
-    Verdict, ASSISTIVE_NOTICE, OBSERVED_STATE_SCHEMA_VERSION, REVIEW_EVAL_SCHEMA_VERSION,
+    ASSISTIVE_NOTICE, OBSERVED_STATE_SCHEMA_VERSION, REVIEW_EVAL_SCHEMA_VERSION,
 };
 use sceneworks_core::time::utc_now;
 use serde_json::{json, Value};
@@ -309,11 +309,6 @@ impl ScriptedVision {
     /// Answer `key` (a question id, or `"<question id>@<frame id>"`) with `answer`.
     pub fn answer(mut self, key: &str, answer: &str) -> Self {
         self.answers.insert(key.to_owned(), answer.to_owned());
-        self
-    }
-
-    pub fn fallback(mut self, answer: &str) -> Self {
-        self.fallback = answer.to_owned();
         self
     }
 
@@ -1925,19 +1920,4 @@ pub fn format_shot_reviews(shot: &ShotRunRecord) -> String {
         ));
     }
     out
-}
-
-/// Verdict counts for a printed summary.
-pub fn verdict_counts(observed: &ObservedState) -> (usize, usize, usize) {
-    let mut matched = 0;
-    let mut mismatched = 0;
-    let mut unobserved = 0;
-    for observation in &observed.observations {
-        match observation.verdict {
-            Verdict::Match => matched += 1,
-            Verdict::Mismatch => mismatched += 1,
-            Verdict::Unobserved => unobserved += 1,
-        }
-    }
-    (matched, mismatched, unobserved)
 }

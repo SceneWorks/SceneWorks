@@ -405,6 +405,13 @@ async fn a_disagreeing_answer_becomes_an_actionable_mismatch_naming_intended_and
         .expect("the wrong parcel colour is flagged");
     assert_eq!(flag.severity, "mismatch");
     assert_eq!(flag.topic, "parcel_identity");
+    for flag in &observed.mismatches {
+        assert!(
+            sceneworks_core::film_review::MISMATCH_SEVERITIES.contains(&flag.severity.as_str()),
+            "{:?} is outside the declared severity vocabulary",
+            flag.severity
+        );
+    }
     assert!(flag.intended.contains("red"), "{}", flag.intended);
     assert!(flag.observed.contains("blue"), "{}", flag.observed);
     assert!(

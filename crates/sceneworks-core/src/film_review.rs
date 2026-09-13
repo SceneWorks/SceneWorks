@@ -1081,16 +1081,6 @@ impl ScoreCounts {
             (Verdict::Unobserved, _) => self.overclaims += 1,
         }
     }
-
-    pub fn merge(&mut self, other: &Self) {
-        self.scored += other.scored;
-        self.correct += other.correct;
-        self.detections += other.detections;
-        self.misses += other.misses;
-        self.false_alarms += other.false_alarms;
-        self.abstentions += other.abstentions;
-        self.overclaims += other.overclaims;
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
