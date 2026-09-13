@@ -1,0 +1,20 @@
+{
+  // Approved reference pack for the courier/workshop/red-parcel fixture (epic 22708, sc-22710).
+  // Each entry has an explicit role the plan's shots address; the images are deterministic
+  // placeholder plates written by `film-harness fixture-images` (576x320, one flat colour with a
+  // bench line — see `FIXTURE_REFERENCES` in apps/rust-api/src/film_harness.rs). Replace a file
+  // with a real approved plate and bump `version`; the roles and the plan do not change.
+  "schemaVersion": 1,
+  "id": "courier-workshop-refs",
+  "version": 1,
+  "description": "Placeholder plates for the courier/workshop/red-parcel sequence.",
+  "references": [
+    { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "The courier: blue jacket, carries the parcel." },
+    { "role": "recipient", "kind": "character", "file": "references/recipient.png", "description": "The recipient: grey work apron, rolled sleeves." },
+    { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png", "description": "Small bright red cardboard parcel." },
+    { "role": "workshop_location", "kind": "location", "file": "references/workshop_location.png", "description": "Cluttered woodworking workshop, door camera-left." },
+    { "role": "workbench_table", "kind": "prop", "file": "references/workbench_table.png", "description": "Long wooden workbench, sawdust, centre of frame." },
+    { "role": "house_style", "kind": "style", "file": "references/house_style.png", "description": "Warm late-afternoon light, film grain, natural colour." },
+    { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png", "description": "Wide keyframe plate of the workshop used as the first frame of the image-conditioned shots." }
+  ]
+}
