@@ -30,6 +30,13 @@
 //! 7. write `run.json` (shot -> attempt -> job -> asset, timeline, export, observed
 //!    model/backend/hardware) beside copies of the two source documents — on every path past
 //!    step 1, refusals and mid-run failures included.
+//!
+//! **One controller per run directory, and nothing locks it.** `run`, [`resume`] and
+//! [`replace_take`] each rewrite `run.json` as they go; two of them held against the same directory
+//! at the same time interleave their writes and the last one wins. The idempotency keys make a
+//! SEQUENTIAL replay safe — they are not a lock between two live controllers. `run` refuses
+//! outright when the directory already holds a run record, and `replace_take` refuses while the
+//! shot still has an unsettled attempt; neither is a substitute for not starting two at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -43,13 +50,14 @@ use sceneworks_core::film_compile::{
     compile_plan, CompileInputs, CompiledPlan, DispatchContext, ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
-    self, AttemptRecord, ConditioningAssets, ExportRecord, GeneratedAudio, HardwareRecord,
-    IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionPlan, ReferenceAssetRecord,
-    ReferencePack, RunOutcome, RunRecord, ShotOutcome, ShotRunRecord, SoundBed, SoundBus,
-    SourceDocument, TakeRecord, TimelineEditRecord, TimelineItemRecord, TimelineRecord,
-    TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
+    self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
+    HardwareRecord, IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionDecision,
+    ProductionPlan, ReferenceAssetRecord, ReferencePack, ReviewFlag, RunOutcome, RunRecord,
+    RunState, RunStop, ShotOutcome, ShotRunRecord, SoundBed, SoundBus, SourceDocument, TakeRecord,
+    TakeRejection, TimelineEditRecord, TimelineItemRecord, TimelineRecord, TimelineTrackRecord,
+    RUN_RECORD_SCHEMA_VERSION,
 };
-use sceneworks_core::time::utc_now;
+use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -95,6 +103,28 @@ const REFERENCE_TAG: &str = "film-harness-reference";
 /// Tag an imported reference the pack has NOT approved carries instead, so a query for the
 /// conditioning-eligible references cannot pick it up.
 const UNAPPROVED_REFERENCE_TAG: &str = "film-harness-reference-unapproved";
+
+/// File name of the run record inside the run directory.
+pub const RUN_RECORD_FILE: &str = "run.json";
+
+/// File `film-harness cancel` drops in the run directory. A controller in another process polls for
+/// it, which is what makes cancellation work without a shared handle to the running controller
+/// (sc-22711).
+pub const CANCEL_SENTINEL_FILE: &str = "cancel.requested";
+
+/// How many jobs a reconciliation lists when looking for a job this run created.
+const JOB_LOOKUP_LIMIT: u32 = 500;
+
+/// Attempt statuses that need no further reconciliation on a resume.
+const TERMINAL_ATTEMPT_STATUSES: &[&str] = &[
+    "completed",
+    "failed",
+    "canceled",
+    "canceled_by_operator",
+    "interrupted",
+    "timed_out",
+    "rejected",
+];
 
 /// One request to the SceneWorks API.
 #[derive(Debug, Clone)]
@@ -145,6 +175,10 @@ pub enum HarnessError {
     },
     /// The transport itself failed (connection refused, malformed response, ...).
     Transport(String),
+    /// The requested action does not apply to the run record on disk — it is finished and not
+    /// resumable, its documents no longer hash to what the run was started from, or it names no
+    /// such shot. Nothing was dispatched (sc-22711).
+    Refused(String),
     Io(String),
 }
 
@@ -169,6 +203,7 @@ impl std::fmt::Display for HarnessError {
                 detail,
             } => write!(f, "{method} {path} -> {status}: {detail}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
+            Self::Refused(message) => write!(f, "refused: {message}"),
             Self::Io(message) => write!(f, "io error: {message}"),
         }
     }
@@ -211,14 +246,27 @@ pub struct RunOptions {
 /// handler; the harness then cancels the in-flight job through the API, stops dispatching, and
 /// still writes the run record — rather than leaving a 45-minute render on the GPU with no record
 /// of it, which is the opposite of what the plan's limits are for.
+/// sc-22711 adds the second source: a controller can also be asked to stop from ANOTHER process, by
+/// `film-harness cancel --out DIR` dropping [`CANCEL_SENTINEL_FILE`] in the run directory. A
+/// controller checks both before every dispatch and on every poll, so a cancel lands within one
+/// poll interval either way.
 #[derive(Debug, Clone, Default)]
 pub struct RunControl {
     canceled: Arc<AtomicBool>,
+    sentinel: Option<PathBuf>,
 }
 
 impl RunControl {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A control that is also tripped by the presence of `<run_dir>/cancel.requested`.
+    pub fn watching(run_dir: &Path) -> Self {
+        Self {
+            canceled: Arc::new(AtomicBool::new(false)),
+            sentinel: Some(run_dir.join(CANCEL_SENTINEL_FILE)),
+        }
     }
 
     /// Ask the in-flight run to cancel its job and stop dispatching. Idempotent.
@@ -227,8 +275,86 @@ impl RunControl {
     }
 
     pub fn is_canceled(&self) -> bool {
-        self.canceled.load(Ordering::SeqCst)
+        if self.canceled.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.sentinel
+            .as_deref()
+            .is_some_and(|path| path.try_exists().unwrap_or(false))
     }
+}
+
+/// Ask the run in `run_dir` to stop, from outside the process running it. Returns the sentinel it
+/// wrote. A run that is not currently held picks this up on its next start, so
+/// [`clear_cancel_request`] runs before a resume.
+///
+/// A directory with no run record in it is REFUSED rather than created: `cancel --out /typo/path`
+/// otherwise printed "cancel requested" and exited 0 while the real 45-minute render kept going,
+/// which is the one thing a cancel must never do.
+pub fn request_cancel(run_dir: &Path) -> Result<PathBuf, HarnessError> {
+    let record = run_dir.join(RUN_RECORD_FILE);
+    if !record.try_exists().unwrap_or(false) {
+        return Err(HarnessError::Refused(format!(
+            "no run record in {} — nothing there to cancel (a run writes {RUN_RECORD_FILE} before \
+             its first API call; check the --out path)",
+            run_dir.display()
+        )));
+    }
+    let path = run_dir.join(CANCEL_SENTINEL_FILE);
+    std::fs::write(&path, format!("{}\n", utc_now()))?;
+    Ok(path)
+}
+
+/// Remove a stale cancel sentinel so a resume is not cancelled by the request that stopped the
+/// previous controller.
+pub fn clear_cancel_request(run_dir: &Path) -> Result<(), HarnessError> {
+    let path = run_dir.join(CANCEL_SENTINEL_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// What `resume` and `replace-take` need. Everything else — which plan, which pack, which project,
+/// which shots, which limits — comes from the run record in `out_dir`, because those are properties
+/// of the run being continued, not of the invocation continuing it (sc-22711).
+#[derive(Debug, Clone)]
+pub struct ResumeOptions {
+    /// The run directory holding `run.json`.
+    pub out_dir: PathBuf,
+    pub poll_interval: Duration,
+    /// Assemble and export the timeline. For `replace-take`, whether to re-export after the new
+    /// take is selected (without it the existing export is simply marked stale).
+    pub export: bool,
+    pub require_installed: bool,
+    pub control: RunControl,
+}
+
+impl ResumeOptions {
+    /// Defaults for a run directory: watch that directory's cancel sentinel, poll every 5s, export.
+    pub fn new(out_dir: PathBuf) -> Self {
+        let control = RunControl::watching(&out_dir);
+        Self {
+            out_dir,
+            poll_interval: Duration::from_secs(5),
+            export: true,
+            require_installed: true,
+            control,
+        }
+    }
+}
+
+/// Read the run record in `run_dir` without touching the API. What `film-harness status` prints and
+/// what `resume` / `replace-take` start from.
+pub fn read_run_record(run_dir: &Path) -> Result<RunRecord, HarnessError> {
+    let path = run_dir.join(RUN_RECORD_FILE);
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        HarnessError::Refused(format!("cannot read {}: {error}", path.display()))
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        HarnessError::Refused(format!("{} is not a run record: {error}", path.display()))
+    })
 }
 
 /// The multipart filename for `path`'s basename: every character outside `[A-Za-z0-9._-]` replaced,
@@ -278,6 +404,63 @@ pub fn encode_asset_upload(
     body.extend_from_slice(provenance.to_string().as_bytes());
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     (boundary, body)
+}
+
+/// Merge several job listings into one, newest first, keeping one entry per job id. The pages
+/// overlap by construction (an unfiltered page plus one page per status), so the dedupe is the
+/// point rather than a precaution.
+fn merge_job_pages(pages: Vec<Vec<Value>>) -> Vec<Value> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut merged: Vec<Value> = Vec::new();
+    for job in pages.into_iter().flatten() {
+        let Some(id) = job.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        if seen.insert(id) {
+            merged.push(job);
+        }
+    }
+    merged.sort_by(|left, right| {
+        let created = |job: &Value| {
+            job.get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        created(right).cmp(&created(left))
+    });
+    merged
+}
+
+/// The newest `timeline_export` job for `timeline_id` that is neither in `exclude` nor older than
+/// `not_before`. Pure, so the adoption rule the export's correctness rests on is provable without a
+/// server: see [`Client::find_export_job`] for what each guard is for.
+///
+/// A job whose `createdAt` cannot be read is NOT adopted: the harness would rather dispatch a
+/// second export than record an unrelated job's asset as this run's delivered MP4.
+fn newest_export_job(
+    jobs: &[Value],
+    timeline_id: &str,
+    exclude: &[String],
+    not_before: &str,
+) -> Option<String> {
+    let floor = parse_utc_seconds(not_before);
+    let mut candidates: Vec<(&str, i64)> = jobs
+        .iter()
+        .filter(|job| job.get("type").and_then(Value::as_str) == Some("timeline_export"))
+        .filter(|job| {
+            job.pointer("/payload/timelineId").and_then(Value::as_str) == Some(timeline_id)
+        })
+        .filter_map(|job| {
+            let id = job.get("id")?.as_str()?;
+            let created = parse_utc_seconds(job.get("createdAt")?.as_str()?)?;
+            Some((id, created))
+        })
+        .filter(|(id, _)| !exclude.iter().any(|excluded| excluded == id))
+        .filter(|(_, created)| floor.is_none_or(|floor| *created >= floor))
+        .collect();
+    candidates.sort_by_key(|(_, created)| *created);
+    candidates.last().map(|(id, _)| (*id).to_owned())
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -496,6 +679,89 @@ impl Client<'_> {
         JobView::from_snapshot(&snapshot).ok_or_else(|| {
             HarnessError::Transport(format!("job {job_id} snapshot has no status: {snapshot}"))
         })
+    }
+
+    /// One page of `GET /api/v1/jobs`, optionally narrowed to one status.
+    async fn job_page(
+        &self,
+        project_id: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<Value>, HarnessError> {
+        let mut path = format!("/api/v1/jobs?projectId={project_id}&limit={JOB_LOOKUP_LIMIT}");
+        if let Some(status) = status {
+            path.push_str("&status=");
+            path.push_str(status);
+        }
+        let jobs = self.expect_ok("GET", &path, None).await?;
+        Ok(jobs.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Every job the API holds for `project_id`, newest first.
+    ///
+    /// `GET /api/v1/jobs` clamps `limit` at [`JOB_LOOKUP_LIMIT`] and takes no offset, so a FULL
+    /// page may be a truncated one — with `--project-id` reusing a busy project, the run's own jobs
+    /// can sit past the cut and a lookup that assumed one page would silently answer "no such job"
+    /// and enqueue a duplicate render. A full page is therefore widened by asking for each status
+    /// separately (the route's only other axis) and merging on job id; the common case still costs
+    /// exactly one request.
+    ///
+    /// What no listing can reach: a job the operator CLEARED from the queue. `list_jobs` filters
+    /// `cleared_at is null` on every path, so a cleared job is invisible here and a replay will
+    /// re-enqueue its attempt. Documented in `docs/film-harness.md`.
+    async fn project_jobs(&self, project_id: &str) -> Result<Vec<Value>, HarnessError> {
+        let first = self.job_page(project_id, None).await?;
+        if first.len() < JOB_LOOKUP_LIMIT as usize {
+            return Ok(first);
+        }
+        let mut pages = vec![first];
+        for status in sceneworks_core::jobs_store::JOB_STATUSES {
+            pages.push(self.job_page(project_id, Some(status)).await?);
+        }
+        Ok(merge_job_pages(pages))
+    }
+
+    /// The job this run already created for `key`, if any.
+    ///
+    /// This is the whole answer to the "created the job, died before recording its id" window: the
+    /// key is in the payload the API persisted, so the controller that comes back finds its own job
+    /// instead of enqueuing a second one for the same attempt (sc-22711).
+    async fn find_job_by_idempotency_key(
+        &self,
+        project_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        Ok(self
+            .project_jobs(project_id)
+            .await?
+            .iter()
+            .find(|job| {
+                job.pointer("/payload/advanced/filmHarness/idempotencyKey")
+                    .and_then(Value::as_str)
+                    == Some(key)
+            })
+            .and_then(|job| job.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    /// The `timeline_export` job THIS pass created for `timeline_id`, if the record lost it: the
+    /// newest one that is not in `exclude` and was created no earlier than `not_before`.
+    ///
+    /// The export route takes no payload field of our own, so the timeline id — which the harness
+    /// creates, names after the run and never shares — is the key, and every export the run ever
+    /// dispatches carries the same one. Two guards keep that from adopting an OLD export as the new
+    /// one: `exclude` is every export job the record has ever held and superseded (not merely the
+    /// last), and `not_before` is the `requested_at` this pass wrote before it POSTed, so a job
+    /// created before this pass can never be adopted.
+    async fn find_export_job(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+        exclude: &[String],
+        not_before: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        let jobs = self.project_jobs(project_id).await?;
+        Ok(newest_export_job(&jobs, timeline_id, exclude, not_before))
     }
 
     /// Poll `job_id` until it is terminal or a deadline passes. On a deadline (or an operator
@@ -811,6 +1077,18 @@ fn compiled_for_run(
     }
 }
 
+/// The key one attempt of one shot dispatches under. Stable across restarts because every part of
+/// it is: the run id is in the record, the shot id is in the plan, and attempt numbers never repeat
+/// within a shot (sc-22711).
+///
+/// It is stamped into the dispatched body's `advanced.filmHarness` block (sc-22713's
+/// [`CompiledRequest::to_job_body_with`] carries it through [`DispatchContext`]), which is what lets
+/// a controller that died between the POST and the record write find its OWN job instead of
+/// enqueuing a second render for the same attempt.
+pub fn idempotency_key(run_id: &str, shot_id: &str, attempt: u32) -> String {
+    format!("{run_id}:{shot_id}:a{attempt}")
+}
+
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
     let asset = result.get("assets")?.as_array()?.first()?;
     let file = asset.get("file").unwrap_or(&Value::Null);
@@ -926,13 +1204,19 @@ fn persist_record(
     std::fs::create_dir_all(out_dir)?;
     let json = serde_json::to_string_pretty(&record.to_json())
         .map_err(|error| HarnessError::Io(error.to_string()))?;
-    let record_path = out_dir.join("run.json");
-    std::fs::write(&record_path, &json)?;
-    if let Ok(plan_text) = std::fs::read(plan_path) {
-        std::fs::write(out_dir.join("plan.json"), plan_text)?;
-    }
-    if let Ok(pack_text) = std::fs::read(pack_path) {
-        std::fs::write(out_dir.join("references.json"), pack_text)?;
+    let record_path = out_dir.join(RUN_RECORD_FILE);
+    write_atomically(&record_path, json.as_bytes())?;
+    // Written once and then left alone, so an edit to the source plan mid-run cannot rewrite the
+    // copy the run was actually started from — which is what a resume re-hashes (sc-22711).
+    for (source, copy) in [
+        (plan_path, out_dir.join("plan.json")),
+        (pack_path, out_dir.join("references.json")),
+    ] {
+        if !copy.exists() {
+            if let Ok(text) = std::fs::read(source) {
+                write_atomically(&copy, &text)?;
+            }
+        }
     }
     // The compiled requests travel with the record too: without them the run record says which
     // prompts were dispatched only by reference.
@@ -945,10 +1229,39 @@ fn persist_record(
         if project_path.is_dir() {
             let project_record_dir = project_path.join("film-harness").join(&record.run_id);
             std::fs::create_dir_all(&project_record_dir)?;
-            std::fs::write(project_record_dir.join("run.json"), &json)?;
+            write_atomically(&project_record_dir.join(RUN_RECORD_FILE), json.as_bytes())?;
         }
     }
     Ok(record_path)
+}
+
+/// Write `bytes` to `path` through a sibling temp file and a rename.
+///
+/// sc-22711 rewrites the record at every state transition rather than once at the end, so a
+/// controller killed during a write must leave the PREVIOUS record intact rather than a truncated
+/// file no resume can parse.
+///
+/// The temp file is `sync_all`'d before the rename, so the rename cannot be ordered ahead of the
+/// data it publishes: without it a power loss can leave the record's NAME pointing at a file whose
+/// contents never reached the disk. The directory entry itself is not fsynced, so a power loss can
+/// still lose the rename and leave the previous record in place — which is the safe direction, and
+/// what a resume reconciles against the API anyway.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), HarnessError> {
+    use std::io::Write;
+    let temp = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!("{extension}."))
+            .unwrap_or_default()
+    ));
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
 }
 
 /// Read, validate and (optionally) check the documents against the live catalog without creating
@@ -1233,6 +1546,2039 @@ fn host_findings(plan: &ProductionPlan, facts: &HostFacts, export: bool) -> Vec<
     findings
 }
 
+/// The model entry, host facts and fps a run needs once the documents themselves are valid.
+struct Prepared {
+    entry: JsonObject<String, Value>,
+    facts: HostFacts,
+    fps: u32,
+}
+
+/// Resolve the catalog entry and the host facts and judge the plan against both. `Ok(Err(findings))`
+/// is a refusal: the caller writes a `rejected` record and creates nothing.
+async fn prepare(
+    client: &Client<'_>,
+    plan: &ProductionPlan,
+    export: bool,
+    require_installed: bool,
+) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
+    let facts = discover_host(client).await?;
+    let entry = resolve_model_entry(client, &plan.model.id).await?;
+    let mut findings = model_findings(plan, entry.as_ref(), require_installed, &facts);
+    if findings.is_empty() {
+        findings.extend(host_findings(plan, &facts, export));
+    }
+    if !findings.is_empty() {
+        return Ok(Err(findings));
+    }
+    let entry = entry.expect("model findings are empty only with an entry");
+    let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
+    Ok(Ok(Prepared { entry, facts, fps }))
+}
+
+/// One shot's selected take, resolved to everything the timeline needs.
+struct SelectedTake {
+    shot_id: String,
+    take: TakeRecord,
+    width: u32,
+    height: u32,
+    job_id: Option<String>,
+}
+
+/// An asset `run_id` already imported for `role`, matched on the provenance the import stamped.
+/// This is what keeps a replay from importing the same reference twice when the controller died
+/// between the upload and the record write (sc-22711).
+fn find_imported_reference(
+    assets: &[Value],
+    run_id: &str,
+    role: &str,
+    sha256: &str,
+) -> Option<String> {
+    assets
+        .iter()
+        .find(|asset| {
+            let field = |name: &str| {
+                asset
+                    .pointer("/extra/filmHarness")
+                    .and_then(|block| block.get(name))
+                    .and_then(Value::as_str)
+            };
+            field("runId") == Some(run_id)
+                && field("role") == Some(role)
+                && field("sha256") == Some(sha256)
+        })
+        .and_then(|asset| asset.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// How long an attempt has already been in flight.
+///
+/// A controller that died mid-poll never wrote `elapsedSeconds`, so the recorded value alone would
+/// hand a hung job a fresh per-shot budget on every restart. `startedAt` IS persisted at dispatch,
+/// and the job kept running while nothing was watching it, so wall-clock since then is the honest
+/// number; the larger of the two wins.
+///
+/// An attempt with NO job has spent nothing, whatever its `startedAt` says. The attempt record is
+/// written BEFORE the job is created (that is what makes the idempotency key work), so a controller
+/// that died in that window leaves `status: "dispatching", jobId: null` — nothing was rendered, and
+/// charging it the wall clock since then would make a resume the next morning compute
+/// `spent > maxShotSeconds`, dispatch a real job and cancel it on the first poll, spending the
+/// shot's attempt on zero work.
+fn attempt_spent_seconds(attempt: &AttemptRecord) -> f64 {
+    if attempt.job_id.is_none() {
+        return 0.0;
+    }
+    let recorded = attempt.elapsed_seconds.max(0.0);
+    let by_clock = parse_utc_seconds(&attempt.started_at)
+        .map(|started| (sceneworks_core::time::now_unix_seconds() - started).max(0) as f64)
+        .unwrap_or(0.0);
+    recorded.max(by_clock)
+}
+
+/// One controller holding one run.
+///
+/// Everything that reaches the API goes through here, and every state change is followed by a
+/// [`Session::persist`], so the record on disk is never more than one transition behind what the
+/// API has. That is what makes the three entry points ([`run`], [`resume`], [`replace_take`]) the
+/// same code: they differ only in the record they start from and the deadline they run under.
+struct Session<'a> {
+    client: Client<'a>,
+    transport: &'a dyn ApiTransport,
+    plan_path: PathBuf,
+    pack_path: PathBuf,
+    out_dir: PathBuf,
+    poll_interval: Duration,
+    export: bool,
+    plan: ProductionPlan,
+    pack: ReferencePack,
+    /// The requests this session dispatches (sc-22713): the compiled document beside the plan, or
+    /// the plan compiled in memory. Every job body comes from here, so what a reviewer reads in
+    /// `compiled.json` is what the API receives — on a resume and a replacement exactly as on the
+    /// first run.
+    compiled: CompiledPlan,
+    facts: HostFacts,
+    fps: u32,
+    record: RunRecord,
+    started: Instant,
+    /// Wall-clock earlier controllers already spent on this run. The plan's `maxRunSeconds` bounds
+    /// the run, not one attempt at it, so a resume inherits the spend.
+    prior_elapsed: f64,
+    run_deadline: Instant,
+    role_assets: BTreeMap<String, String>,
+    /// The pack's sound clips this run has imported, by role (sc-22712). Rebuilt from the record on
+    /// a resume exactly as [`Session::role_assets`] is, so a re-layout after a replacement places
+    /// the same clips the first controller did without importing (and transcoding) them twice.
+    sound_assets: BTreeMap<String, SoundAsset>,
+    /// Set the moment dispatch stops, with the outcome that stop implies.
+    stop: Option<(RunOutcome, RunStop)>,
+}
+
+impl Session<'_> {
+    /// Total wall-clock this run has consumed, across every controller that has held it.
+    fn elapsed(&self) -> f64 {
+        self.prior_elapsed + self.started.elapsed().as_secs_f64()
+    }
+
+    /// Write the record. Called after every state transition — this is the durability contract.
+    fn persist(&mut self) -> Result<(), HarnessError> {
+        self.record.elapsed_seconds = self.elapsed();
+        persist_record(
+            &self.record,
+            &self.out_dir,
+            &self.plan_path,
+            &self.pack_path,
+        )?;
+        Ok(())
+    }
+
+    fn note_decision(&mut self, action: &str, shot_id: Option<&str>, detail: String) {
+        self.record.decisions.push(ProductionDecision {
+            at: utc_now(),
+            action: action.to_owned(),
+            shot_id: shot_id.map(str::to_owned),
+            detail,
+        });
+    }
+
+    fn halt(&mut self, outcome: RunOutcome, reason: &str, detail: String, resumable: bool) {
+        if self.stop.is_none() {
+            self.stop = Some((
+                outcome,
+                RunStop {
+                    reason: reason.to_owned(),
+                    detail,
+                    resumable,
+                },
+            ));
+        }
+    }
+
+    fn canceled(&self) -> bool {
+        self.client.control.is_canceled()
+    }
+
+    /// Whether `memory` is over the plan's budget — and, when it is, halt the run with the memory
+    /// stop.
+    ///
+    /// Both paths that settle an attempt go through here: [`Session::work_attempt`], which watched
+    /// the render land, and [`Session::reconcile_shot`], which adopts one a dead controller was
+    /// watching. A crash around an over-budget render must stop new dispatch exactly as observing
+    /// it does — otherwise a resume adopts the take and keeps dispatching against a budget the
+    /// evidence already says was blown.
+    fn memory_over_budget(&mut self, shot_id: &str, memory: &MemoryObservation) -> bool {
+        if !memory
+            .gb
+            .is_some_and(|observed| observed > self.plan.limits.max_memory_gb)
+        {
+            return false;
+        }
+        self.halt(
+            RunOutcome::StoppedMemoryLimit,
+            "memory_limit",
+            format!(
+                "shot {shot_id} peaked at {:.1} GB ({}), over the plan's {} GB budget; raise \
+                 limits.maxMemoryGb or pick a cheaper tier and start a new run",
+                memory.gb.unwrap_or_default(),
+                memory.source.as_deref().unwrap_or("no source"),
+                self.plan.limits.max_memory_gb
+            ),
+            false,
+        );
+        true
+    }
+
+    /// The per-shot budget, and the graces derived from it: a cancel is never given more room to
+    /// settle than the plan gave the whole attempt.
+    fn shot_budget(&self) -> Duration {
+        Duration::from_secs(self.plan.limits.max_shot_seconds)
+    }
+
+    fn bounds(&self, shot_deadline: Instant) -> PollBounds {
+        let shot_budget = self.shot_budget();
+        PollBounds {
+            shot_deadline,
+            run_deadline: self.run_deadline,
+            poll_interval: self.poll_interval,
+            cancel_grace: CANCEL_GRACE.min(shot_budget),
+            settle_grace: ASSET_SETTLE_GRACE.min(shot_budget),
+        }
+    }
+
+    fn project_id(&self) -> Result<String, HarnessError> {
+        self.record
+            .project_id
+            .clone()
+            .ok_or_else(|| HarnessError::Transport("the run has no project yet".to_owned()))
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Project and references — idempotent, so a replay adopts instead of re-creating
+    // -----------------------------------------------------------------------------------------
+
+    /// The project this run writes into. A run that created its own names it after the plan AND the
+    /// run, which is what lets a controller that died right after `POST /projects` find that exact
+    /// project again instead of creating a second one (sc-22711).
+    fn project_name(&self) -> String {
+        format!("{} ({})", self.plan.title, self.record.run_id)
+    }
+
+    async fn ensure_project(&mut self) -> Result<(), HarnessError> {
+        if let Some(id) = self.record.project_id.clone() {
+            let project = self
+                .client
+                .expect_ok("GET", &format!("/api/v1/projects/{id}"), None)
+                .await?;
+            self.record.project_path = project
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            self.persist()?;
+            return Ok(());
+        }
+        let name = self.project_name();
+        let existing = self
+            .client
+            .expect_ok("GET", "/api/v1/projects", None)
+            .await?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|project| project.get("name").and_then(Value::as_str) == Some(name.as_str()))
+            .cloned();
+        let project = match existing {
+            Some(project) => project,
+            None => {
+                self.client
+                    .expect_ok("POST", "/api/v1/projects", Some(json!({ "name": name })))
+                    .await?
+            }
+        };
+        self.record.project_id = Some(
+            project
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    HarnessError::Transport(format!("project response has no id: {project}"))
+                })?
+                .to_owned(),
+        );
+        self.record.project_path = project
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.persist()?;
+        Ok(())
+    }
+
+    /// Import every pack reference the record does not already name. An import the record missed
+    /// (imported, then the controller died) is found by its `filmHarness` provenance rather than
+    /// imported twice, so replay never doubles a project's reference assets.
+    async fn ensure_references(&mut self) -> Result<(), HarnessError> {
+        let project_id = self.project_id()?;
+        for existing in &self.record.references {
+            // Only APPROVED roles resolve into a shot's conditioning slots, on a resume exactly as
+            // on a first run.
+            if existing.approved {
+                self.role_assets
+                    .insert(existing.role.clone(), existing.asset_id.clone());
+            }
+        }
+        let imported: BTreeSet<String> = self
+            .record
+            .references
+            .iter()
+            .map(|reference| reference.role.clone())
+            .collect();
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let references = self.pack.references.clone();
+        // One listing for the whole pass, not one per reference: anything imported later in this
+        // loop is this controller's own and is already recorded.
+        // `includeRejected` / `includeTrashed` default to FALSE on the route, and a human reviewing
+        // the project between two controllers can reject or trash an imported plate. Adopting one
+        // the listing hid is the point of this lookup, so ask for them.
+        let already_imported = if references
+            .iter()
+            .any(|reference| !imported.contains(&reference.role))
+        {
+            self.client
+                .expect_ok(
+                    "GET",
+                    &format!(
+                        "/api/v1/projects/{project_id}/assets\
+                         ?includeRejected=true&includeTrashed=true"
+                    ),
+                    None,
+                )
+                .await?
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for reference in &references {
+            if imported.contains(&reference.role) {
+                continue;
+            }
+            let path = pack_dir.join(&reference.file);
+            let bytes = std::fs::read(&path)?;
+            let sha256 = sha256_hex(&bytes);
+            let asset_id = match find_imported_reference(
+                &already_imported,
+                &self.record.run_id,
+                &reference.role,
+                &sha256,
+            ) {
+                Some(asset_id) => asset_id,
+                None => {
+                    self.import_reference(&project_id, reference, &path, &sha256)
+                        .await?
+                }
+            };
+            // On BOTH branches: the upload and the tag PATCH are two writes, so a controller that
+            // died between them leaves an asset the adoption finds but nothing has tagged. The
+            // PATCH replaces the tag set, so re-applying it to an already-tagged asset is a no-op.
+            self.tag_reference(&project_id, &asset_id, reference)
+                .await?;
+            if reference.approved {
+                self.role_assets
+                    .insert(reference.role.clone(), asset_id.clone());
+            }
+            self.record.references.push(ReferenceAssetRecord {
+                role: reference.role.clone(),
+                kind: reference.kind.clone(),
+                file: reference.file.clone(),
+                sha256,
+                asset_id,
+                approved: reference.approved,
+            });
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    /// Import every pack sound clip this run will PLACE, and re-adopt the ones an earlier
+    /// controller already imported (sc-22712, under sc-22711's resumable session).
+    ///
+    /// Only what the run PLACES is imported — the two beds plus the dialogue of the SELECTED shots.
+    /// Unlike a reference image, importing an audio clip costs an ffmpeg transcode, and a pack
+    /// legitimately carries sound for shots a `--shots` run left out. `record.sound` is therefore
+    /// the list of clips that were actually available to the mix.
+    ///
+    /// Resume-safe exactly the way [`Session::ensure_references`] is: a clip the record already
+    /// names is adopted rather than re-imported, and one imported by a controller that died before
+    /// recording it is found by its `filmHarness` provenance instead of being imported twice. The
+    /// durations the beds and lines are laid out from are measured by the import route off the
+    /// STORED wav, so they are read back off the project's assets rather than re-derived here —
+    /// which is also what lets a resume place the same spans the first controller did.
+    async fn ensure_sound(&mut self) -> Result<(), HarnessError> {
+        let project_id = self.project_id()?;
+        let placed: BTreeSet<String> = self
+            .plan
+            .sound
+            .ambience
+            .iter()
+            .chain(self.plan.sound.music.iter())
+            .map(|bed| bed.role.clone())
+            .chain(
+                self.plan
+                    .shots
+                    .iter()
+                    .filter(|shot| self.record.selected_shot_ids.contains(&shot.id))
+                    .filter_map(|shot| shot.dialogue_clip.as_ref().map(|clip| clip.role.clone())),
+            )
+            .collect();
+        let entries: Vec<film_plan::SoundEntry> = self
+            .pack
+            .sound
+            .iter()
+            .filter(|entry| placed.contains(&entry.role))
+            .cloned()
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // ONE listing for the whole pass. It does double duty: it carries the stored duration of
+        // every clip an earlier controller already imported, and the provenance that finds one it
+        // imported but died before recording.
+        let assets = self
+            .client
+            .expect_ok(
+                "GET",
+                &format!(
+                    "/api/v1/projects/{project_id}/assets\
+                     ?includeRejected=true&includeTrashed=true"
+                ),
+                None,
+            )
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let stored_duration = |asset_id: &str| -> Option<f64> {
+            assets
+                .iter()
+                .find(|asset| asset.get("id").and_then(Value::as_str) == Some(asset_id))
+                .and_then(|asset| asset.pointer("/file/duration"))
+                .and_then(Value::as_f64)
+                .filter(|seconds| *seconds > 0.0)
+        };
+        let recorded: BTreeMap<String, String> = self
+            .record
+            .sound
+            .iter()
+            .map(|clip| (clip.role.clone(), clip.asset_id.clone()))
+            .collect();
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        for entry in &entries {
+            if let Some(asset_id) = recorded.get(&entry.role) {
+                self.sound_assets.insert(
+                    entry.role.clone(),
+                    SoundAsset {
+                        asset_id: asset_id.clone(),
+                        duration_seconds: stored_duration(asset_id),
+                    },
+                );
+                continue;
+            }
+            let path = pack_dir.join(&entry.file);
+            let bytes = std::fs::read(&path)?;
+            let sha256 = sha256_hex(&bytes);
+            // A clip imported by THIS pass is not in the listing above (it was fetched before the
+            // upload), so its duration comes back with the import response. Only an ADOPTED clip —
+            // one an earlier controller uploaded — is measured off the listing.
+            let (asset_id, duration_seconds) =
+                match find_imported_reference(&assets, &self.record.run_id, &entry.role, &sha256) {
+                    Some(asset_id) => {
+                        let duration = stored_duration(&asset_id);
+                        (asset_id, duration)
+                    }
+                    None => {
+                        self.import_sound(&project_id, entry, &path, &sha256)
+                            .await?
+                    }
+                };
+            // As with a reference: the upload and the tag PATCH are two writes, so re-applying the
+            // tags to an adopted asset is the no-op that closes the window between them.
+            self.client
+                .expect_ok(
+                    "PATCH",
+                    &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
+                    Some(json!({
+                        "tags": [
+                            SOUND_TAG,
+                            format!("role:{}", entry.role),
+                            format!("pack:{}", self.pack.id)
+                        ]
+                    })),
+                )
+                .await?;
+            self.sound_assets.insert(
+                entry.role.clone(),
+                SoundAsset {
+                    asset_id: asset_id.clone(),
+                    duration_seconds,
+                },
+            );
+            self.record.sound.push(ReferenceAssetRecord {
+                role: entry.role.clone(),
+                kind: entry.kind.clone(),
+                file: entry.file.clone(),
+                sha256,
+                asset_id,
+                // A sound entry has no approval flag of its own: approval gates CONDITIONING, and
+                // sound is never conditioning. Everything in the pack's `sound` array is placeable.
+                approved: true,
+            });
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    /// Upload one pack sound clip, with the same `filmHarness` provenance a reference carries so a
+    /// controller that dies before recording it can find it again.
+    ///
+    /// Returns the asset id and the duration the import route MEASURED off the stored PCM-16 wav —
+    /// not anything the plan claimed — which is what the beds and lines are then laid out from.
+    async fn import_sound(
+        &self,
+        project_id: &str,
+        entry: &film_plan::SoundEntry,
+        path: &Path,
+        sha256: &str,
+    ) -> Result<(String, Option<f64>), HarnessError> {
+        let bytes = std::fs::read(path)?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("sound.wav")
+            .to_owned();
+        let provenance = json!({
+            "filmHarness": {
+                "kind": "sound",
+                "role": entry.role,
+                "soundKind": entry.kind,
+                "referencePackId": self.pack.id,
+                "referencePackVersion": self.pack.version,
+                "planId": self.plan.id,
+                "planVersion": self.plan.version,
+                "runId": self.record.run_id,
+                "sourceFile": entry.file,
+                "sha256": sha256,
+            }
+        });
+        let (boundary, body) =
+            encode_asset_upload(&filename, audio_content_type(path), &bytes, &provenance);
+        let route = format!("/api/v1/projects/{project_id}/assets");
+        let response = self
+            .transport
+            .call(ApiRequest {
+                method: "POST",
+                path: route.clone(),
+                body: RequestBody::Multipart {
+                    boundary,
+                    bytes: body,
+                },
+            })
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(HarnessError::Api {
+                method: "POST",
+                path: route,
+                status: response.status,
+                detail: api_detail(&response.body),
+            });
+        }
+        let asset_id = response
+            .body
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "sound import response has no id: {}",
+                    response.body
+                ))
+            })?;
+        let duration_seconds = response
+            .body
+            .pointer("/file/duration")
+            .and_then(Value::as_f64)
+            .filter(|seconds| *seconds > 0.0);
+        Ok((asset_id, duration_seconds))
+    }
+
+    async fn import_reference(
+        &self,
+        project_id: &str,
+        reference: &film_plan::ReferenceEntry,
+        path: &Path,
+        sha256: &str,
+    ) -> Result<String, HarnessError> {
+        let bytes = std::fs::read(path)?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("reference.png")
+            .to_owned();
+        let content_type = match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            _ => "image/png",
+        };
+        let provenance = json!({
+            "filmHarness": {
+                "kind": "reference",
+                "role": reference.role,
+                "referenceKind": reference.kind,
+                "approved": reference.approved,
+                "referencePackId": self.pack.id,
+                "referencePackVersion": self.pack.version,
+                "planId": self.plan.id,
+                "planVersion": self.plan.version,
+                "runId": self.record.run_id,
+                "sourceFile": reference.file,
+                "sha256": sha256,
+            }
+        });
+        let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
+        let route = format!("/api/v1/projects/{project_id}/assets");
+        let response = self
+            .transport
+            .call(ApiRequest {
+                method: "POST",
+                path: route.clone(),
+                body: RequestBody::Multipart {
+                    boundary,
+                    bytes: body,
+                },
+            })
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(HarnessError::Api {
+                method: "POST",
+                path: route,
+                status: response.status,
+                detail: api_detail(&response.body),
+            });
+        }
+        let asset_id = response
+            .body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "asset import response has no id: {}",
+                    response.body
+                ))
+            })?
+            .to_owned();
+        Ok(asset_id)
+    }
+
+    /// Tag an imported reference with its kind, role and pack.
+    ///
+    /// An unapproved reference is imported (so the record can point at it and a human can review
+    /// it) but tagged distinctly, so a query for the conditioning-eligible references cannot pick
+    /// it up. Applied by [`Session::ensure_references`] to a freshly imported asset AND to an
+    /// adopted one, because the tags are a second write the crash window can swallow.
+    async fn tag_reference(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        reference: &film_plan::ReferenceEntry,
+    ) -> Result<(), HarnessError> {
+        let kind_tag = if reference.approved {
+            REFERENCE_TAG
+        } else {
+            UNAPPROVED_REFERENCE_TAG
+        };
+        self.client
+            .expect_ok(
+                "PATCH",
+                &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
+                Some(json!({
+                    "tags": [
+                        kind_tag,
+                        format!("role:{}", reference.role),
+                        format!("pack:{}", self.pack.id)
+                    ]
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Shots
+    // -----------------------------------------------------------------------------------------
+
+    /// Make sure the record holds one entry per plan shot, in plan order, without disturbing the
+    /// entries a previous controller wrote.
+    fn ensure_shot_records(&mut self) {
+        let mut ordered: Vec<ShotRunRecord> = Vec::with_capacity(self.plan.shots.len());
+        for shot in &self.plan.shots {
+            if let Some(index) = self
+                .record
+                .shots
+                .iter()
+                .position(|existing| existing.shot_id == shot.id)
+            {
+                ordered.push(self.record.shots.remove(index));
+                continue;
+            }
+            // Geometry, timing and mode come from the COMPILED request, not from the plan read a
+            // second time: the compiled document is what the job body is built from (sc-22713), so
+            // the record's `intended` has to be the same document or it describes something the
+            // route was never asked for.
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            let (width, height) = (request.width, request.height);
+            let assets = ConditioningAssets {
+                first_frame_asset_id: request
+                    .first_frame_role
+                    .as_ref()
+                    .and_then(|role| self.role_assets.get(role).cloned()),
+                last_frame_asset_id: request
+                    .last_frame_role
+                    .as_ref()
+                    .and_then(|role| self.role_assets.get(role).cloned()),
+                reference_asset_ids: request
+                    .reference_roles
+                    .iter()
+                    .filter_map(|role| self.role_assets.get(role).cloned())
+                    .collect(),
+            };
+            ordered.push(ShotRunRecord {
+                shot_id: shot.id.clone(),
+                outcome: ShotOutcome::NotSelected,
+                intended: IntendedState {
+                    mode: request.mode.clone(),
+                    start_state: shot.start_state.clone(),
+                    end_state: shot.end_state.clone(),
+                    target_duration_seconds: request.duration_seconds,
+                    width,
+                    height,
+                    fps: request.fps,
+                    dialogue: shot.dialogue.clone(),
+                    sound: shot.sound.clone(),
+                    // The policy the export will obey for this shot — its own override, or the
+                    // run-level default it inherits (sc-22712). Resolved here, at the same moment
+                    // the rest of the intended state is, so the record says what was intended
+                    // rather than what a later reader would re-derive from the plan.
+                    generated_audio: resolved_generated_audio(&self.plan, shot),
+                },
+                conditioning_assets: assets,
+                attempts: Vec::new(),
+                selected_attempt: None,
+                needs_review: Vec::new(),
+            });
+        }
+        self.record.shots = ordered;
+    }
+
+    fn is_selected(&self, shot_id: &str) -> bool {
+        self.record.selected_shot_ids.iter().any(|id| id == shot_id)
+    }
+
+    /// Reconcile and, where the limits still allow it, dispatch every selected shot.
+    async fn work_shots(&mut self) -> Result<(), HarnessError> {
+        self.ensure_shot_records();
+        self.persist()?;
+        for index in 0..self.plan.shots.len() {
+            let shot = self.plan.shots[index].clone();
+            if !self.is_selected(&shot.id) {
+                if let Some(record) = self.record.shot_mut(&shot.id) {
+                    record.outcome = ShotOutcome::NotSelected;
+                }
+                continue;
+            }
+            self.work_shot(&shot).await?;
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    /// One shot: adopt whatever the API already holds for it, then dispatch what is still owed and
+    /// still affordable. Never creates a job for an attempt that already has one.
+    async fn work_shot(&mut self, shot: &film_plan::Shot) -> Result<(), HarnessError> {
+        self.reconcile_shot(shot).await?;
+        loop {
+            let Some(index) = self.record.shots.iter().position(|s| s.shot_id == shot.id) else {
+                return Ok(());
+            };
+            if self.record.shots[index].selected_attempt.is_some() {
+                self.record.shots[index].outcome = ShotOutcome::Rendered;
+                return Ok(());
+            }
+            if self.stop.is_some() {
+                break;
+            }
+            // An attempt a previous controller recorded but never finished is continued, not
+            // replaced: it already holds (or is about to hold) a job.
+            let pending = self.record.shots[index]
+                .attempts
+                .iter()
+                .position(|attempt| !TERMINAL_ATTEMPT_STATUSES.contains(&attempt.status.as_str()));
+            let attempt_index = match pending {
+                Some(pending) => pending,
+                None => {
+                    if self.record.shots[index].automatic_attempts()
+                        >= self.plan.limits.max_attempts_per_shot
+                    {
+                        break;
+                    }
+                    if self.canceled() {
+                        self.halt(
+                            RunOutcome::Canceled,
+                            "canceled",
+                            format!("canceled before shot {} was dispatched", shot.id),
+                            true,
+                        );
+                        break;
+                    }
+                    if Instant::now() >= self.run_deadline {
+                        self.halt(
+                            RunOutcome::StoppedRunBudget,
+                            "run_budget",
+                            format!(
+                                "the run's {}s wall-clock budget was spent before shot {} could be \
+                                 dispatched; raise limits.maxRunSeconds and start a new run",
+                                self.plan.limits.max_run_seconds, shot.id
+                            ),
+                            false,
+                        );
+                        break;
+                    }
+                    let number = self.record.shots[index].next_attempt_number();
+                    let key = idempotency_key(&self.record.run_id, &shot.id, number);
+                    self.record.shots[index].attempts.push(AttemptRecord {
+                        attempt: number,
+                        idempotency_key: key,
+                        job_id: None,
+                        status: "dispatching".to_owned(),
+                        started_at: utc_now(),
+                        finished_at: None,
+                        elapsed_seconds: 0.0,
+                        peak_gpu_memory_pct: None,
+                        peak_memory_gb: None,
+                        peak_memory_source: None,
+                        error: None,
+                        take: None,
+                        rejection: None,
+                        human_requested: false,
+                    });
+                    // Persisted BEFORE the job exists: this is the record a replay reads to know a
+                    // job may already be out there under this key.
+                    self.persist()?;
+                    self.record.shots[index].attempts.len() - 1
+                }
+            };
+            let progressed = self
+                .work_attempt(shot, index, attempt_index, pending.is_none())
+                .await?;
+            if !progressed {
+                break;
+            }
+        }
+        let Some(index) = self.record.shots.iter().position(|s| s.shot_id == shot.id) else {
+            return Ok(());
+        };
+        let record = &mut self.record.shots[index];
+        record.outcome = match record
+            .attempts
+            .last()
+            .map(|attempt| attempt.status.as_str())
+        {
+            _ if record.selected_attempt.is_some() => ShotOutcome::Rendered,
+            None => ShotOutcome::NotDispatched,
+            Some("timed_out") => ShotOutcome::TimedOut,
+            Some("canceled" | "canceled_by_operator") => ShotOutcome::Canceled,
+            Some(_) => ShotOutcome::Failed,
+        };
+        // A shot that spent its attempts does NOT stop the run: the remaining shots are independent
+        // work and the human decides what to do about this one. Only a limit, a cancel or a refused
+        // enqueue stops dispatch; `finish` turns a shot with no take into the run's outcome.
+        Ok(())
+    }
+
+    /// Bring one recorded attempt to a terminal state. Returns whether the shot may keep going
+    /// (another attempt is worth trying); `false` means a limit, a cancel or a refusal ended it.
+    async fn work_attempt(
+        &mut self,
+        shot: &film_plan::Shot,
+        shot_index: usize,
+        attempt_index: usize,
+        fresh: bool,
+    ) -> Result<bool, HarnessError> {
+        let project_id = self.project_id()?;
+        let key = self.record.shots[shot_index].attempts[attempt_index]
+            .idempotency_key
+            .clone();
+        let attempt_number = self.record.shots[shot_index].attempts[attempt_index].attempt;
+
+        // 1. The job. Adopt one already created under this key before creating anything.
+        let mut job_id = self.record.shots[shot_index].attempts[attempt_index]
+            .job_id
+            .clone();
+        if job_id.is_none() {
+            job_id = self
+                .client
+                .find_job_by_idempotency_key(&project_id, &key)
+                .await?;
+        }
+        // Neither the record nor the API has a job for this attempt, so this pass creates it: the
+        // attempt has been in flight for zero seconds however old its record is.
+        let created_here = job_id.is_none();
+        if job_id.is_none() {
+            let assets = self.record.shots[shot_index].conditioning_assets.clone();
+            // The body is the COMPILED request's, always (sc-22713): the document a reviewer reads
+            // in `compiled.json` is what the route receives, on a resume and a replacement exactly
+            // as on the first run. The record's own resolved conditioning is passed in rather than
+            // re-resolved, so an attempt dispatched after a crash conditions on the same assets the
+            // record already names.
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            let body = request.to_job_body_with(
+                &DispatchContext {
+                    project_id: &project_id,
+                    run_id: &self.record.run_id,
+                    plan_id: &self.plan.id,
+                    plan_version: self.plan.version,
+                    attempt: attempt_number,
+                    tier: self.plan.model.tier.as_deref(),
+                    idempotency_key: Some(&key),
+                    role_assets: &self.role_assets,
+                },
+                &ResolvedConditioning {
+                    first_frame_asset_id: assets.first_frame_asset_id.clone(),
+                    last_frame_asset_id: assets.last_frame_asset_id.clone(),
+                    reference_asset_ids: assets.reference_asset_ids.clone(),
+                },
+            );
+            let response = self
+                .client
+                .json("POST", "/api/v1/video/jobs", Some(body))
+                .await?;
+            if !(200..300).contains(&response.status) {
+                // A refused enqueue is deterministic: the same body would be refused again, so it
+                // consumes the shot rather than every remaining attempt.
+                let detail = format!(
+                    "POST /api/v1/video/jobs -> {}: {}",
+                    response.status,
+                    api_detail(&response.body)
+                );
+                let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+                attempt.status = "rejected".to_owned();
+                attempt.error = Some(detail.clone());
+                attempt.finished_at = Some(utc_now());
+                self.persist()?;
+                self.halt(
+                    RunOutcome::Failed,
+                    "enqueue_refused",
+                    format!("shot {} could not be enqueued: {detail}", shot.id),
+                    false,
+                );
+                return Ok(false);
+            }
+            job_id = Some(
+                response
+                    .body
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!(
+                            "video job response has no id: {}",
+                            response.body
+                        ))
+                    })?
+                    .to_owned(),
+            );
+        }
+        let job_id = job_id.expect("set on every branch above");
+        {
+            let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+            if created_here {
+                // Nothing has ever run under this key: neither the record nor the API held a job
+                // for it, and the one that exists now was created a moment ago. The clock starts
+                // HERE. An attempt recorded by a controller that died before its POST reached the
+                // API would otherwise be charged every hour since, and a resume the next morning
+                // would dispatch a real render only to cancel it on the first poll.
+                attempt.started_at = utc_now();
+            }
+            attempt.job_id = Some(job_id.clone());
+            attempt.status = "running".to_owned();
+        }
+        self.persist()?;
+
+        // 2. Wait for it, under whatever is left of this attempt's and the run's budgets.
+        let attempt_started = Instant::now();
+        // An attempt this controller just created has spent nothing; one it adopted from a
+        // controller that died has been in flight since its recorded `startedAt`.
+        let spent = if fresh {
+            0.0
+        } else {
+            attempt_spent_seconds(&self.record.shots[shot_index].attempts[attempt_index])
+        };
+        let shot_deadline = attempt_started
+            + Duration::from_secs_f64((self.plan.limits.max_shot_seconds as f64 - spent).max(0.0));
+        let (view, poll_stop) = self
+            .client
+            .wait_for_job(&job_id, self.bounds(shot_deadline))
+            .await?;
+
+        // 3. Settle it into the record. The observed peak comes off the job's metrics block, which
+        // the worker POSTs after its terminal progress — so read it once the attempt is terminal,
+        // whatever ended it.
+        let metrics = self.client.job_metrics(&job_id, self.poll_interval).await;
+        let memory = memory_observation(metrics.as_ref(), &view, self.facts.host_memory_gb);
+        // Whether the cancel the harness posted was actually honoured. A job still running after
+        // the grace is a render in flight that nothing here can stop.
+        let cancel_honoured = view.is_terminal();
+        let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
+        let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
+        let take = (poll_stop == PollStop::Terminal && view.status == "completed")
+            .then(|| take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref()))
+            .flatten();
+        {
+            let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+            attempt.finished_at = Some(utc_now());
+            attempt.elapsed_seconds = spent + attempt_started.elapsed().as_secs_f64();
+            attempt.peak_gpu_memory_pct = memory.pct;
+            attempt.peak_memory_gb = memory.gb;
+            attempt.peak_memory_source = memory.source.clone();
+            attempt.status = match poll_stop {
+                // Terminal either way — for `AssetsUnsettled` the JOB finished and it is the
+                // API's asset handoff that stalled, so the attempt records the job's own status
+                // and says what stalled in `error`. A resume re-reads a completed attempt that
+                // carries no take, which gives the handoff another chance to have landed.
+                PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+                PollStop::Operator => "canceled_by_operator".to_owned(),
+                PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+            };
+            attempt.error = match poll_stop {
+                PollStop::Terminal if view.status == "completed" && take.is_none() => {
+                    Some(format!(
+                        "job {job_id} completed without an asset in its result: {}",
+                        view.result
+                    ))
+                }
+                PollStop::Terminal if view.status == "completed" => None,
+                PollStop::Terminal => Some(view.failure_text()),
+                PollStop::AssetsUnsettled => Some(format!(
+                    "job {job_id} reached {} but its assets never settled within {:.0}s (the \
+                     result still carries raw assetWrites): {}",
+                    view.status,
+                    settle_grace.as_secs_f64(),
+                    view.result
+                )),
+                PollStop::Operator => Some(if cancel_honoured {
+                    format!("canceled by operator (job {job_id} is {})", view.status)
+                } else {
+                    format!(
+                        "canceled by operator; job {job_id} was still {} {:.0}s after the cancel \
+                         was posted",
+                        view.status,
+                        cancel_grace.as_secs_f64()
+                    )
+                }),
+                PollStop::ShotBudget if !cancel_honoured => Some(format!(
+                    "attempt exceeded the per-shot budget of {}s and job {job_id} is still \
+                     running {:.0}s after the cancel was posted — stopping dispatch rather than \
+                     running a second render beside it",
+                    self.plan.limits.max_shot_seconds,
+                    cancel_grace.as_secs_f64()
+                )),
+                PollStop::ShotBudget => Some(format!(
+                    "attempt exceeded the per-shot budget of {}s (last status {})",
+                    self.plan.limits.max_shot_seconds, view.status
+                )),
+                PollStop::RunBudget if !cancel_honoured => Some(format!(
+                    "run exceeded its budget of {}s and job {job_id} is still running {:.0}s \
+                     after the cancel was posted — stopping dispatch rather than running a second \
+                     render beside it",
+                    self.plan.limits.max_run_seconds,
+                    cancel_grace.as_secs_f64()
+                )),
+                PollStop::RunBudget => Some(format!(
+                    "run exceeded its budget of {}s while this attempt was in flight (last status \
+                     {})",
+                    self.plan.limits.max_run_seconds, view.status
+                )),
+            };
+            attempt.take = take.clone();
+        }
+        if let Some(take) = &take {
+            // The first usable take of a shot becomes its selected take. Replay never reaches this
+            // line for a shot that already has one, and nothing but `replace-take` moves it.
+            if self.record.shots[shot_index].selected_attempt.is_none() {
+                self.record.shots[shot_index].selected_attempt = Some(attempt_number);
+            }
+            if let Some(model) = self.record.model.as_mut() {
+                if model.backend_observed.is_none() {
+                    model.backend_observed = take.backend.clone();
+                }
+            }
+        }
+        self.persist()?;
+
+        // 4. Decide whether the run may keep dispatching.
+        match poll_stop {
+            PollStop::AssetsUnsettled => {
+                // Retrying would dispatch a fresh render against a server-side condition a retry
+                // cannot fix.
+                self.halt(
+                    RunOutcome::Failed,
+                    "assets_unsettled",
+                    format!(
+                        "shot {}'s job finished but the API never persisted its assets; the take \
+                         cannot be adopted and a retry would not fix it",
+                        shot.id
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
+            PollStop::Operator => {
+                self.halt(
+                    RunOutcome::Canceled,
+                    "canceled",
+                    if cancel_honoured {
+                        format!("canceled while shot {} was in flight", shot.id)
+                    } else {
+                        format!(
+                            "canceled while shot {} was in flight, and the job was still {} when \
+                             the grace ran out — check the GPU before resuming",
+                            shot.id, view.status
+                        )
+                    },
+                    true,
+                );
+                return Ok(false);
+            }
+            PollStop::RunBudget => {
+                self.halt(
+                    RunOutcome::StoppedRunBudget,
+                    "run_budget",
+                    format!(
+                        "the run's {}s wall-clock budget ran out while shot {} was in flight; \
+                         raise limits.maxRunSeconds and start a new run",
+                        self.plan.limits.max_run_seconds, shot.id
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
+            PollStop::ShotBudget if !cancel_honoured => {
+                // The render is still on the GPU. Neither the next attempt nor the next shot may go
+                // out beside it: the plan declared ONE memory budget, and two renders in flight is
+                // exactly what it is there to prevent.
+                self.halt(
+                    RunOutcome::Failed,
+                    "cancel_not_honoured",
+                    format!(
+                        "shot {}'s job was still {} after the cancel grace, so a render is in \
+                         flight that nothing here can stop; no further dispatch",
+                        shot.id, view.status
+                    ),
+                    false,
+                );
+                return Ok(false);
+            }
+            _ => {}
+        }
+        if self.memory_over_budget(&shot.id, &memory) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Adopt whatever the API holds for attempts a previous controller left unfinished.
+    ///
+    /// Every unfinished attempt is looked up (by its recorded job id, or by its idempotency key
+    /// when the controller died before recording one) and read to its current state: a completed
+    /// job is imported as a take, a failed one counts as a spent attempt, and a job still running
+    /// is left for the dispatch loop to resume polling. Nothing here creates a job.
+    async fn reconcile_shot(&mut self, shot: &film_plan::Shot) -> Result<(), HarnessError> {
+        let project_id = self.project_id()?;
+        let Some(shot_index) = self.record.shots.iter().position(|s| s.shot_id == shot.id) else {
+            return Ok(());
+        };
+        let unfinished: Vec<usize> = self.record.shots[shot_index]
+            .attempts
+            .iter()
+            .enumerate()
+            .filter(|(_, attempt)| {
+                !TERMINAL_ATTEMPT_STATUSES.contains(&attempt.status.as_str())
+                    || (attempt.status == "completed" && attempt.take.is_none())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for attempt_index in unfinished {
+            let attempt = &self.record.shots[shot_index].attempts[attempt_index];
+            let key = attempt.idempotency_key.clone();
+            let job_id = match attempt.job_id.clone() {
+                Some(job_id) => Some(job_id),
+                None => {
+                    self.client
+                        .find_job_by_idempotency_key(&project_id, &key)
+                        .await?
+                }
+            };
+            let Some(job_id) = job_id else {
+                // The controller died before the job was created. The attempt stays pending and the
+                // dispatch loop creates it under the same key.
+                continue;
+            };
+            let view = self.client.get_job(&job_id).await?;
+            let terminal = view.is_terminal() && view.is_settled();
+            let take = (terminal && view.status == "completed")
+                .then(|| {
+                    take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref())
+                })
+                .flatten();
+            let mut adopted_memory = None;
+            if terminal {
+                let metrics = self.client.job_metrics(&job_id, self.poll_interval).await;
+                let memory = memory_observation(metrics.as_ref(), &view, self.facts.host_memory_gb);
+                let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+                attempt.peak_gpu_memory_pct = memory.pct;
+                attempt.peak_memory_gb = memory.gb;
+                attempt.peak_memory_source = memory.source.clone();
+                adopted_memory = Some(memory);
+                attempt.job_id = Some(job_id.clone());
+                attempt.status = view.status.clone();
+                attempt.finished_at.get_or_insert_with(utc_now);
+                attempt.error = match (&view.status[..], take.is_some()) {
+                    ("completed", true) => None,
+                    ("completed", false) => Some(format!(
+                        "job {job_id} completed without an asset in its result: {}",
+                        view.result
+                    )),
+                    _ => Some(view.failure_text()),
+                };
+                attempt.take = take.clone();
+            } else {
+                let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+                attempt.job_id = Some(job_id.clone());
+                attempt.status = "running".to_owned();
+            }
+            if take.is_some() && self.record.shots[shot_index].selected_attempt.is_none() {
+                let number = self.record.shots[shot_index].attempts[attempt_index].attempt;
+                self.record.shots[shot_index].selected_attempt = Some(number);
+            }
+            if let Some(take) = &take {
+                if let Some(model) = self.record.model.as_mut() {
+                    if model.backend_observed.is_none() {
+                        model.backend_observed = take.backend.clone();
+                    }
+                }
+            }
+            self.persist()?;
+            // The plan's memory budget is judged on the EVIDENCE, not on who was watching when it
+            // landed: an adopted terminal attempt whose peak is over budget stops new dispatch here
+            // exactly as it would in `work_attempt`. The take itself is kept — it exists — but the
+            // run goes no further (E5 / AC3).
+            if let Some(memory) = adopted_memory {
+                self.memory_over_budget(&shot.id, &memory);
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Timeline and export
+    // -----------------------------------------------------------------------------------------
+
+    /// The selected take of every selected shot, in plan order — what the timeline is built from.
+    fn selected_takes(&self) -> Vec<SelectedTake> {
+        self.record
+            .shots
+            .iter()
+            .filter(|shot| self.is_selected(&shot.shot_id))
+            .filter_map(|shot| {
+                let attempt = shot.selected()?;
+                Some(SelectedTake {
+                    shot_id: shot.shot_id.clone(),
+                    take: attempt.take.clone()?,
+                    width: shot.intended.width,
+                    height: shot.intended.height,
+                    job_id: attempt.job_id.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The tallest selected take, which fixes the export ladder rung the render uses.
+    fn tallest_selected(&self) -> u32 {
+        self.selected_takes()
+            .iter()
+            .map(|selected| selected.height)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The id of this project's timeline named `name`, if it already has one.
+    async fn find_timeline_by_name(
+        &self,
+        project_id: &str,
+        name: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        Ok(self
+            .client
+            .expect_ok(
+                "GET",
+                &format!("/api/v1/projects/{project_id}/timelines"),
+                None,
+            )
+            .await?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|timeline| timeline.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|timeline| timeline.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    /// Create (or update) the run's timeline from the selected takes. Pure API writes, no job:
+    /// re-running it after a take changed rewrites one item and leaves the rest alone.
+    async fn assemble_timeline(&mut self) -> Result<bool, HarnessError> {
+        let project_id = self.project_id()?;
+        let takes = self.selected_takes();
+        if takes.is_empty() {
+            return Ok(false);
+        }
+        let (first_width, first_height) = (takes[0].width, takes[0].height);
+        let aspect_ratio = aspect_ratio_for(first_width, first_height);
+        let existing_id = self
+            .record
+            .timeline
+            .as_ref()
+            .map(|timeline| timeline.timeline_id.clone());
+        let timeline_name = self
+            .record
+            .timeline
+            .as_ref()
+            .map(|timeline| timeline.name.clone())
+            .unwrap_or_else(|| format!("{} ({})", self.plan.title, self.record.run_id));
+        let mut timeline = match &existing_id {
+            Some(id) => {
+                self.client
+                    .expect_ok(
+                        "GET",
+                        &format!("/api/v1/projects/{project_id}/timelines/{id}"),
+                        None,
+                    )
+                    .await?
+            }
+            // Adopt by identity, exactly as the project is. `POST /timelines` ALWAYS creates a new
+            // row, and the record's `timeline` is only written after the PUT lands — so a
+            // controller killed in that window leaves a timeline nothing names, and a resume that
+            // just POSTed again would leave the project holding two identical sequences with the
+            // run record pointing at one of them. The name carries the run id, which is what makes
+            // the lookup exact (sc-22711).
+            None => match self
+                .find_timeline_by_name(&project_id, &timeline_name)
+                .await?
+            {
+                Some(id) => {
+                    self.client
+                        .expect_ok(
+                            "GET",
+                            &format!("/api/v1/projects/{project_id}/timelines/{id}"),
+                            None,
+                        )
+                        .await?
+                }
+                None => {
+                    self.client
+                        .expect_ok(
+                            "POST",
+                            &format!("/api/v1/projects/{project_id}/timelines"),
+                            Some(json!({
+                                "name": timeline_name,
+                                "aspectRatio": aspect_ratio,
+                                "fps": self.fps
+                            })),
+                        )
+                        .await?
+                }
+            },
+        };
+        let timeline_id = timeline
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HarnessError::Transport(format!("timeline response has no id: {timeline}"))
+            })?
+            .to_owned();
+        // The main video track, by id or — if the project store's default track ids ever change —
+        // by kind. Writing the items nowhere and saving an EMPTY timeline while the record still
+        // listed every shot is the one outcome that must not happen.
+        let tracks = timeline
+            .get("tracks")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let track_index = tracks
+            .iter()
+            .position(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
+            .or_else(|| {
+                tracks
+                    .iter()
+                    .position(|track| track.get("kind").and_then(Value::as_str) == Some("video"))
+            })
+            .ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "timeline {timeline_id} has no track_main and no video track to hold the \
+                     rendered takes: {timeline}"
+                ))
+            })?;
+        let track_id = tracks[track_index]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("track_main")
+            .to_owned();
+        // Picture. Positions are left at zero and handed to `relayout_timeline` below, which is the
+        // single place that knows how the whole sequence is timed — the re-layout after a
+        // replacement must not be a second, drifting copy of this arithmetic (sc-22712).
+        let mut items = Vec::new();
+        for SelectedTake {
+            shot_id,
+            take,
+            job_id,
+            ..
+        } in &takes
+        {
+            let shot = self
+                .plan
+                .shots
+                .iter()
+                .find(|shot| &shot.id == shot_id)
+                .expect("selected takes come from the plan");
+            let length = take
+                .encoded_duration_seconds
+                .filter(|seconds| *seconds > 0.0)
+                .unwrap_or(shot.target_duration_seconds);
+            let item_id = format!(
+                "item_{}_{}",
+                shot.id.to_ascii_lowercase(),
+                &self.record.run_id[4..12]
+            );
+            items.push(json!({
+                "id": item_id,
+                "trackId": track_id,
+                "assetId": take.asset_id,
+                "type": "video",
+                "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
+                "sourceIn": 0.0,
+                "sourceOut": length,
+                "timelineStart": 0.0,
+                "timelineEnd": length,
+                "speed": 1.0,
+                "fit": "fit",
+                "volume": 1.0,
+                // The RESOLVED policy, written into the timeline itself so the export obeys the
+                // saved document rather than re-deriving anything from the plan (sc-22712).
+                "generatedAudio": resolved_generated_audio(&self.plan, shot).as_timeline_str(),
+                "versionHistory": [{
+                    "assetId": take.asset_id,
+                    "source": "original",
+                    "jobId": job_id,
+                    "note": format!("film-harness {} shot {}", self.record.run_id, shot.id),
+                }],
+                HARNESS_KEY: harness_block(ROLE_PICTURE, &self.record.run_id, Some(&shot.id), 0.0),
+            }));
+        }
+
+        // Sound: one dialogue clip per shot that has one, each keeping its offset from the start of
+        // its OWN shot, and the two beds placed ONCE across the whole sequence rather than
+        // restarting at every cut. `relayout_timeline` gives all of them their positions.
+        let mut dialogue_items = Vec::new();
+        for SelectedTake { shot_id, .. } in &takes {
+            let shot = self
+                .plan
+                .shots
+                .iter()
+                .find(|shot| &shot.id == shot_id)
+                .expect("selected takes come from the plan");
+            let Some(clip) = &shot.dialogue_clip else {
+                continue;
+            };
+            let Some(asset) = self.sound_assets.get(&clip.role) else {
+                continue;
+            };
+            let length = clip
+                .duration_seconds
+                .filter(|seconds| *seconds > 0.0)
+                .or_else(|| {
+                    asset
+                        .duration_seconds
+                        .map(|total| (total - clip.source_in_seconds).max(MIN_ITEM_SECONDS))
+                })
+                .unwrap_or(MIN_ITEM_SECONDS)
+                .max(MIN_ITEM_SECONDS);
+            dialogue_items.push(json!({
+                "id": format!(
+                    "item_line_{}_{}",
+                    shot.id.to_ascii_lowercase(),
+                    &self.record.run_id[4..12]
+                ),
+                "trackId": DIALOGUE_TRACK_ID,
+                "assetId": asset.asset_id,
+                "type": "audio",
+                "displayName": format!("{} — dialogue ({})", shot.id, clip.role).chars().take(160).collect::<String>(),
+                "sourceIn": clip.source_in_seconds,
+                "sourceOut": clip.source_in_seconds + length,
+                "timelineStart": 0.0,
+                "timelineEnd": length,
+                "speed": 1.0,
+                "fit": "fit",
+                "volume": clip.gain.clamp(0.0, 2.0),
+                "fadeInSeconds": clip.fade_in_seconds,
+                "fadeOutSeconds": clip.fade_out_seconds,
+                HARNESS_KEY: harness_block(
+                    ROLE_DIALOGUE,
+                    &self.record.run_id,
+                    Some(&shot.id),
+                    clip.offset_seconds,
+                ),
+            }));
+        }
+
+        // The ids of the picture items this pass assembled, kept before `items` is moved onto the
+        // track, so the save can be checked against them below.
+        let intended_item_ids: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let mut tracks = vec![
+            picture_track(&track_id, items),
+            audio_track(
+                DIALOGUE_TRACK_ID,
+                "Dialogue",
+                ROLE_DIALOGUE,
+                &self.plan.sound.dialogue,
+                dialogue_items,
+            ),
+        ];
+        for (bed_track_id, name, role, bed) in [
+            (
+                AMBIENCE_TRACK_ID,
+                "Ambience",
+                ROLE_AMBIENCE,
+                self.plan.sound.ambience.as_ref(),
+            ),
+            (
+                MUSIC_TRACK_ID,
+                "Music",
+                ROLE_MUSIC,
+                self.plan.sound.music.as_ref(),
+            ),
+        ] {
+            let Some(bed) = bed else { continue };
+            let Some(asset) = self.sound_assets.get(&bed.role) else {
+                continue;
+            };
+            tracks.push(bed_track(
+                bed_track_id,
+                name,
+                role,
+                bed,
+                asset,
+                &self.record.run_id,
+            ));
+        }
+        // Keep every track the API created that the harness does not own (the overlay lane and the
+        // editor's default audio lane) so a harness timeline opens in the editor unchanged.
+        if let Some(existing) = timeline.get("tracks").and_then(Value::as_array) {
+            for track in existing {
+                let id = track.get("id").and_then(Value::as_str).unwrap_or_default();
+                if !tracks
+                    .iter()
+                    .any(|kept| kept.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    tracks.push(track.clone());
+                }
+            }
+        }
+        timeline["tracks"] = Value::Array(tracks);
+
+        let plan_order: Vec<String> = takes
+            .iter()
+            .map(|selected| selected.shot_id.clone())
+            .collect();
+        let planned_duration = relayout_timeline(&mut timeline, Some(&plan_order))?;
+        let saved = self
+            .client
+            .expect_ok(
+                "PUT",
+                &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+                Some(json!({ "timeline": timeline })),
+            )
+            .await?;
+        // Check the SAVED document before describing it, rather than trusting the harness's own
+        // intent: the record then cannot claim a sequence the project does not hold. The store may
+        // legitimately add or reshape keys, so what is checked is that every picture item this pass
+        // assembled came back — not that the document is byte-identical to what was sent.
+        persisted_picture_items(&saved, &track_id, &intended_item_ids).ok_or_else(|| {
+            HarnessError::Transport(format!(
+                "saved timeline {timeline_id} does not hold the {} picture items the run \
+                 assembled: {saved}",
+                intended_item_ids.len()
+            ))
+        })?;
+        // The store recomputes `duration` across every track on save, so read it back rather than
+        // republishing the harness's own arithmetic.
+        let duration = saved
+            .get("duration")
+            .and_then(Value::as_f64)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .unwrap_or(planned_duration);
+        // Edits a human applied to this sequence are HISTORY, not something a re-assembly erases: a
+        // resume or a replacement re-lays the picture, but the record must still say the trim or
+        // reorder happened (sc-22712 under sc-22711's record).
+        let prior_edits = self
+            .record
+            .timeline
+            .as_ref()
+            .map(|timeline| timeline.edits.clone())
+            .unwrap_or_default();
+        self.record.timeline = Some(timeline_record(
+            &timeline_id,
+            &timeline_name,
+            aspect_ratio,
+            Some(reduced_aspect_ratio(first_width, first_height)),
+            Some(first_width),
+            Some(first_height),
+            self.fps,
+            duration,
+            &saved,
+            &track_id,
+            self.plan.sound.generated_audio,
+            prior_edits,
+        ));
+        self.persist()?;
+        Ok(true)
+    }
+
+    /// Render the timeline through the `timeline_export` job, adopting an export this run already
+    /// dispatched rather than starting a second render.
+    async fn run_export(&mut self) -> Result<bool, HarnessError> {
+        let project_id = self.project_id()?;
+        let Some(timeline) = self.record.timeline.clone() else {
+            return Ok(false);
+        };
+        if let Some(export) = &self.record.export {
+            if export.status == "completed" && export.asset_id.is_some() && !export.stale {
+                return Ok(true);
+            }
+        }
+        if self.canceled() {
+            self.halt(
+                RunOutcome::Canceled,
+                "canceled",
+                "canceled before the timeline export was dispatched".to_owned(),
+                true,
+            );
+            return Ok(false);
+        }
+        // An export that is stale or finished badly is SUPERSEDED: the next one is a different job,
+        // and saying so is what lets a resume tell the new export apart from the old one on the same
+        // timeline. An export merely recorded as `running` is not superseded — it is the very job
+        // this pass is about to adopt again.
+        let superseded = self
+            .record
+            .export
+            .as_ref()
+            .filter(|export| {
+                export.stale
+                    || (export.status != "running"
+                        && !(export.status == "completed" && export.asset_id.is_some()))
+            })
+            .map(|export| export.job_id.clone());
+        // An export recorded as `running` is the very job this pass is about to poll again, so it
+        // is adopted BY ID — never looked up in the listing, which is what makes the `requested_at`
+        // floor below safe to apply to everything the listing can return.
+        let in_flight = self
+            .record
+            .export
+            .as_ref()
+            .filter(|export| Some(&export.job_id) != superseded.as_ref())
+            .map(|export| export.job_id.clone());
+        if let Some(job_id) = superseded.clone() {
+            // The exclusion set is CUMULATIVE: a second re-export must exclude the first export as
+            // well as the second, or it adopts the first one's finished job and records its
+            // pre-replacement asset as the current MP4.
+            if !self.record.superseded_export_job_ids.contains(&job_id) {
+                self.record.superseded_export_job_ids.push(job_id);
+            }
+        }
+        if self.record.export_pending.is_none() {
+            self.record.export_pending = Some(ExportPending {
+                requested_at: utc_now(),
+                supersedes: superseded,
+            });
+            self.record.export = None;
+            // Persisted BEFORE the export job exists, for the same reason a shot attempt is.
+            self.persist()?;
+        }
+        let requested_at = self
+            .record
+            .export_pending
+            .as_ref()
+            .map(|pending| pending.requested_at.clone())
+            .unwrap_or_else(utc_now);
+        let superseded_ids = self.record.superseded_export_job_ids.clone();
+        let existing = match in_flight {
+            Some(job_id) => Some(job_id),
+            None => {
+                self.client
+                    .find_export_job(
+                        &project_id,
+                        &timeline.timeline_id,
+                        &superseded_ids,
+                        &requested_at,
+                    )
+                    .await?
+            }
+        };
+        let export_job_id = match existing {
+            Some(job_id) => job_id,
+            None => {
+                let export_job = self
+                    .client
+                    .expect_ok(
+                        "POST",
+                        &format!(
+                            "/api/v1/projects/{project_id}/timelines/{}/exports",
+                            timeline.timeline_id
+                        ),
+                        Some(json!({
+                            "resolution": export_resolution_for(self.tallest_selected()),
+                            "fps": self.fps,
+                            "requestedGpu": "auto",
+                        })),
+                    )
+                    .await?;
+                export_job
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!("export response has no id: {export_job}"))
+                    })?
+                    .to_owned()
+            }
+        };
+        self.record.export = Some(ExportRecord {
+            job_id: export_job_id.clone(),
+            status: "running".to_owned(),
+            stale: false,
+            asset_id: None,
+            render_path: None,
+            error: None,
+        });
+        self.record.export_pending = None;
+        self.persist()?;
+
+        let export_started = Instant::now();
+        let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
+        let (view, poll_stop) = self
+            .client
+            .wait_for_job(
+                &export_job_id,
+                self.bounds(export_started + self.shot_budget()),
+            )
+            .await?;
+        let asset_id = view
+            .result
+            .get("assetIds")
+            .and_then(Value::as_array)
+            .and_then(|ids| ids.first())
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let render_path = view
+            .result
+            .get("renderPath")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let status = match poll_stop {
+            PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+            PollStop::Operator => "canceled_by_operator".to_owned(),
+            PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+        };
+        let export_ok = status == "completed" && asset_id.is_some();
+        self.record.export = Some(ExportRecord {
+            job_id: export_job_id,
+            status,
+            stale: false,
+            asset_id,
+            render_path,
+            error: (!export_ok).then(|| match poll_stop {
+                PollStop::Terminal => view.failure_text(),
+                PollStop::AssetsUnsettled => format!(
+                    "the export job reached {} but its assets never settled within {:.0}s",
+                    view.status,
+                    settle_grace.as_secs_f64()
+                ),
+                PollStop::Operator => "canceled by operator during the export".to_owned(),
+                PollStop::ShotBudget => format!(
+                    "export exceeded the per-job budget of {}s",
+                    self.plan.limits.max_shot_seconds
+                ),
+                PollStop::RunBudget => format!(
+                    "run exceeded its budget of {}s during the export",
+                    self.plan.limits.max_run_seconds
+                ),
+            }),
+        });
+        self.persist()?;
+        match poll_stop {
+            PollStop::Operator => self.halt(
+                RunOutcome::Canceled,
+                "canceled",
+                "canceled while the timeline export was in flight".to_owned(),
+                true,
+            ),
+            PollStop::RunBudget => self.halt(
+                RunOutcome::StoppedRunBudget,
+                "run_budget",
+                format!(
+                    "the run's {}s wall-clock budget ran out during the export; raise \
+                     limits.maxRunSeconds and start a new run",
+                    self.plan.limits.max_run_seconds
+                ),
+                false,
+            ),
+            _ => {}
+        }
+        Ok(export_ok)
+    }
+
+    /// Assemble and export, unless a stop already landed. A canceled run stops here with its takes
+    /// intact: the assets are already the project's, and a resume finishes the assembly.
+    async fn assemble_and_export(&mut self) -> Result<bool, HarnessError> {
+        if !self.export {
+            return Ok(true);
+        }
+        if matches!(
+            self.stop.as_ref().map(|(outcome, _)| *outcome),
+            Some(RunOutcome::Canceled | RunOutcome::StoppedRunBudget)
+        ) {
+            return Ok(false);
+        }
+        if !self.assemble_timeline().await? {
+            return Ok(false);
+        }
+        self.run_export().await
+    }
+
+    /// Close the run: classify the outcome, stamp the record `finished` and write it one last time.
+    fn finish(&mut self, export_ok: bool) -> Result<(), HarnessError> {
+        let all_rendered = self
+            .record
+            .shots
+            .iter()
+            .filter(|shot| self.is_selected(&shot.shot_id))
+            .all(|shot| shot.selected_attempt.is_some());
+        let (outcome, stop) = match self.stop.take() {
+            Some((outcome, stop)) => (outcome, Some(stop)),
+            None if all_rendered && export_ok => (RunOutcome::Completed, None),
+            None if all_rendered => (
+                RunOutcome::Failed,
+                Some(RunStop {
+                    reason: "export_failed".to_owned(),
+                    detail: "every selected shot rendered but the timeline export did not \
+                             complete; `film-harness resume` retries the export"
+                        .to_owned(),
+                    resumable: true,
+                }),
+            ),
+            None => (
+                RunOutcome::Failed,
+                Some(RunStop {
+                    reason: "attempts_exhausted".to_owned(),
+                    detail: "a selected shot has no usable take and no attempts left; \
+                             `film-harness replace-take --shot <id>` authorises one more"
+                        .to_owned(),
+                    resumable: false,
+                }),
+            ),
+        };
+        self.record.outcome = outcome;
+        self.record.stop = stop;
+        self.record.state = RunState::Finished;
+        self.record.finished_at = Some(utc_now());
+        self.persist()
+    }
+
+    /// Close a `replace-take` invocation, which is scoped to ONE shot.
+    ///
+    /// [`Session::finish`] classifies the RUN: its `all_rendered` is computed over every selected
+    /// shot, so closing a run that still has unrendered shots through it overwrites whatever stop
+    /// the run actually had with `attempts_exhausted` / `resumable: false` — permanently blocking
+    /// the `resume` that was going to render them. A replacement decides one shot's outcome and
+    /// nothing else: when the run carried a resumable stop and other selected shots are still
+    /// outstanding, that stop is left exactly where it was.
+    fn finish_replacement(
+        &mut self,
+        export_ok: bool,
+        replaced_shot_id: &str,
+        prior: Option<(RunOutcome, RunStop)>,
+    ) -> Result<(), HarnessError> {
+        let outstanding: Vec<String> = self
+            .record
+            .shots
+            .iter()
+            .filter(|shot| shot.shot_id != replaced_shot_id)
+            .filter(|shot| self.is_selected(&shot.shot_id) && shot.selected_attempt.is_none())
+            .map(|shot| shot.shot_id.clone())
+            .collect();
+        match prior {
+            Some((outcome, stop)) if stop.resumable && !outstanding.is_empty() => {
+                self.note_decision(
+                    "replace_take",
+                    Some(replaced_shot_id),
+                    format!(
+                        "the run's own stop ({}) is left in place: {} still {} no take, so the run \
+                         is still resumable",
+                        stop.reason,
+                        outstanding.join(", "),
+                        if outstanding.len() == 1 { "has" } else { "have" }
+                    ),
+                );
+                self.stop = None;
+                self.record.outcome = outcome;
+                self.record.stop = Some(stop);
+                self.record.state = RunState::Finished;
+                self.record.finished_at = Some(utc_now());
+                self.persist()
+            }
+            _ => self.finish(export_ok),
+        }
+    }
+
+    /// Project -> references -> shots -> timeline -> export -> close.
+    async fn drive(mut self) -> Result<RunRecord, HarnessError> {
+        let outcome = self.drive_inner().await;
+        match outcome {
+            Ok(export_ok) => {
+                self.finish(export_ok)?;
+                Ok(self.record)
+            }
+            // A transport/API failure partway through is exactly when the record matters most: by
+            // then the run may have created a project, imported assets and dispatched jobs. It
+            // stays `running`, because that is what it is — a resume reconciles it.
+            Err(error) => {
+                self.record.diagnostics.push(PlanDiagnostic::plan(
+                    "run",
+                    format!("the run stopped on an error: {error}"),
+                ));
+                // Best effort: an io failure while writing the record must not replace the failure
+                // that caused it with a less informative one.
+                let _ = self.persist();
+                Err(error)
+            }
+        }
+    }
+
+    async fn drive_inner(&mut self) -> Result<bool, HarnessError> {
+        self.ensure_project().await?;
+        self.ensure_references().await?;
+        // Before the shots, not after: a resume and a `replace-take` both re-lay the timeline at
+        // the end of this same method, and the re-layout needs the clips to place. Importing here
+        // means the sound of a run is settled by the time the first take exists, whichever entry
+        // point is driving (sc-22712).
+        self.ensure_sound().await?;
+        self.work_shots().await?;
+        self.assemble_and_export().await
+    }
+
+    /// Flag every shot that declared a dependency on `shot_id` AND already has a take of its own.
+    /// A shot that has not rendered yet needs no flag: it will be rendered against the current
+    /// state. Direct dependents only — a flagged shot's own take did not change, so the signal does
+    /// not cascade on its own.
+    fn flag_dependents(&mut self, shot_id: &str, reason: &str) {
+        let dependents: Vec<(String, String, String)> =
+            film_plan::direct_dependents(&self.plan, shot_id)
+                .into_iter()
+                .map(|(shot, edge)| (shot.id.clone(), edge.kind.clone(), edge.note.clone()))
+                .collect();
+        let raised_at = utc_now();
+        for (dependent_id, kind, note) in dependents {
+            let Some(record) = self.record.shot_mut(&dependent_id) else {
+                continue;
+            };
+            if record.selected_attempt.is_none() {
+                continue;
+            }
+            // One standing flag per (source shot, dependency kind): replacing the same upstream
+            // take twice is the same unread signal, not two. Nothing clears a flag yet — sc-22714
+            // adds the human review verbs, and the resolution it records has to be consulted here
+            // so a flag resolved before a SECOND replacement is raised again.
+            if record
+                .needs_review
+                .iter()
+                .any(|flag| flag.source_shot_id == shot_id && flag.dependency == kind)
+            {
+                continue;
+            }
+            let detail = if note.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" ({note})")
+            };
+            record.needs_review.push(ReviewFlag {
+                raised_at: raised_at.clone(),
+                source_shot_id: shot_id.to_owned(),
+                dependency: kind.clone(),
+                reason: format!(
+                    "shot {shot_id}'s selected take was replaced ({reason}); this shot's {kind} \
+                     depends on it{detail} — review it and replace it too if it no longer matches"
+                ),
+            });
+        }
+    }
+}
+
 /// Execute `options` end to end. Returns the run record (also written to `options.out_dir`) on
 /// every path that got past validation, including runs that stopped on a limit; a refused plan
 /// returns [`HarnessError::Validation`] after writing a `rejected` record.
@@ -1247,14 +3593,32 @@ pub async fn run(
 /// cancels the in-flight job through the API and still leaves a record, instead of orphaning a
 /// render on the GPU.
 ///
-/// Every path past document validation writes `run.json` — including a transport/API failure
-/// mid-run, which is exactly when the record matters most: by then the run may have created a
-/// project, imported assets and dispatched jobs, and nothing else remembers that it did.
+/// Every path past document validation writes `run.json` — sc-22711 writes it at every state
+/// transition, not only at the end, so a controller killed anywhere leaves a record `resume` can
+/// reconcile against the API.
 pub async fn run_with_control(
     transport: &dyn ApiTransport,
     options: &RunOptions,
     control: &RunControl,
 ) -> Result<RunRecord, HarnessError> {
+    // A `run` over a directory that already holds a record would mint a NEW run id and persist over
+    // the previous run's state, while `persist_record` keeps the plan/pack copies it finds (they
+    // are written once and then left alone) — so the surviving documents would belong to the old
+    // run and the record's hashes to the new one, and a later resume would refuse or mis-hash.
+    // `scripts/film-harness-smoke.sh` pins `--out "$SMOKE_DIR/run"`, so a second invocation is
+    // exactly this. The takes, decisions and provenance of a run are not something a typo may
+    // overwrite (E2).
+    if let Ok(existing) = read_run_record(&options.out_dir) {
+        return Err(HarnessError::Refused(format!(
+            "{} already holds run {} ({:?}); `film-harness status --out {}` prints it, \
+             `film-harness resume --out {}` continues it, and a NEW run needs a different --out",
+            options.out_dir.join(RUN_RECORD_FILE).display(),
+            existing.run_id,
+            existing.outcome,
+            options.out_dir.display(),
+            options.out_dir.display()
+        )));
+    }
     let started = Instant::now();
     let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
     let plan_bytes = std::fs::read(&options.plan_path)?;
@@ -1283,90 +3647,36 @@ pub async fn run_with_control(
         }
         Err(other) => return Err(other),
     };
-
-    let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
-    let outcome = execute_run(
-        &client,
-        transport,
-        options,
-        &plan,
-        &pack,
-        &run_id,
-        started,
-        &mut record,
-    )
-    .await;
-    record.finished_at = Some(utc_now());
-    record.elapsed_seconds = seconds_since(started);
-    match outcome {
-        Ok(()) => {
-            persist_record(
-                &record,
-                &options.out_dir,
-                &options.plan_path,
-                &options.reference_pack_path,
-            )?;
-            Ok(record)
-        }
-        Err(HarnessError::Validation(findings)) => {
+    let prepared = match prepare(&client, &plan, options.export, options.require_installed).await? {
+        Ok(prepared) => prepared,
+        Err(findings) => {
+            let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
+            record.state = RunState::Finished;
             record.outcome = RunOutcome::Rejected;
+            record.stop = Some(RunStop {
+                reason: "rejected".to_owned(),
+                detail: "the plan was refused against this API's catalog and host".to_owned(),
+                resumable: false,
+            });
             record.diagnostics = findings.clone();
+            record.finished_at = Some(utc_now());
+            record.elapsed_seconds = seconds_since(started);
             persist_record(
                 &record,
                 &options.out_dir,
                 &options.plan_path,
                 &options.reference_pack_path,
             )?;
-            Err(HarnessError::Validation(findings))
+            return Err(HarnessError::Validation(findings));
         }
-        Err(error) => {
-            record.outcome = RunOutcome::Failed;
-            record.diagnostics.push(PlanDiagnostic::plan(
-                "run",
-                format!("the run stopped on an error: {error}"),
-            ));
-            // Best effort: an io failure while writing the record must not replace the failure
-            // that caused it with a less informative one.
-            let _ = persist_record(
-                &record,
-                &options.out_dir,
-                &options.plan_path,
-                &options.reference_pack_path,
-            );
-            Err(error)
-        }
-    }
-}
-
-/// Steps 3-6 against a record the caller owns, so every early return still leaves a persistable
-/// record behind. `Err(Validation)` means the catalog/host refused the plan before the first write;
-/// any other `Err` is a transport/API failure partway through.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn execute_run(
-    client: &Client<'_>,
-    transport: &dyn ApiTransport,
-    options: &RunOptions,
-    plan: &ProductionPlan,
-    pack: &ReferencePack,
-    run_id: &str,
-    started: Instant,
-    record: &mut RunRecord,
-) -> Result<(), HarnessError> {
-    let facts = discover_host(client).await?;
-    let entry = resolve_model_entry(client, &plan.model.id).await?;
-    let mut findings = model_findings(plan, entry.as_ref(), options.require_installed, &facts);
-    if findings.is_empty() {
-        findings.extend(host_findings(plan, &facts, options.export));
-    }
-    if !findings.is_empty() {
-        return Err(HarnessError::Validation(findings));
-    }
-    let entry = entry.expect("model findings are empty only with an entry");
-    let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
-    let lane = facts.lane();
+    };
+    let lane = prepared.facts.lane();
+    let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
     // The requests this run dispatches: the compiled document beside the plan when there is one,
     // else the plan's own prompts compiled in memory (sc-22713). `record.plan.sha256` is the hash
-    // of the plan file as read, which is what a compiled document pins.
+    // of the plan file as read, which is what a compiled document pins. A resume re-reads the same
+    // document and re-checks the same hash, so the requests a replay dispatches are the ones the
+    // first controller did.
     let supplied_compiled = read_compiled_for(options)?;
     record.compiled = match supplied_compiled.as_ref() {
         // The hash is what makes the run reproducible, so an unreadable file is an error rather
@@ -1381,849 +3691,504 @@ async fn execute_run(
         None => None,
     };
     let compiled = compiled_for_run(
-        plan,
-        pack,
-        &entry,
+        &plan,
+        &pack,
+        &prepared.entry,
         lane,
         &record.plan.sha256,
         supplied_compiled.map(|(compiled, _)| compiled),
     )?;
-
     record.model = Some(ModelRecord {
         id: plan.model.id.clone(),
         tier_requested: plan.model.tier.clone(),
-        fps,
+        fps: prepared.fps,
         lane: lane.manifest_key().to_owned(),
         backend_observed: None,
-        weights: primary_weights(&entry, plan.model.tier.as_deref()),
+        weights: primary_weights(&prepared.entry, plan.model.tier.as_deref()),
         hardware: HardwareRecord {
-            platform: facts.platform_or_local().to_owned(),
-            // The host-capabilities route reports no arch, so this process's arch is the truth
-            // only when the API is on this platform; otherwise claiming one would be a fabrication.
-            arch: if facts.platform_or_local() == std::env::consts::OS {
+            platform: prepared.facts.platform_or_local().to_owned(),
+            // The host-capabilities route reports no arch, so this process's arch is the truth only
+            // when the API is on this platform; otherwise claiming one would be a fabrication.
+            arch: if prepared.facts.platform_or_local() == std::env::consts::OS {
                 std::env::consts::ARCH.to_owned()
             } else {
                 "unknown".to_owned()
             },
-            host_memory_gb: facts.host_memory_gb,
-            gpu_name: facts.video_gpu_name.clone(),
-            worker_id: facts.video_worker_id.clone(),
+            host_memory_gb: prepared.facts.host_memory_gb,
+            gpu_name: prepared.facts.video_gpu_name.clone(),
+            worker_id: prepared.facts.video_worker_id.clone(),
         },
     });
-
-    // Step 4: project + references.
-    let project = match &options.project_id {
-        Some(id) => {
-            client
-                .expect_ok("GET", &format!("/api/v1/projects/{id}"), None)
-                .await?
-        }
-        None => {
-            client
-                .expect_ok(
-                    "POST",
-                    "/api/v1/projects",
-                    Some(json!({ "name": plan.title })),
-                )
-                .await?
-        }
+    let run_deadline = started + Duration::from_secs(plan.limits.max_run_seconds);
+    let mut session = Session {
+        client,
+        transport,
+        plan_path: options.plan_path.clone(),
+        pack_path: options.reference_pack_path.clone(),
+        out_dir: options.out_dir.clone(),
+        poll_interval: options.poll_interval,
+        export: options.export,
+        plan,
+        pack,
+        compiled,
+        facts: prepared.facts,
+        fps: prepared.fps,
+        record,
+        started,
+        prior_elapsed: 0.0,
+        run_deadline,
+        role_assets: BTreeMap::new(),
+        sound_assets: BTreeMap::new(),
+        stop: None,
     };
-    let project_id = project
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HarnessError::Transport(format!("project response has no id: {project}")))?
-        .to_owned();
-    record.project_id = Some(project_id.clone());
-    record.project_path = project
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    // The record exists before the first API write, so even a controller killed during project
+    // creation leaves something `resume` can reconcile.
+    session.persist()?;
+    session.drive().await
+}
 
-    let pack_dir = options
-        .reference_pack_path
+/// What `resume` and `replace_take` both need: the record, its documents re-read and re-hashed, and
+/// the catalog/host judged again (either can have changed while the run was not held).
+struct Continued {
+    record: RunRecord,
+    plan: ProductionPlan,
+    pack: ReferencePack,
+    /// The requests the run was dispatching, re-read from the document the record names (and
+    /// re-checked against its recorded hash) or recompiled from the plan when it named none — so a
+    /// resume dispatches what the first controller did, not a fresh compilation of an edited file.
+    compiled: CompiledPlan,
+    plan_path: PathBuf,
+    pack_path: PathBuf,
+    prepared: Prepared,
+}
+
+/// Read `<out_dir>/run.json`, re-read the documents it was started from, and refuse unless they
+/// still hash to what the run recorded.
+///
+/// The hash check is the load-bearing part: resuming against an edited plan would silently render
+/// shots the record's takes were never meant to sit beside. An edited plan is a new run, and the
+/// refusal says so.
+async fn continue_run(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+) -> Result<Continued, HarnessError> {
+    let record = read_run_record(&options.out_dir)?;
+    if record.schema_version != RUN_RECORD_SCHEMA_VERSION {
+        return Err(HarnessError::Refused(format!(
+            "run record schema version {} (this build reads {RUN_RECORD_SCHEMA_VERSION})",
+            record.schema_version
+        )));
+    }
+    let (plan_path, plan_bytes) = read_source(
+        Path::new(&record.plan.path),
+        &options.out_dir.join("plan.json"),
+        "plan",
+    )?;
+    let (pack_path, pack_bytes) = read_source(
+        Path::new(&record.reference_pack.path),
+        &options.out_dir.join("references.json"),
+        "reference pack",
+    )?;
+    for (label, bytes, recorded) in [
+        ("plan", &plan_bytes, &record.plan.sha256),
+        ("reference pack", &pack_bytes, &record.reference_pack.sha256),
+    ] {
+        let actual = sha256_hex(bytes);
+        if &actual != recorded {
+            return Err(HarnessError::Refused(format!(
+                "the {label} changed since run {} started (recorded {recorded}, found {actual}); a \
+                 changed {label} is a new run, not a resume",
+                record.run_id
+            )));
+        }
+    }
+    let plan = film_plan::parse_plan(std::str::from_utf8(&plan_bytes).unwrap_or_default())
+        .map_err(|error| HarnessError::Refused(format!("plan: {error}")))?;
+    let pack =
+        film_plan::parse_reference_pack(std::str::from_utf8(&pack_bytes).unwrap_or_default())
+            .map_err(|error| HarnessError::Refused(format!("reference pack: {error}")))?;
+    let pack_dir = pack_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut role_assets: BTreeMap<String, String> = BTreeMap::new();
-    for reference in &pack.references {
-        let path = pack_dir.join(&reference.file);
-        let bytes = std::fs::read(&path)?;
-        let sha256 = sha256_hex(&bytes);
-        let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("reference.png")
-            .to_owned();
-        let content_type = match path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| extension.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("jpg" | "jpeg") => "image/jpeg",
-            Some("webp") => "image/webp",
-            _ => "image/png",
-        };
-        let provenance = json!({
-            "filmHarness": {
-                "kind": "reference",
-                "role": reference.role,
-                "referenceKind": reference.kind,
-                "approved": reference.approved,
-                "referencePackId": pack.id,
-                "referencePackVersion": pack.version,
-                "planId": plan.id,
-                "planVersion": plan.version,
-                "runId": run_id,
-                "sourceFile": reference.file,
-                "sha256": sha256,
-            }
-        });
-        let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
-        let path = format!("/api/v1/projects/{project_id}/assets");
-        let response = transport
-            .call(ApiRequest {
-                method: "POST",
-                path: path.clone(),
-                body: RequestBody::Multipart {
-                    boundary,
-                    bytes: body,
-                },
-            })
-            .await?;
-        if !(200..300).contains(&response.status) {
-            return Err(HarnessError::Api {
-                method: "POST",
-                path,
-                status: response.status,
-                detail: api_detail(&response.body),
-            });
-        }
-        let asset_id = response
-            .body
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HarnessError::Transport(format!(
-                    "asset import response has no id: {}",
-                    response.body
-                ))
-            })?
-            .to_owned();
-        // An unapproved reference is imported (so the record can point at it and a human can
-        // review it) but tagged distinctly, so a query for the conditioning-eligible references
-        // cannot pick it up — AC1 is about APPROVED references staying addressable.
-        let kind_tag = if reference.approved {
-            REFERENCE_TAG
-        } else {
-            UNAPPROVED_REFERENCE_TAG
-        };
-        client
-            .expect_ok(
-                "PATCH",
-                &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
-                Some(json!({
-                    "tags": [kind_tag, format!("role:{}", reference.role), format!("pack:{}", pack.id)]
-                })),
-            )
-            .await?;
-        if reference.approved {
-            // Only approved roles resolve into a shot's conditioning slots. Validation already
-            // refuses a plan that conditions on an unapproved role, so this is the second half of
-            // the same guarantee: even a validator gap cannot put an unapproved plate on the wire.
-            role_assets.insert(reference.role.clone(), asset_id.clone());
-        }
-        record.references.push(ReferenceAssetRecord {
-            role: reference.role.clone(),
-            kind: reference.kind.clone(),
-            file: reference.file.clone(),
-            sha256,
-            asset_id,
-            approved: reference.approved,
-        });
+    let findings = film_plan::validate_all(&plan, &pack, Some(&pack_dir), None);
+    if !findings.is_empty() {
+        return Err(HarnessError::Validation(findings));
     }
-
-    // Sound imports the same way pictures do (sc-22712). Import normalises every clip to PCM-16
-    // WAV and measures its duration off the stored file, so `durationSeconds` here is the length
-    // the export will actually read rather than anything the plan claimed.
-    //
-    // Only what this run will PLACE is imported — the two beds plus the dialogue of the SELECTED
-    // shots. Unlike a reference image, importing an audio clip costs an ffmpeg transcode, and a
-    // pack legitimately carries sound for shots a `--shots` run left out. `record.sound` is
-    // therefore the list of clips that were actually available to the mix.
-    let placed_sound_roles: BTreeSet<String> = plan
-        .sound
-        .ambience
-        .iter()
-        .chain(plan.sound.music.iter())
-        .map(|bed| bed.role.clone())
-        .chain(
-            plan.shots
-                .iter()
-                .filter(|shot| record.selected_shot_ids.contains(&shot.id))
-                .filter_map(|shot| shot.dialogue_clip.as_ref().map(|clip| clip.role.clone())),
-        )
-        .collect();
-    let mut sound_assets: BTreeMap<String, SoundAsset> = BTreeMap::new();
-    for entry in pack
-        .sound
-        .iter()
-        .filter(|entry| placed_sound_roles.contains(&entry.role))
-    {
-        let path = pack_dir.join(&entry.file);
-        let bytes = std::fs::read(&path)?;
-        let sha256 = sha256_hex(&bytes);
-        let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("sound.wav")
-            .to_owned();
-        let provenance = json!({
-            "filmHarness": {
-                "kind": "sound",
-                "role": entry.role,
-                "soundKind": entry.kind,
-                "referencePackId": pack.id,
-                "referencePackVersion": pack.version,
-                "planId": plan.id,
-                "planVersion": plan.version,
-                "runId": run_id,
-                "sourceFile": entry.file,
-                "sha256": sha256,
-            }
-        });
-        let (boundary, body) =
-            encode_asset_upload(&filename, audio_content_type(&path), &bytes, &provenance);
-        let route = format!("/api/v1/projects/{project_id}/assets");
-        let response = transport
-            .call(ApiRequest {
-                method: "POST",
-                path: route.clone(),
-                body: RequestBody::Multipart {
-                    boundary,
-                    bytes: body,
-                },
-            })
-            .await?;
-        if !(200..300).contains(&response.status) {
-            return Err(HarnessError::Api {
-                method: "POST",
-                path: route,
-                status: response.status,
-                detail: api_detail(&response.body),
-            });
-        }
-        let asset_id = response
-            .body
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HarnessError::Transport(format!(
-                    "sound import response has no id: {}",
-                    response.body
-                ))
-            })?
-            .to_owned();
-        let duration_seconds = response
-            .body
-            .get("file")
-            .and_then(|file| file.get("duration"))
-            .and_then(Value::as_f64)
-            .filter(|seconds| *seconds > 0.0);
-        client
-            .expect_ok(
-                "PATCH",
-                &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
-                Some(json!({
-                    "tags": [SOUND_TAG, format!("role:{}", entry.role), format!("pack:{}", pack.id)]
-                })),
-            )
-            .await?;
-        sound_assets.insert(
-            entry.role.clone(),
-            SoundAsset {
-                asset_id: asset_id.clone(),
-                duration_seconds,
-            },
-        );
-        record.sound.push(ReferenceAssetRecord {
-            role: entry.role.clone(),
-            kind: entry.kind.clone(),
-            file: entry.file.clone(),
-            sha256,
-            asset_id,
-            // A sound entry has no approval flag of its own: approval gates CONDITIONING, and
-            // sound is never conditioning. Everything in the pack's `sound` array is placeable.
-            approved: true,
-        });
-    }
-
-    // Step 5: shots, one at a time, under the declared limits.
-    let run_deadline = started + Duration::from_secs(plan.limits.max_run_seconds);
-    let shot_budget = Duration::from_secs(plan.limits.max_shot_seconds);
-    // A cancel must not be given more room to settle than the plan gave the whole attempt.
-    let cancel_grace = CANCEL_GRACE.min(shot_budget);
-    let settle_grace = ASSET_SETTLE_GRACE.min(shot_budget);
-    let selected: Vec<&film_plan::Shot> = plan
-        .shots
-        .iter()
-        .filter(|shot| record.selected_shot_ids.contains(&shot.id))
-        .collect();
-    let mut stop: Option<RunOutcome> = None;
-    let mut rendered: Vec<(String, TakeRecord, (u32, u32))> = Vec::new();
-    for shot in &plan.shots {
-        // The compiled request is the single source of the geometry, the timing and the prompt —
-        // the same document `compiled.json` shows a reviewer (sc-22713).
-        let request = compiled
-            .request(&shot.id)
-            .expect("every shot compiled a request");
-        let (width, height) = (request.width, request.height);
-        let resolved = request
-            .resolve_conditioning(&role_assets)
-            .map_err(HarnessError::Validation)?;
-        let assets = ConditioningAssets {
-            first_frame_asset_id: resolved.first_frame_asset_id.clone(),
-            last_frame_asset_id: resolved.last_frame_asset_id.clone(),
-            reference_asset_ids: resolved.reference_asset_ids.clone(),
-        };
-        let mut shot_record = ShotRunRecord {
-            shot_id: shot.id.clone(),
-            outcome: ShotOutcome::NotSelected,
-            intended: IntendedState {
-                mode: request.mode.clone(),
-                start_state: shot.start_state.clone(),
-                end_state: shot.end_state.clone(),
-                target_duration_seconds: request.duration_seconds,
-                width,
-                height,
-                fps: request.fps,
-                dialogue: shot.dialogue.clone(),
-                sound: shot.sound.clone(),
-                generated_audio: resolved_generated_audio(plan, shot),
-            },
-            conditioning_assets: assets.clone(),
-            attempts: Vec::new(),
-        };
-        if !selected.iter().any(|candidate| candidate.id == shot.id) {
-            record.shots.push(shot_record);
-            continue;
-        }
-        if stop.is_some() {
-            shot_record.outcome = ShotOutcome::NotDispatched;
-            record.shots.push(shot_record);
-            continue;
-        }
-        let mut outcome = ShotOutcome::Failed;
-        for attempt in 1..=plan.limits.max_attempts_per_shot {
-            if client.control.is_canceled() {
-                stop = Some(RunOutcome::Failed);
-                record.diagnostics.push(PlanDiagnostic::plan(
-                    "run",
-                    "canceled by operator before this attempt was dispatched",
-                ));
-                break;
-            }
-            if Instant::now() >= run_deadline {
-                stop = Some(RunOutcome::StoppedRunBudget);
-                break;
-            }
-            let attempt_started = Instant::now();
-            let mut attempt_record = AttemptRecord {
-                attempt,
-                job_id: None,
-                status: "dispatching".to_owned(),
-                started_at: utc_now(),
-                finished_at: None,
-                elapsed_seconds: 0.0,
-                peak_gpu_memory_pct: None,
-                peak_memory_gb: None,
-                peak_memory_source: None,
-                error: None,
-                take: None,
-            };
-            let body = request.to_job_body_with(
-                &DispatchContext {
-                    project_id: &project_id,
-                    run_id,
-                    plan_id: &plan.id,
-                    plan_version: plan.version,
-                    attempt,
-                    tier: plan.model.tier.as_deref(),
-                    role_assets: &role_assets,
-                },
-                &ResolvedConditioning {
-                    first_frame_asset_id: resolved.first_frame_asset_id.clone(),
-                    last_frame_asset_id: resolved.last_frame_asset_id.clone(),
-                    reference_asset_ids: resolved.reference_asset_ids.clone(),
-                },
-            );
-            let response = client
-                .json("POST", "/api/v1/video/jobs", Some(body))
-                .await?;
-            if !(200..300).contains(&response.status) {
-                // A refused enqueue is deterministic: the same body would be refused again, so it
-                // consumes the shot rather than every remaining attempt.
-                attempt_record.status = "rejected".to_owned();
-                attempt_record.error = Some(format!(
-                    "POST /api/v1/video/jobs -> {}: {}",
-                    response.status,
-                    api_detail(&response.body)
-                ));
-                attempt_record.finished_at = Some(utc_now());
-                attempt_record.elapsed_seconds = seconds_since(attempt_started);
-                shot_record.attempts.push(attempt_record);
-                outcome = ShotOutcome::Failed;
-                break;
-            }
-            let job_id = response
-                .body
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    HarnessError::Transport(format!(
-                        "video job response has no id: {}",
-                        response.body
-                    ))
-                })?
-                .to_owned();
-            attempt_record.job_id = Some(job_id.clone());
-            let (view, poll_stop) = client
-                .wait_for_job(
-                    &job_id,
-                    PollBounds {
-                        shot_deadline: attempt_started + shot_budget,
-                        run_deadline,
-                        poll_interval: options.poll_interval,
-                        cancel_grace,
-                        settle_grace,
-                    },
-                )
-                .await?;
-            attempt_record.finished_at = Some(utc_now());
-            attempt_record.elapsed_seconds = seconds_since(attempt_started);
-            attempt_record.status = match poll_stop {
-                PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
-                PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
-                PollStop::Operator => "canceled_by_operator".to_owned(),
-            };
-            // The observed peak comes off the job's metrics block, which the worker POSTs after
-            // its terminal progress — so read it once the attempt is terminal, whatever ended it.
-            let metrics = client.job_metrics(&job_id, options.poll_interval).await;
-            let memory = memory_observation(metrics.as_ref(), &view, facts.host_memory_gb);
-            attempt_record.peak_gpu_memory_pct = memory.pct;
-            attempt_record.peak_memory_gb = memory.gb;
-            attempt_record.peak_memory_source = memory.source.clone();
-            let memory_exceeded = memory
-                .gb
-                .is_some_and(|observed| observed > plan.limits.max_memory_gb);
-            // Whether the cancel the harness posted was actually honoured. A job still running
-            // after the grace is a render in flight that nothing here can stop.
-            let cancel_honoured = view.is_terminal();
-            match poll_stop {
-                PollStop::AssetsUnsettled => {
-                    // Terminal, but the API never finished the asset handoff. Retrying would
-                    // dispatch a fresh render against a server-side condition a retry cannot fix.
-                    attempt_record.error = Some(format!(
-                        "job {job_id} reached {} but its assets never settled within {:.0}s (the \
-                         result still carries raw assetWrites): {}",
-                        view.status,
-                        settle_grace.as_secs_f64(),
-                        view.result
-                    ));
-                    shot_record.attempts.push(attempt_record);
-                    outcome = ShotOutcome::Failed;
-                    break;
-                }
-                PollStop::Operator => {
-                    attempt_record.error = Some(if cancel_honoured {
-                        format!("canceled by operator (job {job_id} is {})", view.status)
-                    } else {
-                        format!(
-                            "canceled by operator; job {job_id} was still {} {:.0}s after the \
-                             cancel was posted",
-                            view.status,
-                            cancel_grace.as_secs_f64()
-                        )
-                    });
-                    shot_record.attempts.push(attempt_record);
-                    outcome = ShotOutcome::Failed;
-                    stop = Some(RunOutcome::Failed);
-                    record.diagnostics.push(PlanDiagnostic::plan(
-                        "run",
-                        format!("canceled by operator during shot {}", shot.id),
-                    ));
-                    break;
-                }
-                PollStop::Terminal if view.status == "completed" => {
-                    match take_from_result(&view.result, &plan.model.id, view.backend.as_deref()) {
-                        Some(take) => {
-                            if let Some(model) = record.model.as_mut() {
-                                if model.backend_observed.is_none() {
-                                    model.backend_observed = take.backend.clone();
-                                }
-                            }
-                            rendered.push((shot.id.clone(), take.clone(), (width, height)));
-                            attempt_record.take = Some(take);
-                            shot_record.attempts.push(attempt_record);
-                            outcome = ShotOutcome::Rendered;
-                        }
-                        None => {
-                            attempt_record.error = Some(format!(
-                                "job {job_id} completed without an asset in its result: {}",
-                                view.result
-                            ));
-                            shot_record.attempts.push(attempt_record);
-                            outcome = ShotOutcome::Failed;
-                        }
-                    }
-                    if memory_exceeded {
-                        stop = Some(RunOutcome::StoppedMemoryLimit);
-                    }
-                    break;
-                }
-                PollStop::Terminal => {
-                    attempt_record.error = Some(view.failure_text());
-                    shot_record.attempts.push(attempt_record);
-                    outcome = ShotOutcome::Failed;
-                    if memory_exceeded {
-                        stop = Some(RunOutcome::StoppedMemoryLimit);
-                        break;
-                    }
-                }
-                PollStop::ShotBudget => {
-                    attempt_record.error = Some(if cancel_honoured {
-                        format!(
-                            "attempt exceeded the per-shot budget of {}s (last status {})",
-                            plan.limits.max_shot_seconds, view.status
-                        )
-                    } else {
-                        format!(
-                            "attempt exceeded the per-shot budget of {}s and job {job_id} was \
-                             still {} {:.0}s after the cancel was posted; stopping dispatch \
-                             rather than running a second render against the same memory budget",
-                            plan.limits.max_shot_seconds,
-                            view.status,
-                            cancel_grace.as_secs_f64()
-                        )
-                    });
-                    shot_record.attempts.push(attempt_record);
-                    outcome = ShotOutcome::TimedOut;
-                    if !cancel_honoured {
-                        // The render is still on the GPU. Neither the next attempt nor the next
-                        // shot may go out beside it: the plan declared ONE memory budget, and two
-                        // MiniMax-H3 renders in flight is exactly what it is there to prevent.
-                        stop = Some(RunOutcome::Failed);
-                        break;
-                    }
-                    if memory_exceeded {
-                        stop = Some(RunOutcome::StoppedMemoryLimit);
-                        break;
-                    }
-                }
-                PollStop::RunBudget => {
-                    attempt_record.error = Some(format!(
-                        "run exceeded its budget of {}s while this attempt was in flight (last \
-                         status {})",
-                        plan.limits.max_run_seconds, view.status
-                    ));
-                    shot_record.attempts.push(attempt_record);
-                    outcome = ShotOutcome::TimedOut;
-                    stop = Some(RunOutcome::StoppedRunBudget);
-                    break;
-                }
-            }
-        }
-        shot_record.outcome = if shot_record.attempts.is_empty() && stop.is_some() {
-            // The run budget was already spent before this shot's first attempt could start.
-            ShotOutcome::NotDispatched
-        } else {
-            outcome
-        };
-        record.shots.push(shot_record);
-    }
-
-    // Step 6: timeline + export from whatever rendered.
-    let mut export_ok = !options.export;
-    if options.export && !rendered.is_empty() && stop != Some(RunOutcome::StoppedRunBudget) {
-        let (_, _, (first_width, first_height)) = &rendered[0];
-        let aspect_ratio = aspect_ratio_for(*first_width, *first_height);
-        let timeline_name = format!("{} ({})", plan.title, run_id);
-        let mut timeline = client
-            .expect_ok(
-                "POST",
-                &format!("/api/v1/projects/{project_id}/timelines"),
-                Some(json!({ "name": timeline_name, "aspectRatio": aspect_ratio, "fps": fps })),
-            )
-            .await?;
-        let timeline_id = timeline
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HarnessError::Transport(format!("timeline response has no id: {timeline}"))
-            })?
-            .to_owned();
-        // The main video track, by id or — if the project store's default track ids ever change —
-        // by kind. Writing the items nowhere and saving an EMPTY timeline while the record still
-        // listed every shot is the one outcome that must not happen: the record would claim a
-        // sequence the project does not hold.
-        let tracks = timeline
-            .get("tracks")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let track_index = tracks
-            .iter()
-            .position(|track| track.get("id").and_then(Value::as_str) == Some("track_main"))
-            .or_else(|| {
-                tracks
-                    .iter()
-                    .position(|track| track.get("kind").and_then(Value::as_str) == Some("video"))
-            })
-            .ok_or_else(|| {
-                HarnessError::Transport(format!(
-                    "timeline {timeline_id} has no track_main and no video track to hold the \
-                     rendered takes: {timeline}"
-                ))
-            })?;
-        let track_id = tracks[track_index]
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("track_main")
-            .to_owned();
-        let mut items = Vec::new();
-        let mut tallest = 0_u32;
-        for (shot_id, take, (_, height)) in &rendered {
-            let shot = plan
-                .shots
-                .iter()
-                .find(|shot| &shot.id == shot_id)
-                .expect("rendered shots come from the plan");
-            let length = take
-                .encoded_duration_seconds
-                .filter(|seconds| *seconds > 0.0)
-                .unwrap_or(shot.target_duration_seconds);
-            let item_id = format!("item_{}_{}", shot.id.to_ascii_lowercase(), &run_id[4..12]);
-            let job_id = record
-                .shots
-                .iter()
-                .find(|entry| &entry.shot_id == shot_id)
-                .and_then(|entry| entry.attempts.last())
-                .and_then(|attempt| attempt.job_id.clone());
-            items.push(json!({
-                "id": item_id,
-                "trackId": track_id,
-                "assetId": take.asset_id,
-                "type": "video",
-                "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
-                "sourceIn": 0.0,
-                "sourceOut": length,
-                // Placed by `relayout_timeline` below; the cut order is the plan's.
-                "timelineStart": 0.0,
-                "timelineEnd": length,
-                "speed": 1.0,
-                "fit": "fit",
-                "volume": 1.0,
-                // The resolved policy, written into the timeline itself so the export obeys the
-                // saved document rather than re-deriving anything from the plan (sc-22712).
-                "generatedAudio": resolved_generated_audio(plan, shot).as_timeline_str(),
-                "versionHistory": [{
-                    "assetId": take.asset_id,
-                    "source": "original",
-                    "jobId": job_id,
-                    "note": format!("film-harness {run_id} shot {}", shot.id),
-                }],
-                HARNESS_KEY: harness_block(ROLE_PICTURE, run_id, Some(&shot.id), 0.0),
-            }));
-            tallest = tallest.max(*height);
-        }
-
-        // Sound: one dialogue clip per shot that has one, and the two beds placed ONCE across the
-        // whole sequence. `relayout_timeline` gives them their positions.
-        let mut dialogue_items = Vec::new();
-        for (shot_id, _, _) in &rendered {
-            let shot = plan
-                .shots
-                .iter()
-                .find(|shot| &shot.id == shot_id)
-                .expect("rendered shots come from the plan");
-            let Some(clip) = &shot.dialogue_clip else {
-                continue;
-            };
-            let Some(asset) = sound_assets.get(&clip.role) else {
-                continue;
-            };
-            let length = clip
-                .duration_seconds
-                .filter(|seconds| *seconds > 0.0)
-                .or_else(|| {
-                    asset
-                        .duration_seconds
-                        .map(|total| (total - clip.source_in_seconds).max(MIN_ITEM_SECONDS))
-                })
-                .unwrap_or(MIN_ITEM_SECONDS)
-                .max(MIN_ITEM_SECONDS);
-            dialogue_items.push(json!({
-                "id": format!("item_line_{}_{}", shot.id.to_ascii_lowercase(), &run_id[4..12]),
-                "trackId": DIALOGUE_TRACK_ID,
-                "assetId": asset.asset_id,
-                "type": "audio",
-                "displayName": format!("{} — dialogue ({})", shot.id, clip.role).chars().take(160).collect::<String>(),
-                "sourceIn": clip.source_in_seconds,
-                "sourceOut": clip.source_in_seconds + length,
-                "timelineStart": 0.0,
-                "timelineEnd": length,
-                "speed": 1.0,
-                "fit": "fit",
-                "volume": clip.gain.clamp(0.0, 2.0),
-                "fadeInSeconds": clip.fade_in_seconds,
-                "fadeOutSeconds": clip.fade_out_seconds,
-                HARNESS_KEY: harness_block(
-                    ROLE_DIALOGUE,
-                    run_id,
-                    Some(&shot.id),
-                    clip.offset_seconds,
-                ),
-            }));
-        }
-
-        // The ids of the picture items this run assembled, kept before `items` is moved onto the
-        // track, so the save can be checked against them below.
-        let intended_item_ids: Vec<String> = items
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect();
-        let mut tracks = vec![
-            picture_track(&track_id, items),
-            audio_track(
-                DIALOGUE_TRACK_ID,
-                "Dialogue",
-                ROLE_DIALOGUE,
-                &plan.sound.dialogue,
-                dialogue_items,
-            ),
-        ];
-        for (track_id, name, role, bed) in [
-            (
-                AMBIENCE_TRACK_ID,
-                "Ambience",
-                ROLE_AMBIENCE,
-                plan.sound.ambience.as_ref(),
-            ),
-            (
-                MUSIC_TRACK_ID,
-                "Music",
-                ROLE_MUSIC,
-                plan.sound.music.as_ref(),
-            ),
-        ] {
-            let Some(bed) = bed else { continue };
-            let Some(asset) = sound_assets.get(&bed.role) else {
-                continue;
-            };
-            tracks.push(bed_track(track_id, name, role, bed, asset, run_id));
-        }
-        // Keep every track the API created that the harness does not own (the overlay lane and the
-        // editor's default audio lane) so a harness timeline opens in the editor unchanged.
-        if let Some(existing) = timeline.get("tracks").and_then(Value::as_array) {
-            for track in existing {
-                let id = track.get("id").and_then(Value::as_str).unwrap_or_default();
-                if !tracks
-                    .iter()
-                    .any(|kept| kept.get("id").and_then(Value::as_str) == Some(id))
-                {
-                    tracks.push(track.clone());
-                }
-            }
-        }
-        timeline["tracks"] = Value::Array(tracks);
-
-        let plan_order: Vec<String> = rendered
-            .iter()
-            .map(|(shot_id, _, _)| shot_id.clone())
-            .collect();
-        let planned_duration = relayout_timeline(&mut timeline, Some(&plan_order))?;
-        let saved = client
-            .expect_ok(
-                "PUT",
-                &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
-                Some(json!({ "timeline": timeline })),
-            )
-            .await?;
-        // Check the SAVED document before describing it, rather than trusting the harness's own
-        // intent: the record then cannot claim a sequence the project does not hold. The store may
-        // legitimately add or reshape keys, so what is checked is that every picture item the run
-        // assembled came back — not that the document is byte-identical to what was sent.
-        persisted_picture_items(&saved, &track_id, &intended_item_ids).ok_or_else(|| {
-            HarnessError::Transport(format!(
-                "saved timeline {timeline_id} does not hold the {} picture items the run \
-                 assembled: {saved}",
-                intended_item_ids.len()
-            ))
-        })?;
-        // The store recomputes `duration` across every track on save, so read it back rather than
-        // republishing the harness's own arithmetic.
-        let duration = saved
-            .get("duration")
-            .and_then(Value::as_f64)
-            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-            .unwrap_or(planned_duration);
-        record.timeline = Some(timeline_record(
-            &timeline_id,
-            &timeline_name,
-            aspect_ratio,
-            Some(reduced_aspect_ratio(*first_width, *first_height)),
-            Some(*first_width),
-            Some(*first_height),
-            fps,
-            duration,
-            &saved,
-            &track_id,
-            plan.sound.generated_audio,
-            Vec::new(),
-        ));
-
-        let (export_record, poll_stop) = export_timeline(
-            client,
-            &project_id,
-            &timeline_id,
-            export_resolution_for(tallest),
-            fps,
-            PollBounds {
-                shot_deadline: Instant::now() + shot_budget,
-                run_deadline,
-                poll_interval: options.poll_interval,
-                cancel_grace,
-                settle_grace,
-            },
-            &plan.limits,
-        )
-        .await?;
-        export_ok = export_record.status == "completed" && export_record.asset_id.is_some();
-        record.export = Some(export_record);
-        match poll_stop {
-            PollStop::RunBudget => stop = Some(RunOutcome::StoppedRunBudget),
-            PollStop::Operator => {
-                stop = Some(RunOutcome::Failed);
-                record.diagnostics.push(PlanDiagnostic::plan(
-                    "run",
-                    "canceled by operator during the export",
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    let all_rendered = record
-        .shots
-        .iter()
-        .filter(|shot| record.selected_shot_ids.contains(&shot.shot_id))
-        .all(|shot| shot.outcome == ShotOutcome::Rendered);
-    record.outcome = match stop {
-        Some(outcome) => outcome,
-        None if all_rendered && export_ok => RunOutcome::Completed,
-        None => RunOutcome::Failed,
+    let client = Client {
+        transport,
+        control: &options.control,
     };
-    Ok(())
+    let prepared = prepare(&client, &plan, options.export, options.require_installed)
+        .await?
+        .map_err(HarnessError::Validation)?;
+    // The requests the run was dispatching. A record that named a compiled document is held to it,
+    // hash and all — re-reading the file the run started from is what keeps a resume from
+    // dispatching an edited `compiled.json` under the takes the first controller already made, the
+    // same rule the plan and the pack are held to. A record that named none compiles the plan in
+    // memory exactly as the first controller did (sc-22713).
+    let supplied = match &record.compiled {
+        Some(document) => {
+            let (_, bytes) = read_source(
+                Path::new(&document.path),
+                &options.out_dir.join("compiled.json"),
+                "compiled requests",
+            )?;
+            let actual = sha256_hex(&bytes);
+            if actual != document.sha256 {
+                return Err(HarnessError::Refused(format!(
+                    "the compiled requests changed since run {} started (recorded {}, found                      {actual}); recompile and start a new run",
+                    record.run_id, document.sha256
+                )));
+            }
+            Some(
+                serde_json::from_str::<CompiledPlan>(
+                    &sceneworks_core::jsonc::strip_jsonc_comments(
+                        std::str::from_utf8(&bytes).unwrap_or_default(),
+                    ),
+                )
+                .map_err(|error| HarnessError::Refused(format!("compiled requests: {error}")))?,
+            )
+        }
+        None => None,
+    };
+    let compiled = compiled_for_run(
+        &plan,
+        &pack,
+        &prepared.entry,
+        prepared.facts.lane(),
+        &record.plan.sha256,
+        supplied,
+    )?;
+    Ok(Continued {
+        record,
+        plan,
+        pack,
+        compiled,
+        plan_path,
+        pack_path,
+        prepared,
+    })
+}
+
+/// The source document at `original`, falling back to the copy the run kept beside its record.
+fn read_source(
+    original: &Path,
+    fallback: &Path,
+    label: &str,
+) -> Result<(PathBuf, Vec<u8>), HarnessError> {
+    if let Ok(bytes) = std::fs::read(original) {
+        return Ok((original.to_path_buf(), bytes));
+    }
+    let bytes = std::fs::read(fallback).map_err(|error| {
+        HarnessError::Refused(format!(
+            "cannot read the {label} from {} or {}: {error}",
+            original.display(),
+            fallback.display()
+        ))
+    })?;
+    Ok((fallback.to_path_buf(), bytes))
+}
+
+fn session_from<'a>(
+    transport: &'a dyn ApiTransport,
+    options: &'a ResumeOptions,
+    continued: Continued,
+    started: Instant,
+    run_deadline: Instant,
+) -> Session<'a> {
+    Session {
+        client: Client {
+            transport,
+            control: &options.control,
+        },
+        transport,
+        plan_path: continued.plan_path,
+        pack_path: continued.pack_path,
+        out_dir: options.out_dir.clone(),
+        poll_interval: options.poll_interval,
+        export: options.export,
+        plan: continued.plan,
+        pack: continued.pack,
+        compiled: continued.compiled,
+        facts: continued.prepared.facts,
+        fps: continued.prepared.fps,
+        prior_elapsed: continued.record.elapsed_seconds,
+        record: continued.record,
+        started,
+        run_deadline,
+        role_assets: BTreeMap::new(),
+        sound_assets: BTreeMap::new(),
+        stop: None,
+    }
+}
+
+/// Pick a run back up where a crash, a cancel or a failed export left it.
+///
+/// Every completed take is reused, every job the record names is read back from the API and adopted
+/// at whatever state it actually reached, and the run continues under whatever is LEFT of the
+/// plan's wall-clock budget and per-shot attempt cap — so a restart loop cannot turn a bounded run
+/// into an unbounded one. The selected take of every shot is left exactly as it was.
+pub async fn resume(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+) -> Result<RunRecord, HarnessError> {
+    let started = Instant::now();
+    let continued = continue_run(transport, options).await?;
+    if !continued.record.is_resumable() {
+        let detail = continued
+            .record
+            .stop
+            .as_ref()
+            .map(|stop| format!("{}: {}", stop.reason, stop.detail))
+            .unwrap_or_else(|| format!("outcome {:?}", continued.record.outcome));
+        return Err(HarnessError::Refused(format!(
+            "run {} is not resumable ({detail})",
+            continued.record.run_id
+        )));
+    }
+    // A cancel that stopped the previous controller must not cancel this one on its first poll.
+    clear_cancel_request(&options.out_dir)?;
+    let remaining =
+        (continued.plan.limits.max_run_seconds as f64 - continued.record.elapsed_seconds).max(0.0);
+    let run_deadline = started + Duration::from_secs_f64(remaining);
+    let mut session = session_from(transport, options, continued, started, run_deadline);
+    session.record.state = RunState::Running;
+    session.record.stop = None;
+    session.record.finished_at = None;
+    session.note_decision(
+        "resume",
+        None,
+        format!(
+            "resumed with {remaining:.0}s of the plan's {}s budget left",
+            session.plan.limits.max_run_seconds
+        ),
+    );
+    session.persist()?;
+    if remaining <= 0.0 {
+        session.halt(
+            RunOutcome::StoppedRunBudget,
+            "run_budget",
+            format!(
+                "the run already spent its {}s wall-clock budget; raise limits.maxRunSeconds and \
+                 start a new run",
+                session.plan.limits.max_run_seconds
+            ),
+            false,
+        );
+        session.finish(false)?;
+        return Ok(session.record);
+    }
+    session.drive().await
+}
+
+/// Reject the take a shot is currently carrying and render exactly one more, for that shot alone.
+///
+/// This is a human decision, not a retry: it authorises ONE bounded attempt (it does not loop, and
+/// it does not spend or respect the plan's automatic attempt cap), it touches no other shot's
+/// takes, jobs or assets, and it leaves the rejected take in the record beside the new one. When
+/// the replacement lands, every shot that DECLARED a dependency on this one is flagged
+/// `needs_review` and the export is marked stale — flagged, never regenerated.
+pub async fn replace_take(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+) -> Result<RunRecord, HarnessError> {
+    let started = Instant::now();
+    let continued = continue_run(transport, options).await?;
+    if continued.record.project_id.is_none() {
+        return Err(HarnessError::Refused(format!(
+            "run {} never created a project, so it has no take to replace",
+            continued.record.run_id
+        )));
+    }
+    let Some(shot) = continued
+        .plan
+        .shots
+        .iter()
+        .find(|shot| shot.id == shot_id)
+        .cloned()
+    else {
+        return Err(HarnessError::Refused(format!(
+            "{shot_id:?} is not a shot in plan {:?}",
+            continued.plan.id
+        )));
+    };
+    if !continued
+        .record
+        .selected_shot_ids
+        .iter()
+        .any(|id| id == shot_id)
+    {
+        return Err(HarnessError::Refused(format!(
+            "shot {shot_id} is not in run {}'s selection",
+            continued.record.run_id
+        )));
+    }
+    clear_cancel_request(&options.out_dir)?;
+    // One replacement is bounded by the per-shot budget, not by whatever is left of a run budget a
+    // previous controller may already have spent: the human just authorised this one attempt.
+    let run_deadline = started + Duration::from_secs(continued.plan.limits.max_shot_seconds);
+    let mut session = session_from(transport, options, continued, started, run_deadline);
+    // What the RUN said before this replacement: a replacement is scoped to one shot and must not
+    // re-classify the run, so a resumable stop (a cancel, a crash, a failed export) is restored by
+    // `finish_replacement` when other selected shots are still outstanding.
+    let prior_stop = session
+        .record
+        .stop
+        .clone()
+        .map(|stop| (session.record.outcome, stop));
+    session.record.state = RunState::Running;
+    session.record.stop = None;
+    session.record.finished_at = None;
+
+    let Some(index) = session
+        .record
+        .shots
+        .iter()
+        .position(|record| record.shot_id == shot_id)
+    else {
+        return Err(HarnessError::Refused(format!(
+            "run {} has no record for shot {shot_id}",
+            session.record.run_id
+        )));
+    };
+    // An attempt that has not settled is one this shot is still owed — from a controller that died,
+    // or from a `run` that is still going. Starting a second one here would leave the first
+    // orphaned, so say so and point at the command that settles it.
+    if let Some(pending) = session.record.shots[index]
+        .attempts
+        .iter()
+        .find(|attempt| !TERMINAL_ATTEMPT_STATUSES.contains(&attempt.status.as_str()))
+    {
+        return Err(HarnessError::Refused(format!(
+            "shot {shot_id} still has attempt {} in flight (job {}); run `film-harness resume \
+             --out {}` to settle it before replacing the take",
+            pending.attempt,
+            pending.job_id.as_deref().unwrap_or("not yet created"),
+            options.out_dir.display()
+        )));
+    }
+    // Reject whatever this shot is carrying: the selected take, or the last take it produced.
+    let rejected = session.record.shots[index].selected_attempt.or_else(|| {
+        session.record.shots[index]
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.has_live_take())
+            .map(|attempt| attempt.attempt)
+    });
+    if let Some(number) = rejected {
+        if let Some(attempt) = session.record.shots[index]
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.attempt == number)
+        {
+            attempt.rejection = Some(TakeRejection {
+                at: utc_now(),
+                reason: reason.to_owned(),
+            });
+        }
+    }
+    session.record.shots[index].selected_attempt = None;
+    let previous_asset = rejected
+        .and_then(|number| {
+            session.record.shots[index]
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt == number)
+        })
+        .and_then(|attempt| attempt.take.as_ref())
+        .map(|take| take.asset_id.clone());
+    session.note_decision(
+        "replace_take",
+        Some(shot_id),
+        match (&rejected, &previous_asset) {
+            (Some(number), Some(asset)) => {
+                format!("rejected attempt {number} (asset {asset}): {reason}")
+            }
+            (Some(number), None) => format!("rejected attempt {number}: {reason}"),
+            _ => format!("no take to reject; rendering one: {reason}"),
+        },
+    );
+    session.persist()?;
+
+    // Exactly one attempt, marked as the human decision it is so it never spends the plan's cap.
+    let number = session.record.shots[index].next_attempt_number();
+    let key = idempotency_key(&session.record.run_id, shot_id, number);
+    session.record.shots[index].attempts.push(AttemptRecord {
+        attempt: number,
+        idempotency_key: key,
+        job_id: None,
+        status: "dispatching".to_owned(),
+        started_at: utc_now(),
+        finished_at: None,
+        elapsed_seconds: 0.0,
+        peak_gpu_memory_pct: None,
+        peak_memory_gb: None,
+        peak_memory_source: None,
+        error: None,
+        take: None,
+        rejection: None,
+        human_requested: true,
+    });
+    session.persist()?;
+    let attempt_index = session.record.shots[index].attempts.len() - 1;
+    session
+        .work_attempt(&shot, index, attempt_index, true)
+        .await?;
+
+    let replaced = session.record.shots[index].selected_attempt.is_some();
+    session.record.shots[index].outcome = if replaced {
+        ShotOutcome::Rendered
+    } else {
+        ShotOutcome::Failed
+    };
+    if replaced {
+        session.flag_dependents(shot_id, reason);
+        if let Some(export) = session.record.export.as_mut() {
+            export.stale = true;
+        }
+        session.persist()?;
+        // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
+        session.assemble_timeline().await?;
+    } else {
+        // The shot now has NO selected take, and the timeline was deliberately not rewritten (that
+        // would drop the shot out of the sequence entirely). So the timeline — and the MP4 rendered
+        // from it — still carry the take the human just rejected, and the record has to say so
+        // rather than leave `stale: false` claiming the export is current.
+        let rejected_note = format!(
+            "the replacement attempt for shot {shot_id} produced no take, so the timeline and the \
+             exported MP4 still carry the REJECTED take"
+        );
+        if let Some(export) = session.record.export.as_mut() {
+            export.stale = true;
+        }
+        session.note_decision("replace_take", Some(shot_id), rejected_note.clone());
+        session.persist()?;
+        if session.stop.is_none() {
+            session.halt(
+                RunOutcome::Failed,
+                "replacement_failed",
+                format!(
+                    "{rejected_note}; the rejected take is still recorded and `film-harness \
+                     replace-take --shot {shot_id}` authorises another"
+                ),
+                false,
+            );
+        }
+    }
+    // Not re-exporting is a deliberate choice, not a failure: the replacement succeeded, the
+    // existing MP4 is marked stale, and the run is as finished as this invocation was asked to make
+    // it. Only a failed replacement leaves the run failed (with the stop set above).
+    let export_ok = if replaced && session.export {
+        session.run_export().await?
+    } else {
+        replaced
+    };
+    session.finish_replacement(export_ok, shot_id, prior_stop)?;
+    Ok(session.record)
 }
 
 /// The timeline items as the SAVE persisted them, in the order the run assembled them, or `None`
@@ -2280,7 +4245,11 @@ fn base_record(
         run_id: run_id.to_owned(),
         created_at: utc_now(),
         finished_at: None,
+        // A record is born `running`: it exists before the first API write, and only `finish`
+        // decides what it became (sc-22711).
+        state: RunState::Running,
         outcome: RunOutcome::Failed,
+        stop: None,
         plan: SourceDocument {
             id: plan.id.clone(),
             version: plan.version,
@@ -2304,7 +4273,10 @@ fn base_record(
         shots: Vec::new(),
         timeline: None,
         export: None,
+        export_pending: None,
+        superseded_export_job_ids: Vec::new(),
         diagnostics: Vec::new(),
+        decisions: Vec::new(),
         elapsed_seconds: 0.0,
     }
 }
@@ -2359,7 +4331,15 @@ fn rejected_record(
         run_id: run_id.to_owned(),
         created_at: utc_now(),
         finished_at: Some(utc_now()),
+        state: RunState::Finished,
         outcome: RunOutcome::Rejected,
+        stop: Some(RunStop {
+            reason: "rejected".to_owned(),
+            detail: "the plan was refused before anything was created; fix the findings and start \
+                     a new run"
+                .to_owned(),
+            resumable: false,
+        }),
         plan: SourceDocument {
             id: string_at(&plan_value, "id"),
             version: version_at(&plan_value),
@@ -2383,7 +4363,10 @@ fn rejected_record(
         shots: Vec::new(),
         timeline: None,
         export: None,
+        export_pending: None,
+        superseded_export_job_ids: Vec::new(),
         diagnostics: findings,
+        decisions: Vec::new(),
         elapsed_seconds: seconds_since(started),
     }
 }
@@ -2847,6 +4830,138 @@ mod unit_tests {
         let decoded = image::load_from_memory(&first).unwrap();
         assert_eq!((decoded.width(), decoded.height()), FIXTURE_PLATE_SIZE);
         assert_ne!(first, fixture_plate_png("courier", [64, 80, 120]).unwrap());
+    }
+
+    #[test]
+    fn an_export_lookup_excludes_every_export_the_record_ever_held() {
+        let export = |id: &str, created: &str, timeline: &str| {
+            json!({
+                "id": id,
+                "type": "timeline_export",
+                "createdAt": created,
+                "payload": { "timelineId": timeline }
+            })
+        };
+        let jobs = vec![
+            export("export_1", "2026-09-13T10:00:00Z", "tl_run"),
+            export("export_2", "2026-09-13T11:00:00Z", "tl_run"),
+            export("export_3", "2026-09-13T12:00:00Z", "tl_other"),
+            json!({
+                "id": "video_1",
+                "type": "video_generate",
+                "createdAt": "2026-09-13T11:30:00Z",
+                "payload": { "timelineId": "tl_run" }
+            }),
+        ];
+        // The FIRST re-export: export_1 is superseded, and nothing newer than the request exists.
+        assert_eq!(
+            newest_export_job(
+                &jobs,
+                "tl_run",
+                &["export_1".to_owned()],
+                "2026-09-13T11:30:00Z"
+            ),
+            None,
+            "export_2 predates this request, so it is not the job this pass created"
+        );
+        // The SECOND re-export: both earlier exports are excluded, so nothing is adoptable — the
+        // bug was adopting export_1 here and recording its pre-replacement asset as current.
+        assert_eq!(
+            newest_export_job(
+                &jobs,
+                "tl_run",
+                &["export_1".to_owned(), "export_2".to_owned()],
+                "2026-09-13T09:00:00Z"
+            ),
+            None
+        );
+        // Excluding only the most recent one is exactly the defect.
+        assert_eq!(
+            newest_export_job(
+                &jobs,
+                "tl_run",
+                &["export_2".to_owned()],
+                "2026-09-13T09:00:00Z"
+            ),
+            Some("export_1".to_owned())
+        );
+        // The job this pass really did create is adopted: newer than the request, not excluded.
+        let mut with_new = jobs.clone();
+        with_new.push(export("export_4", "2026-09-13T12:30:00Z", "tl_run"));
+        assert_eq!(
+            newest_export_job(
+                &with_new,
+                "tl_run",
+                &["export_1".to_owned(), "export_2".to_owned()],
+                "2026-09-13T12:00:00Z"
+            ),
+            Some("export_4".to_owned())
+        );
+        // A job with no readable `createdAt` is never adopted: the harness would rather run a
+        // second export than record an unrelated asset as this run's delivered MP4.
+        let undated = vec![json!({
+            "id": "export_5",
+            "type": "timeline_export",
+            "payload": { "timelineId": "tl_run" }
+        })];
+        assert_eq!(
+            newest_export_job(&undated, "tl_run", &[], "2026-09-13T09:00:00Z"),
+            None
+        );
+    }
+
+    #[test]
+    fn job_pages_merge_on_id_newest_first() {
+        let job = |id: &str, created: &str| json!({ "id": id, "createdAt": created });
+        let merged = merge_job_pages(vec![
+            vec![
+                job("a", "2026-09-13T10:00:00Z"),
+                job("b", "2026-09-13T12:00:00Z"),
+            ],
+            vec![
+                job("b", "2026-09-13T12:00:00Z"),
+                job("c", "2026-09-13T11:00:00Z"),
+            ],
+            vec![json!({ "type": "video_generate" })],
+        ]);
+        let ids: Vec<&str> = merged
+            .iter()
+            .filter_map(|job| job.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(ids, vec!["b", "c", "a"], "one entry per id, newest first");
+    }
+
+    #[test]
+    fn an_attempt_with_no_job_has_spent_nothing() {
+        let attempt = |job_id: Option<&str>, started_at: &str| AttemptRecord {
+            attempt: 1,
+            idempotency_key: "run:SH010:a1".to_owned(),
+            job_id: job_id.map(str::to_owned),
+            status: "dispatching".to_owned(),
+            started_at: started_at.to_owned(),
+            finished_at: None,
+            elapsed_seconds: 0.0,
+            peak_gpu_memory_pct: None,
+            peak_memory_gb: None,
+            peak_memory_source: None,
+            error: None,
+            take: None,
+            rejection: None,
+            human_requested: false,
+        };
+        let yesterday = sceneworks_core::time::format_unix_seconds(
+            sceneworks_core::time::now_unix_seconds() - 86_400,
+        );
+        assert_eq!(
+            attempt_spent_seconds(&attempt(None, &yesterday)),
+            0.0,
+            "an attempt recorded before its job POST landed rendered nothing, whatever its \
+             startedAt says"
+        );
+        assert!(
+            attempt_spent_seconds(&attempt(Some("job_1"), &yesterday)) > 86_000.0,
+            "an attempt that HAS a job has been in flight since it started"
+        );
     }
 
     #[test]
@@ -3383,6 +5498,9 @@ async fn export_timeline(
         ExportRecord {
             job_id: export_job_id,
             status,
+            // This export just ran against the timeline as it stands, so it matches the selected
+            // takes by construction. Only a LATER take change makes an export stale (sc-22711).
+            stale: false,
             asset_id,
             render_path,
             error: (!ok).then(|| match poll_stop {
@@ -3425,7 +5543,7 @@ pub enum TimelineEdit {
     Reorder { shot_ids: Vec<String> },
     /// Point a shot at a different take. The asset must already exist in the project — choosing it
     /// is sc-22711's job, placing it is this one's.
-    ReplaceTake { shot_id: String, asset_id: String },
+    SwapTake { shot_id: String, asset_id: String },
 }
 
 impl TimelineEdit {
@@ -3433,7 +5551,7 @@ impl TimelineEdit {
         match self {
             Self::Trim { .. } => "trim",
             Self::Reorder { .. } => "reorder",
-            Self::ReplaceTake { .. } => "replace_take",
+            Self::SwapTake { .. } => "swap_take",
         }
     }
 }
@@ -3498,7 +5616,7 @@ pub async fn edit_timeline(
             source_in,
             source_out,
         } => {
-            // Measure the take FIRST, the way `ReplaceTake` does. An out point past the end of the
+            // Measure the take FIRST, the way `SwapTake` does. An out point past the end of the
             // media is silent otherwise: `relayout_timeline` writes a `timelineEnd` longer than the
             // file, `render_item_segment` reports the DECLARED duration while `-t` yields a short
             // segment, and the picture then comes out shorter than the sequence it was saved from —
@@ -3558,7 +5676,7 @@ pub async fn edit_timeline(
                 format!("{shot_id} source range {new_in:.3}..{new_out:.3}"),
             )
         }
-        TimelineEdit::ReplaceTake { shot_id, asset_id } => {
+        TimelineEdit::SwapTake { shot_id, asset_id } => {
             // Measure the replacement before touching the timeline, so a bad asset id fails before
             // the sequence is half-edited.
             let asset = client
@@ -3620,9 +5738,45 @@ pub async fn edit_timeline(
     edits.push(TimelineEditRecord {
         kind: edit.kind().to_owned(),
         applied_at: utc_now(),
-        detail,
+        detail: detail.clone(),
         duration_seconds: duration,
     });
+    // An edit is a HUMAN decision about this run, so it belongs in the run's decision log next to
+    // the generation-side ones (sc-22711 schema 2). `timeline.edits` records what the sequence now
+    // IS; the decision log records that somebody changed it, and when — the two are not the same
+    // question, and only the decision log is read in run order beside the takes.
+    record.decisions.push(ProductionDecision {
+        at: utc_now(),
+        action: edit.kind().to_owned(),
+        shot_id: match &edit {
+            TimelineEdit::Trim { shot_id, .. } | TimelineEdit::SwapTake { shot_id, .. } => {
+                Some(shot_id.clone())
+            }
+            TimelineEdit::Reorder { .. } => None,
+        },
+        detail,
+    });
+    // A swap to an asset this shot ALREADY rendered is a change of selection, so the record's
+    // selected attempt has to follow it. Leaving it behind would point `status`, a later
+    // `replace-take` and the dependency flags at an attempt the sequence no longer shows. A swap to
+    // a foreign asset (an imported clip, not a take of this run) selects no attempt: there is none
+    // to select, and the timeline item is then the only thing that says what is in the cut.
+    if let TimelineEdit::SwapTake { shot_id, asset_id } = &edit {
+        if let Some(shot) = record
+            .shots
+            .iter_mut()
+            .find(|entry| &entry.shot_id == shot_id)
+        {
+            if let Some(attempt) = shot.attempts.iter().find(|attempt| {
+                attempt
+                    .take
+                    .as_ref()
+                    .is_some_and(|take| &take.asset_id == asset_id)
+            }) {
+                shot.selected_attempt = Some(attempt.attempt);
+            }
+        }
+    }
     let picture_track_id = picture_track_index(&saved)
         .and_then(|index| saved["tracks"][index]["id"].as_str())
         .unwrap_or(PICTURE_TRACK_ID)
@@ -3676,6 +5830,11 @@ pub async fn edit_timeline(
             RunOutcome::Failed
         };
         record.export = Some(export_record);
+    } else if let Some(export) = &mut record.export {
+        // The sequence just changed under the MP4 that was exported from it, so that MP4 no longer
+        // matches the run. 22711's rule holds here exactly as it does for a re-rendered take: the
+        // export is FLAGGED, never silently re-run — re-exporting stays an explicit `--export`.
+        export.stale = true;
     }
 
     let json = serde_json::to_string_pretty(&record)

@@ -8,19 +8,20 @@
 //! validation, export dispatch and every enqueue gate are the production code paths.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Request;
 use parking_lot::Mutex;
-use sceneworks_core::film_plan::{RunOutcome, ShotOutcome};
+use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::film_harness::{
-    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, RunOptions,
-    TransportFuture, FIXTURE_REFERENCES,
+    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, ResumeOptions,
+    RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
 };
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
@@ -147,6 +148,8 @@ enum VideoBehavior {
     Complete { delay_secs: u64, peak_pct: f64 },
     /// Fail once (first attempt), then complete.
     FailFirst,
+    /// Fail every time — a shot no retry will rescue.
+    FailAlways,
     /// Never complete; honour a cancel request by reporting `canceled`.
     Hang,
     /// Never complete and never honour a cancel — a worker whose cooperative checkpoint is minutes
@@ -160,6 +163,8 @@ struct WorkerScript {
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
     claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
+    /// Make `timeline_export` jobs fail, for the failed-export resume path (sc-22711).
+    export_fails: bool,
     /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
     /// order. The last one repeats once the list runs out, which is what lets a test prove the
     /// repair loop STOPS rather than looping on a reply that never validates.
@@ -266,7 +271,7 @@ fn spawn_fake_worker(
                 .push((job_type.clone(), job_id.clone(), job["payload"].clone()));
             match job_type.as_str() {
                 "video_generate" => run_fake_video_job(&app, &script, &job_id, &job).await,
-                "timeline_export" => run_fake_export_job(&app, &job_id, &job).await,
+                "timeline_export" => run_fake_export_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
@@ -337,6 +342,19 @@ async fn run_fake_video_job(
                 return;
             }
         },
+        VideoBehavior::FailAlways => {
+            post_progress(
+                app,
+                job_id,
+                json!({
+                    "status": "failed", "stage": "failed", "progress": 1,
+                    "message": "fake engine fault", "error": "fake engine fault: persistent",
+                    "workerId": WORKER_ID
+                }),
+            )
+            .await;
+            return;
+        }
         VideoBehavior::FailFirst => {
             let first = {
                 let mut script = script.lock();
@@ -493,7 +511,25 @@ async fn run_fake_refine_job(
     .await;
 }
 
-async fn run_fake_export_job(app: &axum::Router, job_id: &str, job: &Value) {
+async fn run_fake_export_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    if script.lock().export_fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake ffmpeg fault", "error": "fake ffmpeg fault: no such codec",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
     let payload = &job["payload"];
     let project_id = job["projectId"].as_str().expect("project id").to_owned();
     let render_rel = format!(
@@ -595,11 +631,167 @@ impl Harness {
             compiled_path: None,
             project_id: None,
             shot_ids: shots.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
-            out_dir: self.temp_dir.path().join("run-out"),
+            out_dir: self.out_dir(),
             poll_interval: Duration::from_millis(250),
             export: true,
             require_installed: false,
         }
+    }
+
+    fn out_dir(&self) -> PathBuf {
+        self.temp_dir.path().join("run-out")
+    }
+
+    /// What `resume` / `replace-take` are driven with in these tests: the same run directory, a
+    /// tight poll cadence, and a control only the test can trip (sc-22711).
+    fn resume_options(&self) -> ResumeOptions {
+        ResumeOptions {
+            out_dir: self.out_dir(),
+            poll_interval: Duration::from_millis(250),
+            export: true,
+            require_installed: false,
+            control: RunControl::new(),
+        }
+    }
+
+    /// Resume until the run reaches a state it will not leave on its own, so a test asserts about
+    /// the end of the story rather than about how many crashes it took to get there. Bounded: a
+    /// resume that makes no progress is a failure, not a retry.
+    async fn resume_to_completion(&self) -> RunRecord {
+        let mut last = None;
+        for round in 0..12 {
+            match film_harness::resume(&self.transport, &self.resume_options()).await {
+                Ok(record) => {
+                    if record.outcome == RunOutcome::Completed || !record.is_resumable() {
+                        return record;
+                    }
+                    last = Some(record);
+                }
+                Err(error) => panic!("resume {round} failed: {error}"),
+            }
+        }
+        panic!("run never settled after 12 resumes: {last:#?}");
+    }
+
+    fn video_job_count(&self) -> usize {
+        self.script
+            .lock()
+            .claimed
+            .iter()
+            .filter(|(kind, _, _)| kind == "video_generate")
+            .count()
+    }
+
+    /// Video jobs the API holds, which — unlike the claim log — counts a job the worker has not
+    /// picked up yet.
+    async fn api_video_job_count(&self) -> usize {
+        self.jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "video_generate")
+            .count()
+    }
+
+    async fn project_count(&self) -> usize {
+        let (_, projects) = request(self.app.clone(), "GET", "/api/v1/projects", Value::Null).await;
+        projects.as_array().map(Vec::len).unwrap_or_default()
+    }
+
+    /// Every timeline the project holds. `POST /timelines` always creates a new row, so this is
+    /// what says whether a replay adopted the run's timeline or created a second one.
+    async fn timelines(&self, project_id: &str) -> Vec<Value> {
+        let (_, timelines) = request(
+            self.app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/timelines"),
+            Value::Null,
+        )
+        .await;
+        timelines.as_array().cloned().unwrap_or_default()
+    }
+
+    /// The timelines of whichever project the record names, or none when it named no project.
+    async fn timelines_for(&self, record: &RunRecord) -> Vec<Value> {
+        match record.project_id.as_deref() {
+            Some(project_id) => self.timelines(project_id).await,
+            None => Vec::new(),
+        }
+    }
+
+    fn export_job_count(&self) -> usize {
+        self.script
+            .lock()
+            .claimed
+            .iter()
+            .filter(|(kind, _, _)| kind == "timeline_export")
+            .count()
+    }
+
+    /// Rewrite the record on disk, exactly as a test that needs a run to look older than it is has
+    /// to: the harness reads `run.json` back on every `resume`.
+    fn edit_run_record(&self, edit: impl FnOnce(&mut Value)) {
+        let path = self.out_dir().join("run.json");
+        let mut record: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("run.json")).expect("json");
+        edit(&mut record);
+        std::fs::write(&path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+    }
+
+    /// A two-shot plan with a one-reference pack, written into the temp dir.
+    ///
+    /// The wall-clock-budget tests need the budget to be spent by the RENDER, not by setup:
+    /// importing the shipped seven-reference pack through the real import route costs several
+    /// seconds in a debug build under a loaded runner, which would otherwise eat a small budget
+    /// before the first shot is ever dispatched. Same model, same menus — just less to import.
+    fn minimal_documents(&self, limits: Value) -> (PathBuf, PathBuf) {
+        let dir = self.temp_dir.path().join("minimal");
+        std::fs::create_dir_all(dir.join("references")).expect("minimal dir");
+        std::fs::copy(
+            Path::new(FIXTURE_DIR).join("references/workshop_plate.png"),
+            dir.join("references/workshop_plate.png"),
+        )
+        .expect("plate copies");
+        let shot = |id: &str, depends_on: Value| {
+            json!({
+                "id": id,
+                "beat": format!("{id} beat"),
+                "framing": "wide static",
+                "prompt": format!("a quiet workshop, shot {id}"),
+                "targetDurationSeconds": 5.1667,
+                "startState": "before",
+                "endState": "after",
+                "conditioning": { "mode": "text_to_video" },
+                // Every shot binds at least one approved role (sc-22713): the pack below approves
+                // exactly one, and these shots are about the workshop.
+                "continuityRoles": ["workshop_plate"],
+                "dependsOn": depends_on,
+            })
+        };
+        let plan = json!({
+            "schemaVersion": 2,
+            "id": "budget-fixture",
+            "version": 1,
+            "title": "Budget fixture",
+            "model": { "id": "minimax_h3", "tier": "q4", "fps": 24, "resolution": "576x320" },
+            "limits": limits,
+            "shots": [
+                shot("SH010", json!([])),
+                shot("SH020", json!([{ "shotId": "SH010", "kind": "continuity" }])),
+            ],
+        });
+        let pack = json!({
+            "schemaVersion": 1,
+            "id": "budget-refs",
+            "version": 1,
+            "references": [
+                { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png" }
+            ],
+        });
+        let plan_path = dir.join("plan.json");
+        let pack_path = dir.join("references.json");
+        std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        std::fs::write(&pack_path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+        (plan_path, pack_path)
     }
 
     async fn jobs(&self) -> Vec<Value> {
@@ -613,47 +805,6 @@ impl Harness {
 
     fn fixture_pack(&self) -> PathBuf {
         Path::new(FIXTURE_DIR).join("references.jsonc")
-    }
-
-    /// A plan and pack with ONE reference and no conditioning, for the tests that measure a
-    /// wall-clock budget.
-    ///
-    /// Reference import happens INSIDE the run, so it spends the run's budget: a test with a
-    /// three-second budget and seven plates to import is racing its own setup, and under a loaded
-    /// test binary it loses — the budget expires before the first shot is dispatched and the run
-    /// records `NotDispatched` where the test meant to observe `TimedOut`. Importing one plate
-    /// instead of seven puts setup an order of magnitude inside the budget, so what the test
-    /// measures is the thing it is named after (sc-22712).
-    ///
-    /// The shots still bind the one plate the lean pack carries: every shot must name at least one
-    /// approved canonical role (sc-22713), and binding the role that is already the pack's only
-    /// entry costs no extra import, so the fixture stays lean while the plan stays valid.
-    fn lean_budget_fixture(&self, edit: impl FnOnce(&mut Value)) -> (PathBuf, PathBuf) {
-        let plan = self.edited_plan(|plan| {
-            for shot in plan["shots"].as_array_mut().expect("shots") {
-                shot["conditioning"] = json!({ "mode": "text_to_video" });
-                shot["continuityRoles"] = json!(["workshop_plate"]);
-            }
-            edit(plan);
-        });
-        let dir = self.temp_dir.path().join("lean-pack");
-        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
-        std::fs::copy(
-            Path::new(FIXTURE_DIR).join("references/workshop_plate.png"),
-            dir.join("references/workshop_plate.png"),
-        )
-        .expect("plate copies");
-        let pack = json!({
-            "schemaVersion": 1,
-            "id": "courier-workshop-refs",
-            "version": 1,
-            "references": [
-                { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png" }
-            ]
-        });
-        let pack_path = dir.join("references.json");
-        std::fs::write(&pack_path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
-        (plan, pack_path)
     }
 
     /// The shipped pack with its `sound` array emptied, copied into the temp dir so the relative
@@ -1166,7 +1317,10 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
 async fn unknown_model_and_missing_workers_are_refused_before_dispatch() {
     let harness = Harness::start(false, vec![]).await;
     let plan = harness.edited_plan(|plan| plan["model"]["id"] = json!("no_such_model"));
-    let options = harness.options(plan, harness.fixture_pack(), None);
+    // Each refusal gets its own run directory: a refused run still writes its record there, and a
+    // second `run` over a directory that already holds one is itself refused.
+    let mut options = harness.options(plan, harness.fixture_pack(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-unknown-model");
     let error = film_harness::run(&harness.transport, &options)
         .await
         .unwrap_err();
@@ -1182,7 +1336,8 @@ async fn unknown_model_and_missing_workers_are_refused_before_dispatch() {
 
     // A valid plan with no registered worker: the memory budget cannot be checked and nothing
     // could claim the job, so it is refused rather than queued forever.
-    let options = harness.options(harness.fixture_plan(), harness.fixture_pack(), None);
+    let mut options = harness.options(harness.fixture_plan(), harness.fixture_pack(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-no-worker");
     let error = film_harness::run(&harness.transport, &options)
         .await
         .unwrap_err();
@@ -1206,6 +1361,7 @@ async fn unknown_model_and_missing_workers_are_refused_before_dispatch() {
 
     // The install gate: a tier the catalog reports missing is refused when the gate is on.
     let mut options = harness.options(harness.fixture_plan(), harness.fixture_pack(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-install-gate");
     options.require_installed = true;
     let error = film_harness::run(&harness.transport, &options)
         .await
@@ -1315,29 +1471,17 @@ async fn a_failed_attempt_is_retried_only_up_to_the_declared_cap() {
 
 #[tokio::test]
 async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched() {
-    let harness = Harness::start(
-        true,
-        vec![(
-            "SH010",
-            // Longer than the run budget, so the only thing that can end the attempt is the
-            // harness's own budget (the fake worker ignores the cancel until its delay elapses).
-            VideoBehavior::Complete {
-                delay_secs: 9,
-                peak_pct: 40.0,
-            },
-        )],
-    )
-    .await;
-    // The run budget is wall-clock from the START of the run, so it has to leave room for the
-    // pre-dispatch work (catalog, host, project, reference imports) on a loaded CI runner —
-    // otherwise the budget expires before the first attempt and the test measures its own setup.
-    // Two independent margins, because one of them alone was not enough: a six-second budget
-    // instead of three, AND a fixture that imports one plate instead of seven.
-    let (plan, pack) = harness.lean_budget_fixture(|plan| {
-        plan["limits"] = json!({
-            "maxRunSeconds": 6, "maxShotSeconds": 6, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
-        });
-    });
+    // A job that never finishes on its own, so the ONLY thing that can end the attempt is the run
+    // budget — whether setup took a moment or a while on a loaded runner. `maxShotSeconds` equals
+    // `maxRunSeconds` and the run deadline always comes first (it starts before the attempt does),
+    // so this is the run budget tripping, not the shot budget. The two-shot / one-reference
+    // documents keep the pre-dispatch work (catalog, host, project, imports) small enough that the
+    // budget bounds the RENDER rather than the setup — sc-22711 after a 3s budget expired during
+    // setup on a runner busy with other suites.
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 12, "maxShotSeconds": 12, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+    }));
     let options = harness.options(plan, pack, None);
     let record = film_harness::run(&harness.transport, &options)
         .await
@@ -1363,7 +1507,7 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
         .error
         .as_deref()
         .unwrap()
-        .contains("run exceeded its budget of 6s"));
+        .contains("run exceeded its budget of 12s"));
     for shot in &record.shots[1..] {
         assert_eq!(shot.outcome, ShotOutcome::NotDispatched, "{shot:?}");
         assert!(shot.attempts.is_empty());
@@ -1741,10 +1885,16 @@ async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
         .expect("run finishes with a record");
     signal.await.expect("signal task");
 
-    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    // sc-22711 gives a cancel its own outcome and a RESUMABLE stop, rather than folding it into
+    // `failed` with a diagnostic: nothing went wrong, and the run can be picked back up.
+    assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "canceled");
+    assert!(stop.resumable, "a cancel leaves work a resume can finish");
     let sh010 = &record.shots[0];
     assert_eq!(sh010.attempts.len(), 1, "{:#?}", sh010.attempts);
     assert_eq!(sh010.attempts[0].status, "canceled_by_operator");
+    assert_eq!(sh010.outcome, ShotOutcome::Canceled);
     let job_id = sh010.attempts[0].job_id.as_deref().expect("job id");
     let (_, job) = request(
         harness.app.clone(),
@@ -1756,19 +1906,17 @@ async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
     assert_eq!(job["status"], "canceled", "{job}");
     assert_eq!(record.shots[1].outcome, ShotOutcome::NotDispatched);
     let on_disk = harness.run_record();
-    assert_eq!(on_disk["outcome"], "failed");
-    let diagnostics: Vec<String> = on_disk["diagnostics"]
-        .as_array()
-        .expect("diagnostics")
-        .iter()
-        .map(|finding| finding["message"].as_str().unwrap_or_default().to_owned())
-        .collect();
+    assert_eq!(on_disk["outcome"], "canceled");
+    assert_eq!(on_disk["state"], "finished");
     assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("canceled by operator")),
-        "{diagnostics:?}"
+        on_disk["stop"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("canceled"),
+        "the record says what stopped it: {}",
+        on_disk["stop"]
     );
+    assert_eq!(on_disk["stop"]["resumable"], true);
 }
 
 #[test]
@@ -1826,6 +1974,1843 @@ async fn validate_subcommand_path_checks_documents_without_an_api() {
     let (plan, pack) = film_harness::validate(None, &options).await.unwrap();
     assert_eq!(plan.shots.len(), 6);
     assert_eq!(pack.references.len(), 7);
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-22711 — durable run state: crash windows, reconciliation, cancellation, take replacement
+// ---------------------------------------------------------------------------------------------
+
+/// Where a simulated controller death lands relative to the API call it died on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultMode {
+    /// The call never reaches the API: the mutation did not happen.
+    Before,
+    /// The call reaches the API and succeeds, but the controller never sees the answer. This is the
+    /// window that matters — the job (or project, or asset) exists and its id is nowhere in the
+    /// record, so only an idempotency key can stop a replay from creating a second one.
+    After,
+}
+
+/// A transport that stops answering the controller after `die_at` calls. Everything after the fault
+/// fails too, because the process it models is gone.
+struct FaultTransport {
+    inner: RouterTransport,
+    die_at: usize,
+    mode: FaultMode,
+    /// When set, only POSTs whose path contains this needle are counted, which aims the fault at
+    /// one specific transition instead of sweeping every call.
+    route: Option<&'static str>,
+    matched: AtomicUsize,
+    dead: AtomicBool,
+}
+
+impl FaultTransport {
+    fn new(app: axum::Router, die_at: usize, mode: FaultMode) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            die_at,
+            mode,
+            route: None,
+            matched: AtomicUsize::new(0),
+            dead: AtomicBool::new(false),
+        }
+    }
+
+    fn on_post_route(mut self, needle: &'static str) -> Self {
+        self.route = Some(needle);
+        self
+    }
+
+    fn fired(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
+}
+
+impl ApiTransport for FaultTransport {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        if self.fired() {
+            return Box::pin(async {
+                Err(HarnessError::Transport("controller is gone".to_owned()))
+            });
+        }
+        let targeted = self
+            .route
+            .is_none_or(|needle| request.method == "POST" && request.path.contains(needle));
+        if !targeted || self.matched.fetch_add(1, Ordering::SeqCst) + 1 < self.die_at {
+            return self.inner.call(request);
+        }
+        self.dead.store(true, Ordering::SeqCst);
+        let deliver = self.mode == FaultMode::After;
+        Box::pin(async move {
+            if deliver {
+                // The API really performs the write; the controller just never learns the answer.
+                let _ = self.inner.call(request).await?;
+            }
+            Err(HarnessError::Transport(
+                "simulated controller death".to_owned(),
+            ))
+        })
+    }
+}
+
+fn fast(shots: &[&str]) -> Vec<(&'static str, VideoBehavior)> {
+    const IDS: &[&str] = &["SH010", "SH020", "SH030", "SH040", "SH050", "SH060"];
+    IDS.iter()
+        .filter(|id| shots.contains(id))
+        .map(|id| {
+            (
+                *id,
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            )
+        })
+        .collect()
+}
+
+/// What identifies one shot's selected take: which attempt, which job, which asset. Compared
+/// instead of the whole `AttemptRecord` whenever one side has been through the record on disk — an
+/// `elapsedSeconds` measurement does not survive a JSON round trip in its last bit, and none of
+/// these assertions are about that.
+fn selected_identity(
+    record: &RunRecord,
+    shot_id: &str,
+) -> Option<(u32, Option<String>, Option<String>)> {
+    let attempt = record.shot(shot_id)?.selected()?;
+    Some((
+        attempt.attempt,
+        attempt.job_id.clone(),
+        attempt.take.as_ref().map(|take| take.asset_id.clone()),
+    ))
+}
+
+/// The selected take of every shot, as `shot -> (attempt, asset)`. The thing replay must never move.
+fn selections(record: &RunRecord) -> Vec<(String, Option<(u32, String)>)> {
+    record
+        .shots
+        .iter()
+        .map(|shot| {
+            (
+                shot.shot_id.clone(),
+                shot.selected().and_then(|attempt| {
+                    Some((attempt.attempt, attempt.take.as_ref()?.asset_id.clone()))
+                }),
+            )
+        })
+        .collect()
+}
+
+/// Kill the controller at EVERY point it can die — before and after each API call it makes — and
+/// resume from the record it left behind. Whatever the window, the run must finish with exactly the
+/// work a clean run does: two video jobs, one project, seven reference assets, and the same take
+/// selected for each shot.
+#[tokio::test]
+async fn a_crash_at_every_window_replays_without_duplicate_work_or_a_moved_take() {
+    for mode in [FaultMode::Before, FaultMode::After] {
+        let mut window = 1_usize;
+        loop {
+            assert!(window < 300, "sweep did not terminate ({mode:?})");
+            let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+            let transport = FaultTransport::new(harness.app.clone(), window, mode);
+            // The two-shot / one-reference documents: every distinct transition a run makes, none
+            // of the near-identical repeats seven reference imports would add to the sweep. The
+            // multi-reference replay has its own targeted test below.
+            let (plan, pack) = harness.minimal_documents(json!({
+                "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 2,
+                "maxMemoryGb": 96
+            }));
+            let options = harness.options(plan, pack, None);
+            let crashed = film_harness::run(&transport, &options).await;
+            if !transport.fired() {
+                // Past the last call a clean run makes: the sweep has covered every window.
+                let record = crashed.expect("a run that never faulted completes");
+                assert_eq!(
+                    record.outcome,
+                    RunOutcome::Completed,
+                    "{}",
+                    summary(&record)
+                );
+                assert_eq!(harness.video_job_count(), 2);
+                assert!(
+                    window > 20,
+                    "{mode:?}: only {} windows swept — the run stopped making calls far earlier \
+                     than a project + reference + two dispatches + timeline + export should",
+                    window - 1
+                );
+                break;
+            }
+            crashed.expect_err("the fault stops the controller");
+
+            let context = format!("{mode:?} window {window}");
+            match film_harness::read_run_record(&harness.out_dir()) {
+                Err(_) => {
+                    // Died before the record existed. Nothing was created, so there is nothing to
+                    // resume — and nothing to clean up either.
+                    assert_eq!(harness.video_job_count(), 0, "{context}");
+                    assert_eq!(harness.project_count().await, 0, "{context}");
+                }
+                Ok(crashed_record) => {
+                    assert_eq!(
+                        crashed_record.state,
+                        RunState::Running,
+                        "{context}: a record left by a dead controller must say so"
+                    );
+                    let before = selections(&crashed_record);
+                    let record = harness.resume_to_completion().await;
+                    assert_eq!(
+                        record.outcome,
+                        RunOutcome::Completed,
+                        "{context}\n{}",
+                        summary(&record)
+                    );
+                    assert_eq!(record.run_id, crashed_record.run_id, "{context}");
+                    assert_eq!(
+                        harness.video_job_count(),
+                        2,
+                        "{context}: replay enqueued duplicate work\n{}",
+                        summary(&record)
+                    );
+                    assert_eq!(harness.project_count().await, 1, "{context}");
+                    assert_eq!(
+                        harness.timelines_for(&record).await.len(),
+                        1,
+                        "{context}: replay left the project holding two timelines"
+                    );
+                    assert_eq!(record.references.len(), 1, "{context}");
+                    let mut asset_ids: Vec<&str> = record
+                        .references
+                        .iter()
+                        .map(|reference| reference.asset_id.as_str())
+                        .collect();
+                    asset_ids.sort_unstable();
+                    let unique = asset_ids.len();
+                    asset_ids.dedup();
+                    assert_eq!(
+                        asset_ids.len(),
+                        unique,
+                        "{context}: a reference was imported twice"
+                    );
+                    // A take the crashed record had already selected is still the selected take.
+                    for (shot_id, selected) in before {
+                        if let Some(expected) = selected {
+                            let actual = record
+                                .shot(&shot_id)
+                                .and_then(|shot| shot.selected())
+                                .map(|attempt| {
+                                    (
+                                        attempt.attempt,
+                                        attempt.take.as_ref().unwrap().asset_id.clone(),
+                                    )
+                                });
+                            assert_eq!(
+                                actual,
+                                Some(expected),
+                                "{context}: {shot_id}'s selected take moved"
+                            );
+                        }
+                    }
+                    for shot_id in ["SH010", "SH020"] {
+                        let shot = record.shot(shot_id).expect("shot recorded");
+                        assert_eq!(shot.outcome, ShotOutcome::Rendered, "{context} {shot_id}");
+                        assert_eq!(
+                            shot.attempts.len(),
+                            1,
+                            "{context} {shot_id}: one attempt, not one per restart"
+                        );
+                    }
+                    let export = record.export.as_ref().expect("export recorded");
+                    assert_eq!(export.status, "completed", "{context}");
+                    let exports = harness
+                        .script
+                        .lock()
+                        .claimed
+                        .iter()
+                        .filter(|(kind, _, _)| kind == "timeline_export")
+                        .count();
+                    assert_eq!(exports, 1, "{context}: the export ran twice");
+                }
+            }
+            window += 1;
+        }
+    }
+}
+
+/// Dying right after a reference upload the record never learned about must not import it twice.
+/// Swept over every reference in the shipped seven-role pack, so "the first one" and "the last one"
+/// are both covered.
+#[tokio::test]
+async fn a_reference_imported_but_not_recorded_is_adopted_not_imported_again() {
+    for nth in [1_usize, 4, 7] {
+        let harness = Harness::start(true, fast(&["SH010"])).await;
+        let transport = FaultTransport::new(harness.app.clone(), nth, FaultMode::After)
+            .on_post_route("/assets");
+        let options = harness.options(
+            harness.edited_plan(|_| {}),
+            harness.fixture_pack_without_sound(),
+            Some(&["SH010"]),
+        );
+        film_harness::run(&transport, &options)
+            .await
+            .expect_err("the fault stops the controller");
+        assert!(transport.fired(), "reference {nth}");
+
+        let crashed = film_harness::read_run_record(&harness.out_dir()).expect("record on disk");
+        assert_eq!(
+            crashed.references.len(),
+            nth - 1,
+            "reference {nth}: the upload that was answered is the one the record missed"
+        );
+        let record = harness.resume_to_completion().await;
+        assert_eq!(
+            record.outcome,
+            RunOutcome::Completed,
+            "{}",
+            summary(&record)
+        );
+        assert_eq!(record.references.len(), 7, "reference {nth}");
+
+        // Exactly seven reference assets exist in the project — the interrupted upload was adopted
+        // by its provenance rather than uploaded a second time.
+        let project_id = record.project_id.clone().expect("project");
+        let (_, assets) = request(
+            harness.app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/assets"),
+            Value::Null,
+        )
+        .await;
+        let references: Vec<&Value> = assets
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+            .collect();
+        assert_eq!(
+            references.len(),
+            7,
+            "reference {nth}: a reference was imported twice"
+        );
+        let mut roles: Vec<&str> = references
+            .iter()
+            .filter_map(|asset| asset["extra"]["filmHarness"]["role"].as_str())
+            .collect();
+        roles.sort_unstable();
+        roles.dedup();
+        assert_eq!(roles.len(), 7, "reference {nth}: duplicate roles");
+
+        // The upload and the tag PATCH are two writes: the ADOPTED asset — the one whose upload the
+        // record missed — must end up tagged like every other, or a query for the
+        // conditioning-eligible references silently misses it while the record claims it is tagged.
+        for asset in &references {
+            let role = asset["extra"]["filmHarness"]["role"]
+                .as_str()
+                .expect("role provenance");
+            let tags: Vec<&str> = asset["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(
+                tags.contains(&"film-harness-reference"),
+                "reference {nth}: {role} carries no kind tag: {tags:?}"
+            );
+            assert!(
+                tags.contains(&format!("role:{role}").as_str()),
+                "reference {nth}: {role} carries no role tag: {tags:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn resuming_a_finished_run_reuses_every_take_and_enqueues_nothing() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(first.outcome, RunOutcome::Completed, "{}", summary(&first));
+    assert!(
+        !first.is_resumable(),
+        "a completed run is not something to resume"
+    );
+
+    // A completed run refuses a resume outright rather than re-dispatching anything.
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("a completed run is not resumable");
+    assert!(
+        matches!(&error, HarnessError::Refused(message) if message.contains("not resumable")),
+        "{error}"
+    );
+    assert_eq!(harness.video_job_count(), 2);
+    assert_eq!(selections(&harness_record(&harness)), selections(&first));
+}
+
+/// Reading the record back off disk, which is what a separate `film-harness` invocation does.
+fn harness_record(harness: &Harness) -> RunRecord {
+    film_harness::read_run_record(&harness.out_dir()).expect("run record on disk")
+}
+
+/// Block until `shot_id`'s job has finished, its assets are persisted AND its metrics block has
+/// landed — everything a resume needs to ADOPT the attempt rather than poll it. Without this a
+/// resume races the fake worker and exercises the dispatch path instead of the reconciliation one.
+async fn wait_for_settled_shot(app: &axum::Router, shot_id: &str) -> String {
+    for _ in 0..800 {
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        let job_id = jobs
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|job| job["payload"]["advanced"]["filmHarness"]["shotId"] == shot_id)
+            .and_then(|job| job["id"].as_str())
+            .map(str::to_owned);
+        if let Some(job_id) = job_id {
+            let (_, job) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            let (_, metrics) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}/metrics"),
+                Value::Null,
+            )
+            .await;
+            if job["status"] == "completed"
+                && job["result"]["assets"].is_array()
+                && !metrics.is_null()
+            {
+                return job_id;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the job for {shot_id} never settled");
+}
+
+/// Block until `shot_id`'s job is actually running, so a cancel lands mid-flight rather than at
+/// whatever point a fixed sleep happens to reach on a loaded runner.
+async fn wait_for_running_shot(app: &axum::Router, shot_id: &str) {
+    for _ in 0..800 {
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        let running = jobs.as_array().into_iter().flatten().any(|job| {
+            job["payload"]["advanced"]["filmHarness"]["shotId"] == shot_id
+                && job["status"] == "running"
+        });
+        if running {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{shot_id} never reached running");
+}
+
+#[tokio::test]
+async fn a_cancel_stops_dispatch_keeps_finished_takes_and_the_run_resumes() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+            ("SH020", VideoBehavior::Hang),
+        ],
+    )
+    .await;
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 2, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(
+        plan,
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020", "SH030"]),
+    );
+    // Trip the cancel once SH010 is safely rendered and SH020 is hanging.
+    let control = RunControl::new();
+    let app = harness.app.clone();
+    let waiter = tokio::spawn({
+        let control = control.clone();
+        async move {
+            wait_for_running_shot(&app, "SH020").await;
+            control.cancel();
+        }
+    });
+    let record = film_harness::run_with_control(&harness.transport, &options, &control)
+        .await
+        .expect("a canceled run still returns its record");
+    waiter.await.expect("waiter joins");
+
+    assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "canceled");
+    assert!(stop.resumable, "a cancel leaves work a resume can finish");
+    assert!(record.is_resumable());
+
+    // The finished take is kept, the hung job is canceled through the API, and the shot that was
+    // never reached was never dispatched.
+    let sh010 = record.shot("SH010").expect("SH010 recorded");
+    assert_eq!(sh010.outcome, ShotOutcome::Rendered);
+    assert_eq!(sh010.selected_attempt, Some(1));
+    let sh020 = record.shot("SH020").expect("SH020 recorded");
+    assert_eq!(sh020.attempts.len(), 1, "a cancel is not a retry");
+    assert_eq!(sh020.attempts[0].status, "canceled_by_operator");
+    assert_eq!(
+        sh020.outcome,
+        ShotOutcome::Canceled,
+        "a canceled shot is not a failed one — nothing went wrong with it"
+    );
+    let job_id = sh020.attempts[0].job_id.as_deref().expect("a job id");
+    let (_, job) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(job["status"], "canceled", "{job}");
+    assert_eq!(
+        record.shot("SH030").expect("SH030 recorded").outcome,
+        ShotOutcome::NotDispatched
+    );
+    assert!(record.export.is_none(), "a cancel dispatches no export");
+    assert_eq!(harness.run_record()["outcome"], "canceled");
+
+    // Resuming finishes the job: SH020 gets its remaining attempt, SH030 is dispatched, and SH010's
+    // take is reused rather than re-rendered.
+    harness
+        .script
+        .lock()
+        .behaviors
+        .retain(|(id, _)| id != "SH020");
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        resumed.shot("SH010").unwrap().attempts.len(),
+        1,
+        "SH010 was not re-rendered"
+    );
+    // Identity, not the whole struct: the resumed record came back through JSON, and an
+    // `elapsedSeconds` measurement does not survive that round trip in its last bit.
+    assert_eq!(
+        selected_identity(&resumed, "SH010"),
+        selected_identity(&record, "SH010"),
+        "the selected take survived the cancel and the resume"
+    );
+    assert_eq!(resumed.shot("SH020").unwrap().selected_attempt, Some(2));
+    assert!(resumed
+        .decisions
+        .iter()
+        .any(|decision| decision.action == "resume"));
+}
+
+#[tokio::test]
+async fn a_cancel_sentinel_written_by_another_process_stops_the_run() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010", "SH020"]));
+    // The control a `film-harness run` builds: it watches its own run directory, which is how
+    // `film-harness cancel --out DIR` in another shell reaches it.
+    let control = RunControl::watching(&harness.out_dir());
+    let out_dir = harness.out_dir();
+    let app = harness.app.clone();
+    let waiter = tokio::spawn(async move {
+        wait_for_running_shot(&app, "SH010").await;
+        film_harness::request_cancel(&out_dir).expect("sentinel writes");
+    });
+    let record = film_harness::run_with_control(&harness.transport, &options, &control)
+        .await
+        .expect("a canceled run still returns its record");
+    waiter.await.expect("waiter joins");
+    assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
+    assert!(record.stop.as_ref().expect("stop").resumable);
+    assert_eq!(
+        record.shot("SH010").unwrap().attempts.len(),
+        1,
+        "the attempt cap was never spent on a cancel"
+    );
+    assert!(
+        harness.out_dir().join("cancel.requested").exists(),
+        "the sentinel is left for the operator to see"
+    );
+
+    // The stale sentinel must not cancel the resume the operator asked for.
+    harness.script.lock().behaviors.clear();
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert!(!harness.out_dir().join("cancel.requested").exists());
+}
+
+#[tokio::test]
+async fn an_exhausted_budget_is_terminal_and_refuses_a_resume() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 12, "maxShotSeconds": 12, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, None);
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::StoppedRunBudget);
+    let stop = record.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "run_budget");
+    assert!(
+        !stop.resumable,
+        "resuming an exhausted budget is exactly the unbounded retry the budget exists to prevent"
+    );
+    assert!(
+        stop.detail.contains("maxRunSeconds"),
+        "the terminal reason says what to change: {}",
+        stop.detail
+    );
+    let before = harness.video_job_count();
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("terminal runs refuse a resume");
+    assert!(
+        matches!(&error, HarnessError::Refused(message)
+            if message.contains("not resumable") && message.contains("run_budget")),
+        "{error}"
+    );
+    assert_eq!(
+        harness.video_job_count(),
+        before,
+        "the refusal dispatched nothing"
+    );
+}
+
+/// The wall-clock budget bounds the RUN, not one attempt at it. A resume inherits what earlier
+/// controllers already spent, which is what stops a restart loop from turning a bounded run into an
+/// unbounded one.
+#[tokio::test]
+async fn a_resume_inherits_the_wall_clock_already_spent() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, None);
+    let control = RunControl::watching(&harness.out_dir());
+    let out_dir = harness.out_dir();
+    let app = harness.app.clone();
+    let waiter = tokio::spawn(async move {
+        wait_for_running_shot(&app, "SH010").await;
+        film_harness::request_cancel(&out_dir).expect("sentinel writes");
+    });
+    let record = film_harness::run_with_control(&harness.transport, &options, &control)
+        .await
+        .unwrap();
+    waiter.await.expect("waiter joins");
+    assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
+    assert!(record.is_resumable());
+    let dispatched = harness.api_video_job_count().await;
+
+    // Book the run as having spent its whole budget, exactly as a long first controller would have.
+    let path = harness.out_dir().join("run.json");
+    let mut on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    on_disk["elapsedSeconds"] = json!(record.limits.max_run_seconds);
+    std::fs::write(&path, serde_json::to_string_pretty(&on_disk).unwrap()).unwrap();
+
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("a spent budget still returns a record");
+    assert_eq!(resumed.outcome, RunOutcome::StoppedRunBudget);
+    let stop = resumed.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "run_budget");
+    assert!(
+        !stop.resumable,
+        "the budget is spent; another resume would be the unbounded retry it exists to prevent"
+    );
+    assert_eq!(
+        harness.api_video_job_count().await,
+        dispatched,
+        "a resume with no budget left dispatches nothing"
+    );
+    assert!(resumed.timeline.is_none(), "and assembles nothing");
+    // And it really is terminal now.
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("terminal");
+    assert!(
+        matches!(&error, HarnessError::Refused(message) if message.contains("run_budget")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn resume_refuses_a_plan_that_changed_under_it() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let plan_path = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 1, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(
+        plan_path.clone(),
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .unwrap();
+    assert_ne!(record.outcome, RunOutcome::Completed);
+
+    // Edit the plan the run was started from, then try to resume onto it.
+    let text = std::fs::read_to_string(&plan_path).unwrap();
+    let mut plan: Value = serde_json::from_str(&text).unwrap();
+    plan["shots"][0]["prompt"] = json!("an entirely different shot");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    // The copy the run kept beside its record would otherwise satisfy the read, so remove it: the
+    // point is that the SOURCE no longer hashes to what the run recorded.
+    std::fs::remove_file(harness.out_dir().join("plan.json")).unwrap();
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("an edited plan is a new run");
+    assert!(
+        matches!(&error, HarnessError::Refused(message)
+            if message.contains("the plan changed since run")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_take_renders_one_more_and_leaves_every_other_shot_untouched() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020", "SH030"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020", "SH030"]),
+    );
+    let before = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        before.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&before)
+    );
+    assert_eq!(harness.video_job_count(), 3);
+    let untouched_before = other_shots_digest(&before, "SH020");
+    let references_before = serde_json::to_value(&before.references).unwrap();
+    let rejected_asset = before
+        .shot("SH020")
+        .and_then(|shot| shot.selected())
+        .and_then(|attempt| attempt.take.as_ref())
+        .map(|take| take.asset_id.clone())
+        .expect("SH020 had a take");
+
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "the parcel is the wrong red",
+    )
+    .await
+    .expect("replacement runs");
+
+    // Exactly one more job, for SH020 alone.
+    assert_eq!(
+        harness.video_job_count(),
+        4,
+        "one replacement attempt, no re-render of anything else\n{}",
+        summary(&after)
+    );
+    assert_eq!(
+        other_shots_digest(&after, "SH020"),
+        untouched_before,
+        "every other shot's record changed under a replacement"
+    );
+    assert_eq!(
+        serde_json::to_value(&after.references).unwrap(),
+        references_before,
+        "the imported references are untouched"
+    );
+
+    // The rejected take is still there, with its reason, beside the one that replaced it.
+    let sh020 = after.shot("SH020").expect("SH020 recorded");
+    assert_eq!(sh020.attempts.len(), 2);
+    let rejection = sh020.attempts[0]
+        .rejection
+        .as_ref()
+        .expect("the old take is marked rejected");
+    assert_eq!(rejection.reason, "the parcel is the wrong red");
+    assert_eq!(
+        sh020.attempts[0].take.as_ref().unwrap().asset_id,
+        rejected_asset,
+        "the rejected take keeps its asset and provenance"
+    );
+    assert_eq!(sh020.selected_attempt, Some(2));
+    assert!(
+        sh020.attempts[1].human_requested,
+        "a replacement is a decision, not a retry"
+    );
+    assert_ne!(
+        sh020.attempts[1].take.as_ref().unwrap().asset_id,
+        rejected_asset
+    );
+
+    // The rejected asset is still the project's — a replacement discards nothing.
+    let project_id = after.project_id.clone().unwrap();
+    let (status, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{rejected_asset}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+
+    // The declared dependent is flagged, and only it; nothing was regenerated for it.
+    let sh030 = after.shot("SH030").expect("SH030 recorded");
+    assert_eq!(sh030.needs_review.len(), 1, "{:#?}", sh030.needs_review);
+    let flag = &sh030.needs_review[0];
+    assert_eq!(flag.source_shot_id, "SH020");
+    assert_eq!(flag.dependency, "continuity");
+    assert!(
+        flag.reason.contains("the parcel is the wrong red"),
+        "{}",
+        flag.reason
+    );
+    assert_eq!(sh030.attempts.len(), 1, "a flagged shot is not re-rendered");
+    assert!(
+        after.shot("SH010").unwrap().needs_review.is_empty(),
+        "SH020 depends on SH010, not the other way round"
+    );
+
+    // The timeline now carries the new take and nothing else moved; the export is flagged stale.
+    let timeline = after.timeline.as_ref().expect("timeline");
+    let item = timeline
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH020"))
+        .expect("SH020 on the timeline");
+    assert_eq!(
+        item.asset_id,
+        sh020.selected().unwrap().take.as_ref().unwrap().asset_id
+    );
+    for shot_id in ["SH010", "SH030"] {
+        let before_item = before
+            .timeline
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
+            .unwrap();
+        let after_item = timeline
+            .items
+            .iter()
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
+            .unwrap();
+        assert_eq!(before_item, after_item, "{shot_id}'s timeline item moved");
+    }
+    let export = after.export.as_ref().expect("the export record is kept");
+    assert!(export.stale, "a changed take makes the rendered MP4 stale");
+    assert_eq!(
+        harness
+            .script
+            .lock()
+            .claimed
+            .iter()
+            .filter(|(kind, _, _)| kind == "timeline_export")
+            .count(),
+        1,
+        "without --export the replacement re-renders nothing"
+    );
+    assert!(after
+        .decisions
+        .iter()
+        .any(|decision| decision.action == "replace_take"
+            && decision.shot_id.as_deref() == Some("SH020")
+            && decision.detail.contains("the parcel is the wrong red")));
+    // Choosing not to re-export is not a failure: the replacement landed, the MP4 is just stale.
+    assert_eq!(after.outcome, RunOutcome::Completed, "{}", summary(&after));
+    assert!(after.stop.is_none());
+}
+
+/// A failed export is the one stop a plain `resume` is meant to fix, so it must actually dispatch a
+/// NEW export job rather than re-adopt the failed one.
+#[tokio::test]
+async fn a_failed_export_is_resumable_and_the_retry_is_a_new_job() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    harness.script.lock().export_fails = true;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a failed export still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "export_failed");
+    assert!(
+        stop.resumable,
+        "the shots rendered; only the export needs redoing"
+    );
+    let failed_export = record
+        .export
+        .as_ref()
+        .expect("export recorded")
+        .job_id
+        .clone();
+    assert_eq!(
+        record.shot("SH010").unwrap().selected_attempt,
+        Some(1),
+        "the take is kept"
+    );
+
+    harness.script.lock().export_fails = false;
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    let export = resumed.export.as_ref().expect("export recorded");
+    assert_ne!(
+        export.job_id, failed_export,
+        "the resume re-adopted the failed export instead of running a new one"
+    );
+    assert_eq!(export.status, "completed");
+    assert!(export.asset_id.is_some());
+    assert_eq!(
+        harness.video_job_count(),
+        1,
+        "resuming to fix the export re-rendered nothing"
+    );
+}
+
+/// Every shot except `except`, serialized and hashed — the "nothing else moved" assertion.
+///
+/// Review flags are cleared first, because a flag is precisely the change a replacement IS allowed
+/// to make to a dependent. Everything else — attempts, jobs, takes, selection, outcome — must hash
+/// identically before and after.
+///
+/// Every float is rounded to six decimals first. The two records being compared do not come down
+/// the same path: the "before" one is the controller's own in-memory record, the "after" one was
+/// read back off disk, and serde_json's float parser can land one ULP away from the value it wrote
+/// (`elapsedSeconds: 1.599993458` read back as `1.5999934580000001`), which flips the hash while
+/// nothing moved. That is the same round trip `selected_identity` above exists to dodge. Six
+/// decimals is ten orders of magnitude coarser than the artifact and far finer than any real
+/// re-measurement, so a shot that actually moved — a new attempt, job, take, status or selection —
+/// still changes the digest.
+fn other_shots_digest(record: &RunRecord, except: &str) -> String {
+    let mut value = serde_json::to_value(
+        record
+            .shots
+            .iter()
+            .filter(|shot| shot.shot_id != except)
+            .map(|shot| {
+                let mut shot = shot.clone();
+                shot.needs_review.clear();
+                shot
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("shots serialize");
+    quantize_floats(&mut value);
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(value.to_string().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Round every float in `value`, in place, to six decimal places.
+fn quantize_floats(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if let Some(float) = number.as_f64() {
+                if !number.is_i64() && !number.is_u64() {
+                    let rounded = (float * 1e6).round() / 1e6;
+                    if let Some(number) = serde_json::Number::from_f64(rounded) {
+                        *value = Value::Number(number);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(quantize_floats),
+        Value::Object(fields) => fields.values_mut().for_each(quantize_floats),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn replacing_a_take_with_export_re_renders_the_timeline_once() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let before = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let first_export = before.export.as_ref().expect("export").job_id.clone();
+
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH010",
+        "flat lighting",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(after.outcome, RunOutcome::Completed, "{}", summary(&after));
+    let export = after.export.as_ref().expect("export");
+    assert!(!export.stale, "the re-export is current again");
+    assert_ne!(export.job_id, first_export, "a new export job ran");
+    assert_eq!(export.status, "completed");
+    assert_eq!(harness.export_job_count(), 2, "exactly one re-export");
+    assert!(after.export_pending.is_none());
+
+    // A SECOND replacement is where excluding only the most recently superseded export breaks: the
+    // candidate set still holds the ORIGINAL export job, and adopting it would record the MP4 of
+    // the timeline from before BOTH replacements as the current one.
+    let again = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH010",
+        "still flat",
+    )
+    .await
+    .expect("second replacement runs");
+    let third = again.export.as_ref().expect("export");
+    assert_ne!(
+        third.job_id,
+        first_export,
+        "the second re-export adopted the first export\n{}",
+        summary(&again)
+    );
+    assert_ne!(third.job_id, export.job_id);
+    assert_eq!(third.status, "completed");
+    assert!(!third.stale);
+    assert_eq!(
+        harness.export_job_count(),
+        3,
+        "the second replacement ran no export at all\n{}",
+        summary(&again)
+    );
+    assert_eq!(
+        again.superseded_export_job_ids,
+        vec![first_export, export.job_id.clone()],
+        "every export the record has held is excluded, not only the last"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_replacement_keeps_the_rejection_and_does_not_loop() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let before = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(before.outcome, RunOutcome::Completed);
+    let rejected_asset = before
+        .shot("SH020")
+        .and_then(|shot| shot.selected())
+        .and_then(|attempt| attempt.take.as_ref())
+        .map(|take| take.asset_id.clone())
+        .expect("SH020 had a take");
+    // Replace SH020's scripted behavior; `behavior_for` takes the first match, so pushing would
+    // be shadowed by the entry the run already used.
+    {
+        let mut script = harness.script.lock();
+        script.behaviors.retain(|(id, _)| id != "SH020");
+        script
+            .behaviors
+            .push(("SH020".to_owned(), VideoBehavior::FailAlways));
+    }
+
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "reshoot the approach",
+    )
+    .await
+    .expect("a failed replacement still returns its record");
+    assert_eq!(
+        harness.video_job_count(),
+        3,
+        "exactly one replacement attempt, no retry loop\n{}",
+        summary(&after)
+    );
+    let sh020 = after.shot("SH020").expect("SH020 recorded");
+    assert_eq!(sh020.attempts.len(), 2);
+    assert!(
+        sh020.attempts[0].rejection.is_some(),
+        "the human's rejection stands even though the replacement failed"
+    );
+    assert!(
+        sh020.attempts[0].take.is_some(),
+        "the failure evidence — and the old take — are preserved"
+    );
+    assert_eq!(sh020.attempts[1].status, "failed");
+    assert_eq!(
+        sh020.attempts[1].error.as_deref(),
+        Some("fake engine fault: persistent")
+    );
+    assert_eq!(sh020.selected_attempt, None);
+    assert_eq!(sh020.outcome, ShotOutcome::Failed);
+    let stop = after.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "replacement_failed");
+    assert!(!stop.resumable, "nothing automatic will try again");
+    assert!(
+        after.shot("SH010").unwrap().needs_review.is_empty(),
+        "a failed replacement flags nothing"
+    );
+
+    // The shot now has NO selected take, and the timeline was deliberately not rewritten — so the
+    // sequence and the MP4 rendered from it still carry the take the human REJECTED. The record has
+    // to say so rather than leave `stale: false` claiming the export is current.
+    let timeline = after.timeline.as_ref().expect("the timeline is kept");
+    let item = timeline
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH020"))
+        .expect("SH020 is still in the sequence");
+    assert_eq!(
+        item.asset_id, rejected_asset,
+        "the timeline still names the rejected take"
+    );
+    let export = after.export.as_ref().expect("the export record is kept");
+    assert!(
+        export.stale,
+        "the MP4 renders a timeline that carries a take the human rejected, so it is NOT current"
+    );
+    assert!(
+        after
+            .decisions
+            .iter()
+            .any(|decision| decision.action == "replace_take"
+                && decision.shot_id.as_deref() == Some("SH020")
+                && decision.detail.contains("still carry the REJECTED take")),
+        "{:#?}",
+        after.decisions
+    );
+    assert!(
+        stop.detail.contains("REJECTED take"),
+        "the stop says what the delivered sequence actually holds: {}",
+        stop.detail
+    );
+}
+
+#[tokio::test]
+async fn replace_take_refuses_a_shot_the_run_does_not_hold() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    for (shot, expected) in [
+        ("SH999", "is not a shot in plan"),
+        ("SH020", "is not in run"),
+    ] {
+        let error =
+            film_harness::replace_take(&harness.transport, &harness.resume_options(), shot, "nope")
+                .await
+                .expect_err("refused");
+        assert!(
+            matches!(&error, HarnessError::Refused(message) if message.contains(expected)),
+            "{shot}: {error}"
+        );
+    }
+    assert_eq!(harness.video_job_count(), 1, "a refusal dispatches nothing");
+}
+
+/// Replacing a take while the shot still owes an attempt would orphan that attempt's job, so it is
+/// refused and the operator is pointed at the command that settles it.
+#[tokio::test]
+async fn replace_take_refuses_while_the_shot_still_has_an_unsettled_attempt() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    // Die right after the video job is created: the record holds an attempt with no settled status.
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+        .on_post_route("/api/v1/video/jobs");
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+    // The API holds the job even though the worker may not have claimed it yet.
+    assert_eq!(harness.api_video_job_count().await, 1);
+
+    let error = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH010",
+        "too soon",
+    )
+    .await
+    .expect_err("an unsettled attempt blocks a replacement");
+    assert!(
+        matches!(&error, HarnessError::Refused(message)
+            if message.contains("still has attempt 1 in flight") && message.contains("resume")),
+        "{error}"
+    );
+    assert_eq!(
+        harness.api_video_job_count().await,
+        1,
+        "the refusal dispatched nothing"
+    );
+    // The record is untouched by the refusal: no rejection, no extra attempt.
+    let record = harness_record(&harness);
+    let shot = record.shot("SH010").expect("SH010 recorded");
+    assert_eq!(shot.attempts.len(), 1);
+    assert!(shot.attempts[0].rejection.is_none());
+
+    // Settling it first is exactly what the refusal asked for, and then the replacement works.
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(resumed.shot("SH010").unwrap().selected_attempt, Some(1));
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let replaced = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH010",
+        "now it can be replaced",
+    )
+    .await
+    .expect("replacement runs once the attempt settled");
+    assert_eq!(replaced.shot("SH010").unwrap().selected_attempt, Some(2));
+    assert_eq!(harness.video_job_count(), 2);
+}
+
+#[tokio::test]
+async fn a_conditioning_dependency_is_flagged_with_its_own_kind() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    // SH020's conditioning is declared as coming out of SH010's take rather than a pack plate.
+    let plan = harness.edited_plan(|plan| {
+        plan["shots"][1]["dependsOn"] = json!([
+            { "shotId": "SH010", "kind": "conditioning", "note": "first frame is SH010's last frame" }
+        ]);
+    });
+    let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010", "SH020"]));
+    film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after =
+        film_harness::replace_take(&harness.transport, &resume_options, "SH010", "wrong door")
+            .await
+            .expect("replacement runs");
+    let sh020 = after.shot("SH020").expect("SH020 recorded");
+    assert_eq!(sh020.needs_review.len(), 1);
+    assert_eq!(sh020.needs_review[0].dependency, "conditioning");
+    assert!(
+        sh020.needs_review[0]
+            .reason
+            .contains("first frame is SH010's last frame"),
+        "{}",
+        sh020.needs_review[0].reason
+    );
+    assert_eq!(
+        sh020.attempts.len(),
+        1,
+        "the flagged shot was not re-rendered"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-22711 review: the windows the first pass left open
+// ---------------------------------------------------------------------------------------------
+
+/// A SECOND re-export must dispatch a third job, not adopt the FIRST export.
+///
+/// Every export the run ever dispatches renders the same timeline, which is the only key the export
+/// route gives the harness. Excluding just the most recently superseded job leaves the original
+/// export in the candidate set, and it is a completed `timeline_export` job — so the harness would
+/// adopt it, record `status: completed, stale: false` with its pre-replacement asset, and the record
+/// would claim the delivered MP4 is current while it is the sequence from before both replacements.
+#[tokio::test]
+async fn a_second_re_export_dispatches_a_new_job_instead_of_adopting_the_first() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let export_one = first.export.as_ref().expect("export").job_id.clone();
+
+    let second = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH010",
+        "flat lighting",
+    )
+    .await
+    .expect("first replacement runs");
+    let export_two = second.export.as_ref().expect("export").job_id.clone();
+    assert_ne!(export_two, export_one, "the first re-export ran a new job");
+
+    let third = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH020",
+        "the parcel is the wrong red",
+    )
+    .await
+    .expect("second replacement runs");
+    let export_three = third.export.as_ref().expect("export");
+    assert_ne!(
+        export_three.job_id,
+        export_one,
+        "the second re-export adopted the ORIGINAL export — its asset is the timeline from before \
+         both replacements\n{}",
+        summary(&third)
+    );
+    assert_ne!(export_three.job_id, export_two);
+    assert_eq!(export_three.status, "completed");
+    assert!(!export_three.stale);
+    assert_eq!(
+        harness.export_job_count(),
+        3,
+        "three exports were asked for, so three must have run\n{}",
+        summary(&third)
+    );
+    // Both superseded exports are remembered, which is what keeps the exclusion cumulative.
+    assert_eq!(
+        third.superseded_export_job_ids,
+        vec![export_one, export_two]
+    );
+    // And the MP4 the record points at really is the one rendered from the current takes.
+    let timeline = third.timeline.as_ref().expect("timeline");
+    for shot_id in ["SH010", "SH020"] {
+        let selected = third
+            .shot(shot_id)
+            .and_then(|shot| shot.selected())
+            .and_then(|attempt| attempt.take.as_ref())
+            .expect("a selected take");
+        let item = timeline
+            .items
+            .iter()
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
+            .expect("on the timeline");
+        assert_eq!(item.asset_id, selected.asset_id, "{shot_id}");
+    }
+}
+
+/// `POST /timelines` always creates a NEW row, and the record only learns the timeline id after the
+/// PUT — so a controller killed in that window leaves a timeline nothing names. The resume must
+/// adopt it by the name it was created under, exactly as it adopts the project.
+#[tokio::test]
+async fn a_crash_after_the_timeline_was_created_adopts_it_instead_of_creating_a_second() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let transport =
+        FaultTransport::new(harness.app.clone(), 1, FaultMode::After).on_post_route("/timelines");
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+    assert!(transport.fired());
+
+    let crashed = film_harness::read_run_record(&harness.out_dir()).expect("record on disk");
+    assert!(
+        crashed.timeline.is_none(),
+        "the controller died before it could record the timeline"
+    );
+    let created = harness.timelines_for(&crashed).await;
+    assert_eq!(created.len(), 1, "the API really created one: {created:#?}");
+
+    let record = harness.resume_to_completion().await;
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let timelines = harness.timelines_for(&record).await;
+    assert_eq!(
+        timelines.len(),
+        1,
+        "the resume created a SECOND timeline instead of adopting the one it already made: \
+         {timelines:#?}"
+    );
+    let timeline = record.timeline.as_ref().expect("timeline recorded");
+    assert_eq!(
+        timelines[0]["id"].as_str(),
+        Some(timeline.timeline_id.as_str())
+    );
+    assert_eq!(timelines[0]["name"].as_str(), Some(timeline.name.as_str()));
+    assert_eq!(timeline.items.len(), 1);
+}
+
+/// The memory budget is judged on the EVIDENCE, not on who was watching when it landed: a resume
+/// that adopts an over-budget terminal attempt must stop new dispatch exactly as the controller that
+/// watched it would have (E5 / AC3).
+#[tokio::test]
+async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
+    // 90% of the 128 GiB the fake worker reports is 115.2 GiB, over the fixture's 96 GB budget.
+    let harness = Harness::start(
+        true,
+        vec![(
+            "SH010",
+            VideoBehavior::Complete {
+                delay_secs: 0,
+                peak_pct: 90.0,
+            },
+        )],
+    )
+    .await;
+    // Die right after the video job POST: the API holds the job, the record does not know its id.
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+        .on_post_route("/api/v1/video/jobs");
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+    let crashed = film_harness::read_run_record(&harness.out_dir()).expect("record on disk");
+    assert!(
+        crashed.shot("SH010").expect("SH010").attempts[0]
+            .job_id
+            .is_none(),
+        "the controller never learned the job id, so the resume must reconcile it"
+    );
+    // Let the render finish before the resume, so the attempt is ADOPTED rather than polled.
+    wait_for_settled_shot(&harness.app, "SH010").await;
+
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::StoppedMemoryLimit,
+        "an adopted over-budget peak must stop the run\n{}",
+        summary(&resumed)
+    );
+    let stop = resumed.stop.as_ref().expect("a stop reason");
+    assert_eq!(stop.reason, "memory_limit");
+    assert!(
+        !stop.resumable,
+        "the budget is blown; another pass is not the fix"
+    );
+    let attempt = &resumed.shot("SH010").expect("SH010").attempts[0];
+    assert_eq!(
+        attempt.peak_memory_source.as_deref(),
+        Some("metrics.peakMemoryBytes")
+    );
+    assert!(
+        attempt
+            .peak_memory_gb
+            .is_some_and(|gb| (gb - 115.2).abs() < 0.01),
+        "{:?}",
+        attempt.peak_memory_gb
+    );
+    assert_eq!(
+        resumed.shot("SH010").expect("SH010").outcome,
+        ShotOutcome::Rendered,
+        "the take that was produced is kept"
+    );
+    assert_eq!(
+        resumed.shot("SH020").expect("SH020").outcome,
+        ShotOutcome::NotDispatched,
+        "nothing new goes out against a budget the evidence says was blown\n{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        harness.api_video_job_count().await,
+        1,
+        "the resume dispatched a second render anyway"
+    );
+}
+
+/// `replace-take` decides ONE shot's outcome. Closing the run through the whole-run classifier
+/// overwrote a resumable stop with `attempts_exhausted` / `resumable: false`, which permanently
+/// blocks the `resume` that was going to render the remaining shots.
+#[tokio::test]
+async fn replacing_a_take_leaves_a_canceled_runs_resumable_stop_in_place() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+            ("SH020", VideoBehavior::Hang),
+        ],
+    )
+    .await;
+    let plan = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 2, "maxMemoryGb": 96
+        });
+    });
+    let options = harness.options(
+        plan,
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020", "SH030"]),
+    );
+    let control = RunControl::new();
+    let app = harness.app.clone();
+    let waiter = tokio::spawn({
+        let control = control.clone();
+        async move {
+            wait_for_running_shot(&app, "SH020").await;
+            control.cancel();
+        }
+    });
+    let canceled = film_harness::run_with_control(&harness.transport, &options, &control)
+        .await
+        .expect("a canceled run still returns its record");
+    waiter.await.expect("waiter joins");
+    assert_eq!(
+        canceled.outcome,
+        RunOutcome::Canceled,
+        "{}",
+        summary(&canceled)
+    );
+    assert!(canceled.is_resumable());
+    assert!(canceled
+        .shot("SH020")
+        .expect("SH020")
+        .selected_attempt
+        .is_none());
+
+    // The human replaces the ONE take the run does have. SH020 and SH030 still owe work.
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH010",
+        "flat lighting",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(
+        after.shot("SH010").expect("SH010").selected_attempt,
+        Some(2)
+    );
+    let stop = after.stop.as_ref().expect("the run's own stop is kept");
+    assert_eq!(
+        stop.reason,
+        "canceled",
+        "replacing one take must not re-classify the run\n{}",
+        summary(&after)
+    );
+    assert!(
+        stop.resumable,
+        "the replacement made a resumable run terminal, so SH020/SH030 can never be rendered\n{}",
+        summary(&after)
+    );
+    assert_eq!(after.outcome, RunOutcome::Canceled);
+    assert!(after.is_resumable());
+
+    // And the resume that stop promises really does finish the run, keeping the replacement.
+    harness
+        .script
+        .lock()
+        .behaviors
+        .retain(|(id, _)| id != "SH020");
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        resumed.shot("SH010").expect("SH010").selected_attempt,
+        Some(2),
+        "the replacement take survived the resume"
+    );
+    for shot_id in ["SH020", "SH030"] {
+        assert_eq!(
+            resumed.shot(shot_id).expect("recorded").outcome,
+            ShotOutcome::Rendered,
+            "{shot_id}"
+        );
+    }
+}
+
+/// An attempt is recorded BEFORE its job is created — that is what makes the idempotency key work.
+/// A controller that died in that window rendered nothing, so the next morning's resume must not
+/// charge it the wall clock since: with `maxAttemptsPerShot: 1` that spends the shot's only attempt
+/// on a job it dispatches and cancels on the first poll.
+#[tokio::test]
+async fn an_attempt_whose_job_post_never_landed_is_not_charged_wall_clock() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
+        .on_post_route("/api/v1/video/jobs");
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 600, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, Some(&["SH010"]));
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+    assert_eq!(
+        harness.api_video_job_count().await,
+        0,
+        "the POST never reached the API"
+    );
+    let crashed = film_harness::read_run_record(&harness.out_dir()).expect("record on disk");
+    let attempt = &crashed.shot("SH010").expect("SH010").attempts[0];
+    assert_eq!(attempt.status, "dispatching");
+    assert!(attempt.job_id.is_none());
+
+    // The operator comes back the next morning.
+    let yesterday = sceneworks_core::time::format_unix_seconds(
+        sceneworks_core::time::now_unix_seconds() - 86_400,
+    );
+    harness.edit_run_record(|record| {
+        record["shots"][0]["attempts"][0]["startedAt"] = json!(yesterday);
+    });
+
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "an attempt that never dispatched was charged a night's wall clock\n{}",
+        summary(&resumed)
+    );
+    let shot = resumed.shot("SH010").expect("SH010");
+    assert_eq!(
+        shot.attempts.len(),
+        1,
+        "the plan allows exactly one automatic attempt"
+    );
+    assert_eq!(
+        shot.attempts[0].status,
+        "completed",
+        "the attempt timed out against a budget it had never spent\n{}",
+        summary(&resumed)
+    );
+    assert_eq!(shot.selected_attempt, Some(1));
+    assert_eq!(shot.outcome, ShotOutcome::Rendered);
+    assert_eq!(harness.video_job_count(), 1);
+}
+
+/// `run` over a directory that already holds a record would mint a new run id over the old run's
+/// takes, decisions and provenance — while `persist_record` keeps the plan/pack copies of the run it
+/// just destroyed. `scripts/film-harness-smoke.sh` pins its `--out`, so a second invocation is
+/// exactly this (E2).
+#[tokio::test]
+async fn run_refuses_a_directory_that_already_holds_a_run_record() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(first.outcome, RunOutcome::Completed, "{}", summary(&first));
+    let dispatched = harness.video_job_count();
+
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("a second run over the same --out is refused");
+    assert!(
+        matches!(&error, HarnessError::Refused(message)
+            if message.contains("already holds run") && message.contains("resume")),
+        "{error}"
+    );
+    // The previous run's record is exactly as it was, and nothing was dispatched against it.
+    let on_disk = harness_record(&harness);
+    assert_eq!(on_disk.run_id, first.run_id);
+    assert_eq!(selections(&on_disk), selections(&first));
+    assert_eq!(harness.video_job_count(), dispatched);
+    assert_eq!(harness.project_count().await, 1);
+}
+
+/// `cancel --out /typo/path` used to create the directory, print "cancel requested" and exit 0 while
+/// the real render kept going. A cancel that reaches nothing must say so.
+#[test]
+fn cancel_refuses_a_directory_that_holds_no_run_record() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("typo").join("run");
+    let error = film_harness::request_cancel(&missing).expect_err("there is no run there");
+    assert!(
+        matches!(&error, HarnessError::Refused(message) if message.contains("no run record in")),
+        "{error}"
+    );
+    assert!(
+        !missing.exists(),
+        "a mistyped --out must not be created on the way to a cancel nobody receives"
+    );
+
+    // With a record in it, the sentinel is written as before.
+    let held = temp.path().join("held");
+    std::fs::create_dir_all(&held).expect("run dir");
+    std::fs::write(held.join("run.json"), "{}").expect("record");
+    let sentinel = film_harness::request_cancel(&held).expect("a real run directory is cancelable");
+    assert!(sentinel.exists());
+}
+
+/// Replacing the same upstream take twice is the same unread signal, not two.
+#[tokio::test]
+async fn replacing_the_same_take_twice_does_not_duplicate_a_review_flag() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020", "SH030"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020", "SH030"]),
+    );
+    film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    for reason in ["the parcel is the wrong red", "still the wrong red"] {
+        film_harness::replace_take(&harness.transport, &resume_options, "SH020", reason)
+            .await
+            .expect("replacement runs");
+    }
+    let record = harness_record(&harness);
+    let sh030 = record.shot("SH030").expect("SH030 recorded");
+    assert_eq!(
+        sh030.needs_review.len(),
+        1,
+        "one standing flag per (source shot, dependency), not one per replacement: {:#?}",
+        sh030.needs_review
+    );
+    assert_eq!(sh030.needs_review[0].source_shot_id, "SH020");
+    assert_eq!(sh030.needs_review[0].dependency, "continuity");
+}
+
+/// A human can reject a plate between two controllers, and the asset listing hides rejected and
+/// trashed assets by default — so the adoption lookup has to ask for them. Otherwise the replay
+/// cannot see the reference it already uploaded and imports a second copy, while the record claims
+/// one import.
+#[tokio::test]
+async fn a_reference_rejected_between_controllers_is_still_adopted_not_imported_again() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let transport =
+        FaultTransport::new(harness.app.clone(), 1, FaultMode::After).on_post_route("/assets");
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+    let crashed = film_harness::read_run_record(&harness.out_dir()).expect("record on disk");
+    assert!(
+        crashed.references.is_empty(),
+        "the upload that was answered is the one the record missed"
+    );
+    let project_id = crashed.project_id.clone().expect("project created");
+
+    // The human rejects the uploaded plate before the resume.
+    let (_, assets) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    let uploaded = assets
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+        .and_then(|asset| asset["id"].as_str())
+        .expect("the interrupted upload landed")
+        .to_owned();
+    let (status, _) = request(
+        harness.app.clone(),
+        "PATCH",
+        &format!("/api/v1/projects/{project_id}/assets/{uploaded}/status"),
+        json!({ "rejected": true }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    let record = harness.resume_to_completion().await;
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(record.references.len(), 7);
+    let (_, assets) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true&includeTrashed=true"),
+        Value::Null,
+    )
+    .await;
+    let references: Vec<&Value> = assets
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+        .collect();
+    assert_eq!(
+        references.len(),
+        7,
+        "the rejected plate was invisible to the adoption lookup, so it was imported twice"
+    );
+    assert!(
+        references
+            .iter()
+            .any(|asset| asset["id"].as_str() == Some(uploaded.as_str())),
+        "the adopted asset is the one that was already uploaded"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -2282,7 +4267,7 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
     let replaced = film_harness::edit_timeline(
         &harness.transport,
         &edit_options,
-        film_harness::TimelineEdit::ReplaceTake {
+        film_harness::TimelineEdit::SwapTake {
             shot_id: "SH010".to_owned(),
             asset_id: replacement.clone(),
         },
@@ -2342,11 +4327,61 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
         .iter()
         .filter_map(|edit| edit["kind"].as_str())
         .collect();
-    assert_eq!(edits, vec!["trim", "reorder", "replace_take"], "{on_disk}");
+    assert_eq!(edits, vec!["trim", "reorder", "swap_take"], "{on_disk}");
     assert!(on_disk["timeline"]["edits"][2]["detail"]
         .as_str()
         .unwrap_or_default()
         .contains(&replacement));
+
+    // The edits reach the RUN RECORD's own shape, not only the timeline block (sc-22712 on
+    // sc-22711's schema 2). Three things have to follow an edit, and none of them did before the
+    // two stories were merged:
+
+    // 1. The decision log carries every edit, in order, with the shot the edit named.
+    let decisions: Vec<(&str, Option<&str>)> = on_disk["decisions"]
+        .as_array()
+        .expect("decisions recorded")
+        .iter()
+        .filter_map(|decision| {
+            let action = decision["action"].as_str()?;
+            ["trim", "reorder", "swap_take"]
+                .contains(&action)
+                .then(|| (action, decision["shotId"].as_str()))
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![
+            ("trim", Some("SH010")),
+            ("reorder", None),
+            ("swap_take", Some("SH010")),
+        ],
+        "every edit is a human decision about the run: {on_disk}"
+    );
+
+    // 2. The export these edits ran against is FLAGGED stale — the sequence moved under the MP4,
+    //    and none of these edits passed `--export`. It is never silently re-rendered.
+    assert_eq!(
+        on_disk["export"]["stale"],
+        json!(true),
+        "an edited sequence leaves the existing export stale: {on_disk}"
+    );
+
+    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so there is
+    //    no attempt to select and the shot's selection stays exactly where it was. (The other
+    //    branch — a swap onto an asset that IS one of the shot's takes — moves the selection, and
+    //    is proved in `swapping_onto_an_existing_take_moves_the_shots_selected_attempt`.)
+    let sh010 = on_disk["shots"]
+        .as_array()
+        .expect("shots recorded")
+        .iter()
+        .find(|shot| shot["shotId"] == json!("SH010"))
+        .expect("SH010 recorded");
+    assert_eq!(
+        sh010["selectedAttempt"],
+        json!(1),
+        "a swap onto a foreign asset selects no attempt: {sh010}"
+    );
 
     // A reorder that does not name the whole sequence is refused rather than silently dropping a
     // shot — the one way a "reorder" could quietly become a delete.
@@ -2372,7 +4407,7 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
 /// wrote a `timelineEnd` longer than the file, `render_item_segment` returned the DECLARED duration
 /// while `-t` gave ffmpeg a short segment, and the exported picture came out shorter than the saved
 /// sequence — sound drifting against picture, and a duration in the render sidecar that no file
-/// has. `ReplaceTake` always measured its asset first; `Trim` now does the same.
+/// has. `SwapTake` always measured its asset first; `Trim` now does the same.
 #[tokio::test]
 async fn a_trim_past_the_end_of_the_take_is_clamped_to_the_takes_real_length() {
     let harness = Harness::start(true, vec![]).await;
@@ -2626,6 +4661,94 @@ fn checked_in_fixture_sound_matches_the_generator_byte_for_byte() {
              with `film-harness fixture-sound --out config/film-harness/courier-workshop/sound`."
         );
     }
+}
+
+/// The seam between the two ways a shot's take can change (sc-22711 `replace-take` re-renders,
+/// sc-22712 `swap-take` re-cuts): swapping the sequence back onto a take the run ALREADY rendered
+/// must move the shot's `selectedAttempt` with it.
+///
+/// The generation side owns `selectedAttempt` and the edit side owns the timeline item, and before
+/// the two stories were merged neither told the other anything. A selection left behind is not
+/// cosmetic: `status` reports the wrong take, and a subsequent `replace-take` rejects the attempt
+/// the sequence no longer shows while leaving the one it does show in the cut.
+#[tokio::test]
+async fn swapping_onto_an_existing_take_moves_the_shots_selected_attempt() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let first_take = record
+        .shot("SH010")
+        .expect("SH010 recorded")
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.take.as_ref())
+        .expect("SH010 rendered")
+        .asset_id
+        .clone();
+
+    // Re-render SH010, which makes attempt 2 the selected one and leaves attempt 1's take in the
+    // project, still addressable.
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH010",
+        "prefer the first one after all",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(
+        after
+            .shot("SH010")
+            .expect("SH010 recorded")
+            .selected_attempt,
+        Some(2),
+        "the re-render is what the shot now carries"
+    );
+
+    // Now change our mind on the EDIT side: put attempt 1's take back into the cut.
+    let swapped = film_harness::edit_timeline(
+        &harness.transport,
+        &film_harness::EditOptions {
+            run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+            export: false,
+            poll_interval: Duration::from_millis(250),
+        },
+        film_harness::TimelineEdit::SwapTake {
+            shot_id: "SH010".to_owned(),
+            asset_id: first_take.clone(),
+        },
+    )
+    .await
+    .expect("swap applies");
+
+    assert_eq!(
+        swapped
+            .shot("SH010")
+            .expect("SH010 recorded")
+            .selected_attempt,
+        Some(1),
+        "the selection follows the sequence back onto attempt 1"
+    );
+    let item = swapped
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is in the sequence");
+    assert_eq!(
+        item.asset_id, first_take,
+        "the record and the sequence name the same take"
+    );
 }
 
 // ----------------------------------------------------------------------------------------------

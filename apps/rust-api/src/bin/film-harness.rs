@@ -2,15 +2,19 @@
 //! running SceneWorks API (epic 22708, sc-22710 + sc-22713).
 //!
 //! ```text
-//! film-harness plan     --brief BRIEF.json --references REFERENCES.json --out DIR [--api URL]
-//! film-harness compile  --plan PLAN.json --references REFERENCES.json --out DIR [--api URL]
-//! film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL]
-//! film-harness run      --plan PLAN.json --references REFERENCES.json [--api URL] [--shots SH010,SH020]
-//!                       [--project-id ID] [--out DIR] [--poll-seconds N] [--no-export]
-//!                       [--skip-install-check]
+//! film-harness plan         --brief BRIEF.json --references REFERENCES.json --out DIR [--api URL]
+//! film-harness compile      --plan PLAN.json --references REFERENCES.json --out DIR [--api URL]
+//! film-harness validate     --plan PLAN.json --references REFERENCES.json [--api URL]
+//! film-harness run          --plan PLAN.json --references REFERENCES.json [--api URL] [--shots SH010,SH020]
+//!                           [--project-id ID] [--out DIR] [--poll-seconds N] [--no-export]
+//!                           [--skip-install-check]
+//! film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
+//! film-harness replace-take --out DIR --shot SH030 [--reason TEXT] [--export]
+//! film-harness cancel       --out DIR
+//! film-harness status       --out DIR
 //! film-harness trim         --run RUN.json --shot SH010 [--source-in S] [--source-out S]
 //! film-harness reorder      --run RUN.json --order SH020,SH010
-//! film-harness replace-take --run RUN.json --shot SH010 --asset asset_...
+//! film-harness swap-take    --run RUN.json --shot SH010 --asset asset_...
 //! film-harness fixture-images --out DIR
 //! film-harness fixture-sound  --out DIR
 //! ```
@@ -28,21 +32,31 @@
 //! refused before dispatch, 3 when the run stopped on a limit or a shot failed, 1 on a
 //! transport/API/io error.
 //!
-//! Ctrl-C cancels the in-flight job through the API, stops dispatching and writes the record with
-//! `outcome: failed` and a "canceled by operator" diagnostic, rather than orphaning a render.
+//! Ctrl-C cancels the in-flight job through the API, stops dispatching and writes the record,
+//! rather than orphaning a render. `film-harness cancel --out DIR` does the same from another
+//! shell. A cancel is RESUMABLE: `film-harness resume --out DIR` picks the run back up, reusing
+//! every take that finished and adopting every job still in flight (sc-22711).
 //!
-//! The three edit subcommands (sc-22712) change an assembled sequence without re-rendering
-//! anything: they read the run record, edit the SAVED timeline through the same API the editor
-//! uses, re-lay the sequence, and write the record back. `--export` re-runs the MP4 export.
+//! One controller per run directory: nothing locks `run.json`, so `run`, `resume` and
+//! `replace-take` must not be held against the same `--out` at the same time.
+//!
+//! Two different things can change which take a shot carries, and they are SEPARATE verbs:
+//!
+//! * `replace-take` (sc-22711) is the GENERATION side — it rejects the take a shot is carrying and
+//!   renders exactly one more for it, under the run's remaining budget.
+//! * `trim` / `reorder` / `swap-take` (sc-22712) are the EDIT side — they change an assembled
+//!   sequence without re-rendering anything: they read the run record, edit the SAVED timeline
+//!   through the same API the editor uses, re-lay the sequence, and write the record back.
+//!   `swap-take` swaps in an asset that already exists. `--export` re-runs the MP4 export.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use sceneworks_core::film_plan::RunOutcome;
+use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState};
 use sceneworks_rust_api::film_harness::{
-    self, ApiTransport, EditOptions, HarnessError, HttpTransport, RunOptions, TimelineEdit,
-    FIXTURE_REFERENCES, FIXTURE_SOUNDS,
+    self, ApiTransport, EditOptions, HarnessError, HttpTransport, ResumeOptions, RunControl,
+    RunOptions, TimelineEdit, FIXTURE_REFERENCES, FIXTURE_SOUNDS,
 };
 use sceneworks_rust_api::film_planner::{
     self, PlannerOptions, SceneWorksLlm, DEFAULT_LLM_JOB_TIMEOUT, DEFAULT_MAX_REPAIR_ROUNDS,
@@ -52,13 +66,17 @@ const USAGE: &str = "\
 film-harness — plan, compile and render a production plan into a SceneWorks sequence
 
 USAGE:
-  film-harness plan     --brief BRIEF.json --references REFERENCES.json --out DIR [OPTIONS]
-  film-harness compile  --plan PLAN.json --references REFERENCES.json --out DIR [OPTIONS]
-  film-harness validate --plan PLAN.json --references REFERENCES.json [--api URL] [--shots IDS]
-  film-harness run      --plan PLAN.json --references REFERENCES.json [OPTIONS]
+  film-harness plan         --brief BRIEF.json --references REFERENCES.json --out DIR [OPTIONS]
+  film-harness compile      --plan PLAN.json --references REFERENCES.json --out DIR [OPTIONS]
+  film-harness validate     --plan PLAN.json --references REFERENCES.json [--api URL] [--shots IDS]
+  film-harness run          --plan PLAN.json --references REFERENCES.json [OPTIONS]
+  film-harness resume       --out DIR [--api URL] [--poll-seconds N] [--no-export]
+  film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export] [--api URL]
+  film-harness cancel       --out DIR
+  film-harness status       --out DIR
   film-harness trim         --run RUN.json --shot ID [--source-in S] [--source-out S] [EDIT OPTIONS]
   film-harness reorder      --run RUN.json --order A,B,C                              [EDIT OPTIONS]
-  film-harness replace-take --run RUN.json --shot ID --asset ASSET_ID                 [EDIT OPTIONS]
+  film-harness swap-take    --run RUN.json --shot ID --asset ASSET_ID                 [EDIT OPTIONS]
   film-harness fixture-images --out DIR
   film-harness fixture-sound  --out DIR
 
@@ -83,16 +101,33 @@ OPTIONS (run):
   --no-export            Skip the timeline assembly and MP4 export
   --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
 
-EDIT OPTIONS (trim / reorder / replace-take):
+EDIT OPTIONS (trim / reorder / swap-take):
   --run RUN.json         The run record to edit. It names the project and the timeline, and is
                          rewritten in place with the edited sequence.
   --api URL / --token    As above
   --export               Re-export the MP4 after the edit (default: edit the timeline only)
   --poll-seconds N       Job polling cadence in seconds (default 5)
 
+resume       picks a run up from its record: finished takes are reused, jobs still in flight are
+             adopted, and what is left of the plan's wall-clock budget and per-shot attempt cap is
+             what bounds it. The selected take of every shot is left alone.
+replace-take RE-RENDERS: it rejects the take a shot is carrying and renders exactly ONE more for
+             that shot, with --reason recorded beside it. Other shots' takes, jobs and assets are
+             untouched; shots that declared a dependency on it are flagged needs_review, never
+             re-rendered. Without --export the existing export is only marked stale.
+swap-take    does NOT render: it swaps an asset that already exists into the assembled sequence.
+             Use replace-take to make a new take, swap-take to choose a different existing one.
+cancel       asks a run in another shell to stop; status prints what a record says without touching
+             the API. A directory with no run.json in it is refused, not created.
+
 Every edit re-lays the whole sequence: picture items stay contiguous in cut order, each dialogue
 clip keeps its offset from the start of its own shot, and the ambience/music beds re-span the new
 duration without restarting at any cut.
+
+ONE CONTROLLER PER RUN DIRECTORY: run, resume and replace-take each rewrite --out/run.json as they
+go and nothing locks it, so two held against the same directory at once interleave their writes.
+The idempotency keys make a SEQUENTIAL replay safe; they are not a lock. `run` refuses a directory
+that already holds a record — use resume, or a different --out.
 ";
 
 fn main() -> ExitCode {
@@ -114,9 +149,12 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     };
     match command {
         "validate" | "run" | "plan" | "compile" => {}
+        "resume" | "replace-take" => return record_command(command, &args[1..]).await,
+        "cancel" => return cancel_command(&args[1..]),
+        "status" => return status_command(&args[1..]),
         "fixture-images" => return fixture_images(&args[1..]),
         "fixture-sound" => return fixture_sound(&args[1..]),
-        "trim" | "reorder" | "replace-take" => return edit(command, &args[1..]).await,
+        "trim" | "reorder" | "swap-take" => return edit(command, &args[1..]).await,
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -166,77 +204,16 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     // SIGINT cancels the in-flight job through the API and still writes the record. Interrupting a
     // 45-minute render otherwise leaves it running on the GPU with nothing to say it happened,
     // which is the opposite of what the plan's cancellation limits exist for.
-    let control = film_harness::RunControl::new();
-    let signal = tokio::spawn({
-        let control = control.clone();
-        async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!(
-                    "film-harness: interrupt received — canceling the in-flight job and writing \
-                     the run record; interrupt again to exit now (the render keeps going)"
-                );
-                control.cancel();
-                // The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns
-                // SIGINT for the rest of the process, so without this a second Ctrl-C would be
-                // swallowed and the operator would have no way out but another signal.
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    eprintln!(
-                        "film-harness: second interrupt — exiting without a run record; the \
-                         worker may still be rendering (cancel it in the job list)"
-                    );
-                    std::process::exit(130);
-                }
-            }
-        }
-    });
+    // The run watches its OWN directory too, so `film-harness cancel --out DIR` from another shell
+    // reaches it without a shared handle (sc-22711).
+    let control = parsed.control.clone();
+    let signal = spawn_interrupt_handler(control.clone());
     let outcome = film_harness::run_with_control(&transport, &parsed.options, &control).await;
     signal.abort();
     match outcome {
         Ok(record) => {
-            let record_path = parsed.options.out_dir.join("run.json");
-            println!(
-                "run {} finished: {:?} ({:.0}s); record at {}",
-                record.run_id,
-                record.outcome,
-                record.elapsed_seconds,
-                record_path.display()
-            );
-            for shot in &record.shots {
-                let last = shot.attempts.last();
-                println!(
-                    "  {:<8} {:<15} attempts={} job={} asset={}{}",
-                    shot.shot_id,
-                    format!("{:?}", shot.outcome),
-                    shot.attempts.len(),
-                    last.and_then(|attempt| attempt.job_id.as_deref())
-                        .unwrap_or("-"),
-                    last.and_then(|attempt| attempt.take.as_ref())
-                        .map(|take| take.asset_id.as_str())
-                        .unwrap_or("-"),
-                    last.and_then(|attempt| attempt.error.as_deref())
-                        .map(|error| format!("  error: {error}"))
-                        .unwrap_or_default()
-                );
-            }
-            if let Some(export) = &record.export {
-                println!(
-                    "  export   {:<15} job={} asset={} path={}{}",
-                    export.status,
-                    export.job_id,
-                    export.asset_id.as_deref().unwrap_or("-"),
-                    export.render_path.as_deref().unwrap_or("-"),
-                    export
-                        .error
-                        .as_deref()
-                        .map(|error| format!("  error: {error}"))
-                        .unwrap_or_default()
-                );
-            }
-            match record.outcome {
-                RunOutcome::Completed => ExitCode::SUCCESS,
-                RunOutcome::Rejected => ExitCode::from(2),
-                _ => ExitCode::from(3),
-            }
+            print_record(&record, &parsed.options.out_dir);
+            exit_code_for(&record)
         }
         Err(error) => report_error(error),
     }
@@ -245,7 +222,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
 fn report_error(error: HarnessError) -> ExitCode {
     eprintln!("film-harness: {error}");
     match error {
-        HarnessError::Validation(_) => ExitCode::from(2),
+        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
         _ => ExitCode::from(1),
     }
 }
@@ -253,6 +230,7 @@ fn report_error(error: HarnessError) -> ExitCode {
 struct Parsed {
     api_url: String,
     token: Option<String>,
+    control: RunControl,
     options: RunOptions,
     planner: PlannerOptions,
     /// `--plan` as given, so `compile` can tell "no plan named" from "the default".
@@ -420,9 +398,14 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             .map(|dir| dir.join("brief.json"))
             .unwrap_or_else(|| PathBuf::from("brief.json")),
     };
+    // A `run` watches its own directory, which is how `film-harness cancel --out DIR` in another
+    // shell reaches it (sc-22711). A stale sentinel from a previous controller is cleared first.
+    let control = RunControl::watching(&out_dir);
+    film_harness::clear_cancel_request(&out_dir).map_err(|error| error.to_string())?;
     Ok(Parsed {
         api_url: api_url.clone(),
         token,
+        control,
         planner: PlannerOptions {
             brief_path,
             reference_pack_path: reference_pack_path.clone(),
@@ -490,7 +473,263 @@ fn fixture_images(args: &[String]) -> ExitCode {
     }
 }
 
-/// `trim` / `reorder` / `replace-take` — edit an assembled sequence in place (sc-22712).
+/// Cancel the in-flight run on SIGINT, and exit on a second one.
+///
+/// The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns SIGINT for the
+/// rest of the process, so without it a second Ctrl-C would be swallowed and the operator would
+/// have no way out but another signal.
+fn spawn_interrupt_handler(control: RunControl) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!(
+                "film-harness: interrupt received — canceling the in-flight job and writing the \
+                 run record; interrupt again to exit now (the render keeps going)"
+            );
+            control.cancel();
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!(
+                    "film-harness: second interrupt — exiting without a run record; the worker \
+                     may still be rendering (cancel it in the job list)"
+                );
+                std::process::exit(130);
+            }
+        }
+    })
+}
+
+fn exit_code_for(record: &RunRecord) -> ExitCode {
+    match record.outcome {
+        RunOutcome::Completed => ExitCode::SUCCESS,
+        RunOutcome::Rejected => ExitCode::from(2),
+        _ => ExitCode::from(3),
+    }
+}
+
+/// One screen of what a run record says: per-shot selection, attempts, review flags, the export,
+/// and — the part an operator acts on — whether the run can be resumed and why it stopped.
+fn print_record(record: &RunRecord, out_dir: &std::path::Path) {
+    println!(
+        "run {} {} — {:?} ({:.0}s); record at {}",
+        record.run_id,
+        match record.state {
+            RunState::Running => "RUNNING",
+            RunState::Finished => "finished",
+        },
+        record.outcome,
+        record.elapsed_seconds,
+        out_dir.join(film_harness::RUN_RECORD_FILE).display()
+    );
+    for shot in &record.shots {
+        let selected = shot.selected();
+        println!(
+            "  {:<8} {:<15} attempts={} selected={} job={} asset={}{}",
+            shot.shot_id,
+            format!("{:?}", shot.outcome),
+            shot.attempts.len(),
+            shot.selected_attempt
+                .map(|attempt| attempt.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            selected
+                .or_else(|| shot.attempts.last())
+                .and_then(|attempt| attempt.job_id.as_deref())
+                .unwrap_or("-"),
+            selected
+                .and_then(|attempt| attempt.take.as_ref())
+                .map(|take| take.asset_id.as_str())
+                .unwrap_or("-"),
+            shot.attempts
+                .last()
+                .and_then(|attempt| attempt.error.as_deref())
+                .map(|error| format!("  error: {error}"))
+                .unwrap_or_default()
+        );
+        for attempt in shot.attempts.iter().filter(|a| a.rejection.is_some()) {
+            let rejection = attempt.rejection.as_ref().expect("filtered");
+            println!(
+                "           rejected attempt {} ({}): {}",
+                attempt.attempt, rejection.at, rejection.reason
+            );
+        }
+        for flag in &shot.needs_review {
+            println!("           NEEDS REVIEW: {}", flag.reason);
+        }
+    }
+    if let Some(export) = &record.export {
+        println!(
+            "  export   {:<15} job={} asset={} path={}{}{}",
+            export.status,
+            export.job_id,
+            export.asset_id.as_deref().unwrap_or("-"),
+            export.render_path.as_deref().unwrap_or("-"),
+            if export.stale { "  STALE" } else { "" },
+            export
+                .error
+                .as_deref()
+                .map(|error| format!("  error: {error}"))
+                .unwrap_or_default()
+        );
+    }
+    if let Some(stop) = &record.stop {
+        println!(
+            "  stopped: {} — {}\n  {}",
+            stop.reason,
+            stop.detail,
+            if stop.resumable {
+                "resumable: `film-harness resume --out DIR`"
+            } else {
+                "terminal: this run will not dispatch again"
+            }
+        );
+    }
+}
+
+/// `resume` and `replace-take`: both continue an existing record through the API.
+async fn record_command(command: &str, args: &[String]) -> ExitCode {
+    let parsed = match parse_record_options(command, args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("film-harness: {message}\n\n{USAGE}");
+            return ExitCode::from(1);
+        }
+    };
+    let transport = match HttpTransport::new(&parsed.api_url, parsed.token.clone()) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let signal = spawn_interrupt_handler(parsed.options.control.clone());
+    let result = match command {
+        "resume" => film_harness::resume(&transport, &parsed.options).await,
+        _ => {
+            let Some(shot) = parsed.shot.as_deref() else {
+                eprintln!("film-harness: replace-take needs --shot SHxxx\n\n{USAGE}");
+                return ExitCode::from(1);
+            };
+            film_harness::replace_take(&transport, &parsed.options, shot, &parsed.reason).await
+        }
+    };
+    signal.abort();
+    match result {
+        Ok(record) => {
+            print_record(&record, &parsed.options.out_dir);
+            exit_code_for(&record)
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+fn cancel_command(args: &[String]) -> ExitCode {
+    let Some(out_dir) = flag_value(args, "--out") else {
+        eprintln!("film-harness: cancel needs --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    match film_harness::request_cancel(&PathBuf::from(out_dir)) {
+        Ok(path) => {
+            println!(
+                "cancel requested ({}); the run stops within one poll interval and its record says \
+                 whether it can be resumed",
+                path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        // A mistyped --out is refused (exit 2) rather than reported as a cancel nobody receives.
+        Err(error) => report_error(error),
+    }
+}
+
+fn status_command(args: &[String]) -> ExitCode {
+    let Some(out_dir) = flag_value(args, "--out") else {
+        eprintln!("film-harness: status needs --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let out_dir = PathBuf::from(out_dir);
+    match film_harness::read_run_record(&out_dir) {
+        Ok(record) => {
+            print_record(&record, &out_dir);
+            if record.is_resumable() {
+                ExitCode::from(3)
+            } else {
+                exit_code_for(&record)
+            }
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+struct ParsedRecord {
+    api_url: String,
+    token: Option<String>,
+    shot: Option<String>,
+    reason: String,
+    options: ResumeOptions,
+}
+
+fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, String> {
+    let mut out: Option<PathBuf> = None;
+    let mut api_url = std::env::var("SCENEWORKS_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let mut token = std::env::var("SCENEWORKS_ACCESS_TOKEN").ok();
+    let mut shot: Option<String> = None;
+    let mut reason = String::new();
+    let mut poll_seconds = 5_u64;
+    // `resume` finishes the run, so it exports by default. `replace-take` re-renders ONE shot; the
+    // export is other work, so it only happens when asked for and is otherwise marked stale.
+    let mut export = command == "resume";
+    let mut require_installed = true;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--out" => out = Some(PathBuf::from(value()?)),
+            "--api" => api_url = value()?,
+            "--token" => token = Some(value()?),
+            "--shot" => shot = Some(value()?),
+            "--reason" => reason = value()?,
+            "--poll-seconds" => {
+                poll_seconds = value()?
+                    .parse::<u64>()
+                    .map_err(|error| format!("--poll-seconds: {error}"))?
+                    .max(1)
+            }
+            "--no-export" => export = false,
+            "--export" => export = true,
+            "--skip-install-check" => require_installed = false,
+            other => return Err(format!("unknown option {other:?}")),
+        }
+    }
+    let out_dir = out.ok_or("--out is required")?;
+    if reason.trim().is_empty() {
+        reason = "replaced by hand".to_owned();
+    }
+    let mut options = ResumeOptions::new(out_dir);
+    options.poll_interval = Duration::from_secs(poll_seconds);
+    options.export = export;
+    options.require_installed = require_installed;
+    Ok(ParsedRecord {
+        api_url,
+        token,
+        shot,
+        reason,
+        options,
+    })
+}
+
+/// `trim` / `reorder` / `swap-take` — edit an assembled sequence in place (sc-22712).
 async fn edit(command: &str, args: &[String]) -> ExitCode {
     let mut run_record: Option<PathBuf> = None;
     let mut api_url = std::env::var("SCENEWORKS_API_URL")
@@ -591,11 +830,11 @@ async fn edit(command: &str, args: &[String]) -> ExitCode {
         _ => {
             let (Some(shot_id), Some(asset_id)) = (shot, asset) else {
                 eprintln!(
-                    "film-harness: replace-take needs --shot ID and --asset ASSET_ID\n\n{USAGE}"
+                    "film-harness: swap-take needs --shot ID and --asset ASSET_ID\n\n{USAGE}"
                 );
                 return ExitCode::from(1);
             };
-            TimelineEdit::ReplaceTake { shot_id, asset_id }
+            TimelineEdit::SwapTake { shot_id, asset_id }
         }
     };
 

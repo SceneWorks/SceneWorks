@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 
 use crate::film_plan::{
     parse_resolution, validate_all, ModelLane, PlanDiagnostic, PlanLimits, PlanModel, PlanSound,
-    ProductionPlan, ReferencePack, Shot, ShotConditioning, PLAN_SCHEMA_VERSION,
+    ProductionPlan, ReferencePack, Shot, ShotConditioning, ShotDependency, PLAN_SCHEMA_VERSION,
     SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
@@ -651,6 +651,21 @@ pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> Productio
                 conditioning: shot.conditioning.clone(),
                 seed: shot.seed,
                 continuity_roles: shot.continuity_roles.clone(),
+                // A declared chain IS a continuity dependency in sc-22711's vocabulary — "this
+                // shot's start state is that shot's end state" — so a generated plan carries the
+                // edge rather than leaving a planner-written film with nothing to flag when a take
+                // it continues is replaced. The planner is not asked for edges: this is the one it
+                // already stated, restated where `replace-take` reads it.
+                depends_on: shot
+                    .conditioning
+                    .chain_from_shot_id
+                    .iter()
+                    .map(|shot_id| ShotDependency {
+                        shot_id: shot_id.clone(),
+                        kind: "continuity".to_owned(),
+                        note: "declared by conditioning.chainFromShotId".to_owned(),
+                    })
+                    .collect(),
             })
             .collect(),
     }

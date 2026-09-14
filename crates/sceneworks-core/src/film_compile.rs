@@ -240,6 +240,10 @@ pub struct DispatchContext<'a> {
     pub plan_version: u32,
     pub attempt: u32,
     pub tier: Option<&'a str>,
+    /// The key this attempt dispatches under, stamped into the job's `filmHarness` provenance so a
+    /// controller that died between the POST and the record write finds its OWN job instead of
+    /// enqueuing a second render for the same attempt (sc-22711). `None` leaves it out.
+    pub idempotency_key: Option<&'a str>,
     /// Reference role -> imported asset id.
     pub role_assets: &'a BTreeMap<String, String>,
 }
@@ -321,6 +325,9 @@ impl CompiledRequest {
             "shotId": self.shot_id,
             "attempt": context.attempt,
         });
+        if let Some(key) = context.idempotency_key {
+            provenance["idempotencyKey"] = json!(key);
+        }
         if self.prompt_source == PromptSource::Refined {
             provenance["promptSource"] = json!("refined");
         }
@@ -747,6 +754,7 @@ mod tests {
             plan_version: 2,
             attempt: 1,
             tier: Some("q4"),
+            idempotency_key: Some("run_abc:SH010:a1"),
             role_assets: &assets,
         };
         let body = compiled
@@ -766,6 +774,12 @@ mod tests {
         assert_eq!(body["advanced"]["mlxQuantize"], 4);
         assert_eq!(body["advanced"]["filmHarness"]["shotId"], "SH010");
         assert_eq!(body["advanced"]["filmHarness"]["planVersion"], 2);
+        // The replay key rides the dispatched payload: it is how a controller that died between the
+        // POST and the record write finds its own job instead of enqueuing a second render.
+        assert_eq!(
+            body["advanced"]["filmHarness"]["idempotencyKey"],
+            "run_abc:SH010:a1"
+        );
         assert!(body.get("sourceAssetId").is_none());
         assert!(body["advanced"]["filmHarness"]
             .get("promptSource")
@@ -848,6 +862,7 @@ mod tests {
                 plan_version: 2,
                 attempt: 1,
                 tier: None,
+                idempotency_key: None,
                 role_assets: &assets,
             })
             .unwrap();
