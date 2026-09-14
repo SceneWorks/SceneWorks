@@ -3191,6 +3191,73 @@ mod artifact_provenance_tests {
         );
     }
 
+    #[test]
+    fn exact_revision_handoff_never_repairs_an_inexact_receipt_identity() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "starvector/terminal-copy";
+        let model_id = "starvector_1b";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot");
+        std::fs::write(snapshot.join("model.safetensors"), b"exact weights").expect("weights");
+        let managed = data.path().join("models").join(safe_download_dir(model_id));
+        std::fs::create_dir_all(&managed).expect("managed receipt dir");
+        let marker = managed.join(INSTALL_MARKER);
+        let valid = json!({
+            "schemaVersion": 2,
+            "repo": repo,
+            "modelId": model_id,
+            "variant": "default",
+            "snapshotRevision": revision,
+            "resolvedFiles": ["model.safetensors"],
+            "artifactTreeStamp": null,
+        });
+        let mutations = [
+            (
+                "wrong revision",
+                "snapshotRevision",
+                json!("different-revision"),
+            ),
+            ("missing model", "modelId", Value::Null),
+            ("wrong schema", "schemaVersion", json!(1)),
+            ("wrong variant", "variant", json!("q4")),
+        ];
+        for (label, key, value) in mutations {
+            let mut entry = valid.clone();
+            if value.is_null() {
+                entry.as_object_mut().expect("entry").remove(key);
+            } else {
+                entry[key] = value;
+            }
+            let mut envelope = entry.clone();
+            envelope["receipts"] = json!([entry]);
+            let before = serde_json::to_vec(&envelope).expect("receipt json");
+            std::fs::write(&marker, &before).expect("receipt");
+            assert_eq!(
+                huggingface_receipt_weights_dir_at_revision(
+                    data.path(),
+                    repo,
+                    revision,
+                    Some(model_id),
+                    None,
+                ),
+                None,
+                "{label} must be rejected before repair"
+            );
+            assert_eq!(
+                std::fs::read(&marker).expect("receipt after rejected read"),
+                before,
+                "{label} must leave marker bytes unchanged"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn hf_tree_stamp_detects_in_place_blob_mutation_beneath_unchanged_snapshot_symlink() {
@@ -3283,10 +3350,16 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     // An exact-revision native provider is itself a provenance consumer. A source-produced v2
     // receipt may predate download-time tree stamping (or have crossed a verified offline-library
     // materialization boundary), so establish the canonical locked/atomic baseline when the stamp
-    // is absent. Existing stamp drift is never repaired, and the requested repository/revision is
-    // still checked below before a path can cross the native load boundary.
-    let resolved =
-        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Allow)?;
+    // is absent. Before any repair write, require the v2 receipt to name the complete identity the
+    // native provider requested. Existing stamp drift is never repaired.
+    let resolved = huggingface_receipt_weights_with_revision(
+        data_dir,
+        repo,
+        model_id,
+        variant,
+        Some(revision),
+        ProvenanceRepair::Allow,
+    )?;
     let identity = &resolved.provenance.as_ref()?.identity;
     if identity.repository != repo || identity.revision != revision {
         return None;
@@ -3308,6 +3381,17 @@ pub(crate) fn huggingface_receipt_weights(
     variant: Option<&str>,
     repair: ProvenanceRepair,
 ) -> Option<ResolvedWeights> {
+    huggingface_receipt_weights_with_revision(data_dir, repo, model_id, variant, None, repair)
+}
+
+fn huggingface_receipt_weights_with_revision(
+    data_dir: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+    required_revision: Option<&str>,
+    repair: ProvenanceRepair,
+) -> Option<ResolvedWeights> {
     let models_dir = data_dir.join("models");
     let repo_marker = models_dir
         .join(safe_download_dir(repo))
@@ -3325,9 +3409,15 @@ pub(crate) fn huggingface_receipt_weights(
     // The repo/model marker is the overwhelmingly common path. Resolve it before walking every
     // installed model directory; a targeted hit makes this lookup O(1) in the catalog size.
     for marker in &targeted {
-        if let Some(weights_dir) =
-            receipt_weights_dir_from_marker(data_dir, marker, repo, model_id, variant, repair)
-        {
+        if let Some(weights_dir) = receipt_weights_dir_from_marker(
+            data_dir,
+            marker,
+            repo,
+            model_id,
+            variant,
+            required_revision,
+            repair,
+        ) {
             return Some(weights_dir);
         }
     }
@@ -3338,9 +3428,15 @@ pub(crate) fn huggingface_receipt_weights(
         .map(|entry| entry.path().join(INSTALL_MARKER))
         .filter(|marker| !targeted.contains(marker))
     {
-        if let Some(weights_dir) =
-            receipt_weights_dir_from_marker(data_dir, &marker, repo, model_id, variant, repair)
-        {
+        if let Some(weights_dir) = receipt_weights_dir_from_marker(
+            data_dir,
+            &marker,
+            repo,
+            model_id,
+            variant,
+            required_revision,
+            repair,
+        ) {
             return Some(weights_dir);
         }
     }
@@ -3431,9 +3527,14 @@ fn establish_receipt_tree_stamp(
         .unwrap_or_else(|| vec![&top]);
     if !current.iter().any(|entry| identity(entry))
         || current.iter().filter(|entry| identity(entry)).any(|entry| {
-            ["resolvedFiles", "snapshotRevision", "artifactTreeStamp"]
-                .iter()
-                .any(|key| entry.get(*key) != receipt.get(*key))
+            [
+                "schemaVersion",
+                "resolvedFiles",
+                "snapshotRevision",
+                "artifactTreeStamp",
+            ]
+            .iter()
+            .any(|key| entry.get(*key) != receipt.get(*key))
         })
     {
         return Err(WorkerError::InvalidPayload(
@@ -3460,6 +3561,7 @@ fn receipt_weights_dir_from_marker(
     repo: &str,
     model_id: Option<&str>,
     variant: Option<&str>,
+    required_revision: Option<&str>,
     repair: ProvenanceRepair,
 ) -> Option<ResolvedWeights> {
     #[cfg(test)]
@@ -3474,6 +3576,19 @@ fn receipt_weights_dir_from_marker(
     for receipt in receipts {
         if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
             continue;
+        }
+        // Exact native handoffs may establish a missing tree stamp, but only after the receipt
+        // already proves the complete requested identity. This keeps an A lookup from stamping an
+        // unstamped B receipt and excludes permissive legacy receipts from the repair path.
+        if let Some(revision) = required_revision {
+            if receipt.get("schemaVersion").and_then(Value::as_u64) != Some(2)
+                || receipt.get("modelId").and_then(Value::as_str) != model_id
+                || receipt.get("variant").and_then(Value::as_str)
+                    != Some(variant.unwrap_or("default"))
+                || receipt.get("snapshotRevision").and_then(Value::as_str) != Some(revision)
+            {
+                continue;
+            }
         }
         if let Some(model_id) = model_id {
             if receipt

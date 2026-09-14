@@ -362,7 +362,7 @@ impl NativeStarVectorProvider {
             identity.repository,
             identity.revision,
             Some(identity.model_id),
-            None,
+            Some("default"),
         )
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(

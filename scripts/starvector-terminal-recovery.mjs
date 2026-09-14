@@ -47,6 +47,59 @@ async function treeInventory(root) {
   return entries.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+const EXECUTION_RECORDS = ["controller-failure.json", "preflight-provenance.json", "case-bundle.json", "product-service-worker.stdout.log"];
+async function boundedArchiveRecords(archive, required) {
+  const program = String.raw`import base64,json,pathlib,stat,sys,zipfile
+archive=pathlib.Path(sys.argv[1]); required=json.loads(sys.argv[2]); result={}; names=set(); total=0
+with zipfile.ZipFile(archive) as z:
+ infos=z.infolist()
+ if len(infos)>20000: raise ValueError('archive entry limit')
+ for i in infos:
+  p=pathlib.PurePosixPath(i.filename); total+=i.file_size
+  if p.is_absolute() or '..' in p.parts or '\\' in i.filename or i.filename in names or stat.S_ISLNK(i.external_attr>>16) or total>512*1024*1024: raise ValueError('unsafe failed execution archive')
+  names.add(i.filename)
+ for suffix in required:
+  matches=[i for i in infos if not i.is_dir() and (i.filename==suffix or i.filename.endswith('/'+suffix))]
+  if len(matches)!=1 or matches[0].file_size>2*1024*1024: raise ValueError('missing, ambiguous, or oversized failed execution record '+suffix)
+  result[suffix]=base64.b64encode(z.read(matches[0])).decode('ascii')
+print(json.dumps(result,separators=(',',':')))`;
+  let encoded;
+  try {
+    encoded = JSON.parse((await execFile(python(), ["-c", program, archive, JSON.stringify(required)], { maxBuffer: 8 * 1024 * 1024 })).stdout);
+  } catch (error) {
+    fail(`cannot inspect failed execution archive: ${error.message}`);
+  }
+  return Object.fromEntries(required.map((name) => [name, Buffer.from(encoded[name], "base64")]));
+}
+const parseRecord = (records, name) => {
+  try { return JSON.parse(records[name]); } catch { fail(`invalid failed execution ${name}`); }
+};
+
+export async function validateNativeExecutionArchives(value, archives) {
+  if (!archives?.upstream || !archives?.raw || !archives?.combined) fail("native execution archives are incomplete");
+  const upstreamRecords = await boundedArchiveRecords(archives.upstream, ["upstream-controller.json"]);
+  const rawRecords = await boundedArchiveRecords(archives.raw, EXECUTION_RECORDS);
+  const combinedRecords = await boundedArchiveRecords(archives.combined, EXECUTION_RECORDS);
+  for (const name of EXECUTION_RECORDS) if (!rawRecords[name].equals(combinedRecords[name])) fail(`combined archive substituted ${name}`);
+
+  const expected = value.failure, upstream = parseRecord(upstreamRecords, "upstream-controller.json");
+  if (upstream.schema_version !== expected.evidence_schema_version || upstream.campaign_run_id !== value.campaign_id || upstream.inference_revision !== value.inference_revision || upstream.sceneworks_revision !== value.sceneworks_revision || String(upstream.workflow_run_id) !== value.workflow.run_id || upstream.workflow_run_attempt !== value.workflow.run_attempt) fail("upstream controller identity differs from failed execution");
+  const bundle = parseRecord(rawRecords, "case-bundle.json");
+  const tuple = bundle.tuples?.[expected.tuple];
+  const modelRows = [...(tuple?.image_quality ?? []), ...(tuple?.deterministic_parity ?? [])];
+  if (bundle.schema_version !== expected.evidence_schema_version || bundle.inference_revision !== value.inference_revision || modelRows.length < 1 || modelRows.some((row) => row.model !== expected.model_id) || tuple?.upstream_reference?.checkpoint_revision !== expected.model_revision) fail("native case bundle identity differs from failed execution");
+  const provenance = parseRecord(rawRecords, "preflight-provenance.json");
+  if (provenance.campaign_run_id !== value.campaign_id || provenance.inference_revision !== value.inference_revision || provenance.permanent_pin !== value.inference_revision || provenance.tuple !== expected.tuple || String(provenance.workflow_run_id) !== value.workflow.run_id || provenance.workflow_run_attempt !== value.workflow.run_attempt || provenance.service?.sceneworks_revision !== value.sceneworks_revision || provenance.service?.inference_revision !== value.inference_revision || provenance.service?.tuple !== expected.tuple || provenance.service?.worker?.model_id !== expected.model_id || provenance.service?.worker?.provider_id !== "mlx-starvector-1b" || provenance.service?.models?.["starvector-1b"]?.revision !== expected.model_revision) fail("native preflight provenance differs from failed execution");
+  const controller = parseRecord(rawRecords, "controller-failure.json");
+  if (controller.campaign_run_id !== value.campaign_id || controller.permanent_pin !== value.inference_revision || controller.tuple !== expected.tuple || controller.status !== "failed") fail("native controller failure identity differs");
+  const logRecords = rawRecords["product-service-worker.stdout.log"].toString("utf8").trim().split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { fail("invalid native worker evidence log"); } });
+  const exactError = `vector_model_unavailable: exact receipt-backed snapshot ${expected.model_repository}@${expected.model_revision} is missing or unproven`;
+  const failures = logRecords.filter((record) => record.event === "utility_job_failed");
+  const selections = logRecords.filter((record) => record.event === "model_source_tier_selected");
+  if (failures.length < 1 || failures.some((record) => record.error !== exactError) || selections.length < 1 || selections.some((record) => record.repository !== expected.model_repository || record.revision !== expected.model_revision)) fail("native worker failure does not prove the declared receipt rejection");
+  return value;
+}
+
 // Invoked in a hosted preparation job, before the first hardware job. ZIPs are
 // GitHub artifacts, not model downloads. A local archive directory supports the
 // same production path for a CPU-only integration dry run.
@@ -104,7 +157,7 @@ export function validateExecutionPredecessor(config, run, artifact, jobs) {
     }
     return value;
   }
-  if (value.failure?.code !== "native_model_receipt_unproven" || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b") fail("invalid native execution failure identity");
+  if (value.failure?.code !== "native_model_receipt_unproven" || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b" || value.failure.evidence_schema_version !== 1 || value.failure.model_id !== "starvector_1b" || value.failure.model_repository !== "starvector/starvector-1b-im2svg" || !/^[a-f0-9]{40}$/.test(value.failure.model_revision ?? "")) fail("invalid native execution failure identity");
   const expectedRoles = ["upstream", "raw", "combined"], inputs = value.source_artifacts, artifacts = Array.isArray(artifact) ? artifact : [];
   if (!Array.isArray(inputs) || inputs.length !== expectedRoles.length || artifacts.length !== expectedRoles.length) fail("native execution artifact census differs");
   for (const [index, role] of expectedRoles.entries()) {
@@ -132,11 +185,15 @@ async function prepareExecutionPredecessor(config, output, { archiveRoot, token,
   const run = await get(base), artifacts = await Promise.all(inputs.map((input) => get(`actions/artifacts/${input.id}`))), jobs = await get(`${base}/jobs?per_page=100`);
   validateExecutionPredecessor(config, run, value.stage === "native" ? artifacts : artifacts[0], jobs);
   const root = `execution-attempts/${value.campaign_id}`;
+  const archivePaths = {};
   for (const input of inputs) {
     const bytes = archiveRoot ? await readFile(path.join(archiveRoot, `${input.id}.zip`)) : await get(`actions/artifacts/${input.id}/zip`, true);
     if (bytes.length !== input.size || `sha256:${sha(bytes)}` !== input.digest) fail("failed execution archive identity differs");
-    await put(output, `${root}/${value.stage === "native" ? input.role : "upstream"}.zip`, bytes);
+    const role = value.stage === "native" ? input.role : "upstream";
+    await put(output, `${root}/${role}.zip`, bytes);
+    archivePaths[role] = path.join(output, root, `${role}.zip`);
   }
+  if (value.stage === "native") await validateNativeExecutionArchives(value, archivePaths);
   await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, ...(value.stage === "native" ? { artifacts } : { artifact: artifacts[0] }), jobs }));
 }
 
@@ -164,6 +221,7 @@ export async function verifyExecutionPredecessor(config, root, nativePredecessor
     validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, value.stage === "native" ? metadata.artifacts : metadata.artifact, metadata.jobs);
     const inputs = value.stage === "native" ? value.source_artifacts : [value.source_artifact];
     for (const input of inputs) await checkedRecoveryFile(root, `${relative}/${value.stage === "native" ? input.role : "upstream"}.zip`, { size: input.size, sha256: input.digest.slice(7) });
+    if (value.stage === "native") await validateNativeExecutionArchives(value, Object.fromEntries(inputs.map((input) => [input.role, path.join(root, relative, `${input.role}.zip`)])));
   }
   return config.execution_predecessor ?? nativePredecessor;
 }

@@ -84,7 +84,11 @@
     "failure": {
       "code": "native_model_receipt_unproven",
       "phase": "execution",
-      "tuple": "mlx:1b"
+      "tuple": "mlx:1b",
+      "evidence_schema_version": 1,
+      "model_id": "starvector_1b",
+      "model_repository": "starvector/starvector-1b-im2svg",
+      "model_revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9"
     },
     "source_artifacts": [
       {

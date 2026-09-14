@@ -8,6 +8,15 @@ import test from "node:test";
 import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateExecutionPredecessor, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+async function writeZip(root, id, files) {
+  const source = path.join(root, `zip-${id}`);
+  for (const [relative, content] of Object.entries(files)) {
+    const file = path.join(source, relative); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content);
+  }
+  const archive = path.join(root, `${id}.zip`);
+  execFileSync("python3", ["-c", "import os,sys,zipfile\nroot,out=sys.argv[1:]\nwith zipfile.ZipFile(out,'w') as z:\n for base,_,names in os.walk(root):\n  for name in names:\n   p=os.path.join(base,name); z.write(p,os.path.relpath(p,root))", source, archive]);
+  return readFile(archive);
+}
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-recovery-test-")); t.after(() => rm(root, { recursive: true, force: true }));
   const archive = path.join(root, "77.zip");
@@ -100,14 +109,8 @@ test("authenticated upstream-only failure advances execution without rewriting n
 });
 
 test("authenticated native failure retains upstream, raw, and combined archives as one successor", async (t) => {
-  const { config, output, root } = await fixture(t), bytes = await readFile(path.join(root, "77.zip"));
+  const { config, output, root } = await fixture(t);
   const campaign = "failed-native";
-  const sourceArtifacts = [
-    ["upstream", "88", `starvector-upstream-${campaign}`],
-    ["raw", "89", `starvector-terminal-mlx-1b-${campaign}`],
-    ["combined", "90", `starvector-terminal-receipt-${campaign}`],
-  ].map(([role, id, name]) => ({ role, id, name, size: bytes.length, digest: `sha256:${sha(bytes)}` }));
-  for (const input of sourceArtifacts) await writeFile(path.join(root, `${input.id}.zip`), bytes);
   const value = {
     stage: "native",
     predecessor_campaign_id: config.campaign_id,
@@ -115,9 +118,29 @@ test("authenticated native failure retains upstream, raw, and combined archives 
     inference_revision: "c".repeat(40),
     sceneworks_revision: "d".repeat(40),
     workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/server-candle-linux.yml", run_id: "101", run_attempt: 1, head_sha: "d".repeat(40), conclusion: "failure" },
-    failure: { code: "native_model_receipt_unproven", phase: "execution", tuple: "mlx:1b" },
-    source_artifacts: sourceArtifacts,
+    failure: { code: "native_model_receipt_unproven", phase: "execution", tuple: "mlx:1b", evidence_schema_version: 1, model_id: "starvector_1b", model_repository: "starvector/starvector-1b-im2svg", model_revision: "e".repeat(40) },
   };
+  const upstream = { "upstream-controller.json": JSON.stringify({ schema_version: 1, campaign_run_id: campaign, inference_revision: value.inference_revision, sceneworks_revision: value.sceneworks_revision, workflow_run_id: value.workflow.run_id, workflow_run_attempt: value.workflow.run_attempt }) };
+  const records = {
+    "controller-failure.json": JSON.stringify({ campaign_run_id: campaign, permanent_pin: value.inference_revision, tuple: value.failure.tuple, status: "failed" }),
+    "preflight-provenance.json": JSON.stringify({ campaign_run_id: campaign, inference_revision: value.inference_revision, permanent_pin: value.inference_revision, tuple: value.failure.tuple, workflow_run_id: value.workflow.run_id, workflow_run_attempt: value.workflow.run_attempt, service: { sceneworks_revision: value.sceneworks_revision, inference_revision: value.inference_revision, tuple: value.failure.tuple, models: { "starvector-1b": { revision: value.failure.model_revision } }, worker: { model_id: value.failure.model_id, provider_id: "mlx-starvector-1b" } } }),
+    "case-bundle.json": JSON.stringify({ schema_version: 1, inference_revision: value.inference_revision, tuples: { [value.failure.tuple]: { image_quality: [{ model: value.failure.model_id }], deterministic_parity: [{ model: value.failure.model_id }], upstream_reference: { checkpoint_revision: value.failure.model_revision } } } }),
+    "product-service-worker.stdout.log": [
+      JSON.stringify({ event: "model_source_tier_selected", repository: value.failure.model_repository, revision: value.failure.model_revision }),
+      JSON.stringify({ event: "utility_job_failed", error: `vector_model_unavailable: exact receipt-backed snapshot ${value.failure.model_repository}@${value.failure.model_revision} is missing or unproven` }),
+    ].join("\n"),
+  };
+  const bytesByRole = {
+    upstream: await writeZip(root, "88", upstream),
+    raw: await writeZip(root, "89", records),
+    combined: await writeZip(root, "90", Object.fromEntries(Object.entries(records).map(([name, content]) => [`evidence/${name}`, content]))),
+  };
+  const sourceArtifacts = [
+    ["upstream", "88", `starvector-upstream-${campaign}`],
+    ["raw", "89", `starvector-terminal-mlx-1b-${campaign}`],
+    ["combined", "90", `starvector-terminal-receipt-${campaign}`],
+  ].map(([role, id, name]) => ({ role, id, name, size: bytesByRole[role].length, digest: `sha256:${sha(bytesByRole[role])}` }));
+  value.source_artifacts = sourceArtifacts;
   config.execution_predecessor = value;
   const run = { id: 101, run_attempt: 1, head_sha: value.sceneworks_revision, path: value.workflow.path, event: "workflow_dispatch", status: "completed", conclusion: "failure" };
   const artifacts = sourceArtifacts.map((input) => ({ id: Number(input.id), name: input.name, size_in_bytes: input.size, digest: input.digest, expired: false, workflow_run: { id: 101, head_sha: run.head_sha } }));
@@ -138,4 +161,34 @@ test("authenticated native failure retains upstream, raw, and combined archives 
   const wrongJobs = structuredClone(jobs); wrongJobs.jobs.find((job) => job.name.endsWith("mlx-8b")).conclusion = "success";
   assert.throws(() => validateExecutionPredecessor(config, run, artifacts, wrongJobs), /mlx-8b/);
   assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: { ...value, failure: { ...value.failure, code: "generic_error" } } }, run, artifacts, jobs), /failure identity/);
+
+  let mutationIndex = 0;
+  const expectSemanticFailure = async (role, files, pattern) => {
+    const mutated = structuredClone(value), observed = artifacts.map((entry) => ({ ...entry }));
+    const roles = role === "raw+combined" ? ["raw", "combined"] : [role];
+    for (const currentRole of roles) {
+      const input = mutated.source_artifacts.find((entry) => entry.role === currentRole);
+      const archiveFiles = currentRole === "combined" ? Object.fromEntries(Object.entries(files).map(([name, content]) => [`evidence/${name}`, content])) : files;
+      const bytes = await writeZip(root, input.id, archiveFiles); input.size = bytes.length; input.digest = `sha256:${sha(bytes)}`;
+      const observedArtifact = observed.find((entry) => String(entry.id) === input.id);
+      observedArtifact.size_in_bytes = input.size; observedArtifact.digest = input.digest;
+    }
+    const mutatedFetch = async (url) => {
+      const found = mutated.source_artifacts.findIndex((entry) => url.includes(`/artifacts/${entry.id}`));
+      return { ok: true, json: async () => found >= 0 ? observed[found] : url.includes("/jobs?") ? jobs : run };
+    };
+    const mutatedConfig = { ...config, execution_predecessor: mutated };
+    try {
+      await assert.rejects(() => prepareRecovery(mutatedConfig, path.join(root, `semantic-${mutationIndex++}`), { archiveRoot: root, token: "fixture-token", fetchImpl: mutatedFetch }), pattern);
+    } finally {
+      for (const currentRole of roles) {
+        const input = value.source_artifacts.find((entry) => entry.role === currentRole);
+        await writeFile(path.join(root, `${input.id}.zip`), bytesByRole[currentRole]);
+      }
+    }
+  };
+  await expectSemanticFailure("upstream", { ...upstream, "upstream-controller.json": JSON.stringify({ ...JSON.parse(upstream["upstream-controller.json"]), inference_revision: "f".repeat(40) }) }, /upstream controller identity/);
+  await expectSemanticFailure("raw+combined", { ...records, "preflight-provenance.json": JSON.stringify({ ...JSON.parse(records["preflight-provenance.json"]), tuple: "mlx:8b" }) }, /preflight provenance/);
+  await expectSemanticFailure("raw+combined", { ...records, "product-service-worker.stdout.log": JSON.stringify({ event: "utility_job_failed", error: "generic infrastructure error" }) }, /receipt rejection/);
+  await expectSemanticFailure("combined", { ...records, "case-bundle.json": JSON.stringify({ schema_version: 1, inference_revision: value.inference_revision, tuples: {} }) }, /combined archive substituted case-bundle/);
 });
