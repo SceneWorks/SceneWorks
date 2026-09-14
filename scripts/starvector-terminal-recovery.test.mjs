@@ -78,6 +78,23 @@ test("authenticated upstream-only failure advances execution without rewriting n
   assert.throws(() => validateExecutionPredecessor(config, run, artifact, { ...jobs, total_count: 6 }), /census is incomplete/);
   const executed = structuredClone(jobs); executed.jobs[1].conclusion = "failure";
   assert.throws(() => validateExecutionPredecessor(config, run, artifact, executed), /mlx-1b/);
+  // A second upstream failure retains the first authentic archive and links
+  // through it, while the old native quarantine remains byte-identical.
+  const oldMetadata = await readFile(path.join(output, "execution-attempts/failed-upstream/metadata.json"));
+  const next = structuredClone(value);
+  next.campaign_id = "second-failed-upstream"; next.predecessor_campaign_id = value.campaign_id;
+  next.workflow.run_id = "102"; next.source_artifact.id = "89"; next.source_artifact.name = `starvector-upstream-${next.campaign_id}`;
+  config.execution_history = [value]; config.execution_predecessor = next;
+  await writeFile(path.join(root, "89.zip"), bytes);
+  const secondRun = { ...run, id: 102 }, secondArtifact = { ...artifact, id: 89, name: next.source_artifact.name, workflow_run: { ...artifact.workflow_run, id: 102 } };
+  const secondFetch = async (url) => ({ ok: true, json: async () => url.includes("/artifacts/89") ? secondArtifact : url.includes("/artifacts/") ? artifact : url.includes("/jobs?") ? jobs : url.includes("/runs/102/") ? secondRun : run });
+  await prepareRecovery(config, output, { archiveRoot: root, token: "fixture-token", fetchImpl: secondFetch });
+  assert.deepEqual(await verifyExecutionPredecessor(config, output, native), next);
+  assert.deepEqual(await readFile(path.join(output, "execution-attempts/failed-upstream/metadata.json")), oldMetadata);
+  assert.equal(await readFile(path.join(output, "recovery-predecessor.json"), "utf8"), original);
+  await verifyRecovery(config, output);
+  await assert.rejects(() => verifyExecutionPredecessor({ ...config, execution_history: [] }, output, native), /ordered successor chain/);
+  await assert.rejects(() => verifyExecutionPredecessor({ ...config, execution_history: [value, value] }, output, native), /ordered successor chain/);
   await writeFile(path.join(output, "execution-attempts/failed-upstream/upstream.zip"), "substituted archive");
   await assert.rejects(() => verifyExecutionPredecessor(config, output, native), /evidence bytes differ/);
 });

@@ -507,6 +507,28 @@ def durable_json(path, value):
         os.fsync(stream.fileno())
 
 
+def render_upstream_svg(sanitizer, raw_path, rendered, case_index):
+    # Keep the exact generated SVG and renderer diagnostics even when policy
+    # rejects it. Comparison uses an explicit raster size, never rewritten SVG.
+    result = subprocess.run([sanitizer, 'run', str(raw_path), str(rendered), '--preview-size', '512'],
+                            capture_output=True, text=True, timeout=60, check=False)
+    case_root = Path(raw_path).parent
+    (case_root / 'sanitizer.stdout.log').write_text(result.stdout)
+    (case_root / 'sanitizer.stderr.log').write_text(result.stderr)
+    if result.returncode:
+        fail('canonical renderer failed for case ' + str(case_index) + ': exit ' + str(result.returncode)
+             + '; see sanitizer.stderr.log')
+    try:
+        event = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        fail('canonical renderer returned invalid JSON for case ' + str(case_index)
+             + '; see sanitizer.stdout.log')
+    if not isinstance(event, dict) or event.get('outcome') != 'sanitized_inert':
+        code = event.get('error_code', 'missing error_code') if isinstance(event, dict) else 'invalid result'
+        fail('upstream SVG rejected by canonical renderer: case ' + str(case_index) + ': ' + str(code))
+    return event
+
+
 def worker(args, facts):
     import torch
     sys.path.insert(0, str(Path(args.upstream_root).resolve()))
@@ -543,10 +565,7 @@ def worker(args, facts):
                 raw, generation = generate(model, row, device)
                 raw_path = case_root / 'raw.svg'; raw_path.write_text(raw)
                 rendered = case_root / 'rendered'
-                result = subprocess.run([args.sanitizer, 'run', str(raw_path), str(rendered)], capture_output=True, text=True, timeout=60, check=True)
-                event = json.loads(result.stdout)
-                if event.get('outcome') != 'sanitized_inert':
-                    fail('upstream SVG rejected by canonical renderer: ' + str(row['case_index']))
+                render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
                 svg = local_file(rendered, 'canonical.svg'); preview = local_file(rendered, 'preview.png')
                 from PIL import Image
                 with Image.open(preview) as image:

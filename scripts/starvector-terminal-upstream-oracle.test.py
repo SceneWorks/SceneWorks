@@ -223,6 +223,33 @@ class OracleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'case wall-time budget'):
                     oracle.generate(wrapper, row, torch.device('cpu'))
 
+    def test_upstream_renderer_uses_comparison_canvas_preserves_raw_and_error(self):
+        raw = self.root / 'raw.svg'; original = '<svg viewBox="0 0 80 80"><path fill-rule="evenodd"/></svg>'
+        raw.write_text(original); rendered = self.root / 'rendered'
+        result = SimpleNamespace(returncode=0, stdout=json.dumps({'outcome': 'rejected', 'error_code': 'provider SVG attribute fill-rule is not allowed'}), stderr='diagnostic')
+        with patch.object(oracle.subprocess, 'run', return_value=result) as run:
+            with self.assertRaisesRegex(ValueError, 'case 0: provider SVG attribute fill-rule is not allowed'):
+                oracle.render_upstream_svg('sanitizer', raw, rendered, 0)
+        self.assertEqual(run.call_args.args[0], ['sanitizer', 'run', str(raw), str(rendered), '--preview-size', '512'])
+        self.assertEqual(raw.read_text(), original)
+        self.assertEqual((self.root / 'sanitizer.stdout.log').read_text(), result.stdout)
+        self.assertEqual((self.root / 'sanitizer.stderr.log').read_text(), 'diagnostic')
+        self.assertFalse(rendered.exists())
+
+    def test_upstream_renderer_distinguishes_infrastructure_invalid_json_and_success(self):
+        raw = self.root / 'raw.svg'; raw.write_text('<svg viewBox="0 0 80 80"/>')
+        for result, error in [
+            (SimpleNamespace(returncode=1, stdout='', stderr='disk failure'), 'exit 1'),
+            (SimpleNamespace(returncode=0, stdout='not json', stderr=''), 'invalid JSON'),
+            (SimpleNamespace(returncode=0, stdout='[]', stderr=''), 'invalid result'),
+        ]:
+            with self.subTest(error=error), patch.object(oracle.subprocess, 'run', return_value=result):
+                with self.assertRaisesRegex(ValueError, error):
+                    oracle.render_upstream_svg('sanitizer', raw, self.root / 'rendered', 0)
+        accepted = {'outcome': 'sanitized_inert'}
+        with patch.object(oracle.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(accepted), stderr='')):
+            self.assertEqual(oracle.render_upstream_svg('sanitizer', raw, self.root / 'rendered', 0), accepted)
+
     def rows(self):
         rows = []
         for index in range(120):

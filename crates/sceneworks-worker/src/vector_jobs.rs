@@ -1265,6 +1265,22 @@ pub async fn terminal_write_sanitized_pair(
     value: &TerminalSanitizedSvg,
     destination: &Path,
 ) -> Result<(PathBuf, PathBuf), String> {
+    terminal_write_sanitized_pair_with_preview_size(value, destination, None).await
+}
+
+/// Terminal comparison raster only: fit the intrinsic SVG into a bounded square without changing
+/// canonical source or the ordinary product preview. The same resvg renderer handles both paths.
+#[doc(hidden)]
+pub async fn terminal_write_sanitized_pair_with_preview_size(
+    value: &TerminalSanitizedSvg,
+    destination: &Path,
+    preview_size: Option<u32>,
+) -> Result<(PathBuf, PathBuf), String> {
+    if preview_size.is_some_and(|size| size == 0 || size > MAX_PREVIEW_DIMENSION) {
+        return Err(format!(
+            "terminal preview size must be 1..={MAX_PREVIEW_DIMENSION}"
+        ));
+    }
     let parent = destination
         .parent()
         .ok_or_else(|| "terminal sanitizer destination has no parent".to_owned())?;
@@ -1277,7 +1293,14 @@ pub async fn terminal_write_sanitized_pair(
         let svg = staging.join("canonical.svg");
         let preview = staging.join("preview.png");
         tokio::fs::write(&svg, value.canonical_svg.as_bytes()).await?;
-        render_preview(&value.canonical_svg, value.width, value.height, &preview).await?;
+        render_preview_with_size(
+            &value.canonical_svg,
+            value.width,
+            value.height,
+            &preview,
+            preview_size,
+        )
+        .await?;
         tokio::fs::rename(&staging, destination).await?;
         Ok((
             destination.join("canonical.svg"),
@@ -1514,6 +1537,8 @@ fn allowed_attribute(element: &str, attribute: &str) -> bool {
     let common = matches!(
         attribute,
         "fill"
+            | "fill-rule"
+            | "clip-rule"
             | "fill-opacity"
             | "stroke"
             | "stroke-opacity"
@@ -1544,6 +1569,11 @@ fn validate_attribute_resource_budget(
     budget: &mut SanitizerBudget,
 ) -> WorkerResult<()> {
     match key {
+        "fill-rule" | "clip-rule" if !matches!(value, "nonzero" | "evenodd") => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG attribute {key} must be nonzero or evenodd"
+            )));
+        }
         "d" => {
             budget.path_data_bytes =
                 budget
@@ -1980,21 +2010,41 @@ fn write_start(output: &mut String, name: &str, attrs: &[(String, String)], empt
 }
 
 async fn render_preview(svg: &str, width: u32, height: u32, path: &Path) -> WorkerResult<()> {
+    render_preview_with_size(svg, width, height, path, None).await
+}
+
+async fn render_preview_with_size(
+    svg: &str,
+    width: u32,
+    height: u32,
+    path: &Path,
+    preview_size: Option<u32>,
+) -> WorkerResult<()> {
     let svg = svg.to_owned();
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
         let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).map_err(|error| {
             WorkerError::InvalidPayload(format!("provider SVG cannot be rendered: {error}"))
         })?;
+        let (width, height, transform) = match preview_size {
+            Some(size) => {
+                let intrinsic = tree.size();
+                let scale = (size as f32 / intrinsic.width()).min(size as f32 / intrinsic.height());
+                let x = (size as f32 - intrinsic.width() * scale) / 2.0;
+                let y = (size as f32 - intrinsic.height() * scale) / 2.0;
+                (
+                    size,
+                    size,
+                    resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y),
+                )
+            }
+            None => (width, height, resvg::tiny_skia::Transform::identity()),
+        };
         let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
             WorkerError::InvalidPayload("provider SVG preview dimensions are invalid".to_owned())
         })?;
         // resvg draws only the already-sanitized inert geometry into a fixed-size PNG.
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::identity(),
-            &mut pixmap.as_mut(),
-        );
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
         pixmap
             .save_png(path)
             .map_err(|error| WorkerError::Io(std::io::Error::other(error)))
@@ -2481,6 +2531,135 @@ mod tests {
             valid.svg.contains("height=\"8px\" width=\"12px\""),
             "attributes are canonicalized"
         );
+    }
+
+    #[tokio::test]
+    async fn fill_rules_preserve_holes_and_inherited_geometry() {
+        for rule in ["nonzero", "evenodd"] {
+            let input = format!(
+                r#"<svg width="16" height="16"><g fill-rule="{rule}" clip-rule="{rule}"><path fill="red" d="M0 0H16V16H0Z M4 4H12V12H4Z"/></g></svg>"#
+            );
+            let canonical = sanitize_svg(&input).expect("inert fill rule");
+            assert!(canonical.svg.contains(&format!("fill-rule=\"{rule}\"")));
+            assert!(canonical.svg.contains(&format!("clip-rule=\"{rule}\"")));
+            let temp = tempfile::tempdir().expect("temp dir");
+            let preview = temp.path().join("preview.png");
+            render_preview(&canonical.svg, 16, 16, &preview)
+                .await
+                .expect("render rule");
+            let pixels = image::open(preview).expect("PNG").to_rgba8();
+            assert_eq!(pixels.get_pixel(1, 1)[3], 255);
+            assert_eq!(
+                pixels.get_pixel(8, 8)[3],
+                if rule == "evenodd" { 0 } else { 255 }
+            );
+        }
+    }
+
+    #[test]
+    fn fill_rules_reject_invalid_enums_and_resources() {
+        for attribute in ["fill-rule", "clip-rule"] {
+            for value in [
+                "",
+                "inherit",
+                "EvenOdd",
+                "evenodd nonzero",
+                "url(#mask)",
+                "url(https://example.invalid/a)",
+                "file:///tmp/a",
+                "e\\76enodd",
+                "evenodd;fill:red",
+            ] {
+                let input = format!(r#"<svg><path {attribute}="{value}" d="M0 0H1V1Z"/></svg>"#);
+                assert!(
+                    sanitize_svg(&input).is_err(),
+                    "accepted {attribute}={value}"
+                );
+            }
+        }
+        for input in [
+            r#"<svg><path fill-rule="evenodd" clip-path="url(#mask)" d="M0 0H1V1Z"/></svg>"#,
+            r#"<svg><clipPath clip-rule="evenodd"/></svg>"#,
+            r#"<svg><path fill-rule="evenodd" onclick="alert(1)" d="M0 0H1V1Z"/></svg>"#,
+        ] {
+            assert!(sanitize_svg(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn fill_rules_still_consume_attribute_budgets() {
+        let input = format!(
+            "<svg>{}</svg>",
+            r#"<g fill-rule="evenodd" clip-rule="nonzero" fill="red"/>"#
+                .repeat(MAX_SVG_ATTRIBUTES / 3 + 1)
+        );
+        assert!(invalid_detail(sanitize_svg(&input)).contains("total attribute budget"));
+        let value = "evenodd".repeat(MAX_SVG_ATTRIBUTE_VALUE_BYTES / 7 + 1);
+        let input = format!(r#"<svg fill-rule="{value}"/>"#);
+        assert!(invalid_detail(sanitize_svg(&input)).contains("per-value byte budget"));
+    }
+
+    #[tokio::test]
+    async fn upstream_fill_rule_svg_keeps_source_and_gets_bounded_comparison_preview() {
+        let raw = include_bytes!("../tests/fixtures/starvector/upstream-34829516753-case-00.svg");
+        let canonical = terminal_sanitize_svg_bytes(raw).expect("actual upstream case accepted");
+        assert_eq!((canonical.width, canonical.height), (80, 80));
+        assert!(canonical.canonical_svg.contains("fill-rule=\"evenodd\""));
+        assert!(canonical.canonical_svg.contains("clip-rule=\"evenodd\""));
+        assert!(canonical.canonical_svg.contains("viewBox=\"0 0 80 80\""));
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (_, intrinsic) =
+            terminal_write_sanitized_pair(&canonical, &temp.path().join("intrinsic"))
+                .await
+                .expect("intrinsic pair");
+        let (source, comparison) = terminal_write_sanitized_pair_with_preview_size(
+            &canonical,
+            &temp.path().join("comparison"),
+            Some(512),
+        )
+        .await
+        .expect("comparison pair");
+        assert_eq!(
+            image::open(intrinsic).expect("PNG").to_rgba8().dimensions(),
+            (80, 80)
+        );
+        let pixels = image::open(comparison).expect("PNG").to_rgba8();
+        assert_eq!(pixels.dimensions(), (512, 512));
+        assert!(
+            pixels.pixels().any(|pixel| pixel[3] > 0),
+            "actual geometry renders"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source).expect("canonical source"),
+            canonical.canonical_svg
+        );
+        for size in [0, MAX_PREVIEW_DIMENSION + 1] {
+            let destination = temp.path().join(format!("invalid-{size}"));
+            assert!(terminal_write_sanitized_pair_with_preview_size(
+                &canonical,
+                &destination,
+                Some(size)
+            )
+            .await
+            .is_err());
+            assert!(!destination.exists());
+        }
+        // A rectangular viewport is fitted and centered, not stretched to fill the square.
+        let rectangle = terminal_sanitize_svg_bytes(
+            br#"<svg viewBox="0 0 16 8"><rect width="16" height="8" fill="red"/></svg>"#,
+        )
+        .expect("rectangle");
+        let (_, preview) = terminal_write_sanitized_pair_with_preview_size(
+            &rectangle,
+            &temp.path().join("rectangle"),
+            Some(32),
+        )
+        .await
+        .expect("fitted rectangle");
+        let pixels = image::open(preview).expect("PNG").to_rgba8();
+        assert_eq!(pixels.get_pixel(16, 2)[3], 0);
+        assert_eq!(pixels.get_pixel(16, 16)[3], 255);
+        assert_eq!(pixels.get_pixel(16, 29)[3], 0);
     }
 
     #[test]

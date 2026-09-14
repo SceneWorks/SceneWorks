@@ -53,7 +53,7 @@ async function treeInventory(root) {
 export async function prepareRecovery(config, output, { archiveRoot, token = process.env.GH_TOKEN, fetchImpl = fetch } = {}) {
   if (config.schema_version !== 1) fail("unsupported recovery configuration");
   const predecessor = structuredClone(config);
-  delete predecessor.schema_version; delete predecessor.authority; delete predecessor.execution_predecessor;
+  delete predecessor.schema_version; delete predecessor.authority; delete predecessor.execution_predecessor; delete predecessor.execution_history;
   const root = `quarantine/${safeRecoveryPath(predecessor.campaign_id)}`, entries = [];
   for (const [role, marker] of Object.entries(predecessor.markers)) {
     const bytes = Buffer.from(marker.content); delete marker.content;
@@ -83,7 +83,7 @@ export async function prepareRecovery(config, output, { archiveRoot, token = pro
   predecessor.quarantine = { root, entries, aggregate_sha256: sha(stable({ root, entries })) };
   await put(output, `${root}/aggregate.json`, stable({ root, entries }));
   await put(output, "recovery-predecessor.json", stable(predecessor));
-  if (config.execution_predecessor) await prepareExecutionPredecessor(config, output, { archiveRoot, token, fetchImpl });
+  for (const value of executionChain(config)) await prepareExecutionPredecessor({ ...config, execution_predecessor: value }, output, { archiveRoot, token, fetchImpl });
   return predecessor;
 }
 
@@ -123,17 +123,31 @@ async function prepareExecutionPredecessor(config, output, { archiveRoot, token,
   await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, artifact, jobs }));
 }
 
+// Ordered upstream-only history is retained separately from native receipts.
+function executionChain(config) {
+  const history = config.execution_history ?? [];
+  if (!Array.isArray(history) || (history.length && !config.execution_predecessor)) fail("invalid execution history");
+  const chain = [...history, ...(config.execution_predecessor ? [config.execution_predecessor] : [])];
+  let previous = config.campaign_id;
+  const seen = new Set([previous]);
+  for (const value of chain) {
+    if (!value || seen.has(value.campaign_id) || value.predecessor_campaign_id !== previous) fail("execution history is not an ordered successor chain");
+    seen.add(value.campaign_id); previous = value.campaign_id;
+  }
+  return chain;
+}
+
 export async function verifyExecutionPredecessor(config, root, nativePredecessor) {
-  const value = config.execution_predecessor;
-  if (!value) return nativePredecessor;
-  const relative = `execution-attempts/${safeRecoveryPath(value.campaign_id)}`;
-  const metadataPath = `${relative}/metadata.json`, info = await lstat(path.join(root, metadataPath));
-  const bytes = await checkedRecoveryFile(root, metadataPath, { size: info.size, sha256: sha(await readFile(path.join(root, metadataPath))) });
-  const metadata = JSON.parse(bytes);
-  if (stable(metadata.predecessor) !== stable(value)) fail("failed execution declaration differs from prepared evidence");
-  validateExecutionPredecessor(config, metadata.run, metadata.artifact, metadata.jobs);
-  await checkedRecoveryFile(root, `${relative}/upstream.zip`, { size: value.source_artifact.size, sha256: value.source_artifact.digest.slice(7) });
-  return value;
+  for (const value of executionChain(config)) {
+    const relative = `execution-attempts/${safeRecoveryPath(value.campaign_id)}`;
+    const metadataPath = `${relative}/metadata.json`, info = await lstat(path.join(root, metadataPath));
+    const bytes = await checkedRecoveryFile(root, metadataPath, { size: info.size, sha256: sha(await readFile(path.join(root, metadataPath))) });
+    const metadata = JSON.parse(bytes);
+    if (stable(metadata.predecessor) !== stable(value)) fail("failed execution declaration differs from prepared evidence");
+    validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, metadata.artifact, metadata.jobs);
+    await checkedRecoveryFile(root, `${relative}/upstream.zip`, { size: value.source_artifact.size, sha256: value.source_artifact.digest.slice(7) });
+  }
+  return config.execution_predecessor ?? nativePredecessor;
 }
 
 export async function verifyRecovery(config, root, { campaignRunId, permanentPin, leaseRoot } = {}) {

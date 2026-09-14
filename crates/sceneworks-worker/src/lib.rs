@@ -244,7 +244,8 @@ mod vector_jobs;
 use vector_jobs::*;
 #[doc(hidden)]
 pub use vector_jobs::{
-    terminal_sanitize_svg_bytes, terminal_write_sanitized_pair, TerminalSanitizedSvg,
+    terminal_sanitize_svg_bytes, terminal_write_sanitized_pair,
+    terminal_write_sanitized_pair_with_preview_size, TerminalSanitizedSvg,
 };
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
