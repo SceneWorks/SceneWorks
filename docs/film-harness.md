@@ -503,6 +503,13 @@ a reboot) leaves the record `running` with the job still named in it, and `resum
 at whatever state it reached — measured on the same evaluation, the resumed controller found the
 render 32 % through and simply polled it to completion, enqueuing nothing.
 
+Once the run itself is over, the same signals still work for the rest of the process — printing the
+record, the last flush — and leave with the code a shell reports (`143` for SIGTERM, `130` for
+SIGINT) instead of cancelling anything: by then there is nothing in flight to cancel, and the record
+is already written. One signal is enough; the watcher does not consume it deciding what to do with
+it. Which of the two happens is settled by whether the run had ended when the signal was read, never
+by which the process noticed first (sc-22715).
+
 A directory with no `run.json` in it is **refused** (exit 2), not created: a mistyped `--out` that
 printed "cancel requested" and exited 0 while the render kept going is the one thing a cancel must
 never do. A run writes its record before its first API call, so any directory holding a live run has
