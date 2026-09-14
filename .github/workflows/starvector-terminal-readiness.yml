@@ -58,6 +58,12 @@ jobs:
           $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN"
           if ($LASTEXITCODE -ne 0) { throw 'immutable pin-keyed terminal path resolution failed' }
           $pinEnvironment | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build exact production sanitizer for readiness validation
+        shell: powershell
+        run: |
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+          cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize
+          if ($LASTEXITCODE -ne 0) { throw 'sanitizer build failed' }
       - name: Validate Windows terminal host without executing models
         shell: powershell
         run: |

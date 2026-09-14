@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
+  ".github/workflows/starvector-terminal-readiness.yml",
   ".github/workflows/starvector-terminal.yml",
   ".github/workflows/starvector-terminal-provision.yml",
   "Cargo.lock",

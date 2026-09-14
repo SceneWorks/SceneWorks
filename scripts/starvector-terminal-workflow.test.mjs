@@ -568,8 +568,11 @@ test("readiness workflow is an identity-only dispatch on both campaign hosts", (
   assert.doesNotMatch(readiness, /campaign_run_id|concurrency:/);
 });
 
-test("readiness workflow cannot start services, claim leases, or execute models", () => {
-  assert.doesNotMatch(readiness, /starvector-terminal-product-service|starvector-terminal-producer\.mjs|starvector_terminal_lease|STARVECTOR_TERMINAL_LEASE|vector_generate|cargo\s+(?:build|run)|(?:pip|npm|cargo)\s+install|huggingface-cli|\bcurl\b|\bwget\b/i);
+test("readiness workflow builds only its exact production sanitizer prerequisite and cannot execute models", () => {
+  const sanitizerBuild = "cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize";
+  assert.equal((readiness.match(/cargo build/g) ?? []).length, 1);
+  assert.ok(readiness.indexOf(sanitizerBuild) < readiness.indexOf("Validate Windows terminal host without executing models"));
+  assert.doesNotMatch(readiness, /starvector-terminal-product-service|starvector-terminal-producer\.mjs|starvector_terminal_lease|STARVECTOR_TERMINAL_LEASE|vector_generate|cargo\s+run|(?:pip|npm|cargo)\s+install|huggingface-cli|\bcurl\b|\bwget\b/i);
   assert.match(readiness, /Upload macOS readiness report even on failure/);
   assert.match(readiness, /Upload Windows readiness report even on failure/);
 });
