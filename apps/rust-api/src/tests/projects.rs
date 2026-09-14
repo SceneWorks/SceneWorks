@@ -287,6 +287,19 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(timeline["projectId"], project_id);
     assert_eq!(timeline["tracks"].as_array().unwrap().len(), 3);
+    // Every track ships with a role and a bus fader (sc-22712). A new timeline is at unity, which
+    // is what "the editor has not changed anything" has to sound like.
+    let roles: Vec<&str> = timeline["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| track["role"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(roles, vec!["picture", "overlay", "sound"]);
+    for track in timeline["tracks"].as_array().unwrap() {
+        assert_eq!(track["gain"], json!(1.0), "{track}");
+        assert_eq!(track["muted"], json!(false), "{track}");
+    }
 
     let timeline_id = timeline["id"].as_str().expect("timeline id").to_owned();
     timeline["tracks"][0]["items"] = json!([
@@ -322,6 +335,11 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
         saved["tracks"][0]["items"][0]["versionHistory"][0]["source"],
         "original"
     );
+    // An item that says nothing about its own audio gets the defaults that keep an existing
+    // project sounding exactly as it did: no fades, and its generated audio out of the mix.
+    assert_eq!(saved["tracks"][0]["items"][0]["fadeInSeconds"], json!(0.0));
+    assert_eq!(saved["tracks"][0]["items"][0]["fadeOutSeconds"], json!(0.0));
+    assert_eq!(saved["tracks"][0]["items"][0]["generatedAudio"], "mute");
 
     let (status, timelines) = request(
         app.clone(),

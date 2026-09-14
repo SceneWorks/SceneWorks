@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::film_plan::{
-    parse_resolution, validate_all, ModelLane, PlanDiagnostic, PlanLimits, PlanModel,
+    parse_resolution, validate_all, ModelLane, PlanDiagnostic, PlanLimits, PlanModel, PlanSound,
     ProductionPlan, ReferencePack, Shot, ShotConditioning, PLAN_SCHEMA_VERSION,
     SHOT_CONDITIONING_MODES,
 };
@@ -613,6 +613,13 @@ fn flatten_to_prose(value: &Value) -> Option<String> {
 /// Assemble a [`ProductionPlan`] from the brief and a parsed draft. Everything outside the shots —
 /// id, version, title, model, limits — comes from the brief, so the planner cannot widen a limit or
 /// swap the model.
+///
+/// The planner writes sound INTENT only (each shot's `dialogue` and `sound` prose, below); it never
+/// places sound. Resolving intent into a placed bed or a [`Shot::dialogue_clip`] needs a reference
+/// pack to resolve roles against, and a brief does not carry one — so the generated plan takes
+/// [`PlanSound::default`] (no beds, generated clip audio muted, the policy that cannot double a
+/// line) and leaves every clip unset, which `validate_plan_structure` and
+/// `validate_plan_against_pack` both accept. Placing sound is an edit to the generated plan.
 pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> ProductionPlan {
     ProductionPlan {
         schema_version: PLAN_SCHEMA_VERSION,
@@ -622,6 +629,7 @@ pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> Productio
         synopsis: brief.synopsis.clone(),
         model: brief.model.clone(),
         limits: brief.limits.clone(),
+        sound: PlanSound::default(),
         shots: draft
             .shots
             .iter()
@@ -638,6 +646,8 @@ pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> Productio
                 end_state: shot.end_state.clone(),
                 dialogue: shot.dialogue.clone(),
                 sound: shot.sound.clone(),
+                generated_audio: None,
+                dialogue_clip: None,
                 conditioning: shot.conditioning.clone(),
                 seed: shot.seed,
                 continuity_roles: shot.continuity_roles.clone(),

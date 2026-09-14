@@ -16,5 +16,21 @@
     { "role": "workbench_table", "kind": "prop", "file": "references/workbench_table.png", "description": "Long wooden workbench, sawdust, centre of frame." },
     { "role": "house_style", "kind": "style", "file": "references/house_style.png", "description": "Warm late-afternoon light, film grain, natural colour." },
     { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png", "description": "Wide keyframe plate of the workshop used as the first frame of the image-conditioned shots." }
+  ],
+  // Approved sound (sc-22712). Sound roles live in the same namespace as reference roles but are
+  // placed through different slots — a `dialogue` role goes on a shot's `dialogueClip`, and the
+  // `ambience`/`music` roles go on the plan's `sound` beds. They are never conditioning.
+  //
+  // The clips are deterministic placeholder tones written by `film-harness fixture-sound`
+  // (`FIXTURE_SOUNDS` in apps/rust-api/src/film_harness.rs): mono 8 kHz PCM-16 triangle waves at
+  // one frequency each, so the three buses are trivially distinguishable by ear when checking the
+  // POC export. Replace a file with real recorded audio and bump `version`; nothing else changes.
+  // The two beds are 32s — long enough to play under the whole six-shot sequence without a gap,
+  // which is the point of placing them once instead of per shot.
+  "sound": [
+    { "role": "courier_line", "kind": "dialogue", "file": "sound/courier_line.wav", "description": "Placeholder for the courier's line (400 Hz, 2s)." },
+    { "role": "recipient_line", "kind": "dialogue", "file": "sound/recipient_line.wav", "description": "Placeholder for the recipient's lines (500 Hz, 2s)." },
+    { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav", "description": "Continuous workshop room tone (100 Hz, 32s)." },
+    { "role": "main_theme", "kind": "music", "file": "sound/main_theme.wav", "description": "Continuous music bed (250 Hz, 32s)." }
   ]
 }

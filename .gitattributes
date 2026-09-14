@@ -103,6 +103,7 @@ pre-push        text diff
 *.onnx  binary
 
 # Audio / video
+*.wav   binary
 *.mp4   binary
 *.mov   binary
 *.webm  binary
