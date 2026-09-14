@@ -155,7 +155,7 @@ export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoo
   const gpu = await terminalGpuBinding();
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
   if (permanentPin !== plan.inference_contract.revision) die("requested permanent pin does not equal the sealed terminal plan");
-  await verifyInferenceCheckout(inferenceRoot);
+  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract);
   await verifyPermanentPin(sceneWorksRoot, permanentPin, permanentPin);
   const route = await verifyRouteClosure(sceneWorksRoot, path.join(sceneWorksRoot, "scripts", "starvector-terminal-route.mjs"));
   const weights = await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions);

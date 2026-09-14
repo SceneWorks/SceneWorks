@@ -20,6 +20,10 @@ test("terminal campaign is fixed, serial, and fail closed", async () => {
 test("terminal campaign rejects count, lock, and LPIPS weight drift", () => {
   const badPlan = structuredClone(plan); badPlan.counts.hostile_sanitizer = 199;
   assert.throws(() => validatePlan(badPlan), /counts/);
+  const legacySchema = structuredClone(plan); legacySchema.inference_contract.receipt_schema = "release/starvector-terminal-receipt-v2.schema.json";
+  assert.throws(() => validatePlan(legacySchema), /outcome-parity receipt schema/);
+  const wrongSchemaHash = structuredClone(plan); wrongSchemaHash.inference_contract.receipt_schema_sha256 = "0".repeat(64);
+  assert.throws(() => validatePlan(wrongSchemaHash), /outcome-parity receipt schema/);
   const badLock = structuredClone(lock); badLock.lpips.alexnet_weights_sha256 = "0".repeat(64);
   assert.throws(() => validateMetricsLock(badLock), /LPIPS/);
 });

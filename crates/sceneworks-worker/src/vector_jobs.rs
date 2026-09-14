@@ -87,6 +87,41 @@ fn terminal_result(
     })
 }
 
+fn terminal_generation_limit_result(
+    terminal: &TerminalProviderOutcome,
+    transcript: (&Path, &[u8]),
+) -> WorkerResult<Value> {
+    if !matches!(
+        terminal.finish_reason,
+        "token_limit" | "byte_limit" | "wall_time_limit"
+    ) {
+        return Err(WorkerError::Engine(
+            "terminal generation rejection lacks a typed bounded finish reason".to_owned(),
+        ));
+    }
+    let mut evidence = terminal_result(terminal, None, None, Some(transcript));
+    let object = evidence.as_object_mut().ok_or_else(|| {
+        WorkerError::Engine("terminal generation rejection evidence must be an object".to_owned())
+    })?;
+    object.insert("outcome".to_owned(), Value::String("rejected".to_owned()));
+    object.insert(
+        "rejectionStage".to_owned(),
+        Value::String("generation_limit".to_owned()),
+    );
+    object.insert(
+        "rejectionCode".to_owned(),
+        Value::String(terminal.finish_reason.to_owned()),
+    );
+    object.insert(
+        "rejectionReason".to_owned(),
+        Value::String(format!(
+            "native StarVector stopped at the {}",
+            terminal.finish_reason
+        )),
+    );
+    Ok(evidence)
+}
+
 fn terminal_transcript_bytes(terminal: &TerminalProviderOutcome) -> WorkerResult<Vec<u8>> {
     serde_json::to_vec(&json!({
         "providerId": terminal.provider_id,
@@ -870,6 +905,9 @@ fn collect_svg_source(
     let terminal = provider.terminal_outcome();
     if let Some(terminal) = &terminal {
         if !terminal.publishable() {
+            if terminal.finish_reason == "cancelled" {
+                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+            }
             if std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1") {
                 return Ok(CollectedSvgSource {
                     source: None,
@@ -877,7 +915,6 @@ fn collect_svg_source(
                 });
             }
             return match terminal.finish_reason {
-                "cancelled" => Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned())),
                 "token_limit" => Err(WorkerError::Engine(
                     "native StarVector stopped at the token limit; no partial SVG was published"
                         .to_owned(),
@@ -1071,7 +1108,10 @@ pub(crate) async fn run_vector_job_with_provider(
         evidence_write?;
         let result = json!({
             "terminalEvidence": add_source_raster_evidence(
-                terminal_result(&terminal, None, None, Some((&transcript_path, &transcript))),
+                terminal_generation_limit_result(
+                    &terminal,
+                    (&transcript_path, &transcript),
+                )?,
                 source_raster.as_ref().map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
             )?,
         })
@@ -1112,7 +1152,83 @@ pub(crate) async fn run_vector_job_with_provider(
         ),
     )
     .await?;
-    let canonical = sanitize_svg(&source)?;
+    let canonical = match sanitize_svg(&source) {
+        Ok(canonical) => canonical,
+        Err(WorkerError::InvalidPayload(reason))
+            if std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1") =>
+        {
+            let terminal = collected.terminal.as_ref().ok_or_else(|| {
+                WorkerError::Engine(
+                    "terminal campaign sanitizer rejection lacks provider terminal evidence"
+                        .to_owned(),
+                )
+            })?;
+            let evidence_dir = project_path.join(".terminal-evidence").join(&job.id);
+            let staging = evidence_dir.with_extension("tmp");
+            let transcript_path = evidence_dir.join("provider-terminal.json");
+            let rejected_svg_path = evidence_dir.join("provider-output.svg");
+            let transcript = terminal_transcript_bytes(terminal)?;
+            let evidence_write: WorkerResult<()> = async {
+                tokio::fs::create_dir_all(&staging).await?;
+                tokio::fs::write(staging.join("provider-terminal.json"), &transcript).await?;
+                tokio::fs::write(staging.join("provider-output.svg"), source.as_bytes()).await?;
+                tokio::fs::rename(&staging, &evidence_dir).await?;
+                Ok(())
+            }
+            .await;
+            if evidence_write.is_err() {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+            }
+            evidence_write?;
+            let mut terminal_evidence =
+                terminal_result(terminal, None, None, Some((&transcript_path, &transcript)));
+            let object = terminal_evidence.as_object_mut().ok_or_else(|| {
+                WorkerError::Engine("terminal rejection evidence must be an object".to_owned())
+            })?;
+            object.insert("accepted".to_owned(), Value::Bool(false));
+            object.insert("outcome".to_owned(), Value::String("rejected".to_owned()));
+            object.insert(
+                "rejectionStage".to_owned(),
+                Value::String("sanitizer".to_owned()),
+            );
+            object.insert("rejectionReason".to_owned(), Value::String(reason));
+            object.insert(
+                "rejectedSvgPath".to_owned(),
+                Value::String(rejected_svg_path.to_string_lossy().into_owned()),
+            );
+            object.insert(
+                "rejectedSvgSha256".to_owned(),
+                Value::String(sha256_hex(source.as_bytes())),
+            );
+            let result = json!({
+                "terminalEvidence": add_source_raster_evidence(
+                    terminal_evidence,
+                    source_raster
+                        .as_ref()
+                        .map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
+                )?,
+            })
+            .as_object()
+            .cloned()
+            .expect("terminal rejection result is an object");
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Completed,
+                    ProgressStage::Completed,
+                    1.0,
+                    "Native vector output was rejected by the SVG sanitizer without publication.",
+                    None,
+                    Some(result),
+                    None,
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
 
     let created_at = now_rfc3339();
@@ -4102,14 +4218,31 @@ mod tests {
             model_revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
             backend: "mlx",
         };
-        let result = terminal_result(&terminal, None, None, None);
+        let result = terminal_generation_limit_result(
+            &terminal,
+            (Path::new("provider-terminal.json"), b"transcript"),
+        )
+        .expect("typed generation rejection");
         assert_eq!(result["accepted"], false);
+        assert_eq!(result["outcome"], "rejected");
+        assert_eq!(result["rejectionStage"], "generation_limit");
+        assert_eq!(result["rejectionCode"], "token_limit");
         assert_eq!(result["finishReason"], "token_limit");
-        assert_eq!(result["providerTranscriptSha256"], Value::Null);
+        assert_ne!(result["providerTranscriptSha256"], Value::Null);
         assert!(result["canonicalSvgPath"].is_null());
         assert!(result["previewPngPath"].is_null());
-        assert!(result["providerTranscriptPath"].is_null());
+        assert_eq!(result["providerTranscriptPath"], "provider-terminal.json");
         assert_eq!(result["resultContainsInlineSvg"], false);
+
+        let cancelled = TerminalProviderOutcome {
+            finish_reason: "cancelled",
+            ..terminal
+        };
+        assert!(terminal_generation_limit_result(
+            &cancelled,
+            (Path::new("provider-terminal.json"), b"transcript"),
+        )
+        .is_err());
     }
 
     #[test]

@@ -102,6 +102,44 @@ def event_evidence(event, label):
     return value
 
 
+def normalized_rejection(reason, stage):
+    if stage == "generation_limit":
+        if reason not in {"token_limit", "byte_limit", "wall_time_limit"}:
+            fail("unknown native generation-limit rejection")
+        return reason
+    if stage != "sanitizer" or not isinstance(reason, str) or not reason.startswith("provider SVG "):
+        fail("native rejection is not a typed SVG policy outcome")
+    value = reason.lower()
+    if "malformed" in value or "not valid utf-8" in value or "not utf-8" in value:
+        return "malformed_svg"
+    if "<animate" in value or "<set>" in value or "animation" in value:
+        return "animation"
+    if "<text>" in value:
+        return "text"
+    if any(token in value for token in ["external", "data:", "file:", "http:", "https:", "@import"]):
+        return "external_io"
+    if "<use>" in value or "href" in value:
+        return "unsafe_href_use"
+    return "svg_policy"
+
+
+def native_parity_outcome(native):
+    if native.get("accepted") is True:
+        return "accepted", None, None, None
+    if native.get("outcome") == "rejected" and native.get("rejectionStage") == "sanitizer":
+        reason = native.get("rejectionReason")
+        return "rejected", "sanitizer", normalized_rejection(reason, "sanitizer"), reason
+    if native.get("outcome") == "rejected" and native.get("rejectionStage") == "generation_limit":
+        code, reason = native.get("rejectionCode"), native.get("rejectionReason")
+        if (code != native.get("finishReason")
+                or code != normalized_rejection(code, "generation_limit")
+                or not isinstance(reason, str)
+                or not reason.startswith("native StarVector stopped at the ")):
+            fail("native generation-limit rejection evidence is inconsistent")
+        return "rejected", "generation_limit", code, reason
+    fail("native parity rejection lacks a typed sanitizer or generation-limit outcome")
+
+
 def prompt_cosine(prompt, image_path, clip):
     """Exact local CLIP comparison; the bundle names a pre-provisioned file."""
     import open_clip
@@ -209,10 +247,34 @@ def main():
         native = event_evidence(event, "native parity")
         if native.get("sourceRasterSha256") != case.get("input_png_sha256"):
             fail("parity worker consumed a different raster than the upstream oracle")
-        native_file = verified_file(native.get("previewPngPath"), native.get("previewPngSha256"), "actual native parity preview")
-        upstream_file = verified_file(case.get("upstream_preview_png"), case.get("upstream_preview_png_sha256"), "independent upstream parity preview")
-        verified_file(case.get("upstream_svg"), case.get("upstream_svg_sha256"), "independent upstream SVG")
-        parity_facts.append({"case_id": case["case_id"], "rendered_ssim": compare(native_file, upstream_file)["ssim"]})
+        verified_file(native.get("providerTranscriptPath"), native.get("providerTranscriptSha256"), "native parity provider transcript")
+        native_outcome, native_stage, native_code, native_reason = native_parity_outcome(native)
+        upstream_outcome = case.get("upstream_outcome")
+        if upstream_outcome not in {"accepted", "rejected"} or native_outcome != upstream_outcome:
+            fail("native/upstream parity acceptance decision differs")
+        fact = {"case_id": case["case_id"], "upstream_outcome": upstream_outcome,
+                "native_outcome": native_outcome, "rendered_ssim": None,
+                "upstream_rejection_stage": None, "upstream_rejection_code": None,
+                "upstream_rejection_reason": None, "native_rejection_stage": native_stage,
+                "native_rejection_code": native_code, "native_rejection_reason": native_reason}
+        if native_outcome == "accepted":
+            native_file = verified_file(native.get("previewPngPath"), native.get("previewPngSha256"), "actual native parity preview")
+            upstream_file = verified_file(case.get("upstream_preview_png"), case.get("upstream_preview_png_sha256"), "independent upstream parity preview")
+            verified_file(case.get("upstream_svg"), case.get("upstream_svg_sha256"), "independent upstream SVG")
+            fact["rendered_ssim"] = compare(native_file, upstream_file)["ssim"]
+        else:
+            upstream_stage, upstream_code, upstream_reason = case.get("upstream_rejection_stage"), case.get("upstream_rejection_code"), case.get("upstream_rejection_reason")
+            if upstream_code != normalized_rejection(upstream_code if upstream_stage == "generation_limit" else upstream_reason, upstream_stage):
+                fail("upstream parity rejection code is not normalized")
+            if native_stage != upstream_stage or native_code != upstream_code:
+                fail("native/upstream parity rejection reason differs")
+            if any(native.get(key) is not None for key in ["canonicalSvgPath", "canonicalSvgSha256", "previewPngPath", "previewPngSha256"]):
+                fail("rejected native parity outcome exposed a published attachment")
+            if native_stage == "sanitizer":
+                verified_file(native.get("rejectedSvgPath"), native.get("rejectedSvgSha256"), "native rejected SVG")
+            fact.update(upstream_rejection_stage=upstream_stage, upstream_rejection_code=upstream_code,
+                        upstream_rejection_reason=upstream_reason)
+        parity_facts.append(fact)
     # The JS producer owns exact inference-schema assembly.  This script emits
     # raw per-case values only, never a pass/fail or trusted aggregate.
     hardware = runtime.get("hardware") if isinstance(runtime, dict) else None

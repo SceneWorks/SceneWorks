@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assembleRun, assembleSuites, validateBundle, vectorRequest } from "./starvector-terminal-route.mjs";
+import { assembleParityRecord, assembleRun, assembleSuites, validateBundle, vectorRequest } from "./starvector-terminal-route.mjs";
 
 test("route runner can only construct the typed project-owned vector_generate request", () => {
   const request = vectorRequest({ projectId: "project", sourceAssetId: "asset", model: "starvector_1b", prompt: "icon" });
@@ -19,6 +19,18 @@ test("route refuses a count-only or incomplete terminal bundle before product ca
 test("route refuses missing raw metric facts and missing terminal suite output", () => {
   assert.throws(() => assembleRun("mlx:1b", { image_quality: [], run_identity: {}, hardware: {} }, { image_quality: [], deterministic_parity: [], lifecycle: [], limits: [] }, []), /120 unique raw quality facts/);
   assert.throws(() => assembleSuites({}, {}, {}), /lacks source-owned hostile\/prompt suite evidence/);
+});
+
+test("parity receipt records accepted renders and matched typed rejections without substitution", () => {
+  const hash = "a".repeat(64), native = { sourceRasterSha256: hash, providerTranscriptSha256: "b".repeat(64), previewPngSha256: "c".repeat(64), rejectedSvgSha256: "d".repeat(64) };
+  const acceptedGolden = { input_png_sha256: hash, upstream_outcome: "accepted", upstream_svg_sha256: "e".repeat(64), upstream_preview_png_sha256: "f".repeat(64) };
+  const accepted = assembleParityRecord(0, 0, native, acceptedGolden, { native_outcome: "accepted", upstream_outcome: "accepted", rendered_ssim: .996 });
+  assert.equal(accepted.rendered_ssim, .996);
+  const rejectedGolden = { input_png_sha256: hash, upstream_outcome: "rejected", upstream_raw_svg_sha256: "1".repeat(64), upstream_sanitizer_stdout_sha256: "2".repeat(64), upstream_sanitizer_stderr_sha256: "3".repeat(64) };
+  const rejection = { native_outcome: "rejected", upstream_outcome: "rejected", rendered_ssim: null, native_rejection_stage: "sanitizer", native_rejection_code: "malformed_svg", native_rejection_reason: "provider SVG is malformed", upstream_rejection_stage: "sanitizer", upstream_rejection_code: "malformed_svg", upstream_rejection_reason: "provider SVG is malformed" };
+  assert.equal(assembleParityRecord(1, 1, native, rejectedGolden, rejection).native_raw_svg_sha256, native.rejectedSvgSha256);
+  assert.throws(() => assembleParityRecord(1, 1, native, rejectedGolden, { ...rejection, native_rejection_code: "svg_policy" }), /matching typed reason/);
+  assert.throws(() => assembleParityRecord(1, 1, native, { ...rejectedGolden, upstream_outcome: "accepted" }, rejection), /invalid upstream parity/);
 });
 
 test("terminal suite identities come from the same-run controller and observed workflow", () => {

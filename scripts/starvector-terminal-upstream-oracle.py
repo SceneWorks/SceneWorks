@@ -478,6 +478,112 @@ def load_model(facts, device):
     return model.eval().to(device), {'checkpoint_tensor_count': len(observed), 'tied_aliases': aliases}
 
 
+def complete_svg_prefix(value):
+    """Return the end of one structurally complete SVG root, or None."""
+    stack = []
+    index = 0
+    length = len(value)
+    while index < length and value[index].isspace():
+        index += 1
+    if not value[index:].startswith('<svg'):
+        return None
+    while index < length:
+        if value[index] != '<':
+            if not stack and not value[index].isspace():
+                return None
+            index += 1
+            continue
+        if value.startswith('<!--', index):
+            end = value.find('-->', index + 4)
+            if end < 0:
+                return None
+            index = end + 3
+            continue
+        if value.startswith('<![CDATA[', index):
+            end = value.find(']]>', index + 9)
+            if end < 0:
+                return None
+            index = end + 3
+            continue
+        if value.startswith('<?', index):
+            end = value.find('?>', index + 2)
+            if end < 0:
+                return None
+            index = end + 2
+            continue
+        quote = None
+        end = index + 1
+        while end < length:
+            char = value[end]
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char == '>':
+                break
+            end += 1
+        if end >= length:
+            return None
+        body = value[index + 1:end].strip()
+        if not body or body.startswith('!'):
+            return None
+        closing = body.startswith('/')
+        self_closing = body.endswith('/')
+        name_body = body[1:].lstrip() if closing else body
+        name = name_body.split(None, 1)[0].rstrip('/')
+        if not name:
+            return None
+        if closing:
+            if not stack or stack[-1] != name:
+                return None
+            stack.pop()
+            if not stack:
+                return end + 1 if value[end + 1:].strip() == '' else None
+        elif not stack:
+            if name != 'svg':
+                return None
+            if self_closing:
+                return end + 1 if value[end + 1:].strip() == '' else None
+            stack.append(name)
+        elif not self_closing:
+            stack.append(name)
+        index = end + 1
+    return None
+
+
+def bounded_completion(value, tokens, now, deadline, max_bytes):
+    end = complete_svg_prefix(value)
+    byte_count = len(value[:end].encode()) if end is not None else len(value.encode())
+    if end is not None and byte_count <= max_bytes and now <= deadline:
+        return {'complete_root': True, 'completion_tokens': tokens,
+                'completion_bytes': byte_count, 'completion_end': end}
+    if byte_count > max_bytes:
+        return {'byte_exceeded': True}
+    if now > deadline:
+        return {'deadline_exceeded': True}
+    return {}
+
+
+def classify_generation(raw, observation, budget, max_bytes):
+    end = complete_svg_prefix(raw)
+    completed = observation.get('complete_root') is True
+    if not completed and end is not None and not observation.get('deadline_exceeded') and not observation.get('byte_exceeded'):
+        completed = observation.get('generated_tokens', budget + 1) <= budget and len(raw[:end].encode()) <= max_bytes
+    if completed and end is not None:
+        if len(raw.encode()) <= max_bytes and observation.get('completion_tokens', observation.get('generated_tokens', budget + 1)) <= budget:
+            return raw, 'complete'
+    if observation.get('deadline_exceeded'):
+        return raw, 'wall_time_limit'
+    if observation.get('byte_exceeded') or len(raw.encode()) > max_bytes:
+        return raw, 'byte_limit'
+    if observation.get('generated_tokens', 0) >= budget:
+        return raw, 'token_limit'
+    # Natural EOS without a complete root still goes through the sanitizer and
+    # is rejected as malformed; EOS alone is never proof of valid SVG output.
+    return raw, 'complete'
+
+
 def generate(model, row, device):
     import torch
     from PIL import Image
@@ -497,10 +603,23 @@ def generate(model, row, device):
     budget = row['detail_budget']['maxNewTokens']
     deadline = time.monotonic() + row['detail_budget']['maxWallTimeMs'] / 1000
     from transformers import StoppingCriteria, StoppingCriteriaList
-    class Deadline(StoppingCriteria):
+    tokenizer = getattr(model.model.processor, 'tokenizer', None)
+    class BoundedCompletion(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):
-            if time.monotonic() > deadline:
-                fail('upstream exceeded the native case wall-time budget')
+            now = time.monotonic()
+            if tokenizer is not None:
+                decoded = tokenizer.decode(input_ids[0], skip_special_tokens=True,
+                                           clean_up_tokenization_spaces=False)
+                bounded = bounded_completion(decoded, int(input_ids.shape[-1]), now, deadline,
+                                              row['detail_budget']['maxSvgBytes'])
+                observation.update(bounded)
+                if bounded.get('complete_root'):
+                    return True
+                if bounded.get('byte_exceeded') or bounded.get('deadline_exceeded'):
+                    return True
+            if tokenizer is None and now > deadline:
+                observation['deadline_exceeded'] = True
+                return True
             return False
     def bounded_generate(**kwargs):
         if kwargs.get('do_sample') is not False or kwargs.get('num_beams') != 1:
@@ -508,7 +627,7 @@ def generate(model, row, device):
         observation['prefix_length'] = int(kwargs['inputs_embeds'].shape[1])
         kwargs.pop('max_length', None)
         kwargs['max_new_tokens'] = budget
-        kwargs['stopping_criteria'] = StoppingCriteriaList([*kwargs.get('stopping_criteria', []), Deadline()])
+        kwargs['stopping_criteria'] = StoppingCriteriaList([*kwargs.get('stopping_criteria', []), BoundedCompletion()])
         output = original(**kwargs)
         observation['generated_tokens'] = int(output.shape[1])
         if observation['generated_tokens'] > budget:
@@ -519,9 +638,11 @@ def generate(model, row, device):
                                       max_length=budget, repetition_penalty=row['sampling'].get('repetitionPenalty', 1.0))
     if not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], str):
         fail('upstream generation returned an invalid batch')
-    if len(result[0].encode()) > row['detail_budget']['maxSvgBytes']:
-        fail('upstream exceeded the native SVG byte budget')
-    return result[0], observation
+    raw, finish_reason = classify_generation(result[0], observation, budget, row['detail_budget']['maxSvgBytes'])
+    generated_bytes = len(raw.encode())
+    observation['generated_bytes'] = generated_bytes
+    observation['finish_reason'] = finish_reason
+    return raw, observation
 
 
 def durable_json(path, value):
@@ -587,23 +708,40 @@ def collect_cases(args, facts, model, device, output, tier_root, record, cases=N
         # Serialize the upstream Python string identically on Windows and Unix. Locale-default
         # text I/O turned U+2013 into CP1252 0x96 on the Windows oracle host.
         raw_path = case_root / 'raw.svg'; raw_path.write_bytes(raw.encode('utf-8'))
+        identity = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
+        if generation['finish_reason'] != 'complete':
+            rejection = {**identity, 'outcome': 'rejected', 'rejection_stage': 'generation_limit',
+                         'rejection_code': generation['finish_reason'],
+                         'rejection_reason': 'upstream StarVector stopped at the ' + generation['finish_reason'],
+                         'upstream_raw_svg': raw_path.relative_to(output).as_posix(),
+                         'upstream_raw_svg_sha256': digest(raw_path)}
+            cases.append(rejection); rejections.append(rejection)
+            record({'event': 'case_rejected', **rejection, 'error_code': rejection['rejection_reason'],
+                    'raw_svg_sha256': rejection['upstream_raw_svg_sha256'], **generation})
+            continue
         rendered = case_root / 'rendered'
         try:
             render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
         except SvgCaseRejected as exc:
-            rejection = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
-            rejection.update(error_code=exc.event['error_code'], raw_svg_sha256=digest(raw_path),
-                             sanitizer_stdout=(case_root / 'sanitizer.stdout.log').relative_to(output).as_posix(),
-                             sanitizer_stderr=(case_root / 'sanitizer.stderr.log').relative_to(output).as_posix())
-            rejections.append(rejection)
-            record({'event': 'case_rejected', **rejection, **generation})
+            stdout = case_root / 'sanitizer.stdout.log'; stderr = case_root / 'sanitizer.stderr.log'
+            rejection = {**identity, 'outcome': 'rejected', 'rejection_stage': 'sanitizer',
+                         'rejection_reason': exc.event['error_code'],
+                         'upstream_raw_svg': raw_path.relative_to(output).as_posix(),
+                         'upstream_raw_svg_sha256': digest(raw_path),
+                         'sanitizer_stdout': stdout.relative_to(output).as_posix(),
+                         'sanitizer_stdout_sha256': digest(stdout),
+                         'sanitizer_stderr': stderr.relative_to(output).as_posix(),
+                         'sanitizer_stderr_sha256': digest(stderr)}
+            cases.append(rejection); rejections.append(rejection)
+            record({'event': 'case_rejected', **rejection, 'error_code': rejection['rejection_reason'],
+                    'raw_svg_sha256': rejection['upstream_raw_svg_sha256'], **generation})
             continue
         svg = local_file(rendered, 'canonical.svg'); preview = local_file(rendered, 'preview.png')
         from PIL import Image
         with Image.open(preview) as image:
             if image.size != (512, 512):
                 fail('upstream canonical preview is not 512x512')
-        case = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
+        case = {**identity, 'outcome': 'accepted'}
         case.update(upstream_svg=svg.relative_to(output).as_posix(), upstream_svg_sha256=digest(svg),
                     upstream_preview_png=preview.relative_to(output).as_posix(), upstream_preview_png_sha256=digest(preview))
         cases.append(case)
@@ -647,23 +785,20 @@ def worker(args, facts):
             finally:
                 del model
                 torch.cuda.empty_cache()
-            if rejections:
-                indices = ','.join(str(item['case_index']) for item in rejections)
-                raise CollectedSvgRejections('canonical renderer rejected ' + str(len(rejections))
-                                             + ' of ' + str(len(facts['rows']))
-                                             + ' planned SVG cases: ' + indices)
-            record({'event': 'completed', 'cases': len(cases), 'peak_cuda_bytes': torch.cuda.max_memory_allocated(device)})
+            record({'event': 'completed', 'cases': len(cases),
+                    'accepted_cases': len(cases) - len(rejections), 'rejected_cases': len(rejections),
+                    'peak_cuda_bytes': torch.cuda.max_memory_allocated(device)})
         except BaseException as exc:
             event = {'event': 'failed', 'error': str(exc), 'completed_cases': len(cases)}
             if isinstance(exc, CollectedSvgRejections):
                 event['failure_kind'] = 'svg_case_rejections'
             if rejections:
-                event.update(collected_cases=len(cases) + len(rejections), rejected_cases=rejections)
+                event.update(collected_cases=len(cases), rejected_cases=rejections)
             record(event)
             raise
     config_copy = tier_root / 'config.json'; shutil.copyfile(facts['config_path'], config_copy)
     processor_copy = tier_root / 'processor.json'; shutil.copyfile(facts['processor_path'], processor_copy)
-    value = {'schema_version': 1, 'upstream_reference': reference_metadata(facts, args.tier, config_copy, processor_copy, transcript_path),
+    value = {'schema_version': 2, 'upstream_reference': reference_metadata(facts, args.tier, config_copy, processor_copy, transcript_path),
         'config_path': config_copy.relative_to(output).as_posix(), 'processor_path': processor_copy.relative_to(output).as_posix(),
         'transcript_path': transcript_path.relative_to(output).as_posix(), 'cases': cases}
     suffix = '.pending.json' if args.defer_manifest else '.json'

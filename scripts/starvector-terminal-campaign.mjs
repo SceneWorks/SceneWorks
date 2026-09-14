@@ -11,6 +11,8 @@ const configuredPlan = JSON.parse(await readFile(new URL("../release/starvector-
 export const INFERENCE_REVISION = configuredPlan.inference_contract.revision;
 export const LPIPS_LINEAR_SHA256 = "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0";
 export const ALEXNET_SHA256 = "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02";
+export const RECEIPT_SCHEMA = "release/starvector-terminal-receipt-v2-outcome-parity.schema.json";
+export const RECEIPT_SCHEMA_SHA256 = "fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35";
 const CAMPAIGN_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function terminalSourceRowRecord(row) {
@@ -40,6 +42,7 @@ export function validateMetricsLock(lock) {
 
 export function validatePlan(plan) {
   if (plan?.schema_version !== 1 || !/^[a-f0-9]{40}$/.test(plan?.inference_contract?.revision ?? "") || plan?.inference_contract?.revision !== INFERENCE_REVISION || plan.inference_contract.repository !== "SceneWorks/inference") fail("inference contract identity changed");
+  if (plan.inference_contract.receipt_schema !== RECEIPT_SCHEMA || plan.inference_contract.receipt_schema_sha256 !== RECEIPT_SCHEMA_SHA256) fail("outcome-parity receipt schema selection changed");
   const pre = plan.inference_preflight;
   if (pre?.repository !== "SceneWorks/inference" || pre.head_sha !== plan.inference_contract.revision || pre.workflow?.path !== ".github/workflows/real-weights.yml" || pre.workflow.event !== "workflow_dispatch" || !Number.isSafeInteger(pre.workflow.id) || !/^[0-9]+$/.test(pre.workflow_run_id ?? "") || !Number.isSafeInteger(pre.workflow_run_attempt) || pre.workflow_run_attempt < 1 || !Number.isSafeInteger(pre.artifact?.id) || pre.artifact.id < 1 || !Number.isSafeInteger(pre.artifact.size_in_bytes) || pre.artifact.size_in_bytes < 1 || !/^sha256:[a-f0-9]{64}$/.test(pre.artifact.digest ?? "") || pre.artifact.name !== `starvector-terminal-preflight-${pre.head_sha}-${pre.workflow_run_id}-${pre.workflow_run_attempt}`) fail("inference preflight provenance is invalid");
   for (const [name, keys] of [["inventory_artifacts", ["1b", "8b"]], ["hook_logs", TUPLES]]) {

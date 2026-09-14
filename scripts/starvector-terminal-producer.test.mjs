@@ -13,6 +13,7 @@ import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt
 // the focused fixture without embedding a developer-specific worktree path.
 const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT ?? path.resolve("../sc-22261-inference-integration");
 let inferenceRoot = inferenceRepository;
+const campaignPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");
 const inferenceRevision = INFERENCE_REVISION;
@@ -70,7 +71,7 @@ test("sealer reconstructs exact colon-bearing canonical paths from portable tupl
 
 test("preflight requires the exact clean inference checkout and current Cargo permanent pin", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-scene-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks"));
-  await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin);
+  await verifyInferenceCheckout(inferenceRoot, campaignPlan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin);
   await assert.rejects(() => verifyPermanentPin(sceneWorksRoot, "0".repeat(40)), /terminal inference revision/);
   await removePinnedInference(inferenceRoot); inferenceRoot = inferenceRepository;
 });
