@@ -12,7 +12,11 @@
 //! film-harness replace-take --out DIR --shot SH030 [--reason TEXT] [--export]
 //! film-harness cancel       --out DIR
 //! film-harness status       --out DIR
+//! film-harness trim         --run RUN.json --shot SH010 [--source-in S] [--source-out S]
+//! film-harness reorder      --run RUN.json --order SH020,SH010
+//! film-harness swap-take    --run RUN.json --shot SH010 --asset asset_...
 //! film-harness fixture-images --out DIR
+//! film-harness fixture-sound  --out DIR
 //! ```
 //!
 //! The intended loop is `plan` -> read and edit `plan.json` -> `compile` -> `validate` -> `run`.
@@ -35,6 +39,15 @@
 //!
 //! One controller per run directory: nothing locks `run.json`, so `run`, `resume` and
 //! `replace-take` must not be held against the same `--out` at the same time.
+//!
+//! Two different things can change which take a shot carries, and they are SEPARATE verbs:
+//!
+//! * `replace-take` (sc-22711) is the GENERATION side — it rejects the take a shot is carrying and
+//!   renders exactly one more for it, under the run's remaining budget.
+//! * `trim` / `reorder` / `swap-take` (sc-22712) are the EDIT side — they change an assembled
+//!   sequence without re-rendering anything: they read the run record, edit the SAVED timeline
+//!   through the same API the editor uses, re-lay the sequence, and write the record back.
+//!   `swap-take` swaps in an asset that already exists. `--export` re-runs the MP4 export.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -42,8 +55,8 @@ use std::time::Duration;
 
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState};
 use sceneworks_rust_api::film_harness::{
-    self, ApiTransport, HarnessError, HttpTransport, ResumeOptions, RunControl, RunOptions,
-    FIXTURE_REFERENCES,
+    self, ApiTransport, EditOptions, HarnessError, HttpTransport, ResumeOptions, RunControl,
+    RunOptions, TimelineEdit, FIXTURE_REFERENCES, FIXTURE_SOUNDS,
 };
 use sceneworks_rust_api::film_planner::{
     self, PlannerOptions, SceneWorksLlm, DEFAULT_LLM_JOB_TIMEOUT, DEFAULT_MAX_REPAIR_ROUNDS,
@@ -61,7 +74,11 @@ USAGE:
   film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export] [--api URL]
   film-harness cancel       --out DIR
   film-harness status       --out DIR
+  film-harness trim         --run RUN.json --shot ID [--source-in S] [--source-out S] [EDIT OPTIONS]
+  film-harness reorder      --run RUN.json --order A,B,C                              [EDIT OPTIONS]
+  film-harness swap-take    --run RUN.json --shot ID --asset ASSET_ID                 [EDIT OPTIONS]
   film-harness fixture-images --out DIR
+  film-harness fixture-sound  --out DIR
 
 OPTIONS (plan / compile):
   --brief BRIEF.json     The brief to plan from (plan); re-checked for dropped beats (compile)
@@ -84,15 +101,28 @@ OPTIONS (run):
   --no-export            Skip the timeline assembly and MP4 export
   --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
 
+EDIT OPTIONS (trim / reorder / swap-take):
+  --run RUN.json         The run record to edit. It names the project and the timeline, and is
+                         rewritten in place with the edited sequence.
+  --api URL / --token    As above
+  --export               Re-export the MP4 after the edit (default: edit the timeline only)
+  --poll-seconds N       Job polling cadence in seconds (default 5)
+
 resume       picks a run up from its record: finished takes are reused, jobs still in flight are
              adopted, and what is left of the plan's wall-clock budget and per-shot attempt cap is
              what bounds it. The selected take of every shot is left alone.
-replace-take rejects the take a shot is carrying and renders exactly ONE more for that shot, with
-             --reason recorded beside it. Other shots' takes, jobs and assets are untouched; shots
-             that declared a dependency on it are flagged needs_review, never re-rendered. Without
-             --export the existing export is only marked stale.
+replace-take RE-RENDERS: it rejects the take a shot is carrying and renders exactly ONE more for
+             that shot, with --reason recorded beside it. Other shots' takes, jobs and assets are
+             untouched; shots that declared a dependency on it are flagged needs_review, never
+             re-rendered. Without --export the existing export is only marked stale.
+swap-take    does NOT render: it swaps an asset that already exists into the assembled sequence.
+             Use replace-take to make a new take, swap-take to choose a different existing one.
 cancel       asks a run in another shell to stop; status prints what a record says without touching
              the API. A directory with no run.json in it is refused, not created.
+
+Every edit re-lays the whole sequence: picture items stay contiguous in cut order, each dialogue
+clip keeps its offset from the start of its own shot, and the ambience/music beds re-span the new
+duration without restarting at any cut.
 
 ONE CONTROLLER PER RUN DIRECTORY: run, resume and replace-take each rewrite --out/run.json as they
 go and nothing locks it, so two held against the same directory at once interleave their writes.
@@ -123,6 +153,8 @@ async fn main_async(args: Vec<String>) -> ExitCode {
         "cancel" => return cancel_command(&args[1..]),
         "status" => return status_command(&args[1..]),
         "fixture-images" => return fixture_images(&args[1..]),
+        "fixture-sound" => return fixture_sound(&args[1..]),
+        "trim" | "reorder" | "swap-take" => return edit(command, &args[1..]).await,
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -695,4 +727,225 @@ fn parse_record_options(command: &str, args: &[String]) -> Result<ParsedRecord, 
         reason,
         options,
     })
+}
+
+/// `trim` / `reorder` / `swap-take` — edit an assembled sequence in place (sc-22712).
+async fn edit(command: &str, args: &[String]) -> ExitCode {
+    let mut run_record: Option<PathBuf> = None;
+    let mut api_url = std::env::var("SCENEWORKS_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let mut token = std::env::var("SCENEWORKS_ACCESS_TOKEN").ok();
+    let mut shot: Option<String> = None;
+    let mut asset: Option<String> = None;
+    let mut order: Option<Vec<String>> = None;
+    let mut source_in: Option<f64> = None;
+    let mut source_out: Option<f64> = None;
+    let mut export = false;
+    let mut poll_seconds = 5_u64;
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        let parsed = (|| -> Result<(), String> {
+            match arg.as_str() {
+                "--run" => run_record = Some(PathBuf::from(value()?)),
+                "--api" => api_url = value()?,
+                "--token" => token = Some(value()?),
+                "--shot" => shot = Some(value()?),
+                "--asset" => asset = Some(value()?),
+                "--order" => {
+                    order = Some(
+                        value()?
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                            .collect(),
+                    )
+                }
+                "--source-in" => {
+                    source_in = Some(
+                        value()?
+                            .parse::<f64>()
+                            .map_err(|error| format!("--source-in: {error}"))?,
+                    )
+                }
+                "--source-out" => {
+                    source_out = Some(
+                        value()?
+                            .parse::<f64>()
+                            .map_err(|error| format!("--source-out: {error}"))?,
+                    )
+                }
+                "--export" => export = true,
+                "--poll-seconds" => {
+                    poll_seconds = value()?
+                        .parse::<u64>()
+                        .map_err(|error| format!("--poll-seconds: {error}"))?
+                        .max(1)
+                }
+                other => return Err(format!("unknown option {other:?}")),
+            }
+            Ok(())
+        })();
+        if let Err(message) = parsed {
+            eprintln!("film-harness: {message}\n\n{USAGE}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let Some(run_record_path) = run_record else {
+        eprintln!("film-harness: {command} needs --run RUN.json\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let edit = match command {
+        "trim" => {
+            let Some(shot_id) = shot else {
+                eprintln!("film-harness: trim needs --shot ID\n\n{USAGE}");
+                return ExitCode::from(1);
+            };
+            if source_in.is_none() && source_out.is_none() {
+                eprintln!("film-harness: trim needs --source-in and/or --source-out\n\n{USAGE}");
+                return ExitCode::from(1);
+            }
+            TimelineEdit::Trim {
+                shot_id,
+                source_in,
+                source_out,
+            }
+        }
+        "reorder" => {
+            let Some(shot_ids) = order.filter(|ids| !ids.is_empty()) else {
+                eprintln!("film-harness: reorder needs --order A,B,C\n\n{USAGE}");
+                return ExitCode::from(1);
+            };
+            TimelineEdit::Reorder { shot_ids }
+        }
+        _ => {
+            let (Some(shot_id), Some(asset_id)) = (shot, asset) else {
+                eprintln!(
+                    "film-harness: swap-take needs --shot ID and --asset ASSET_ID\n\n{USAGE}"
+                );
+                return ExitCode::from(1);
+            };
+            TimelineEdit::SwapTake { shot_id, asset_id }
+        }
+    };
+
+    let transport = match HttpTransport::new(&api_url, token) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let options = EditOptions {
+        run_record_path: run_record_path.clone(),
+        export,
+        poll_interval: Duration::from_secs(poll_seconds),
+    };
+    match film_harness::edit_timeline(&transport, &options, edit).await {
+        Ok(record) => {
+            let Some(timeline) = &record.timeline else {
+                eprintln!(
+                    "film-harness: the edit left no timeline in {}",
+                    run_record_path.display()
+                );
+                return ExitCode::from(1);
+            };
+            println!(
+                "{command} applied to timeline {} ({:.3}s, {} picture items, {} tracks); record at {}",
+                timeline.timeline_id,
+                timeline.duration_seconds,
+                timeline.items.len(),
+                timeline.tracks.len(),
+                run_record_path.display()
+            );
+            for item in &timeline.items {
+                println!(
+                    "  {:<8} {:>7.3}..{:<7.3} source {:.3}..{:.3} asset={} generatedAudio={}",
+                    item.shot_id.as_deref().unwrap_or("-"),
+                    item.timeline_start,
+                    item.timeline_end,
+                    item.source_in,
+                    item.source_out,
+                    item.asset_id,
+                    item.generated_audio
+                        .map(|policy| policy.as_timeline_str())
+                        .unwrap_or("-")
+                );
+            }
+            for track in timeline.tracks.iter().filter(|track| track.kind == "audio") {
+                println!(
+                    "  {:<14} gain={:.2} muted={} items={}",
+                    track.role,
+                    track.gain,
+                    track.muted,
+                    track.items.len()
+                );
+            }
+            if let Some(export) = &record.export {
+                println!(
+                    "  export   {:<15} job={} asset={} path={}",
+                    export.status,
+                    export.job_id,
+                    export.asset_id.as_deref().unwrap_or("-"),
+                    export.render_path.as_deref().unwrap_or("-")
+                );
+                if export.status != "completed" {
+                    return ExitCode::from(3);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `fixture-sound --out DIR` — write the deterministic placeholder clips the fixture pack's sound
+/// roles resolve against (sc-22712).
+fn fixture_sound(args: &[String]) -> ExitCode {
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--out" => out = iter.next().map(PathBuf::from),
+            other => {
+                eprintln!("film-harness: unknown option {other:?}\n\n{USAGE}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let Some(out) = out else {
+        eprintln!("film-harness: fixture-sound needs --out DIR");
+        return ExitCode::from(1);
+    };
+    match film_harness::write_fixture_sound(&out) {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
+            println!(
+                "{} clips written at {} Hz ({})",
+                FIXTURE_SOUNDS.len(),
+                film_harness::FIXTURE_SOUND_RATE,
+                FIXTURE_SOUNDS
+                    .iter()
+                    .map(|(role, seconds, hz, _)| format!("{role} {seconds}s @{hz}Hz"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            ExitCode::from(1)
+        }
+    }
 }

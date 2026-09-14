@@ -493,6 +493,8 @@ fn brief_model_findings(
         synopsis: brief.synopsis.clone(),
         model: brief.model.clone(),
         limits: brief.limits.clone(),
+        // Inert here: the rules this probe runs read `model` and `limits` only.
+        sound: film_plan::PlanSound::default(),
         shots: Vec::new(),
     };
     film_plan::validate_plan_against_model(&probe, entry, lane)

@@ -16,6 +16,7 @@ references ──┘                          │                        │
                                 film-harness validate ──> film-harness run ──> run.json
                                                                     │
                                             film-harness resume / replace-take / cancel / status
+                                            film-harness trim / reorder / swap-take
 ```
 
 ## Documents
@@ -47,6 +48,115 @@ A pack entry with `"approved": false` is still imported (so a human can review i
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
 a `[A-Za-z0-9._-]` basename: it is sent as a multipart filename, so a CR/LF in it would inject
 headers.
+
+## Sound (sc-22712)
+
+The pack's `sound` array maps roles to approved audio files (`dialogue` / `ambience` / `music` /
+`sfx`), in the same role namespace as the references but placed through different slots — sound is
+never conditioning. The plan's `sound` block then places them:
+
+```jsonc
+"sound": {
+  "generatedAudio": "mute",                 // run-level policy for the takes' OWN audio
+  "dialogue": { "gain": 1.0, "muted": false },
+  "ambience": { "role": "workshop_room_tone", "gain": 0.35, "fadeInSeconds": 1.0 },
+  "music":    { "role": "main_theme", "gain": 0.2, "startSeconds": 0.0 }
+}
+```
+
+and a shot places its own line with `"dialogueClip": { "role": ..., "offsetSeconds": ... }`, where
+the offset is measured **from the start of that shot** rather than from the head of the sequence.
+A role placed on the wrong bus (an `ambience` slot pointing at a `dialogue` entry) is a finding
+before any job exists, because a plan like that renders, exports, and simply sounds wrong.
+
+The assembled timeline therefore has four tracks: `track_main` (picture), `track_dialogue`,
+`track_ambience` and `track_music`. Each audio track is a bus with its own `gain` and `muted`;
+**the beds are placed once for the whole sequence**, so they play straight through the cuts instead
+of restarting at each one. The export mixes every non-muted audio track — gain is
+`track.gain * item.volume`, clips are delayed to where they land in the exported picture, per-item
+`fadeInSeconds`/`fadeOutSeconds` become `afade`, the summed mix passes through a limiter so the
+timeline's gains cannot add up past the encoder's ceiling and clip, and the mix is padded so the
+file ends on the last picture frame. Sound never extends the export: a clip that would overrun the
+picture is shortened.
+
+**Timeline seconds are not picture seconds when a shot carries a crossfade.** The picture pass
+overlaps a crossfaded shot with the one before it, so the exported file is shorter than the timeline
+by the crossfade duration once per transition and every shot after a transition begins that much
+earlier in the file. The mix is placed against the picture that was actually built: the ceiling is
+the real exported length, and a clip keyed to a shot is delayed to where that shot IS, not to where
+the timeline says it starts. Two 2 s shots with a 1 s crossfade export as a 3.000 s file with the
+second shot's line at 1.0 s. Only the picture track's items can contribute their own generated
+audio; an overlay item is never rendered into the picture, so its take's audio is not mixed in.
+
+**Generated clip audio** (`generatedAudio`, `include` | `mute`, default `mute`) decides whether a
+take's own audio joins the mix. The default is the doubling guard: a take whose model spoke the
+line and a placed dialogue clip for the same beat would otherwise both be heard, with nothing in
+the documents saying which was meant. A shot may override the run-level setting. The resolved value
+is written into the timeline item and into `run.json`, so the export obeys the saved document and
+the record says what it obeyed.
+
+The fixture's clips are deterministic placeholder tones (`film-harness fixture-sound`) — one
+frequency per role, so the three buses are distinguishable by ear when checking an export. Replace
+a file with real audio and bump the pack's `version`.
+
+### What this did and did not settle for SC-12807
+
+[SC-12807](https://app.shortcut.com/trefry/story/12807) owns full audio-track support for the video
+editor. This story took the two engine-side items it listed — **multiple audio tracks** and
+**mixing every non-muted audio track into the export**, including honouring the per-item `volume`
+that had been validated and read by nothing — and added per-track `gain`/`role` and per-item audio
+fades to the timeline schema on the way. Those are done for every timeline, not only a harness one.
+
+What SC-12807 still owns is the **editor** half, untouched here: audio assets in the media bin,
+placing and trimming audio items from the timeline UI, and controls for a track's gain and mute.
+The editor can create an audio track today and the backend will mix whatever is on it, but nothing
+in the UI puts a clip there or moves a fader. This story is not that audit.
+
+## Editing the assembled sequence
+
+Three subcommands change a saved sequence without re-rendering anything. Each reads the run record,
+edits the timeline through the same API the editor uses, re-lays the sequence, and rewrites the
+record; `--export` also re-runs the MP4 export.
+
+```text
+film-harness trim      --run RUN.json --shot SH010 --source-in 1.0 --source-out 3.0
+film-harness reorder   --run RUN.json --order SH020,SH010
+film-harness swap-take --run RUN.json --shot SH010 --asset asset_...
+```
+
+> **`swap-take` vs `replace-take`.** Two different things can change which take a shot carries, and
+> they are separate verbs. `swap-take` (here) re-cuts: it puts an asset that ALREADY EXISTS into
+> the sequence and renders nothing. [`replace-take`](#replacing-a-take)
+> re-renders: it rejects the take a shot is carrying and dispatches one more attempt for it under
+> the run's remaining budget. Use `replace-take` to make a new take, `swap-take` to choose a
+> different existing one.
+
+All three change one input to a single re-layout pass: picture items are laid end to end in cut
+order at whatever span their own source range implies (a trim ripples; there are no holes), each
+dialogue clip returns to its shot's new start plus the offset it has always had, and both beds
+re-span the new duration. Shot → asset links are never rebuilt from the plan — the picture item
+carries its own shot id and version history, so `swap-take` appends to that history rather than
+overwriting it, and the take that was there stays addressable. A reorder that does not name every
+shot exactly once is refused rather than silently dropping one.
+
+Every edit is recorded against the run, not only against the timeline: it is appended to
+`timeline.edits` AND to the run's decision log, and it leaves the existing MP4 flagged
+`export.stale` unless `--export` re-runs it — an edited sequence never silently re-renders. When
+the asset a `swap-take` names is itself one of that shot's recorded takes, the shot's
+`selectedAttempt` moves with it, so `status` and a later `replace-take` act on the take the
+sequence actually shows; a swap onto a foreign asset (an imported clip) selects no attempt, and the
+timeline item is then the only thing that says what is in the cut.
+
+`trim` measures the take before it cuts, the same way `swap-take` measures its replacement: an
+out point past the end of the media is clamped to the take's real length, and a range that starts
+past the end is refused with the length named. An unbounded out point used to be accepted in
+silence and produced a sequence longer than the file it points at — picture shorter than the saved
+timeline, sound drifting against it, and a duration in the render sidecar that no file has.
+
+A re-layout only re-places what the harness placed. A dialogue, ambience or music item the harness
+put there is re-derived from the plan (and dropped when the re-layout leaves it no room, because the
+plan can put it back); an audio clip the harness did not place — the editor's own — is clamped into
+the new duration and **kept**, and dropped only when it starts past the end of the re-laid sequence.
 
 Each conditioning mode fixes which slots it takes — `text_to_video` none, `image_to_video` a first
 frame, `first_last_frame` first and last, `reference_to_video` references only — which is how a
@@ -240,6 +350,11 @@ A shot keeps **all** its takes with their provenance; at most one is `selectedAt
 usable take of a shot is selected, and nothing but an explicit replacement ever moves it — replay
 and resume never do.
 
+> **`replace-take` vs `swap-take`.** `replace-take` (here) RE-RENDERS: it dispatches one more
+> attempt for the shot. To put a take the run already has back into the cut without rendering
+> anything, use [`swap-take`](#editing-the-assembled-sequence) — which also moves `selectedAttempt`
+> when the asset it names is one of that shot's takes.
+
 ```text
 film-harness replace-take --out DIR --shot SH030 --reason "the parcel is the wrong red" [--export]
 ```
@@ -330,7 +445,12 @@ target/debug/film-harness resume       --out DIR [--api URL] [--poll-seconds N] 
 target/debug/film-harness replace-take --out DIR --shot SHxxx [--reason TEXT] [--export]
 target/debug/film-harness cancel       --out DIR
 target/debug/film-harness status       --out DIR
+target/debug/film-harness trim         --run RUN.json --shot ID [--source-in S] [--source-out S]
+                                       [--export] [--api URL] [--poll-seconds N]
+target/debug/film-harness reorder      --run RUN.json --order A,B,C     [--export] [--api URL]
+target/debug/film-harness swap-take    --run RUN.json --shot ID --asset ASSET_ID [--export]
 target/debug/film-harness fixture-images --out DIR
+target/debug/film-harness fixture-sound  --out DIR
 ```
 
 `plan` and `compile` need a SceneWorks API with a worker advertising `prompt_refine`; `run`
@@ -372,8 +492,10 @@ processes down. It loads no video weights and renders nothing.
 
 `scripts/film-harness-smoke.sh` builds this checkout, starts the API and the native GPU worker
 against a scratch data dir, waits for both to register, renders `SH010,SH020` of the fixture on
-MiniMax-H3 q4 (MLX), and tears both down. The fixture's placeholder plates are deterministic
-(`fixture-images`), so the checked-in PNGs are reproducible byte for byte.
+MiniMax-H3 q4 (MLX), and tears both down. The fixture's placeholder plates and clips are
+deterministic (`fixture-images`, `fixture-sound`), so the checked-in PNGs and WAVs are reproducible
+byte for byte — the clips are integer triangle waves with no floating point anywhere, because a
+sine's last ULP differs between platforms and that is enough to break a byte-for-byte check.
 
 It builds the **release** profile, so export the release prebuilt libmlx before running it on
 macOS — the fetch script defaults to Debug, and a Debug directory is the wrong key for a release
