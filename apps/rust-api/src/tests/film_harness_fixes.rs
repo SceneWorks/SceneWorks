@@ -1,0 +1,1590 @@
+//! Feature-end fixes for the local filmmaking harness (epic 22708, sc-22715): one test per finding
+//! of the feature-end review, each written so that it FAILS on the code the finding was about.
+//! Same fixtures and fake worker as `film_harness.rs`; the real routes in-process throughout.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
+use serde_json::{json, Value};
+
+use crate::film_harness::review::{self, Decision};
+use crate::film_harness::{self, EditOptions, HarnessError, RunOptions, TimelineEdit};
+use crate::film_planner;
+use crate::tests::film_harness::{
+    close, draft_text, fast, findings_of, full_draft, harness_record, items_of, planner_llm,
+    planner_options, saved_timeline, set_plan_replies, summary, Harness, VideoBehavior,
+    BRIEF_FIXTURE, FAKE_REFINE_PEAK_BYTES, FIXTURE_DIR,
+};
+use crate::tests::support::request;
+
+fn edit_options(harness: &Harness, export: bool) -> EditOptions {
+    EditOptions {
+        run_record_path: harness.out_dir().join("run.json"),
+        export,
+        poll_interval: Duration::from_millis(250),
+    }
+}
+
+fn picture_order(saved: &Value) -> Vec<String> {
+    items_of(saved, "track_main")
+        .iter()
+        .map(|item| {
+            item["filmHarness"]["shotId"]
+                .as_str()
+                .expect("a harness picture item names its shot")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn picture_item<'a>(saved: &'a Value, shot_id: &str) -> &'a Value {
+    items_of(saved, "track_main")
+        .iter()
+        .find(|item| item["filmHarness"]["shotId"] == json!(shot_id))
+        .unwrap_or_else(|| panic!("{shot_id} is on the saved picture track"))
+}
+
+fn history_sources(item: &Value) -> Vec<&str> {
+    item["versionHistory"]
+        .as_array()
+        .expect("version history")
+        .iter()
+        .filter_map(|entry| entry["source"].as_str())
+        .collect()
+}
+
+fn edit_kinds(record: &RunRecord) -> Vec<String> {
+    record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .edits
+        .iter()
+        .map(|edit| edit.kind.clone())
+        .collect()
+}
+
+fn selected_asset(record: &RunRecord, shot_id: &str) -> String {
+    record
+        .shot(shot_id)
+        .and_then(|shot| shot.selected())
+        .and_then(|attempt| attempt.take.as_ref())
+        .map(|take| take.asset_id.clone())
+        .unwrap_or_else(|| panic!("{shot_id} has a selected take"))
+}
+
+/// Make the record on disk look like a controller that died mid-run: `running`, no stop.
+fn simulate_crash(harness: &Harness) {
+    harness.edit_run_record(|record| {
+        record["state"] = json!("running");
+        record.as_object_mut().unwrap().remove("stop");
+        record.as_object_mut().unwrap().remove("finishedAt");
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// [blocker] AT2/E4/E2 — re-assembly merges into the saved sequence instead of rebuilding it
+// ---------------------------------------------------------------------------------------------
+
+/// The probe from the feature-end review, as a regression test: run → trim SH010 1.0..3.0 →
+/// reorder [SH020, SH010] → `replace-take SH020`. Before the fix the replacement rebuilt every
+/// picture item from the selection — order back to plan order, SH010 back to 0.0..5.1667, one
+/// `original` history entry — while `timeline.edits` and the decision log still said "trimmed,
+/// reordered". Now only SH020's item changes.
+#[tokio::test]
+async fn a_replacement_merges_into_the_edited_sequence_instead_of_rebuilding_it() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let old_sh020 = selected_asset(&record, "SH020");
+    let sh010_asset = selected_asset(&record, "SH010");
+
+    film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, false),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(1.0),
+            source_out: Some(3.0),
+        },
+    )
+    .await
+    .expect("trim applies");
+    film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, false),
+        TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "the parcel is the wrong red",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(after.outcome, RunOutcome::Completed, "{}", summary(&after));
+    let new_sh020 = selected_asset(&after, "SH020");
+    assert_ne!(new_sh020, old_sh020);
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(
+        picture_order(&saved),
+        vec!["SH020", "SH010"],
+        "the reorder survived the replacement: {saved}"
+    );
+    let sh010 = picture_item(&saved, "SH010");
+    assert!(
+        close(sh010["sourceIn"].as_f64().unwrap(), 1.0)
+            && close(sh010["sourceOut"].as_f64().unwrap(), 3.0),
+        "the trim survived the replacement: {sh010}"
+    );
+    assert!(
+        close(sh010["timelineStart"].as_f64().unwrap(), 5.1667)
+            && close(sh010["timelineEnd"].as_f64().unwrap(), 5.1667 + 2.0),
+        "SH010 is still the trimmed 2s after the re-laid SH020: {sh010}"
+    );
+    assert_eq!(
+        sh010["assetId"],
+        json!(sh010_asset),
+        "SH010's take is untouched"
+    );
+    assert_eq!(
+        history_sources(sh010),
+        vec!["original"],
+        "an item whose take did not change keeps its history as it was: {sh010}"
+    );
+    let sh020 = picture_item(&saved, "SH020");
+    assert_eq!(sh020["assetId"], json!(new_sh020));
+    assert_eq!(sh020["currentVersionAssetId"], json!(new_sh020));
+    assert_eq!(
+        history_sources(sh020),
+        vec!["original", "replacement"],
+        "the replaced item's history GROWS rather than restarting: {sh020}"
+    );
+    assert_eq!(
+        sh020["versionHistory"][0]["assetId"],
+        json!(old_sh020),
+        "the rejected take stays addressable from the item: {sh020}"
+    );
+    assert!(
+        close(sh020["sourceIn"].as_f64().unwrap(), 0.0)
+            && close(sh020["sourceOut"].as_f64().unwrap(), 5.1667),
+        "the replaced item's source range is reset to the new take: {sh020}"
+    );
+    assert_eq!(
+        edit_kinds(&after),
+        vec!["trim", "reorder"],
+        "the edits are still recorded, and the sequence still honours them"
+    );
+    let recorded_order: Vec<&str> = after
+        .timeline
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|item| item.shot_id.as_deref())
+        .collect();
+    assert_eq!(recorded_order, vec!["SH020", "SH010"]);
+    assert!(
+        after.export.as_ref().is_some_and(|export| export.stale),
+        "without --export the existing MP4 is flagged stale"
+    );
+
+    // A `swap-take` onto a FOREIGN asset (an imported plate, not a take of this run) used to be
+    // reverted to the old take by the next replacement. It stays.
+    let plate = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported")
+        .asset_id
+        .clone();
+    film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, false),
+        TimelineEdit::SwapTake {
+            shot_id: "SH010".to_owned(),
+            asset_id: plate.clone(),
+        },
+    )
+    .await
+    .expect("swap applies");
+    let again = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "still the wrong red",
+    )
+    .await
+    .expect("second replacement runs");
+    assert_eq!(again.outcome, RunOutcome::Completed, "{}", summary(&again));
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let sh010 = picture_item(&saved, "SH010");
+    assert_eq!(
+        sh010["assetId"],
+        json!(plate),
+        "a swap onto a foreign asset survives a later replacement: {sh010}"
+    );
+    assert_eq!(history_sources(sh010), vec!["original", "replacement"]);
+    assert_eq!(
+        history_sources(picture_item(&saved, "SH020")),
+        vec!["original", "replacement", "replacement"]
+    );
+    assert_eq!(picture_order(&saved), vec!["SH020", "SH010"]);
+    assert_eq!(edit_kinds(&again), vec!["trim", "reorder", "swap_take"]);
+}
+
+/// The other path into `assemble_timeline`: a `resume` after an edit. A run whose export failed
+/// is edited (trim, reorder) and then resumed to redo the export — the re-assembly must keep the
+/// edited sequence, and the re-export must be of THAT sequence.
+#[tokio::test]
+async fn a_resume_after_an_edit_keeps_the_edited_sequence() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    harness.script.lock().export_fails = true;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a failed export still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    assert_eq!(
+        record.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("export_failed")
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+
+    film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, false),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(1.0),
+            source_out: Some(3.0),
+        },
+    )
+    .await
+    .expect("trim applies");
+    film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, false),
+        TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+
+    harness.script.lock().export_fails = false;
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    let export = resumed.export.as_ref().expect("export");
+    assert_eq!(export.status, "completed");
+    assert!(!export.stale);
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(picture_order(&saved), vec!["SH020", "SH010"], "{saved}");
+    let sh010 = picture_item(&saved, "SH010");
+    assert!(
+        close(sh010["sourceIn"].as_f64().unwrap(), 1.0)
+            && close(sh010["sourceOut"].as_f64().unwrap(), 3.0),
+        "the trim survived the resume: {sh010}"
+    );
+    assert!(close(saved["duration"].as_f64().unwrap(), 5.1667 + 2.0));
+    for shot_id in ["SH010", "SH020"] {
+        assert_eq!(
+            history_sources(picture_item(&saved, shot_id)),
+            vec!["original"]
+        );
+    }
+    assert_eq!(edit_kinds(&resumed), vec!["trim", "reorder"]);
+    assert!(
+        close(
+            resumed.timeline.as_ref().unwrap().duration_seconds,
+            5.1667 + 2.0
+        ),
+        "the record describes the edited sequence, not a rebuilt one"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// [major] E4/E5 — a replacement runs outside the run's automatic budgets
+// ---------------------------------------------------------------------------------------------
+
+/// A `replace-take` is charged to `humanRequestedElapsedSeconds`, never to `elapsedSeconds`: the
+/// probe in the review saw 4.28 s → 5.76 s after one replacement, and a run with less left than
+/// the replacement took then refused its own `resume` with "raise limits.maxRunSeconds".
+///
+/// The run here stopped on a failed export (resumable), and the replacement does not re-export —
+/// so the `export_failed` stop must survive the replacement too, or there is nothing to resume.
+#[tokio::test]
+async fn a_replacement_is_booked_as_human_time_and_leaves_the_run_budget_alone() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    harness.script.lock().export_fails = true;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 120, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, None);
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a failed export still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    assert_eq!(
+        record.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("export_failed")
+    );
+    assert_eq!(record.human_requested_elapsed_seconds, 0.0);
+
+    // Book the run as having five seconds of its budget left, as a long first controller would.
+    let booked = 595.0;
+    harness.edit_run_record(|record| record["elapsedSeconds"] = json!(booked));
+    // The replacement takes longer than what is left.
+    harness.script.lock().behaviors.push((
+        "SH010".to_owned(),
+        VideoBehavior::Complete {
+            delay_secs: 6,
+            peak_pct: 40.0,
+        },
+    ));
+    harness.script.lock().behaviors.rotate_right(1);
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH010",
+        "prefer another",
+    )
+    .await
+    .expect("a replacement is not bounded by what is left of the run budget");
+    assert_eq!(after.shot("SH010").unwrap().selected_attempt, Some(2));
+    assert_eq!(
+        after.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("export_failed"),
+        "a replacement that did not re-export leaves the export still owed: {}",
+        summary(&after)
+    );
+    assert!(after.is_resumable());
+
+    let on_disk = harness_record(&harness);
+    assert!(
+        close(on_disk.elapsed_seconds, booked),
+        "the run's automatic wall-clock is untouched by a human-requested attempt: {}",
+        on_disk.elapsed_seconds
+    );
+    assert!(
+        on_disk.human_requested_elapsed_seconds >= 6.0,
+        "the replacement is booked as human-requested time: {}",
+        on_disk.human_requested_elapsed_seconds
+    );
+
+    // The run's own `resume` is still admitted: it has the five seconds it had before, and the
+    // export it owes fits in them.
+    harness.script.lock().export_fails = false;
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("the resume is not refused for a budget the replacement did not spend");
+    assert!(
+        resumed
+            .decisions
+            .iter()
+            .any(|decision| decision.action == "resume"
+                && decision
+                    .detail
+                    .contains("5s of the plan's 600s budget left")),
+        "{:#?}",
+        resumed.decisions
+    );
+    assert_ne!(
+        resumed.outcome,
+        RunOutcome::StoppedRunBudget,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert!(
+        harness_record(&harness).human_requested_elapsed_seconds >= 6.0,
+        "a resume inherits the human-requested spend rather than resetting it"
+    );
+}
+
+/// A replacement's `--export` is bounded by the export's own per-job budget and NOT by a
+/// synthetic run deadline (`started + maxShotSeconds`, which the render had already spent most
+/// of): an overrun is `export_failed` / resumable, never `run_budget` / terminal.
+#[tokio::test]
+async fn a_replacements_export_overrun_is_export_failed_and_resumable_not_run_budget() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 4, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, Some(&["SH010"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    harness.script.lock().export_hangs = true;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH010",
+        "again, with export",
+    )
+    .await
+    .expect("a replacement whose export overruns still returns its record");
+    assert_eq!(after.outcome, RunOutcome::Failed, "{}", summary(&after));
+    let stop = after.stop.as_ref().expect("a stop reason");
+    assert_eq!(
+        stop.reason, "export_failed",
+        "an export overrun is an export failure, not the run's budget: {stop:?}"
+    );
+    assert!(stop.resumable, "{stop:?}");
+    let export = after.export.as_ref().expect("export recorded");
+    assert_eq!(export.status, "timed_out");
+    assert!(
+        export
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("per-job budget of 4s")),
+        "{export:?}"
+    );
+    assert_eq!(after.shot("SH010").unwrap().selected_attempt, Some(2));
+    assert!(after.human_requested_elapsed_seconds >= 4.0);
+    assert!(after.is_resumable());
+}
+
+// ---------------------------------------------------------------------------------------------
+// [major] E5/E4 — every preflight counts LIVE workers only
+// ---------------------------------------------------------------------------------------------
+
+/// A stale `offline` row still advertising `video_generate` / `timeline_export` / `prompt_refine`
+/// fooled the run and planner preflights (the review preflight had already learned this). Now one
+/// shared rule refuses all three, naming the row.
+#[tokio::test]
+async fn every_preflight_ignores_a_stale_worker_row_that_still_advertises_the_capability() {
+    let harness = Harness::start(false, Vec::new()).await;
+    let (status, _) = request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "stale-gpu",
+            "gpuId": "mlx",
+            "gpuName": "Apple M-series (stale)",
+            "capabilities": ["video_generate", "timeline_export", "prompt_refine"],
+            "loadedModels": [],
+            "utilization": { "memoryTotalMb": 128 * 1024 },
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let heartbeat = |worker_status: &'static str| {
+        let app = harness.app.clone();
+        async move {
+            let (status, _) = request(
+                app,
+                "POST",
+                "/api/v1/workers/stale-gpu/heartbeat",
+                json!({
+                    "status": worker_status, "loadedModels": [],
+                    "utilization": { "memoryTotalMb": 128 * 1024 },
+                }),
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+        }
+    };
+    heartbeat("offline").await;
+
+    // The run preflight: both the render worker and the export worker.
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        None,
+    );
+    let findings = findings_of(
+        film_harness::validate(Some(&harness.transport), &options)
+            .await
+            .expect_err("an offline worker cannot render or export"),
+    );
+    assert!(
+        findings.iter().any(|finding| finding
+            .contains("no live registered worker advertises video_generate")
+            && finding.contains("stale-gpu (offline)")),
+        "{findings:?}"
+    );
+    assert!(
+        findings.iter().any(|finding| finding
+            .contains("no live registered worker advertises timeline_export")
+            && finding.contains("stale-gpu (offline)")),
+        "{findings:?}"
+    );
+
+    // The planner preflight.
+    let findings = findings_of(
+        film_planner::generate(
+            &harness.transport,
+            &planner_llm(&harness),
+            &planner_options(&harness, "stale"),
+        )
+        .await
+        .expect_err("an offline worker cannot plan"),
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].contains("no live registered worker advertises prompt_refine")
+            && findings[0].contains("stale-gpu (offline)"),
+        "{findings:?}"
+    );
+    assert!(harness.jobs().await.is_empty(), "nothing was queued");
+
+    // The same row, live, passes the run preflight.
+    heartbeat("idle").await;
+    film_harness::validate(Some(&harness.transport), &options)
+        .await
+        .expect("an idle worker advertising both is accepted");
+}
+
+// ---------------------------------------------------------------------------------------------
+// [minor] E3 — dropped audio layers reach the run record
+// ---------------------------------------------------------------------------------------------
+
+/// The layers a `timeline_export` mixed WITHOUT are in its result and copied into `run.json`'s
+/// export entry, so "why is the music missing" is answerable from the record. The real worker's
+/// `droppedAudioLayers` is exercised in `a_real_timeline_export_mixes_the_harness_four_track_sequence`;
+/// this proves the record side against the fake.
+#[tokio::test]
+async fn the_run_record_carries_the_audio_layers_the_export_dropped() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let dropped = json!({
+        "assetId": "asset_gone",
+        "trackId": "track_music",
+        "role": "music",
+        "generated": false,
+        "reason": "asset_missing",
+    });
+    harness.script.lock().export_dropped_layers = vec![dropped.clone()];
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let export = record.export.as_ref().expect("export");
+    assert_eq!(export.dropped_audio_layers, vec![dropped.clone()]);
+    let on_disk = harness.run_record();
+    assert_eq!(on_disk["export"]["droppedAudioLayers"], json!([dropped]));
+    assert_eq!(on_disk["export"]["status"], "completed");
+}
+
+// ---------------------------------------------------------------------------------------------
+// [minor] E2 — an edit persists like every other controller and leaves the run's stop alone
+// ---------------------------------------------------------------------------------------------
+
+/// `edit_timeline` wrote `run.json` with a plain `fs::write`, never refreshed the project's copy,
+/// and on `--export` overwrote `outcome` regardless of the prior stop. Now it goes through
+/// `persist_record` and only an `export_failed` stop (which the re-export resolves) moves.
+#[tokio::test]
+async fn an_edit_persists_atomically_mirrors_the_projects_copy_and_leaves_the_runs_stop_alone() {
+    // A run that stopped for a reason a trim does not change: SH020 exhausted its one attempt.
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+            ("SH020", VideoBehavior::FailAlways),
+        ],
+    )
+    .await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 120, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, None);
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a run with a failed shot still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    assert_eq!(
+        record.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("attempts_exhausted")
+    );
+    assert!(record
+        .export
+        .as_ref()
+        .is_some_and(|export| export.status == "completed"));
+    let project_path = PathBuf::from(record.project_path.as_deref().expect("project path"));
+    let mirror = project_path
+        .join("film-harness")
+        .join(&record.run_id)
+        .join("run.json");
+    assert!(mirror.is_file(), "the run writes the project's copy");
+
+    let edited = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, true),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(0.5),
+            source_out: Some(2.0),
+        },
+    )
+    .await
+    .expect("trim --export applies");
+    assert_eq!(
+        edited.outcome,
+        RunOutcome::Failed,
+        "a successful re-export does not re-classify a run that stopped on attempts_exhausted"
+    );
+    assert_eq!(
+        edited.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("attempts_exhausted")
+    );
+    assert!(edited
+        .export
+        .as_ref()
+        .is_some_and(|export| export.status == "completed" && !export.stale));
+    assert!(
+        edited.human_requested_elapsed_seconds > 0.0,
+        "an edit's re-export is human-requested time"
+    );
+
+    // The project's copy says the same thing as the run directory's, and nothing was left half
+    // written: the temp file `write_atomically` renames from is gone.
+    let on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&mirror).unwrap()).expect("mirror parses");
+    assert_eq!(on_disk["timeline"]["edits"][0]["kind"], "trim", "{on_disk}");
+    assert_eq!(on_disk["stop"]["reason"], "attempts_exhausted");
+    assert_eq!(
+        on_disk,
+        harness.run_record(),
+        "the project's copy is the run directory's record"
+    );
+    assert!(
+        !harness.out_dir().join("run.json.tmp").exists(),
+        "the atomic write leaves no temp file behind"
+    );
+
+    // An `export_failed` stop IS about the export an edit just redid, so a successful re-export
+    // clears it; a re-export that fails records `export_failed` (resumable) itself.
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    harness.script.lock().export_fails = true;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("record");
+    assert_eq!(
+        record.stop.as_ref().map(|stop| stop.reason.as_str()),
+        Some("export_failed")
+    );
+    harness.script.lock().export_fails = false;
+    let edited = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, true),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(0.5),
+            source_out: None,
+        },
+    )
+    .await
+    .expect("trim --export applies");
+    assert_eq!(
+        edited.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&edited)
+    );
+    assert!(edited.stop.is_none(), "{:?}", edited.stop);
+
+    harness.script.lock().export_fails = true;
+    let edited = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, true),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(1.0),
+            source_out: None,
+        },
+    )
+    .await
+    .expect("a failed re-export still returns the record");
+    assert_eq!(edited.outcome, RunOutcome::Failed, "{}", summary(&edited));
+    let stop = edited.stop.as_ref().expect("stop");
+    assert_eq!(stop.reason, "export_failed");
+    assert!(stop.resumable);
+    assert_eq!(
+        edited.export.as_ref().map(|export| export.status.as_str()),
+        Some("failed")
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// TERMINAL_READINESS (a) — the LTX-2.5 menus are exercised before the first LTX plan is
+// ---------------------------------------------------------------------------------------------
+
+/// The checked-in LTX-2.5 plan validates against the LIVE catalog entry, and an off-menu fps or
+/// duration for LTX is refused by name — so the first real LTX run is not the first time those
+/// menus are read.
+#[tokio::test]
+async fn the_ltx_2_5_plan_validates_against_the_live_catalog_and_off_menu_values_are_refused_by_name(
+) {
+    let harness = Harness::start(true, Vec::new()).await;
+    let plan_path = Path::new(FIXTURE_DIR).join("plan.ltx25.jsonc");
+    let options = harness.options(plan_path.clone(), harness.fixture_pack(), None);
+    let (plan, _) = film_harness::validate(Some(&harness.transport), &options)
+        .await
+        .expect("the LTX-2.5 plan validates against the live catalog");
+    assert_eq!(plan.model.id, "ltx_2_5");
+    assert_eq!(plan.model.tier.as_deref(), Some("q4"));
+    assert_eq!(plan.model.fps, Some(25));
+    assert_eq!(plan.shots.len(), 6);
+    assert!(plan
+        .shots
+        .iter()
+        .all(|shot| close(shot.target_duration_seconds, 6.0)));
+    // Same beats, same roles, same sound as the H3 plan — only the model block differs.
+    let h3 = sceneworks_core::film_plan::read_plan_file(&Path::new(FIXTURE_DIR).join("plan.jsonc"))
+        .expect("h3 plan reads");
+    let ids = |plan: &sceneworks_core::film_plan::ProductionPlan| {
+        plan.shots
+            .iter()
+            .map(|shot| shot.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&plan), ids(&h3));
+    for (ltx, h3) in plan.shots.iter().zip(&h3.shots) {
+        assert_eq!(ltx.continuity_roles, h3.continuity_roles, "{}", ltx.id);
+        assert_eq!(
+            ltx.dialogue_clip.is_some(),
+            h3.dialogue_clip.is_some(),
+            "{}",
+            ltx.id
+        );
+    }
+
+    let text = std::fs::read_to_string(&plan_path).unwrap();
+    let mut off_fps: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text)).unwrap();
+    off_fps["model"]["fps"] = json!(23);
+    let off_fps_path = harness.temp_dir.path().join("ltx-off-fps.json");
+    std::fs::write(
+        &off_fps_path,
+        serde_json::to_string_pretty(&off_fps).unwrap(),
+    )
+    .unwrap();
+    let mut options = harness.options(off_fps_path, harness.fixture_pack(), None);
+    let findings = findings_of(
+        film_harness::validate(Some(&harness.transport), &options)
+            .await
+            .expect_err("23 fps is off LTX-2.5's menu"),
+    );
+    assert!(
+        findings.iter().any(|finding| finding.contains("model.fps")
+            && finding.contains("ltx_2_5")
+            && finding.contains("23 fps")),
+        "{findings:?}"
+    );
+
+    let mut off_duration: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text)).unwrap();
+    off_duration["shots"][2]["targetDurationSeconds"] = json!(5.1667);
+    let off_duration_path = harness.temp_dir.path().join("ltx-off-duration.json");
+    std::fs::write(
+        &off_duration_path,
+        serde_json::to_string_pretty(&off_duration).unwrap(),
+    )
+    .unwrap();
+    options.plan_path = off_duration_path;
+    let findings = findings_of(
+        film_harness::validate(Some(&harness.transport), &options)
+            .await
+            .expect_err("H3's 5.1667s is off LTX-2.5's menu"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("[SH030] targetDurationSeconds")
+                && finding.contains("ltx_2_5")
+                && finding.contains("menu")),
+        "{findings:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (A) resume refuses a changed reference pack and changed compiled requests
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resume_refuses_a_reference_pack_that_changed_under_it() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    let plan_path = harness.edited_plan(|plan| {
+        plan["limits"] = json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 1, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+        });
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let options = harness.options(plan_path, pack_path.clone(), Some(&["SH010"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("record");
+    assert_ne!(record.outcome, RunOutcome::Completed);
+
+    let text = std::fs::read_to_string(&pack_path).unwrap();
+    let mut pack: Value = serde_json::from_str(&text).unwrap();
+    pack["description"] = json!("edited after the run started");
+    std::fs::write(&pack_path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+    std::fs::remove_file(harness.out_dir().join("references.json")).unwrap();
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("an edited pack is a new run");
+    let message = format!("{error}");
+    assert!(matches!(error, HarnessError::Refused(_)), "{error}");
+    assert!(
+        message.contains("the reference pack changed since run")
+            && message.contains("a changed reference pack is a new run, not a resume"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn resume_refuses_compiled_requests_that_changed_under_it() {
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = full_draft();
+    draft["shots"].as_array_mut().unwrap().truncate(2);
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["requiredBeats"].as_array_mut().unwrap().truncate(2);
+    brief["targetTotalSeconds"] = json!({ "min": 10.0, "max": 12.0 });
+    let brief_path = harness.temp_dir.path().join("two-beat-brief.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    let mut options = planner_options(&harness, "compiled-hash");
+    options.brief_path = brief_path;
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("plan generates");
+
+    let run_options = RunOptions {
+        plan_path: artifacts.plan_path.clone(),
+        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        compiled_path: None,
+        project_id: None,
+        shot_ids: None,
+        out_dir: harness.out_dir(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let record = film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("the generated plan runs");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let recorded_sha = record
+        .compiled
+        .as_ref()
+        .expect("compiled recorded")
+        .sha256
+        .clone();
+
+    // Edit the compiled document the run dispatched from, and remove the run's own copy so the
+    // SOURCE is what gets re-read.
+    let text = std::fs::read_to_string(&artifacts.compiled_path).unwrap();
+    let mut compiled: Value = serde_json::from_str(&text).unwrap();
+    compiled["requests"][0]["prompt"] = json!("an entirely different prompt");
+    std::fs::write(
+        &artifacts.compiled_path,
+        serde_json::to_string_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(harness.out_dir().join("compiled.json")).unwrap();
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("edited compiled requests are a new run");
+    let message = format!("{error}");
+    assert!(matches!(error, HarnessError::Refused(_)), "{error}");
+    assert!(
+        message.contains("the compiled requests changed since run")
+            && message.contains(&format!("recorded {recorded_sha}, found "))
+            && message.contains("recompile and start a new run"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("  "),
+        "the refusal reads as one line, not a botched continuation: {message:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (D) `plan --force`
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn plan_refuses_to_overwrite_a_differing_plan_json_unless_forced() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let mut options = planner_options(&harness, "forced");
+    let first = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("the first plan writes");
+    let generated = std::fs::read_to_string(&first.plan_path).unwrap();
+
+    // The same plan again is not a conflict.
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("an identical plan.json is simply rewritten");
+
+    // A hand edit is: the file IS the correction surface, and it is never silently replaced.
+    let edited = generated.replace(
+        "Courier at the Workshop",
+        "Courier at the Workshop (edited)",
+    );
+    assert_ne!(edited, generated);
+    std::fs::write(&first.plan_path, &edited).unwrap();
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let error = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect_err("a differing plan.json is refused");
+    let message = format!("{error}");
+    assert!(matches!(error, HarnessError::Io(_)), "{error}");
+    assert!(
+        message.contains("already exists and differs") && message.contains("--force"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&first.plan_path).unwrap(),
+        edited,
+        "the refused write left the hand edit exactly as it was"
+    );
+
+    // `--force` replaces it.
+    options.force = true;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("--force replaces the edited plan");
+    assert_eq!(
+        std::fs::read_to_string(&first.plan_path).unwrap(),
+        generated
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (E) the attempt cap across a resume, and the human attempt that never counts toward it
+// ---------------------------------------------------------------------------------------------
+
+/// maxAttemptsPerShot 1, one automatic failure, a crash, a resume: the resume hands out no fresh
+/// budget — the shot is not re-dispatched and the run closes `attempts_exhausted`, terminal.
+#[tokio::test]
+async fn an_attempt_cap_spent_before_a_crash_gives_the_resume_no_fresh_budget() {
+    let harness = Harness::start(
+        true,
+        vec![
+            ("SH010", VideoBehavior::FailAlways),
+            (
+                "SH020",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+        ],
+    )
+    .await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 120, "maxAttemptsPerShot": 1, "maxMemoryGb": 96
+    }));
+    let options = harness.options(plan, pack, None);
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    assert_eq!(record.shot("SH010").unwrap().attempts.len(), 1);
+    assert_eq!(harness.video_job_count(), 2);
+
+    simulate_crash(&harness);
+    assert!(harness_record(&harness).is_resumable());
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("a crashed run is resumed");
+    assert_eq!(
+        harness.video_job_count(),
+        2,
+        "the resume dispatched a fresh attempt for a shot whose cap was already spent\n{}",
+        summary(&resumed)
+    );
+    assert_eq!(resumed.shot("SH010").unwrap().attempts.len(), 1);
+    assert_eq!(resumed.shot("SH010").unwrap().outcome, ShotOutcome::Failed);
+    assert_eq!(resumed.outcome, RunOutcome::Failed, "{}", summary(&resumed));
+    let stop = resumed.stop.as_ref().expect("stop");
+    assert_eq!(stop.reason, "attempts_exhausted");
+    assert!(!stop.resumable);
+    assert_eq!(resumed.state, RunState::Finished);
+    let error = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect_err("terminal");
+    assert!(
+        matches!(&error, HarnessError::Refused(message) if message.contains("attempts_exhausted")),
+        "{error}"
+    );
+}
+
+/// A `replace-take` attempt is a human decision, not a retry: after the automatic attempts have
+/// spent the cap it still runs, and it never fills the cap for a LATER automatic retry either way.
+/// Two runs with the same history (fail, ok, human replacement, human rejection, crash) differ
+/// only in the cap: at 2 the resume dispatches nothing — the two automatic attempts filled it —
+/// and at 3 it dispatches one more, which it could not if the human attempt were the third.
+#[tokio::test]
+async fn a_human_replacement_is_not_counted_against_the_attempt_cap_on_a_later_retry() {
+    for (cap, expect_dispatch) in [(2_u32, false), (3_u32, true)] {
+        let harness = Harness::start(true, vec![("SH010", VideoBehavior::FailFirst)]).await;
+        let (plan, pack) = harness.minimal_documents(json!({
+            "maxRunSeconds": 600, "maxShotSeconds": 120, "maxAttemptsPerShot": cap, "maxMemoryGb": 96
+        }));
+        let options = harness.options(plan, pack, Some(&["SH010"]));
+        let record = film_harness::run(&harness.transport, &options)
+            .await
+            .expect("record");
+        assert_eq!(
+            record.outcome,
+            RunOutcome::Completed,
+            "cap {cap}: {}",
+            summary(&record)
+        );
+        assert_eq!(record.shot("SH010").unwrap().automatic_attempts(), 2);
+        assert_eq!(harness.video_job_count(), 2);
+
+        let mut resume_options = harness.resume_options();
+        resume_options.export = false;
+        let replaced = film_harness::replace_take(
+            &harness.transport,
+            &resume_options,
+            "SH010",
+            "another, please",
+        )
+        .await
+        .expect("a replacement never respects the cap");
+        assert_eq!(replaced.shot("SH010").unwrap().selected_attempt, Some(3));
+        assert_eq!(replaced.shot("SH010").unwrap().automatic_attempts(), 2);
+        assert_eq!(harness.video_job_count(), 3);
+
+        // The person rejects the replacement too, then the controller dies.
+        review::decide_take(&harness.out_dir(), "SH010", Decision::Reject, "no better")
+            .expect("rejection records");
+        simulate_crash(&harness);
+        let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+            .await
+            .expect("the crashed run resumes");
+        let dispatched = harness.video_job_count() - 3;
+        assert_eq!(
+            dispatched,
+            usize::from(expect_dispatch),
+            "cap {cap}: the human attempt must not count toward the automatic cap\n{}",
+            summary(&resumed)
+        );
+        if expect_dispatch {
+            assert_eq!(resumed.shot("SH010").unwrap().selected_attempt, Some(4));
+            assert_eq!(resumed.shot("SH010").unwrap().automatic_attempts(), 3);
+            assert_eq!(
+                resumed.outcome,
+                RunOutcome::Completed,
+                "{}",
+                summary(&resumed)
+            );
+        } else {
+            assert_eq!(resumed.shot("SH010").unwrap().selected_attempt, None);
+            assert_eq!(
+                resumed.stop.as_ref().map(|stop| stop.reason.as_str()),
+                Some("attempts_exhausted"),
+                "{}",
+                summary(&resumed)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// (F) the repair-round ceiling bounds the loop whatever the caller asks
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_repair_loop_ceiling_bounds_a_never_converging_planner_whatever_the_caller_asks() {
+    let harness = Harness::start(true, vec![]).await;
+    let mut short = full_draft();
+    short["shots"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|shot| shot["beatId"] != "handover");
+    set_plan_replies(&harness, vec![draft_text(&short)]);
+    let mut options = planner_options(&harness, "ceiling");
+    options.max_repair_rounds = 99;
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("a draft that never covers the beat is refused"),
+    );
+    assert_eq!(
+        harness.script.lock().plan_calls,
+        1 + film_planner::MAX_REPAIR_ROUNDS_CEILING as usize,
+        "the draft plus exactly the ceiling's rounds, not the 99 asked for"
+    );
+    assert!(
+        findings.iter().any(|finding| finding.contains(&format!(
+            "did not produce a valid plan within {} repair round",
+            film_planner::MAX_REPAIR_ROUNDS_CEILING
+        ))),
+        "{findings:?}"
+    );
+    let rejected = std::fs::read_to_string(options.out_dir.join("planner-rejected.txt"))
+        .expect("the refused answer is written out");
+    assert!(
+        rejected.contains(&format!(
+            "refused after {} round(s) of repair",
+            film_planner::MAX_REPAIR_ROUNDS_CEILING
+        )),
+        "{rejected}"
+    );
+    assert!(!options.out_dir.join("plan.json").exists());
+}
+
+// ---------------------------------------------------------------------------------------------
+// (E3/E6) the REAL timeline_export over a harness-assembled four-track sequence
+// ---------------------------------------------------------------------------------------------
+
+/// Decode `[start, start + seconds)` of `path` to mono 48 kHz PCM, the way the worker's measured
+/// mix tests do.
+fn decode_window(path: &Path, start: f64, seconds: f64) -> Vec<f64> {
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-ss",
+            &format!("{start:.3}"),
+            "-i",
+            &path.display().to_string(),
+            "-t",
+            &format!("{seconds:.3}"),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "s16le",
+            "-",
+        ])
+        .output()
+        .expect("ffmpeg decodes the export");
+    output
+        .stdout
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f64 / 32768.0)
+        .collect()
+}
+
+/// Goertzel magnitude of `frequency` in `samples`, normalised by length.
+fn tone_level(samples: &[f64], frequency: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let omega = 2.0 * std::f64::consts::PI * frequency / 48_000.0;
+    let coefficient = 2.0 * omega.cos();
+    let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+    for sample in samples {
+        let s0 = sample + coefficient * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = s1 * s1 + s2 * s2 - coefficient * s1 * s2;
+    power.max(0.0).sqrt() / samples.len() as f64
+}
+
+/// The `Stream #…: Audio:` / `Video:` lines ffmpeg prints for `path`.
+fn stream_kinds(path: &Path) -> Vec<String> {
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-i", &path.display().to_string()])
+        .output()
+        .expect("ffmpeg probes the export");
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.contains("Stream #"))
+        .map(|line| {
+            if line.contains(": Video:") {
+                "video".to_owned()
+            } else if line.contains(": Audio:") {
+                "audio".to_owned()
+            } else {
+                "other".to_owned()
+            }
+        })
+        .collect()
+}
+
+/// The REAL `timeline_export` job code path — `run_timeline_export_job` → `render` →
+/// `finalize` (two-pass mux) — over the four-track sequence the harness assembled through the real
+/// routes, run by the real utility worker loop against this test's in-process API over loopback.
+/// The fake worker renders the takes (as REAL clips, each with its own 900 Hz tone) and leaves
+/// `timeline_export` to the real worker. Every claim is measured off the exported file's samples.
+///
+/// Gated exactly as the worker's measured mix tests are: skips without ffmpeg locally, asserts
+/// under `SCENEWORKS_REQUIRE_FFMPEG`, which CI sets on the Linux lane.
+#[tokio::test]
+async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
+    if !crate::tests::film_harness::ffmpeg_reachable() {
+        return;
+    }
+    let harness = Harness::start(false, Vec::new()).await;
+    // The fake renders takes as real clips and does NOT advertise `timeline_export`.
+    {
+        let mut script = harness.script.lock();
+        script.real_takes = true;
+        script.capabilities = Some(vec![
+            "video_generate",
+            "frame_extract",
+            "image_vqa",
+            "prompt_refine",
+        ]);
+        script.behaviors = fast(&["SH010", "SH020"])
+            .into_iter()
+            .map(|(id, behavior)| (id.to_owned(), behavior))
+            .collect();
+    }
+    harness.spawn_worker().await;
+
+    // The in-process API on a loopback port, for the real worker's `reqwest` client.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback port");
+    let port = listener.local_addr().expect("address").port();
+    let app = harness.app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("the API serves");
+    });
+    let data_dir = harness.temp_dir.path().join("data");
+    let worker_settings = sceneworks_worker::Settings {
+        api_url: format!("http://127.0.0.1:{port}"),
+        access_token: None,
+        data_dir: data_dir.clone(),
+        resolved_cache: Default::default(),
+        config_dir: harness.temp_dir.path().join("config"),
+        worker_id: "real-utility-worker".to_owned(),
+        gpu_id: "cpu".to_owned(),
+        is_child_worker: true,
+        poll_seconds: 1,
+        heartbeat_seconds: 5,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: "http://127.0.0.1:9".to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: 1 << 30,
+        max_model_url_bytes: 1 << 30,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: false,
+        backend_candle_enabled: false,
+        external_model_roots: Vec::new(),
+        gpu_memory_limit_bytes: 0,
+    };
+    let worker = tokio::spawn(sceneworks_worker::run_worker_loop(worker_settings));
+    // Wait for the real worker to register with `timeline_export`, bounded.
+    let mut registered = false;
+    for _ in 0..400 {
+        let (_, workers) =
+            request(harness.app.clone(), "GET", "/api/v1/workers", Value::Null).await;
+        if workers.as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["id"] == "real-utility-worker"
+                    && row["capabilities"]
+                        .as_array()
+                        .is_some_and(|caps| caps.iter().any(|cap| cap == "timeline_export"))
+            })
+        }) {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        registered,
+        "the real utility worker did not register within 10s"
+    );
+
+    // SH010 + SH020 with the fixture's sound: a line 1.2s into SH020, two beds across the cut.
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let export = record.export.as_ref().expect("export");
+    assert_eq!(export.status, "completed", "{export:?}");
+    assert!(export.dropped_audio_layers.is_empty(), "{export:?}");
+    let project_id = record.project_id.clone().unwrap();
+    let (_, project) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let project_path = PathBuf::from(project["path"].as_str().expect("project path"));
+    let render_path = project_path.join(export.render_path.as_deref().expect("render path"));
+    assert!(render_path.is_file(), "{}", render_path.display());
+
+    // One video stream and one audio stream, from the two-pass mux.
+    let kinds = stream_kinds(&render_path);
+    assert_eq!(kinds, vec!["video", "audio"], "nb_streams: {kinds:?}");
+    let (_, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/assets/{}",
+            export.asset_id.as_deref().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    let total = 2.0 * 5.1667;
+    let duration = asset["file"]["duration"].as_f64().expect("render duration");
+    assert!(
+        (duration - total).abs() < 0.1,
+        "the export is exactly the picture's length: {duration} vs {total}"
+    );
+    assert_eq!(asset["file"]["hasAudio"], true, "{asset}");
+    let layers = asset["recipe"]["rawAdapterSettings"]["audioLayers"]
+        .as_array()
+        .expect("audio layers in the sidecar");
+    let roles: Vec<&str> = layers
+        .iter()
+        .filter_map(|layer| layer["role"].as_str())
+        .collect();
+    assert!(
+        roles.contains(&"dialogue") && roles.contains(&"ambience") && roles.contains(&"music"),
+        "{roles:?}"
+    );
+    assert_eq!(
+        asset["recipe"]["rawAdapterSettings"]["droppedAudioLayers"],
+        json!([]),
+        "{asset}"
+    );
+    // The whole file decodes to audio of the picture's length.
+    let all = decode_window(&render_path, 0.0, total + 1.0);
+    assert!(
+        (all.len() as f64 / 48_000.0 - total).abs() < 0.15,
+        "decoded audio length {}s vs picture {total}s",
+        all.len() as f64 / 48_000.0
+    );
+
+    // Bed continuity across the cut at 5.1667s: the 100 Hz room tone and the 250 Hz theme are
+    // present on both sides at the same level (one continuous bed each, not restarted).
+    let before = decode_window(&render_path, 4.6, 0.4);
+    let after = decode_window(&render_path, 5.4, 0.4);
+    // The fixture beds are quiet by design (triangle waves at amplitude 2600 / 3600 of 32768,
+    // mixed at 0.35 / 0.2): a few thousandths of full scale on the probe, and clearly above the
+    // silence floor a muted or missing bed reads as (< 0.0005 measured).
+    for (label, hz) in [("ambience", 100.0), ("music", 250.0)] {
+        let (b, a) = (tone_level(&before, hz), tone_level(&after, hz));
+        assert!(
+            b > 0.002 && a > 0.002,
+            "{label} must span the cut: {b:.5} before, {a:.5} after"
+        );
+        assert!(
+            (b - a).abs() < b * 0.35,
+            "{label} must not step at the cut: {b:.5} -> {a:.5}"
+        );
+    }
+    // The line sits 1.2s into SH020 (6.37s..8.37s in the file) and nowhere else.
+    let line_inside = tone_level(&decode_window(&render_path, 6.7, 0.4), 400.0);
+    let line_outside = tone_level(&decode_window(&render_path, 2.0, 0.4), 400.0);
+    assert!(
+        line_inside > 0.005,
+        "the dialogue line must be audible inside its slot: {line_inside:.5}"
+    );
+    assert!(
+        line_outside < line_inside / 10.0,
+        "the dialogue line must be absent outside its slot: {line_outside:.5} vs {line_inside:.5}"
+    );
+    // The takes' own 900 Hz audio is muted by the plan's `generatedAudio: mute`.
+    for start in [2.0, 6.7] {
+        let generated = tone_level(&decode_window(&render_path, start, 0.4), 900.0);
+        assert!(
+            generated < 0.0005,
+            "generated clip audio must be muted at {start}s: {generated:.5}"
+        );
+    }
+
+    // A placed clip whose asset is gone is DROPPED from the mix and reported, by name and reason,
+    // in the export result — and from there in the run record and the sidecar (E3).
+    let timeline_id = record.timeline.as_ref().unwrap().timeline_id.clone();
+    let mut timeline = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let tracks = timeline["tracks"].as_array_mut().unwrap();
+    let editor_track = tracks
+        .iter_mut()
+        .find(|track| track["id"] == "track_audio")
+        .expect("the editor's default audio track is kept");
+    editor_track["items"] = json!([{
+        "id": "item_editor_missing",
+        "trackId": "track_audio",
+        "assetId": "asset_that_does_not_exist",
+        "type": "audio",
+        "displayName": "editor clip",
+        "sourceIn": 0.0,
+        "sourceOut": 1.0,
+        "timelineStart": 0.5,
+        "timelineEnd": 1.5,
+        "speed": 1.0,
+        "fit": "fit",
+        "volume": 1.0,
+    }]);
+    let (status, _) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": timeline }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let edited = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options(&harness, true),
+        TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(0.5),
+            source_out: None,
+        },
+    )
+    .await
+    .expect("trim --export re-exports through the real worker");
+    let export = edited.export.as_ref().expect("export");
+    assert_eq!(export.status, "completed", "{export:?}");
+    assert_eq!(export.dropped_audio_layers.len(), 1, "{export:?}");
+    assert_eq!(
+        export.dropped_audio_layers[0]["assetId"],
+        "asset_that_does_not_exist"
+    );
+    assert_eq!(export.dropped_audio_layers[0]["reason"], "asset_missing");
+    assert_eq!(export.dropped_audio_layers[0]["trackId"], "track_audio");
+    assert_eq!(
+        harness.run_record()["export"]["droppedAudioLayers"][0]["reason"],
+        "asset_missing"
+    );
+
+    worker.abort();
+    server.abort();
+}
+
+// ---------------------------------------------------------------------------------------------
+// (B) helper alignment is asserted structurally: both `ffmpeg_reachable` helpers share one rule
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn both_ffmpeg_reachable_helpers_fall_back_to_the_path_probe_when_the_override_is_broken() {
+    let api = include_str!("film_harness.rs");
+    let api_body = api
+        .split("pub(crate) fn ffmpeg_reachable() -> bool {")
+        .nth(1)
+        .expect("helper exists")
+        .split("\n}\n")
+        .next()
+        .expect("helper ends");
+    // A set-but-broken SCENEWORKS_FFMPEG must NOT decide "unreachable" on its own: the override
+    // only counts when it names a real file, and otherwise the PATH probe decides.
+    assert!(
+        api_body.contains(".exists())") && api_body.contains("Command::new(\"ffmpeg\")"),
+        "{api_body}"
+    );
+    assert!(
+        !api_body
+            .contains("Ok(path) if !path.trim().is_empty() => Path::new(path.trim()).is_file(),"),
+        "the old set-but-broken short-circuit is gone"
+    );
+    assert_eq!(FAKE_REFINE_PEAK_BYTES, 9_000_000_000);
+}

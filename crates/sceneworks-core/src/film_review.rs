@@ -640,10 +640,12 @@ pub struct Observation {
     pub confidence: f64,
     pub evidence_frame_ids: Vec<String>,
     pub answers: Vec<FrameAnswer>,
-    /// Why nothing was read, when the question was never put to the backend at all — an
-    /// `acrossCut` question with no adjacent selected take, above all. A question that reached the
-    /// backend carries its answers instead, and a skipped one used to be omitted from the document
-    /// entirely, which reads exactly like a question nobody declared.
+    /// Why nothing was read, when the question was never answered by the backend — an
+    /// `acrossCut` question with no adjacent selected take, above all, or a question whose answer
+    /// did not arrive inside `limits.maxAnswerSeconds` (`answer_timeout: …`, sc-22715). A question
+    /// that reached the backend and was answered carries its answers instead, and a skipped one
+    /// used to be omitted from the document entirely, which reads exactly like a question nobody
+    /// declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }

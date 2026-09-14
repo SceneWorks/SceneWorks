@@ -283,6 +283,13 @@ pub struct PlanLimits {
     /// Memory the run is allowed to use, in GB. Checked against the model's declared minimum
     /// before dispatch and against the observed peak after every attempt.
     pub max_memory_gb: f64,
+    /// Memory the PLANNER's LLM decodes are allowed, in GB (sc-22715). A brief must declare it —
+    /// the planner runs `1 + rounds` full local decodes plus one rewrite per shot, and a budget
+    /// nobody wrote down is not a declared bound — and it is checked against the API host's
+    /// reported memory before the first token. A hand-authored plan runs no planner and may omit
+    /// it; a generated plan carries the brief's value through unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_max_memory_gb: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -903,7 +910,7 @@ fn validate_dialogue_clip(shot_id: &str, clip: &DialogueClip) -> Vec<PlanDiagnos
     findings
 }
 
-fn validate_limits(limits: &PlanLimits) -> Vec<PlanDiagnostic> {
+pub(crate) fn validate_limits(limits: &PlanLimits) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     if limits.max_run_seconds == 0 {
         findings.push(PlanDiagnostic::plan(
@@ -936,6 +943,15 @@ fn validate_limits(limits: &PlanLimits) -> Vec<PlanDiagnostic> {
         findings.push(PlanDiagnostic::plan(
             "limits.maxMemoryGb",
             "the memory budget must be a finite number > 0",
+        ));
+    }
+    if limits
+        .planner_max_memory_gb
+        .is_some_and(|budget| !budget.is_finite() || budget <= 0.0)
+    {
+        findings.push(PlanDiagnostic::plan(
+            "limits.plannerMaxMemoryGb",
+            "the planner memory budget must be a finite number > 0",
         ));
     }
     findings
@@ -2204,6 +2220,12 @@ pub struct ExportRecord {
     pub render_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Audio layers the export DROPPED from the mix (sc-22715): a placed clip whose asset was
+    /// missing from the project, whose media file was gone, or which carried no decodable audio
+    /// stream. The worker reports them in the job result (`droppedAudioLayers`) rather than only in
+    /// its log, so a sequence that exported with one bus missing says so in the run record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_audio_layers: Vec<Value>,
 }
 
 /// An export the controller is about to dispatch, written BEFORE the job is created so a
@@ -2287,7 +2309,18 @@ pub struct RunRecord {
     pub decisions: Vec<ProductionDecision>,
     /// Wall-clock the run has spent across every controller that has held it, so the plan's
     /// `limits.maxRunSeconds` bounds the run and not merely one attempt at it.
+    ///
+    /// AUTOMATIC work only. A `replace-take` / `request-repair` is a human decision that
+    /// authorises one bounded attempt outside the plan's automatic budgets, so its wall-clock is
+    /// booked in [`RunRecord::human_requested_elapsed_seconds`] instead — otherwise one replacement
+    /// could exhaust `maxRunSeconds` and make the run's own `resume` refuse with "raise
+    /// limits.maxRunSeconds" (sc-22715).
     pub elapsed_seconds: f64,
+    /// Wall-clock spent on human-requested attempts and their exports, kept apart from
+    /// `elapsedSeconds` so the terminal evaluation can still report the run's TOTAL cost
+    /// (`elapsedSeconds + humanRequestedElapsedSeconds`).
+    #[serde(default)]
+    pub human_requested_elapsed_seconds: f64,
 }
 
 impl RunRecord {
@@ -3013,6 +3046,7 @@ mod tests {
                 detail: "operator".into(),
             }],
             elapsed_seconds: 0.0,
+            human_requested_elapsed_seconds: 0.0,
         };
         let json = record.to_json();
         assert_eq!(json["outcome"], "rejected");

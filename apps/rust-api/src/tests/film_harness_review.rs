@@ -1370,7 +1370,11 @@ fn adjacent_answer(
     answers.insert(format!("{question}@{case_id}-adjacent"), answer.to_owned());
 }
 
-fn eval_backend() -> ScriptedVision {
+/// The whole answer table the labeled evaluation is scored against, keyed exactly as BOTH backends
+/// key a question: `<question id>@<frame id>` first, then `<question id>`. `ScriptedVision` reads
+/// it directly; the fake worker's `image_vqa` job reads the same keys off the tag the reviewer
+/// stamps into the question text, so the two backends can be driven with one table (sc-22715).
+fn eval_answer_table() -> BTreeMap<String, String> {
     let mut answers = eval_answers();
     // Every comparative cut question needs its OTHER side answered. By default the neighbour
     // agrees, so only the case that plants a discontinuity disagrees.
@@ -1479,8 +1483,12 @@ fn eval_backend() -> ScriptedVision {
         &[("sh050_recipient_apron", "jacket")],
     );
 
+    answers
+}
+
+fn eval_backend() -> ScriptedVision {
     let mut vision = ScriptedVision::new();
-    for (key, answer) in &answers {
+    for (key, answer) in &eval_answer_table() {
         vision = vision.answer(key, answer);
     }
     vision
@@ -1798,4 +1806,372 @@ async fn an_evaluation_backend_that_answers_nothing_scores_misses_never_matches(
             .iter()
             .all(|observation| observation.unobserved && observation.observed.is_none()));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-22715: the two review limits that no test ever tripped, and the evaluation over the REAL
+// image_vqa route.
+// ---------------------------------------------------------------------------------------------
+
+/// A review plan copy with `edit` applied to its limits, written beside the harness.
+fn review_plan_with_limits(harness: &Harness, edit: impl FnOnce(&mut ReviewPlan)) -> PathBuf {
+    let mut document = shipped_review_plan();
+    edit(&mut document);
+    let path = harness.temp_dir.path().join("review-limits.jsonc");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).expect("serializes"),
+    )
+    .expect("writes");
+    path
+}
+
+/// (C) `limits.maxSeconds`: a review whose backend is slow spends its wall-clock budget partway
+/// through the questions, stops with `review_budget`, and KEEPS the evidence it already has —
+/// the frames it sampled and the questions it answered — rather than erroring out.
+#[tokio::test]
+async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and_keeps_partial_evidence(
+) {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    // ~0.6 s per answer against a 2 s budget: the frames sample well inside it, the first answer
+    // or two land, and the deadline falls between questions.
+    harness.script.lock().vqa_delay = Some(Duration::from_millis(600));
+    let mut options = review_options(&harness, &["SH010"]);
+    options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
+        plan.limits.max_seconds = 2;
+    }));
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("a review that runs out of time still returns, with what it has");
+    let observed = observed_for(&reviewed, &harness.out_dir(), "SH010");
+    let stop = observed
+        .stop
+        .as_deref()
+        .expect("a review that spent its budget says so");
+    assert!(
+        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        "{stop}"
+    );
+    let declared = shipped_review_plan().shots["SH010"].questions.len();
+    assert!(
+        !observed.observations.is_empty() && observed.observations.len() < declared,
+        "partial evidence is kept: {} of {declared} questions",
+        observed.observations.len()
+    );
+    assert!(
+        observed.frames.iter().any(|frame| frame.shot_id == "SH010"),
+        "the sampled frames are kept"
+    );
+    assert!(
+        observed
+            .observations
+            .iter()
+            .all(|observation| observation.is_well_formed()),
+        "{:#?}",
+        observed.observations
+    );
+    assert_eq!(
+        reviewed
+            .shot("SH010")
+            .expect("shot")
+            .latest_review()
+            .expect("review recorded")
+            .stop
+            .as_deref(),
+        Some(stop),
+        "the run record's review index carries the same stop"
+    );
+    assert!(
+        harness.script.lock().vqa_asked.len() < declared * 3,
+        "the review did not go on asking after its budget ran out"
+    );
+}
+
+/// (C) `limits.maxSeconds` running out DURING a frame extraction is a `review_budget` stop that
+/// keeps the frames already sampled — it used to surface as a transport error from the cancelled
+/// extraction job, with no document written at all.
+#[tokio::test]
+async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sampled() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    // Frames take ~0.9 s each against a 2 s budget: the first one or two land, and the budget
+    // runs out while a later one is still being extracted. Under a loaded runner even the first
+    // can miss, which is the same stop with fewer frames — the claims below hold either way.
+    harness.script.lock().frame_delay = Some(Duration::from_millis(900));
+    let mut options = review_options(&harness, &["SH010"]);
+    options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
+        plan.limits.max_seconds = 2;
+    }));
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("a budget spent mid-extraction is a stop, not an error");
+    let observed = observed_for(&reviewed, &harness.out_dir(), "SH010");
+    let stop = observed
+        .stop
+        .as_deref()
+        .expect("the review says why it stopped");
+    assert!(
+        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        "{stop}"
+    );
+    let sampled = observed
+        .frames
+        .iter()
+        .filter(|frame| frame.shot_id == "SH010")
+        .count();
+    assert!(
+        sampled < 3,
+        "the extraction the budget interrupted must not have produced a frame: {sampled}"
+    );
+    assert_eq!(
+        observed.frames.len(),
+        sampled,
+        "only the frames that landed before the budget ran out are kept: {:?}",
+        observed.frames
+    );
+    assert!(
+        observed.observations.is_empty(),
+        "no question was put after the budget ran out: {:#?}",
+        observed.observations
+    );
+    let jobs = harness.jobs().await;
+    assert!(
+        jobs.iter()
+            .any(|job| job["type"] == "frame_extract" && job["status"] == "canceled"),
+        "the extraction the budget interrupted was cancelled through the API"
+    );
+}
+
+/// (C) `limits.maxAnswerSeconds`: an answer that does not arrive in time is recorded as an
+/// `unobserved` observation carrying the timeout as its note — never as a value, never as an
+/// error that throws the take's other evidence away — and the job it was waiting on is cancelled.
+#[tokio::test]
+async fn an_answer_that_times_out_is_recorded_unobserved_with_the_timeout_never_as_a_value() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    harness.script.lock().vqa_delay = Some(Duration::from_secs(30));
+    let mut options = review_options(&harness, &["SH010"]);
+    options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
+        plan.limits.max_answer_seconds = 1;
+        plan.limits.max_seconds = 600;
+    }));
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("a timed-out answer is not an error");
+    let observed = observed_for(&reviewed, &harness.out_dir(), "SH010");
+    let declared = shipped_review_plan().shots["SH010"].questions.len();
+    assert_eq!(
+        observed.observations.len(),
+        declared,
+        "every declared question is in the document"
+    );
+    for observation in &observed.observations {
+        assert!(observation.unobserved, "{observation:?}");
+        assert_eq!(observation.verdict, Verdict::Unobserved, "{observation:?}");
+        assert!(
+            observation.observed.is_none(),
+            "a timeout never becomes a value: {observation:?}"
+        );
+        assert!(observation.answers.is_empty(), "{observation:?}");
+        let note = observation
+            .note
+            .as_deref()
+            .expect("the timeout is the note");
+        assert!(
+            note.starts_with("answer_timeout: limits.maxAnswerSeconds is 1s"),
+            "{note}"
+        );
+        assert!(note.contains("was cancelled"), "{note}");
+        assert!(observation.is_well_formed(), "{observation:?}");
+    }
+    assert!(
+        observed.stop.is_none(),
+        "a per-answer timeout is not a review stop: {:?}",
+        observed.stop
+    );
+    assert!(
+        !observed.backend.real_model_inference,
+        "no answer came from a model run, so the document must not claim one did"
+    );
+    // A mustObserve question that timed out raises its unobserved flag exactly as an honest
+    // "I cannot tell" does.
+    let shipped = shipped_review_plan();
+    let must_observe: Vec<&str> = shipped.shots["SH010"]
+        .questions
+        .iter()
+        .filter(|question| question.must_observe)
+        .map(|question| question.id.as_str())
+        .collect();
+    for question_id in must_observe {
+        assert!(
+            observed
+                .mismatches
+                .iter()
+                .any(|flag| flag.question_id == question_id),
+            "{question_id} is mustObserve and was not observed: {:#?}",
+            observed.mismatches
+        );
+    }
+    // Every VQA job the reviewer gave up on was cancelled through the API, not abandoned — and a
+    // question whose first frame timed out is not put to its remaining frames (one job each).
+    let jobs = harness.jobs().await;
+    let vqa: Vec<&Value> = jobs
+        .iter()
+        .filter(|job| job["type"] == "image_vqa")
+        .collect();
+    assert_eq!(
+        vqa.len(),
+        declared,
+        "one cancelled job per question, none for the frames after the timeout: {}",
+        vqa.len()
+    );
+    assert!(
+        vqa.iter().all(|job| job["status"] == "canceled"),
+        "{:?}",
+        vqa.iter()
+            .map(|job| job["status"].clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// (G) The labeled evaluation over `VqaVision` — the real `image_vqa` route, the real frame import
+/// through `POST /assets`, the fake worker answering from the SAME table the scripted backend
+/// reads — scores exactly as the scripted run does. A route-level regression can no longer pass
+/// the evaluation on the strength of a backend that never touches the route.
+#[tokio::test]
+async fn the_labeled_evaluation_over_the_real_vqa_route_scores_exactly_as_the_scripted_backend() {
+    let harness = Harness::start(true, Vec::new()).await;
+    harness.script.lock().vqa_answers = eval_answer_table();
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let scripted = review::review_eval(
+        &harness.transport,
+        &EvalOptions::new(PathBuf::from(EVAL_SET), temp.path().join("scripted")),
+        &eval_backend(),
+    )
+    .await
+    .expect("the scripted evaluation runs");
+
+    let vision = VqaVision::new(
+        &harness.transport,
+        Duration::from_millis(50),
+        RunControl::new(),
+    );
+    let routed = review::review_eval(
+        &harness.transport,
+        &EvalOptions::new(PathBuf::from(EVAL_SET), temp.path().join("routed")),
+        &vision,
+    )
+    .await
+    .expect("the evaluation runs over the real route");
+
+    assert_eq!(routed.backend.kind, "image_vqa");
+    assert_eq!(routed.backend.route, review::VQA_ROUTE);
+    assert!(
+        !routed.backend.real_model_inference,
+        "the fake worker reports no weights ran, and the report says so"
+    );
+    assert_eq!(
+        routed.totals, scripted.totals,
+        "the verdicts are the route's, not the table's"
+    );
+    assert_eq!(routed.per_question, scripted.per_question);
+    assert_eq!(routed.per_topic, scripted.per_topic);
+    assert_eq!(routed.per_case.len(), scripted.per_case.len());
+    for (routed_case, scripted_case) in routed.per_case.iter().zip(&scripted.per_case) {
+        assert_eq!(routed_case.case_id, scripted_case.case_id);
+        assert_eq!(
+            routed_case.counts, scripted_case.counts,
+            "{}",
+            routed_case.case_id
+        );
+        assert_eq!(
+            routed_case.verdicts, scripted_case.verdicts,
+            "{}",
+            routed_case.case_id
+        );
+    }
+    // And the route really was driven: every graded answer came through an `image_vqa` job the
+    // fake worker claimed, over frames imported as project assets.
+    let asked = harness.script.lock().vqa_asked.len();
+    assert!(asked > 0);
+    // `GET /api/v1/jobs` pages at 100, so count the jobs the fake worker CLAIMED instead.
+    let claimed_vqa = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(kind, _, _)| kind == "image_vqa")
+        .count();
+    assert_eq!(claimed_vqa, asked);
+    let scored: u32 = routed.per_case.iter().map(|case| case.counts.scored).sum();
+    assert!(
+        asked as u32 >= scored,
+        "every scored question rode at least one job: {asked} jobs, {scored} scored"
+    );
+    for case in &routed.per_case {
+        let observed = review::read_observed_state(Path::new(&case.observed_state_path))
+            .expect("observed state reads");
+        assert!(
+            observed
+                .frames
+                .iter()
+                .all(|frame| !frame.asset_id.is_empty()),
+            "every frame the evidence cites is a project asset: {:?}",
+            observed.frames
+        );
+        for frame in &observed.frames {
+            let (status, asset) = crate::tests::support::request(
+                harness.app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/projects/{}/assets/{}",
+                    routed_project_id(&harness).await,
+                    frame.asset_id
+                ),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+            assert_eq!(
+                asset["extra"]["filmHarness"]["kind"], "review_frame",
+                "{asset}"
+            );
+        }
+    }
+}
+
+/// The project the routed evaluation imported its frames into (`film-harness review-eval (…)`).
+async fn routed_project_id(harness: &Harness) -> String {
+    let (_, projects) =
+        crate::tests::support::request(harness.app.clone(), "GET", "/api/v1/projects", Value::Null)
+            .await;
+    projects
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|project| {
+            project["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("film-harness review-eval ("))
+        })
+        .and_then(|project| project["id"].as_str())
+        .expect("the evaluation created its project")
+        .to_owned()
 }

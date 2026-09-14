@@ -101,6 +101,35 @@ pub struct CompiledPlan {
     pub compiled_at: String,
     pub model: CompiledModel,
     pub requests: Vec<CompiledRequest>,
+    /// What the planner's LLM decodes cost to produce this document (sc-22715): the jobs it
+    /// created through the `prompt_refine` seam, their wall-clock, and the peak memory their
+    /// metrics blocks reported. Absent on a plan compiled with no LLM at all (`--no-refine` over a
+    /// hand-authored plan), present on every generated or refined one, so the planner's cost is
+    /// persisted beside the requests it produced rather than only printed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<PlannerCostRecord>,
+}
+
+/// The cost of the planner's LLM work, persisted into `compiled.json` (sc-22715).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannerCostRecord {
+    /// Every `prompt_refine` job this document's planning and refinement created, in order: the
+    /// plan draft, each repair round, then one rewrite per shot.
+    pub job_ids: Vec<String>,
+    /// Wall-clock the LLM jobs took end to end, summed.
+    pub elapsed_seconds: f64,
+    /// Highest `peakMemoryBytes` any of those jobs' metrics blocks reported; `None` when no job
+    /// reported one (a worker whose probe measured nothing posts no block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    /// Repair rounds actually taken for the plan draft (0 when the first draft validated, and 0 on
+    /// a `compile` of an existing plan).
+    pub repair_rounds: u32,
+    /// The budget the brief declared for those decodes (`limits.plannerMaxMemoryGb`), so the
+    /// record carries the bound beside the measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_max_memory_gb: Option<f64>,
 }
 
 /// `advanced.mlxQuantize` for a tier — the shared convention the MLX lanes read.
@@ -168,6 +197,7 @@ pub fn compile_plan(
             lane: inputs.lane.to_owned(),
         },
         requests,
+        planner: None,
     })
 }
 

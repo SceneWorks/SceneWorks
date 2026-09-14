@@ -65,10 +65,13 @@ use sceneworks_core::time::utc_now;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
+/// Re-exported from the harness root, where every preflight now reads it (sc-22715).
+pub use super::LIVE_STATUSES;
 use super::{
-    api_detail, encode_asset_upload, flag_dependents, persist_record, read_run_record, read_source,
-    sha256_hex, ApiRequest, ApiTransport, Client, HarnessError, PollBounds, RequestBody,
-    RunControl, ASSET_SETTLE_GRACE, CANCEL_GRACE,
+    api_detail, encode_asset_upload, flag_dependents, live_worker_advertising, persist_record,
+    read_run_record, read_source, sha256_hex, stale_workers_detail, ApiRequest, ApiTransport,
+    Client, HarnessError, PollBounds, PollStop, RequestBody, RunControl, ASSET_SETTLE_GRACE,
+    CANCEL_GRACE,
 };
 
 /// Directory, inside the run directory, holding one observed-state document per review.
@@ -82,10 +85,6 @@ pub const VQA_MODEL_ID: &str = "sensenova_u1_8b";
 
 /// The route one question goes through.
 pub const VQA_ROUTE: &str = "POST /api/v1/image/vqa/jobs";
-
-/// Worker statuses that mean a worker will actually claim a job. Anything else — `offline` above
-/// all — is a row the store still holds, not a worker that will answer anything.
-pub const LIVE_STATUSES: &[&str] = &["idle", "busy"];
 
 // Tokens an answer is truncated to, and the memory the review declares it needs, both come off the
 // review document's own `limits` (`ReviewLimits::max_new_tokens`, `ReviewLimits::max_memory_gb`)
@@ -118,6 +117,22 @@ pub struct VisionAnswer {
     pub elapsed_seconds: f64,
 }
 
+/// What one `ask` came back with: an answer, or the fact that none arrived inside the review's
+/// `limits.maxAnswerSeconds` (sc-22715). A timeout is NOT an error and NOT a value: the reviewer
+/// records that question `unobserved` with the timeout as its note and moves on, because "the
+/// model did not answer in time" and "the model saw nothing" must both read as nothing seen,
+/// never as agreement — and one slow answer must not throw away a take's other evidence.
+#[derive(Debug, Clone)]
+pub enum VisionOutcome {
+    Answered(VisionAnswer),
+    /// The backend was asked and cancelled after `after_seconds` with no answer. `detail` names
+    /// the job and its last status, for the note.
+    TimedOut {
+        after_seconds: f64,
+        detail: String,
+    },
+}
+
 /// How the reviewer reaches a vision model.
 ///
 /// Two implementations ship: [`VqaVision`] over the `image_vqa` route, and [`ScriptedVision`],
@@ -135,8 +150,9 @@ pub trait ReviewVision: Send + Sync {
         frame: &'a FrameRef,
     ) -> VisionFuture<'a, String>;
 
-    /// Put one question about one frame, within the review's own declared bounds: it must return
-    /// inside `limits.max_answer_seconds` or fail, and the answer is truncated to
+    /// Put one question about one frame, within the review's own declared bounds: an answer that
+    /// does not arrive inside `limits.max_answer_seconds` comes back as
+    /// [`VisionOutcome::TimedOut`] (the job cancelled), and an answer is truncated to
     /// `limits.max_new_tokens`.
     fn ask<'a>(
         &'a self,
@@ -144,7 +160,7 @@ pub trait ReviewVision: Send + Sync {
         asset_id: &'a str,
         question: &'a str,
         limits: ReviewLimits,
-    ) -> VisionFuture<'a, VisionAnswer>;
+    ) -> VisionFuture<'a, VisionOutcome>;
 }
 
 /// The production backend: the existing `image_vqa` job type, SenseNova-U1-8B, through the route
@@ -195,42 +211,12 @@ impl<'a> VqaVision<'a> {
             .client()
             .expect_ok("GET", "/api/v1/workers", None)
             .await?;
-        let rows: Vec<&Value> = workers.as_array().into_iter().flatten().collect();
-        let advertises = |worker: &Value| {
-            worker
-                .get("capabilities")
-                .and_then(Value::as_array)
-                .is_some_and(|caps| caps.iter().any(|cap| cap == "image_vqa"))
-        };
-        let live = |worker: &Value| {
-            worker
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| LIVE_STATUSES.contains(&status))
-        };
-        if rows.iter().any(|worker| advertises(worker) && live(worker)) {
+        // The ONE liveness rule every harness preflight shares (sc-22715).
+        let advert = live_worker_advertising(&workers, "image_vqa");
+        if advert.live.is_some() {
             return self.preflight_memory(limits).await;
         }
-        let stale: Vec<String> = rows
-            .iter()
-            .filter(|worker| advertises(worker) && !live(worker))
-            .map(|worker| {
-                format!(
-                    "{} ({})",
-                    worker.get("id").and_then(Value::as_str).unwrap_or("?"),
-                    worker.get("status").and_then(Value::as_str).unwrap_or("?")
-                )
-            })
-            .collect();
-        let detail = if stale.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " ({} advertise(s) it but is not live: {})",
-                stale.len(),
-                stale.join(", ")
-            )
-        };
+        let detail = stale_workers_detail(&advert.stale);
         Err(HarnessError::Refused(format!(
             "no live registered worker advertises image_vqa{detail}, so {VQA_MODEL_ID} cannot \
              answer anything; start the GPU worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to \
@@ -344,7 +330,7 @@ impl ReviewVision for VqaVision<'_> {
         asset_id: &'a str,
         question: &'a str,
         limits: ReviewLimits,
-    ) -> VisionFuture<'a, VisionAnswer> {
+    ) -> VisionFuture<'a, VisionOutcome> {
         Box::pin(async move {
             let started = Instant::now();
             let max_seconds = limits.max_answer_seconds;
@@ -371,9 +357,20 @@ impl ReviewVision for VqaVision<'_> {
                 })?
                 .to_owned();
             let deadline = started + Duration::from_secs(max_seconds);
-            let (view, _) = client
+            let (view, poll_stop) = client
                 .wait_for_job(&job_id, poll_bounds(deadline, self.poll_interval))
                 .await?;
+            // `limits.maxAnswerSeconds` ran out: the job was cancelled through the API and this
+            // question has no answer. Reported as a timeout, never as an error (sc-22715).
+            if matches!(poll_stop, PollStop::ShotBudget | PollStop::RunBudget) {
+                return Ok(VisionOutcome::TimedOut {
+                    after_seconds: started.elapsed().as_secs_f64(),
+                    detail: format!(
+                        "vqa job {job_id} was still {} and was cancelled",
+                        view.status
+                    ),
+                });
+            }
             if view.status != "completed" {
                 return Err(HarnessError::Transport(format!(
                     "vqa job {job_id} ended {}: {}",
@@ -381,7 +378,7 @@ impl ReviewVision for VqaVision<'_> {
                     view.failure_text()
                 )));
             }
-            Ok(VisionAnswer {
+            Ok(VisionOutcome::Answered(VisionAnswer {
                 answer: view
                     .result
                     .get("answer")
@@ -394,7 +391,7 @@ impl ReviewVision for VqaVision<'_> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 elapsed_seconds: started.elapsed().as_secs_f64(),
-            })
+            }))
         })
     }
 }
@@ -478,7 +475,7 @@ impl ReviewVision for ScriptedVision {
         _asset_id: &'a str,
         question: &'a str,
         _limits: ReviewLimits,
-    ) -> VisionFuture<'a, VisionAnswer> {
+    ) -> VisionFuture<'a, VisionOutcome> {
         let (question_id, frame_id) = Self::key_of(question);
         let answer = self
             .answers
@@ -487,11 +484,11 @@ impl ReviewVision for ScriptedVision {
             .cloned()
             .unwrap_or_else(|| self.fallback.clone());
         Box::pin(async move {
-            Ok(VisionAnswer {
+            Ok(VisionOutcome::Answered(VisionAnswer {
                 answer,
                 real_model_inference: false,
                 elapsed_seconds: 0.0,
-            })
+            }))
         })
     }
 }
@@ -502,7 +499,7 @@ fn poll_bounds(deadline: Instant, poll_interval: Duration) -> PollBounds {
     let remaining = deadline.saturating_duration_since(Instant::now());
     PollBounds {
         shot_deadline: deadline,
-        run_deadline: deadline,
+        run_deadline: Some(deadline),
         poll_interval,
         cancel_grace: CANCEL_GRACE.min(remaining.max(Duration::from_secs(1))),
         settle_grace: ASSET_SETTLE_GRACE.min(remaining.max(Duration::from_secs(1))),
@@ -1013,7 +1010,7 @@ async fn review_one(
         }
         let timestamp = (position * length).clamp(0.0, (length - 0.001).max(0.0));
         let frame_id = format!("{shot_id}-a{attempt}-f{}", index + 1);
-        let evidence = extract_frame(
+        let Some(evidence) = extract_frame(
             client,
             project_id,
             timeline_id,
@@ -1025,7 +1022,12 @@ async fn review_one(
             deadline,
             options,
         )
-        .await?;
+        .await?
+        else {
+            // The budget ran out mid-extraction: keep the frames already sampled, say so.
+            stop.get_or_insert_with(|| review_stop_reason(&options.control, limits));
+            break;
+        };
         frame_refs.push(FrameRef {
             id: evidence.id.clone(),
             asset_id: Some(evidence.asset_id.clone()),
@@ -1069,7 +1071,7 @@ async fn review_one(
                 previous.shot_id,
                 previous_shot.selected_attempt.unwrap_or(0)
             );
-            let evidence = extract_frame(
+            match extract_frame(
                 client,
                 project_id,
                 timeline_id,
@@ -1081,14 +1083,24 @@ async fn review_one(
                 deadline,
                 options,
             )
-            .await?;
-            let reference = FrameRef {
-                id: evidence.id.clone(),
-                asset_id: Some(evidence.asset_id.clone()),
-                path: PathBuf::from(&evidence.path),
-                timestamp_seconds: evidence.timestamp_seconds,
-            };
-            adjacent_frame = Some((evidence, reference));
+            .await?
+            {
+                Some(evidence) => {
+                    let reference = FrameRef {
+                        id: evidence.id.clone(),
+                        asset_id: Some(evidence.asset_id.clone()),
+                        path: PathBuf::from(&evidence.path),
+                        timestamp_seconds: evidence.timestamp_seconds,
+                    };
+                    adjacent_frame = Some((evidence, reference));
+                }
+                // Out of budget before the neighbour's frame landed: the cut question is then
+                // recorded unobserved by `answer_questions` (no adjacent frame), and the stop
+                // says why the review ended.
+                None => {
+                    stop.get_or_insert_with(|| review_stop_reason(&options.control, limits));
+                }
+            }
         }
     }
     let adjacent = adjacent.map(|mut adjacent| {
@@ -1167,6 +1179,13 @@ fn review_stop_reason(control: &RunControl, limits: ReviewLimits) -> String {
     }
 }
 
+/// What one question to one frame produced: a graded answer, or the reason no answer arrived.
+enum Asked {
+    Answer(FrameAnswer),
+    /// The note an `unobserved` observation carries for this question.
+    TimedOut(String),
+}
+
 /// Put one question to one frame and grade the answer, keeping the token the grader matched and
 /// the polarity it read it with so a mis-grade is debuggable from the record alone.
 async fn ask_one(
@@ -1176,13 +1195,25 @@ async fn ask_one(
     frame: &FrameRef,
     limits: ReviewLimits,
     real_model_inference: &mut bool,
-) -> Result<FrameAnswer, HarnessError> {
+) -> Result<Asked, HarnessError> {
     let asset_id = vision.prepare_frame(project_id, frame).await?;
     let text = tagged_question(&question.id, &frame.id, &question.ask);
-    let answer = vision.ask(project_id, &asset_id, &text, limits).await?;
+    let answer = match vision.ask(project_id, &asset_id, &text, limits).await? {
+        VisionOutcome::Answered(answer) => answer,
+        VisionOutcome::TimedOut {
+            after_seconds,
+            detail,
+        } => {
+            return Ok(Asked::TimedOut(format!(
+                "answer_timeout: limits.maxAnswerSeconds is {}s and frame {} got no answer in \
+                 {after_seconds:.1}s ({detail}); nothing was read, so nothing is recorded as seen",
+                limits.max_answer_seconds, frame.id
+            )));
+        }
+    };
     *real_model_inference &= answer.real_model_inference;
     let grade = grade_answer(question, &answer.answer);
-    Ok(FrameAnswer {
+    Ok(Asked::Answer(FrameAnswer {
         frame_id: frame.id.clone(),
         answer: answer.answer,
         verdict: grade.verdict,
@@ -1191,7 +1222,7 @@ async fn ask_one(
         confidence: grade.confidence,
         hedged: grade.hedged,
         elapsed_seconds: answer.elapsed_seconds,
-    })
+    }))
 }
 
 /// What one pass of questions produced.
@@ -1251,9 +1282,14 @@ async fn answer_questions(
             observations.push(observation);
             continue;
         }
+        // A question whose backend answer timed out on ANY of its frames is recorded `unobserved`
+        // with the timeout as its note (sc-22715) — never a value, and never an error that would
+        // discard the take's other evidence. The remaining questions are still asked, under the
+        // review's own deadline.
         let mut answers = Vec::new();
+        let mut timed_out: Option<String> = None;
         for frame in question.frames.select(frames) {
-            let answer = ask_one(
+            match ask_one(
                 vision,
                 project_id,
                 question,
@@ -1261,12 +1297,18 @@ async fn answer_questions(
                 limits,
                 &mut real_model_inference,
             )
-            .await?;
-            answers.push(answer);
+            .await?
+            {
+                Asked::Answer(answer) => answers.push(answer),
+                Asked::TimedOut(note) => {
+                    timed_out = Some(note);
+                    break;
+                }
+            }
         }
-        let observation = match comparing {
-            Some(reference) => {
-                let theirs = ask_one(
+        let theirs = match (timed_out.is_none(), comparing) {
+            (true, Some(reference)) => {
+                match ask_one(
                     vision,
                     project_id,
                     question,
@@ -1274,10 +1316,26 @@ async fn answer_questions(
                     limits,
                     &mut real_model_inference,
                 )
-                .await?;
-                aggregate_cut_observation(question, answers, theirs)
+                .await?
+                {
+                    Asked::Answer(answer) => Some(answer),
+                    Asked::TimedOut(note) => {
+                        timed_out = Some(note);
+                        None
+                    }
+                }
             }
-            None => aggregate_observation(question, answers),
+            _ => None,
+        };
+        let observation = match (timed_out, theirs) {
+            (Some(note), _) => {
+                // No model produced this question's (absent) answer, so the document must not
+                // claim every answer came from a real model run.
+                real_model_inference = false;
+                unasked_observation(question, &note)
+            }
+            (None, Some(theirs)) => aggregate_cut_observation(question, answers, theirs),
+            (None, None) => aggregate_observation(question, answers),
         };
         // Unconditional, not a `debug_assert!`: the "unobserved carries no value" invariant is the
         // one this whole module exists to hold, and a release build is exactly where an observation
@@ -1312,7 +1370,7 @@ async fn extract_frame(
     timestamp: f64,
     deadline: Instant,
     options: &ReviewOptions,
-) -> Result<FrameEvidence, HarnessError> {
+) -> Result<Option<FrameEvidence>, HarnessError> {
     let created = client
         .expect_ok(
             "POST",
@@ -1327,9 +1385,18 @@ async fn extract_frame(
         .and_then(Value::as_str)
         .ok_or_else(|| HarnessError::Transport(format!("frame job response has no id: {created}")))?
         .to_owned();
-    let (view, _) = client
+    let (view, poll_stop) = client
         .wait_for_job(&job_id, poll_bounds(deadline, options.poll_interval))
         .await?;
+    // The review's `limits.maxSeconds` (or a cancel) ran out while a frame was being extracted:
+    // the job was cancelled, and that is a STOP the caller records with the partial evidence
+    // (sc-22715) — not a transport error that would throw the evidence away.
+    if matches!(
+        poll_stop,
+        PollStop::ShotBudget | PollStop::RunBudget | PollStop::Operator
+    ) {
+        return Ok(None);
+    }
     if view.status != "completed" {
         return Err(HarnessError::Transport(format!(
             "frame extraction job {job_id} ended {}: {}",
@@ -1349,7 +1416,7 @@ async fn extract_frame(
                 view.result
             ))
         })?;
-    Ok(FrameEvidence {
+    Ok(Some(FrameEvidence {
         id: frame_id.to_owned(),
         shot_id: shot_id.to_owned(),
         attempt,
@@ -1367,7 +1434,7 @@ async fn extract_frame(
         source: "frame_extract".to_owned(),
         job_id: Some(job_id),
         captured_at: utc_now(),
-    })
+    }))
 }
 
 /// The shot whose selected take this one sits against across a cut, from the plan's declared edges

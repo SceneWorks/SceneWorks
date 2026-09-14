@@ -223,12 +223,9 @@ async fn main_async(args: Vec<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let transport = match HttpTransport::new(&parsed.api_url, parsed.token.clone()) {
+    let transport = match guarded_transport(&parsed.api_url, parsed.token.clone()) {
         Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     if command == "plan" || command == "compile" {
         return plan_or_compile(command, &transport, &parsed).await;
@@ -269,6 +266,23 @@ async fn main_async(args: Vec<String>) -> ExitCode {
         }
         Err(error) => report_error(error),
     }
+}
+
+/// The ONE way this binary reaches an API. Every command that dispatches work — run, resume,
+/// replace-take, request-repair, review, review-eval, plan, compile, and an edit — builds its
+/// transport here, and the local-only rule (`film_planner::local_only_guard`, E1) runs FIRST: a
+/// hosted endpoint or a hosted-LLM credential in the environment is refused (exit 2) before a
+/// single request leaves this machine. `plan`/`compile` used to be the only commands that checked;
+/// `run --api https://…` did not (sc-22715). A source-text test in `film_planner` pins the count
+/// of `HttpTransport::new` calls in this file to exactly this one.
+fn guarded_transport(api_url: &str, token: Option<String>) -> Result<HttpTransport, ExitCode> {
+    if let Err(error) = film_planner::local_only_guard(api_url) {
+        return Err(report_error(error));
+    }
+    HttpTransport::new(api_url, token).map_err(|error| {
+        eprintln!("film-harness: {error}");
+        ExitCode::from(1)
+    })
 }
 
 fn report_error(error: HarnessError) -> ExitCode {
@@ -645,12 +659,9 @@ async fn record_command(command: &str, args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let transport = match HttpTransport::new(&parsed.api_url, parsed.token.clone()) {
+    let transport = match guarded_transport(&parsed.api_url, parsed.token.clone()) {
         Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     let signal = spawn_interrupt_handler(parsed.options.control.clone());
     let result = match command {
@@ -716,12 +727,9 @@ async fn review_command(args: &[String]) -> ExitCode {
         eprintln!("film-harness: {error}");
         return ExitCode::from(1);
     }
-    let transport = match HttpTransport::new(&api_url, token) {
+    let transport = match guarded_transport(&api_url, token) {
         Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     // The review document's own declared bounds, read BEFORE anything is dispatched: the preflight
     // checks the host against `limits.maxMemoryGb`, so it has to know what the document asks for.
@@ -820,12 +828,9 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
         .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
     let token =
         flag_value(args, "--token").or_else(|| std::env::var("SCENEWORKS_ACCESS_TOKEN").ok());
-    let transport = match HttpTransport::new(&api_url, token) {
+    let transport = match guarded_transport(&api_url, token) {
         Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     let signal = spawn_interrupt_handler(options.control.clone());
     let scripted_backend = ScriptedVision::new();
@@ -1113,12 +1118,9 @@ async fn edit(command: &str, args: &[String]) -> ExitCode {
         }
     };
 
-    let transport = match HttpTransport::new(&api_url, token) {
+    let transport = match guarded_transport(&api_url, token) {
         Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("film-harness: {error}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     let options = EditOptions {
         run_record_path: run_record_path.clone(),

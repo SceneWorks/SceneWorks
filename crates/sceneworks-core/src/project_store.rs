@@ -5406,15 +5406,17 @@ fn normalize_image_upload(
 }
 
 /// Normalize an audio upload to the canonical PCM-16 RIFF/WAVE the product can actually read back
-/// (sc-18650), ALWAYS — there is no pass-through branch.
+/// (sc-18650), ALWAYS — there is no pass-through branch HERE.
 ///
 /// The rule is deliberately unlike [`normalize_image_upload`]'s, where an already-decodable PNG or
 /// JPEG is stored byte-for-byte. Audio has exactly one reader,
 /// `sceneworks_worker::audio_jobs::read_wav_pcm16`, and it accepts exactly one encoding, so
 /// "already supported" is a much narrower set than "already audio": a 24-bit WAV, a float WAV, or a
-/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Sniffing for that narrow set and
-/// branching would mean the conversion path only ran for some inputs — the shape of latent bug this
-/// story exists to remove — for a saving of one ffmpeg pass on a file measured in megabytes.
+/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Every upload therefore goes
+/// through `transcode_to_wav_pcm16`; the ONE encoding that converter copies through unchanged
+/// (`media_convert::is_canonical_pcm16_wav`, sc-22715) is exactly the reader's own acceptance
+/// rule, decided inside the converter rather than by a sniff here, so the stored file is the
+/// canonical one on every path and a host with no ffmpeg can still import a file that already is.
 ///
 /// A conversion failure is a `BadRequest`: the caller named a file that is not decodable audio (or
 /// carries no audio stream), which is a fact about the upload, not about the host. The one host-shaped

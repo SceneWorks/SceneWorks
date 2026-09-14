@@ -159,12 +159,29 @@ pub(crate) enum VideoBehavior {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkerScript {
-    behaviors: Vec<(String, VideoBehavior)>,
+    pub(crate) behaviors: Vec<(String, VideoBehavior)>,
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
-    claimed: Vec<(String, String, Value)>,
+    pub(crate) claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
     /// Make `timeline_export` jobs fail, for the failed-export resume path (sc-22711).
-    export_fails: bool,
+    pub(crate) export_fails: bool,
+    /// Make `timeline_export` jobs hang until cancelled (honouring the cancel), for the
+    /// export-overrun path (sc-22715).
+    pub(crate) export_hangs: bool,
+    /// `droppedAudioLayers` the fake export reports in its result (sc-22715).
+    pub(crate) export_dropped_layers: Vec<Value>,
+    /// Delay before the fake `image_vqa` job answers, honouring a cancel meanwhile (sc-22715) —
+    /// what lets a test spend a review's `maxSeconds` or `maxAnswerSeconds`.
+    pub(crate) vqa_delay: Option<Duration>,
+    /// Delay before the fake `frame_extract` job writes its frame, honouring a cancel meanwhile
+    /// (sc-22715) — what lets a test spend a review's `maxSeconds` DURING an extraction.
+    pub(crate) frame_delay: Option<Duration>,
+    /// Capabilities the fake registers with, when a test needs it to leave one to a REAL worker
+    /// (`None` advertises every job type the harness drives).
+    pub(crate) capabilities: Option<Vec<&'static str>>,
+    /// Write REAL clips (through ffmpeg) for completed takes instead of placeholder bytes, so a
+    /// real `timeline_export` can render them (sc-22715).
+    pub(crate) real_takes: bool,
     /// sc-22714 VQA answers, keyed by the `[questionId@frameId]` tag the reviewer stamps onto
     /// every question. Most specific first: `questionId@frameId`, then `questionId`, then
     /// `vqa_fallback`. An unmatched question answers "I cannot tell", so a test that forgets one
@@ -177,11 +194,11 @@ pub(crate) struct WorkerScript {
     /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
     /// order. The last one repeats once the list runs out, which is what lets a test prove the
     /// repair loop STOPS rather than looping on a reply that never validates.
-    plan_replies: Vec<String>,
-    plan_calls: usize,
+    pub(crate) plan_replies: Vec<String>,
+    pub(crate) plan_calls: usize,
     /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
     /// by the shot's own prompt.
-    refine_template: Option<String>,
+    pub(crate) refine_template: Option<String>,
 }
 
 impl WorkerScript {
@@ -213,7 +230,20 @@ impl WorkerScript {
 const WORKER_ID: &str = "fake-mlx-worker";
 const HOST_MEMORY_MB: u64 = 128 * 1024;
 
-async fn register_fake_worker(app: &axum::Router) {
+/// Every job type the harness drives, which the fake advertises unless a test narrows it.
+///
+/// `image_vqa` (sc-22714) is what the reviewer's questions ride; `frame_extract` is what turns a
+/// take into timestamped frame evidence; `prompt_refine` (sc-22713) is the planner seam. All of
+/// them are job types the real worker already advertises.
+pub(crate) const FAKE_CAPABILITIES: &[&str] = &[
+    "video_generate",
+    "timeline_export",
+    "frame_extract",
+    "image_vqa",
+    "prompt_refine",
+];
+
+async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -222,10 +252,7 @@ async fn register_fake_worker(app: &axum::Router) {
             "workerId": WORKER_ID,
             "gpuId": "mlx",
             "gpuName": "Apple M-series (fake)",
-            // `image_vqa` (sc-22714) is what the reviewer's questions ride; `frame_extract` is
-            // what turns a take into timestamped frame evidence; `prompt_refine` (sc-22713) is the
-            // planner seam. All three are job types the real worker already advertises.
-            "capabilities": ["video_generate", "timeline_export", "frame_extract", "image_vqa", "prompt_refine"],
+            "capabilities": capabilities,
             "loadedModels": [],
             "utilization": { "memoryTotalMb": HOST_MEMORY_MB }
         }),
@@ -261,7 +288,12 @@ fn spawn_fake_worker(
     script: Arc<Mutex<WorkerScript>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        register_fake_worker(&app).await;
+        let capabilities = script
+            .lock()
+            .capabilities
+            .clone()
+            .unwrap_or_else(|| FAKE_CAPABILITIES.to_vec());
+        register_fake_worker(&app, &capabilities).await;
         loop {
             let (status, claim) = request(
                 app.clone(),
@@ -287,7 +319,7 @@ fn spawn_fake_worker(
                 // sc-22714: the two understanding seams the reviewer drives. Neither renders
                 // anything — `frame_extract` writes a placeholder still where FFmpeg would, and
                 // `image_vqa` answers from the script's table in the shape SenseNova-U1 posts.
-                "frame_extract" => run_fake_frame_job(&app, &job_id, &job).await,
+                "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
                 "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
@@ -409,9 +441,48 @@ async fn run_fake_video_job(
     let media_rel = format!("assets/videos/{asset_id}.mp4");
     let project_dir = project_path(app, &project_id).await;
     std::fs::create_dir_all(project_dir.join("assets/videos")).expect("videos dir");
-    std::fs::write(project_dir.join(&media_rel), b"not really an mp4").expect("fake mp4");
     let duration = payload["duration"].as_f64().unwrap_or(5.0);
     let fps = payload["fps"].as_u64().unwrap_or(24);
+    if script.lock().real_takes {
+        // A REAL clip at the requested geometry, timing and fps, with its own 900 Hz tone as the
+        // "generated audio" a mute policy must keep out of the export (sc-22715). Built the way the
+        // worker's measured mix tests build theirs.
+        let out = project_dir.join(&media_rel);
+        let width = payload["width"].as_u64().unwrap_or(576);
+        let height = payload["height"].as_u64().unwrap_or(320);
+        let ok = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=size={width}x{height}:rate={fps}:duration={duration}"),
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("sine=frequency=900:duration={duration}:sample_rate=48000"),
+                    "-shortest",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    &out.display().to_string(),
+                ])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+        .await
+        .expect("ffmpeg task joins");
+        assert!(
+            ok,
+            "the fake worker could not write a real take with ffmpeg"
+        );
+    } else {
+        std::fs::write(project_dir.join(&media_rel), b"not really an mp4").expect("fake mp4");
+    }
     let frames = (duration * fps as f64).round() as u64;
     let fact = json!({
         "type": "video",
@@ -496,7 +567,38 @@ async fn post_generation_metrics(app: &axum::Router, job_id: &str, metrics: Valu
 /// The `frame_extract` job, faked: write a placeholder still where FFmpeg would and report it as
 /// an `assetWrites` fact, exactly as `run_frame_extract` does. Asset persistence, the sidecar, the
 /// index and the two-phase result rewrite are all production code paths (sc-22714).
-async fn run_fake_frame_job(app: &axum::Router, job_id: &str, job: &Value) {
+async fn run_fake_frame_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let delay = script.lock().frame_delay;
+    if let Some(delay) = delay {
+        let started = std::time::Instant::now();
+        while started.elapsed() < delay {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     let payload = &job["payload"];
     let project_id = job["projectId"].as_str().expect("project id").to_owned();
     let timestamp = payload["sourceTimestamp"].as_f64().unwrap_or(0.0);
@@ -555,6 +657,34 @@ async fn run_fake_vqa_job(
         .and_then(|rest| rest.split_once(']'))
         .map(|(tag, _)| tag.to_owned())
         .unwrap_or_default();
+    let delay = script.lock().vqa_delay;
+    if let Some(delay) = delay {
+        // A slow model: answer after `delay`, unless the reviewer cancels first — which is what a
+        // `maxAnswerSeconds` timeout does through the API (sc-22715).
+        let started = std::time::Instant::now();
+        while started.elapsed() < delay {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     let (answer, fails) = {
         let mut script = script.lock();
         script.vqa_asked.push((tag.clone(), question.clone()));
@@ -632,7 +762,24 @@ async fn run_fake_refine_job(
         }),
     )
     .await;
+    // The real worker's `run_utility_job` posts a metrics block for EVERY job type after its
+    // terminal progress, a refine decode included; the planner reads the peak off it (sc-22715).
+    post_generation_metrics(
+        app,
+        job_id,
+        json!({
+            "backend": "mlx",
+            "totalMs": 1_000,
+            "peakMemoryBytes": FAKE_REFINE_PEAK_BYTES,
+            "peakMemoryPct": 7.0,
+        }),
+    )
+    .await;
 }
+
+/// The peak the fake refine job reports, so a test can prove the number in `compiled.json` is
+/// the one the metrics route carried rather than something the planner made up.
+pub(crate) const FAKE_REFINE_PEAK_BYTES: u64 = 9_000_000_000;
 
 async fn run_fake_export_job(
     app: &axum::Router,
@@ -640,6 +787,32 @@ async fn run_fake_export_job(
     job_id: &str,
     job: &Value,
 ) {
+    if script.lock().export_hangs {
+        // An export that never finishes on its own but honours a cancel — the shape a per-job
+        // budget overrun takes (sc-22715).
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     if script.lock().export_fails {
         post_progress(
             app,
@@ -663,6 +836,7 @@ async fn run_fake_export_job(
     std::fs::create_dir_all(project_dir.join("assets/renders")).expect("renders dir");
     std::fs::write(project_dir.join(&render_rel), b"not really an mp4").expect("fake render");
     let asset_id = format!("asset_render_{}", &job_id.replace('-', "")[..12]);
+    let dropped = script.lock().export_dropped_layers.clone();
     post_progress(
         app,
         job_id,
@@ -674,7 +848,9 @@ async fn run_fake_export_job(
                 "assets": [{ "id": asset_id, "type": "render", "file": { "path": render_rel } }],
                 "timelineId": payload["timelineId"],
                 "renderPath": render_rel,
-                "adapter": "ffmpeg_timeline"
+                "adapter": "ffmpeg_timeline",
+                // The real worker reports the layers the mix went without (sc-22715).
+                "droppedAudioLayers": dropped
             }
         }),
     )
@@ -684,9 +860,11 @@ async fn run_fake_export_job(
 pub(crate) struct Harness {
     pub(crate) app: axum::Router,
     pub(crate) transport: RouterTransport,
-    temp_dir: tempfile::TempDir,
+    pub(crate) temp_dir: tempfile::TempDir,
     pub(crate) script: Arc<Mutex<WorkerScript>>,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    /// The fake worker's task, when one runs. Behind a lock so a test that started WITHOUT a
+    /// worker can script the fake first and spawn it afterwards (`spawn_worker`).
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Harness {
@@ -716,30 +894,24 @@ impl Harness {
         }));
         let worker = with_worker.then(|| spawn_fake_worker(app.clone(), script.clone()));
         if with_worker {
-            // Wait for the worker to register before the harness looks for it — bounded, not a
-            // fixed sleep, so a slow CI runner cannot turn this into a spurious refusal.
-            let mut registered = false;
-            for _ in 0..200 {
-                let (_, workers) =
-                    request(app.clone(), "GET", "/api/v1/workers", Value::Null).await;
-                if workers
-                    .as_array()
-                    .is_some_and(|workers| workers.iter().any(|w| w["id"] == WORKER_ID))
-                {
-                    registered = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            assert!(registered, "fake worker did not register within 5s");
+            wait_for_fake_worker(&app).await;
         }
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
             temp_dir,
             script,
-            worker,
+            worker: Mutex::new(worker),
         }
+    }
+
+    /// Start the fake worker AFTER the script has been shaped — for a test that needs the fake
+    /// to register with a narrower capability set, or to render real clips (sc-22715). Waits for
+    /// the registration exactly as `start(true, …)` does.
+    pub(crate) fn spawn_worker(&self) -> impl std::future::Future<Output = ()> + '_ {
+        let handle = spawn_fake_worker(self.app.clone(), self.script.clone());
+        *self.worker.lock() = Some(handle);
+        wait_for_fake_worker(&self.app)
     }
 
     pub(crate) fn options(
@@ -796,7 +968,7 @@ impl Harness {
         panic!("run never settled after 12 resumes: {last:#?}");
     }
 
-    fn video_job_count(&self) -> usize {
+    pub(crate) fn video_job_count(&self) -> usize {
         self.script
             .lock()
             .claimed
@@ -807,7 +979,7 @@ impl Harness {
 
     /// Video jobs the API holds, which — unlike the claim log — counts a job the worker has not
     /// picked up yet.
-    async fn api_video_job_count(&self) -> usize {
+    pub(crate) async fn api_video_job_count(&self) -> usize {
         self.jobs()
             .await
             .iter()
@@ -815,7 +987,7 @@ impl Harness {
             .count()
     }
 
-    async fn project_count(&self) -> usize {
+    pub(crate) async fn project_count(&self) -> usize {
         let (_, projects) = request(self.app.clone(), "GET", "/api/v1/projects", Value::Null).await;
         projects.as_array().map(Vec::len).unwrap_or_default()
     }
@@ -841,7 +1013,7 @@ impl Harness {
         }
     }
 
-    fn export_job_count(&self) -> usize {
+    pub(crate) fn export_job_count(&self) -> usize {
         self.script
             .lock()
             .claimed
@@ -852,7 +1024,7 @@ impl Harness {
 
     /// Rewrite the record on disk, exactly as a test that needs a run to look older than it is has
     /// to: the harness reads `run.json` back on every `resume`.
-    fn edit_run_record(&self, edit: impl FnOnce(&mut Value)) {
+    pub(crate) fn edit_run_record(&self, edit: impl FnOnce(&mut Value)) {
         let path = self.out_dir().join("run.json");
         let mut record: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("run.json")).expect("json");
@@ -866,7 +1038,7 @@ impl Harness {
     /// importing the shipped seven-reference pack through the real import route costs several
     /// seconds in a debug build under a loaded runner, which would otherwise eat a small budget
     /// before the first shot is ever dispatched. Same model, same menus — just less to import.
-    fn minimal_documents(&self, limits: Value) -> (PathBuf, PathBuf) {
+    pub(crate) fn minimal_documents(&self, limits: Value) -> (PathBuf, PathBuf) {
         let dir = self.temp_dir.path().join("minimal");
         std::fs::create_dir_all(dir.join("references")).expect("minimal dir");
         std::fs::copy(
@@ -922,11 +1094,11 @@ impl Harness {
         jobs.as_array().cloned().unwrap_or_default()
     }
 
-    fn fixture_plan(&self) -> PathBuf {
+    pub(crate) fn fixture_plan(&self) -> PathBuf {
         Path::new(FIXTURE_DIR).join("plan.jsonc")
     }
 
-    fn fixture_pack(&self) -> PathBuf {
+    pub(crate) fn fixture_pack(&self) -> PathBuf {
         Path::new(FIXTURE_DIR).join("references.jsonc")
     }
 
@@ -984,7 +1156,7 @@ impl Harness {
     /// every caller is testing something about references, and importing sound needs an ffmpeg
     /// that is not on every lane. Pair it with `edited_plan`, which drops the roles that would
     /// otherwise dangle.
-    fn edited_pack(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    pub(crate) fn edited_pack(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
         let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
         let mut pack: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
@@ -1003,7 +1175,7 @@ impl Harness {
         path
     }
 
-    fn run_record(&self) -> Value {
+    pub(crate) fn run_record(&self) -> Value {
         let text = std::fs::read_to_string(self.temp_dir.path().join("run-out/run.json"))
             .expect("run.json written");
         serde_json::from_str(&text).expect("run.json parses")
@@ -1012,15 +1184,33 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.get_mut().take() {
             worker.abort();
         }
     }
 }
 
+/// Wait for the fake worker to register before the harness looks for it — bounded, not a fixed
+/// sleep, so a slow CI runner cannot turn this into a spurious refusal.
+async fn wait_for_fake_worker(app: &axum::Router) {
+    let mut registered = false;
+    for _ in 0..200 {
+        let (_, workers) = request(app.clone(), "GET", "/api/v1/workers", Value::Null).await;
+        if workers
+            .as_array()
+            .is_some_and(|workers| workers.iter().any(|w| w["id"] == WORKER_ID))
+        {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(registered, "fake worker did not register within 5s");
+}
+
 /// One line per attempt — the shot, status and error of every attempt plus the export — for
 /// assertion messages, so a failing run explains itself without the full Debug dump.
-fn summary(record: &sceneworks_core::film_plan::RunRecord) -> String {
+pub(crate) fn summary(record: &sceneworks_core::film_plan::RunRecord) -> String {
     let mut lines = vec![format!("outcome={:?}", record.outcome)];
     for shot in &record.shots {
         lines.push(format!("{} {:?}", shot.shot_id, shot.outcome));
@@ -2523,7 +2713,7 @@ async fn wait_for_settled_shot(app: &axum::Router, shot_id: &str) -> String {
 
 /// Block until `shot_id`'s job is actually running, so a cancel lands mid-flight rather than at
 /// whatever point a fixed sleep happens to reach on a loaded runner.
-async fn wait_for_running_shot(app: &axum::Router, shot_id: &str) {
+pub(crate) async fn wait_for_running_shot(app: &axum::Router, shot_id: &str) {
     for _ in 0..800 {
         let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
         let running = jobs.as_array().into_iter().flatten().any(|job| {
@@ -3952,16 +4142,20 @@ async fn a_reference_rejected_between_controllers_is_still_adopted_not_imported_
 /// is not on every lane. Soft-skipping is the posture the sibling store test
 /// (`import_asset_admits_audio_and_normalizes_it_to_pcm16_wav`) already takes for exactly this
 /// call; `SCENEWORKS_REQUIRE_FFMPEG` turns the skip into a failure on the lane that installs one.
-fn ffmpeg_reachable() -> bool {
-    let reachable = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if !path.trim().is_empty() => Path::new(path.trim()).is_file(),
-        _ => std::process::Command::new("ffmpeg")
+pub(crate) fn ffmpeg_reachable() -> bool {
+    // The same rule as `sceneworks_worker::video_jobs::tests::ffmpeg_reachable` (sc-22715): a
+    // `SCENEWORKS_FFMPEG` that names a real file is reachable; one that is set but broken falls
+    // through to the PATH probe rather than counting as unreachable on its own.
+    let configured = std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .is_some_and(|path| !path.trim().is_empty() && Path::new(path.trim()).exists());
+    let reachable = configured
+        || std::process::Command::new("ffmpeg")
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|status| status.success()),
-    };
+            .is_ok_and(|status| status.success());
     assert!(
         reachable || std::env::var("SCENEWORKS_REQUIRE_FFMPEG").is_err(),
         "SCENEWORKS_REQUIRE_FFMPEG is set but no ffmpeg is reachable, so the film-harness sound \
@@ -3972,7 +4166,11 @@ fn ffmpeg_reachable() -> bool {
 
 /// Read the saved timeline document straight from the API — the thing the exporter reads and the
 /// editor opens, rather than the run record's description of it.
-async fn saved_timeline(app: &axum::Router, project_id: &str, timeline_id: &str) -> Value {
+pub(crate) async fn saved_timeline(
+    app: &axum::Router,
+    project_id: &str,
+    timeline_id: &str,
+) -> Value {
     let (status, timeline) = request(
         app.clone(),
         "GET",
@@ -3984,7 +4182,7 @@ async fn saved_timeline(app: &axum::Router, project_id: &str, timeline_id: &str)
     timeline
 }
 
-fn track_of<'a>(timeline: &'a Value, id: &str) -> &'a Value {
+pub(crate) fn track_of<'a>(timeline: &'a Value, id: &str) -> &'a Value {
     timeline["tracks"]
         .as_array()
         .expect("tracks")
@@ -3993,23 +4191,27 @@ fn track_of<'a>(timeline: &'a Value, id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("timeline has no track {id}: {timeline}"))
 }
 
-fn items_of<'a>(timeline: &'a Value, track_id: &str) -> &'a Vec<Value> {
+pub(crate) fn items_of<'a>(timeline: &'a Value, track_id: &str) -> &'a Vec<Value> {
     track_of(timeline, track_id)["items"]
         .as_array()
         .unwrap_or_else(|| panic!("track {track_id} has no items"))
 }
 
-fn close(left: f64, right: f64) -> bool {
+pub(crate) fn close(left: f64, right: f64) -> bool {
     (left - right).abs() < 1e-3
 }
 
 /// AC2, on the saved sequence: dialogue, ambience and music are three separately controlled buses,
 /// and the beds are placed ONCE rather than per shot.
+///
+/// Runs on EVERY lane, ffmpeg or not (sc-22715): the fixture clips are canonical PCM-16 WAVs, which
+/// the import route now stores without a transcode (`media_convert::is_canonical_pcm16_wav`), so
+/// the timeline-document assertions here — the bus rollup, the dialogue offset, the beds placed
+/// once, the reorder that keeps the sound — no longer hide behind an ffmpeg skip that reported
+/// `ok` on the hosted macOS lane while asserting nothing. What still needs an ffmpeg is the
+/// REAL mix, measured in `a_real_timeline_export_mixes_the_harness_four_track_sequence`.
 #[tokio::test]
 async fn the_assembled_sequence_carries_three_independently_controlled_sound_buses() {
-    if !ffmpeg_reachable() {
-        return;
-    }
     let harness = Harness::start(true, vec![]).await;
     let options = harness.options(
         harness.fixture_plan(),
@@ -4884,7 +5086,7 @@ async fn swapping_onto_an_existing_take_moves_the_shots_selected_attempt() {
 // bound on the repair loop, and the conformance of the compiled requests to the INSTALLED manifest.
 // ----------------------------------------------------------------------------------------------
 
-const BRIEF_FIXTURE: &str = concat!(
+pub(crate) const BRIEF_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../config/film-harness/courier-workshop/brief.jsonc"
 );
@@ -4933,7 +5135,7 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
 }
 
 /// A well-formed draft covering every beat of the checked-in brief.
-fn full_draft() -> Value {
+pub(crate) fn full_draft() -> Value {
     json!({
         "shots": BRIEF_BEATS
             .iter()
@@ -4943,11 +5145,11 @@ fn full_draft() -> Value {
     })
 }
 
-fn draft_text(draft: &Value) -> String {
+pub(crate) fn draft_text(draft: &Value) -> String {
     serde_json::to_string_pretty(draft).expect("draft serializes")
 }
 
-fn planner_options(harness: &Harness, out: &str) -> film_planner::PlannerOptions {
+pub(crate) fn planner_options(harness: &Harness, out: &str) -> film_planner::PlannerOptions {
     film_planner::PlannerOptions {
         brief_path: PathBuf::from(BRIEF_FIXTURE),
         reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
@@ -4965,7 +5167,7 @@ fn planner_options(harness: &Harness, out: &str) -> film_planner::PlannerOptions
     }
 }
 
-fn planner_llm(harness: &Harness) -> film_planner::SceneWorksLlm<'_> {
+pub(crate) fn planner_llm(harness: &Harness) -> film_planner::SceneWorksLlm<'_> {
     film_planner::SceneWorksLlm::new(
         &harness.transport,
         Duration::from_millis(50),
@@ -4973,13 +5175,13 @@ fn planner_llm(harness: &Harness) -> film_planner::SceneWorksLlm<'_> {
     )
 }
 
-fn set_plan_replies(harness: &Harness, replies: Vec<String>) {
+pub(crate) fn set_plan_replies(harness: &Harness, replies: Vec<String>) {
     let mut script = harness.script.lock();
     script.plan_replies = replies;
     script.plan_calls = 0;
 }
 
-fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Vec<Value> {
+pub(crate) fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Vec<Value> {
     harness
         .script
         .lock()
@@ -4992,7 +5194,7 @@ fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Vec<Value> {
         .collect()
 }
 
-fn findings_of(error: HarnessError) -> Vec<String> {
+pub(crate) fn findings_of(error: HarnessError) -> Vec<String> {
     match error {
         HarnessError::Validation(findings) => findings.iter().map(ToString::to_string).collect(),
         other => panic!("expected a validation refusal, got {other}"),
@@ -5081,6 +5283,36 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         );
     }
 
+    // What the planning cost is PERSISTED beside what it produced (sc-22715): every LLM job, its
+    // wall-clock, the peak the metrics route reported, the rounds, and the budget it ran under.
+    let planner = compiled["planner"]
+        .as_object()
+        .expect("compiled.json carries a planner cost block");
+    assert_eq!(
+        planner["jobIds"].as_array().map(Vec::len),
+        Some(1 + BRIEF_BEATS.len()),
+        "one plan draft plus one rewrite per shot: {planner:?}"
+    );
+    assert_eq!(planner["repairRounds"], 0);
+    assert!(
+        planner["elapsedSeconds"].as_f64().unwrap_or(0.0) > 0.0,
+        "{planner:?}"
+    );
+    assert_eq!(
+        planner["peakMemoryBytes"].as_u64(),
+        Some(FAKE_REFINE_PEAK_BYTES),
+        "the peak is the one the metrics route carried: {planner:?}"
+    );
+    assert_eq!(planner["plannerMaxMemoryGb"], 24.0);
+    assert_eq!(
+        artifacts
+            .compiled
+            .planner
+            .as_ref()
+            .map(|cost| cost.job_ids.len()),
+        Some(1 + BRIEF_BEATS.len())
+    );
+
     // The planner drove the shipped seam: one film_plan job plus one rewrite job per shot, all of
     // them `prompt_refine`, with the target model forwarded (which is what selects the H3 asset).
     let refine_jobs = refine_job_payloads(&harness, false);
@@ -5119,6 +5351,17 @@ async fn a_dropped_beat_is_repaired_and_the_repair_loop_is_bounded() {
         .expect("the repair round produces a plan");
     assert_eq!(artifacts.repair_rounds, 1);
     assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    let cost = artifacts
+        .compiled
+        .planner
+        .as_ref()
+        .expect("the compiled document records the planner's cost");
+    assert_eq!(cost.repair_rounds, 1, "{cost:?}");
+    assert_eq!(
+        cost.job_ids.len(),
+        2,
+        "the draft and its one repair: {cost:?}"
+    );
     // The repair round was told exactly what was wrong, and the dropped beat was never accepted.
     let repair = refine_job_payloads(&harness, true)
         .get(1)
@@ -5261,7 +5504,7 @@ async fn planning_without_a_local_refiner_is_refused_rather_than_queued_forever(
     );
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert!(
-        findings[0].contains("no registered worker advertises prompt_refine"),
+        findings[0].contains("no live registered worker advertises prompt_refine"),
         "{findings:?}"
     );
     assert!(harness.jobs().await.is_empty(), "no job was created");
@@ -5612,6 +5855,44 @@ async fn a_brief_the_model_cannot_render_is_refused_before_a_single_decode() {
         "{findings:?}"
     );
     assert_eq!(harness.script.lock().plan_calls, 0);
+
+    // And the PLANNER's own budget (sc-22715): the decodes run on the same host, so a
+    // `plannerMaxMemoryGb` the host cannot meet is refused before the first token too.
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    brief["limits"]["plannerMaxMemoryGb"] = json!(4096.0);
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("a planner budget above the host's memory is refused"),
+    );
+    assert!(
+        findings.iter().any(
+            |finding| finding.contains("limits.plannerMaxMemoryGb") && finding.contains("4096")
+        ),
+        "{findings:?}"
+    );
+    assert_eq!(harness.script.lock().plan_calls, 0);
+    // A brief that declares no planner budget at all is refused by the document check.
+    brief["limits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("plannerMaxMemoryGb");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("an undeclared planner budget is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("brief.limits.plannerMaxMemoryGb")),
+        "{findings:?}"
+    );
 }
 
 #[tokio::test]
@@ -5783,7 +6064,19 @@ fn the_checked_in_brief_is_valid_and_matches_the_hand_authored_baseline() {
     )
     .unwrap();
     assert_eq!(brief.model, baseline.model);
-    assert_eq!(brief.limits, baseline.limits);
+    // The render-side limits match; `plannerMaxMemoryGb` is a brief-only declaration (a
+    // hand-authored plan runs no planner), so it is the one field left out of the comparison.
+    assert_eq!(
+        sceneworks_core::film_plan::PlanLimits {
+            planner_max_memory_gb: None,
+            ..brief.limits.clone()
+        },
+        baseline.limits
+    );
+    assert!(
+        brief.limits.planner_max_memory_gb.is_some(),
+        "the checked-in brief declares the planner's memory budget"
+    );
     assert_ne!(brief.id, baseline.id);
     // Every beat is coverable inside the model's shortest legal clip and the declared window.
     assert!(brief.required_beats.len() as f64 * 5.1667 >= brief.target_total_seconds.min);
