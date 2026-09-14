@@ -203,6 +203,17 @@ pub fn validate_brief(brief: &ProductionBrief) -> Vec<PlanDiagnostic> {
             }
         }
     }
+    // The planner's own memory budget is a declared bound like every other limit (E5, sc-22715):
+    // `1 + rounds` full local decodes plus one rewrite per shot run on the same host the plan will
+    // later render on, and nothing checks that host before the first token unless the brief says
+    // what the decodes are allowed.
+    if brief.limits.planner_max_memory_gb.is_none() {
+        findings.push(PlanDiagnostic::plan(
+            "brief.limits.plannerMaxMemoryGb",
+            "a brief must declare limits.plannerMaxMemoryGb — the memory the planner's LLM decodes \
+             are allowed on the API host; it is checked against the host before the first token",
+        ));
+    }
     if brief.max_shots == 0 || brief.max_shots > MAX_PLANNER_SHOTS {
         findings.push(PlanDiagnostic::plan(
             "brief.maxShots",
@@ -1017,7 +1028,7 @@ pub fn build_planner_request(
     out.push_str(&caps.as_prompt_section());
 
     out.push_str("\n\n# Output contract\n\n");
-    out.push_str(PLAN_JSON_CONTRACT);
+    out.push_str(&plan_json_contract(caps));
     out
 }
 
@@ -1033,6 +1044,7 @@ pub fn build_planner_request(
 /// read before the contract.
 pub fn build_repair_request(
     brief: &ProductionBrief,
+    caps: &PlannerCapabilities,
     previous_output: &str,
     findings: &[PlanDiagnostic],
     round: u32,
@@ -1070,12 +1082,31 @@ pub fn build_repair_request(
         out.push_str(&format!("- {finding}\n"));
     }
     out.push_str("\n# Output contract\n\n");
-    out.push_str(PLAN_JSON_CONTRACT);
+    out.push_str(&plan_json_contract(caps));
     out
 }
 
+/// The placeholder [`PLAN_JSON_CONTRACT`]'s worked example carries where its `targetDurationSeconds`
+/// goes. It is filled from the ENVELOPE, never hard-coded: the example used to read `5.1667` —
+/// MiniMax-H3's shortest clip — which on any other model is a value the same contract's own rule
+/// ("copy one of the allowed durations EXACTLY") forbids, and a planner shown a forbidden value in
+/// the one filled example it gets was being taught the wrong thing (AT4, sc-22715).
+pub const EXAMPLE_DURATION_PLACEHOLDER: &str = "{{EXAMPLE_DURATION}}";
+
+/// The contract with its worked example on THIS model's envelope: the first allowed duration when
+/// the model declares a menu, else a plain round number the "any positive value" rule admits.
+pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
+    let example = caps
+        .durations
+        .first()
+        .map(|value| format!("{value}"))
+        .unwrap_or_else(|| "6".to_owned());
+    PLAN_JSON_CONTRACT.replace(EXAMPLE_DURATION_PLACEHOLDER, &example)
+}
+
 /// The JSON contract both the first round and every repair round end with. Kept as one constant so
-/// the two rounds cannot drift.
+/// the two rounds cannot drift. It is a TEMPLATE: [`plan_json_contract`] fills the worked example's
+/// duration from the envelope, so it is never sent raw.
 pub const PLAN_JSON_CONTRACT: &str = "\
 Answer with ONE JSON object and nothing else — no prose, no markdown fence, no commentary:
 
@@ -1137,7 +1168,7 @@ detail, never the content.
   \"prompt\": \"A cramped garage office in hard noon light. A mechanic in an oil-stained shirt \
 slides a brass key across a steel counter; the customer's hand closes around it and lifts it away. \
 Dust turns in the light from the roller door behind them. The camera does not move.\",
-  \"targetDurationSeconds\": 5.1667,
+  \"targetDurationSeconds\": {{EXAMPLE_DURATION}},
   \"startState\": \"The mechanic stands behind the counter with the brass key flat under their \
 palm; the customer waits opposite with both hands at their sides.\",
   \"endState\": \"The counter is empty and the customer holds the brass key at chest height; the \
@@ -1167,7 +1198,7 @@ mod tests {
                 { "id": "discovery", "summary": "The recipient finds the parcel." }
             ],
             "model": { "id": "minimax_h3", "tier": "q4", "fps": 24, "resolution": "576x320" },
-            "limits": { "maxRunSeconds": 7200, "maxShotSeconds": 2700, "maxAttemptsPerShot": 1, "maxMemoryGb": 96 },
+            "limits": { "maxRunSeconds": 7200, "maxShotSeconds": 2700, "maxAttemptsPerShot": 1, "maxMemoryGb": 96, "plannerMaxMemoryGb": 24 },
             "maxShots": 8
         })
     }
@@ -1699,25 +1730,77 @@ mod tests {
             "an unapproved role must never be offered to the planner"
         );
         assert!(request.contains("576x320"), "{request}");
-        assert!(request.contains(PLAN_JSON_CONTRACT), "{request}");
+        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+        assert!(
+            !request.contains(EXAMPLE_DURATION_PLACEHOLDER),
+            "the contract template must never reach the planner unfilled: {request}"
+        );
         assert!(request.contains("at most 8 shots"), "{request}");
     }
 
     #[test]
     fn a_repair_request_returns_every_finding_and_restates_the_beats() {
         let brief = brief();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         let findings = vec![
             PlanDiagnostic::plan("shots", "required beat \"delivery\" is covered by no shot"),
             PlanDiagnostic::shot("SH010", "targetDurationSeconds", "6s is not on the menu"),
         ];
-        let request = build_repair_request(&brief, "{\"shots\": []}", &findings, 1, 2);
+        let request = build_repair_request(&brief, &caps, "{\"shots\": []}", &findings, 1, 2);
         assert!(request.contains("Repair round 1 of 2"), "{request}");
         for finding in &findings {
             assert!(request.contains(&finding.to_string()), "{request}");
         }
         assert!(request.contains("arrival:"), "{request}");
         assert!(request.contains("{\"shots\": []}"), "{request}");
-        assert!(request.contains(PLAN_JSON_CONTRACT), "{request}");
+        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+    }
+
+    /// AT4 (sc-22715): the contract's ONE worked example copies a duration off the envelope it is
+    /// sent with. On the H3 entry that is still 5.1667; on a model with a different menu the
+    /// example must show that model's first allowed value, and never H3's — which the contract's
+    /// own "copy one of these EXACTLY" rule would forbid.
+    #[test]
+    fn the_contracts_worked_example_takes_its_duration_from_the_envelope() {
+        let brief = brief();
+        let h3 = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        assert!(
+            plan_json_contract(&h3).contains("\"targetDurationSeconds\": 5.1667,"),
+            "{}",
+            plan_json_contract(&h3)
+        );
+
+        // An LTX-2.5-shaped envelope: whole-second clips, none of them 5.1667.
+        let mut entry = model_entry();
+        entry["limits"]["durations"] = json!([4, 6, 8, 10, 12, 15]);
+        entry["defaults"]["duration"] = json!(6);
+        let ltx = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
+        let contract = plan_json_contract(&ltx);
+        assert!(
+            contract.contains("\"targetDurationSeconds\": 4,"),
+            "the example must be the first allowed duration: {contract}"
+        );
+        assert!(
+            !contract.contains("5.1667"),
+            "H3's clip length must not leak into another model's contract: {contract}"
+        );
+        let request = build_planner_request(&brief, &pack(), &ltx);
+        assert!(
+            request.contains("\"targetDurationSeconds\": 4,"),
+            "{request}"
+        );
+        assert!(!request.contains("5.1667"), "{request}");
+        let repair = build_repair_request(&brief, &ltx, "{}", &[], 1, 1);
+        assert!(repair.contains("\"targetDurationSeconds\": 4,"), "{repair}");
+
+        // No declared menu at all: a plain round number the "any positive value" rule admits.
+        entry["limits"]["durations"] = json!([]);
+        let open = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
+        assert!(
+            plan_json_contract(&open).contains("\"targetDurationSeconds\": 6,"),
+            "{}",
+            plan_json_contract(&open)
+        );
     }
 
     #[test]
@@ -1748,6 +1831,31 @@ mod tests {
             "{findings:?}"
         );
         assert!(validate_brief(&brief()).is_empty());
+        // The planner's memory budget is a declared bound (sc-22715): a brief without one is
+        // refused by name, and a non-positive one is refused by the shared limits rule.
+        let mut value = brief_json();
+        value["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("plannerMaxMemoryGb");
+        let undeclared: ProductionBrief = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_brief(&undeclared));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("limits.plannerMaxMemoryGb")),
+            "{findings:?}"
+        );
+        let mut value = brief_json();
+        value["limits"]["plannerMaxMemoryGb"] = json!(0);
+        let zero: ProductionBrief = serde_json::from_value(value).unwrap();
+        let findings = messages(&crate::film_plan::validate_limits(&zero.limits));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("planner memory budget must be")),
+            "{findings:?}"
+        );
         // An unknown field in a brief is refused on parse, like every other document here.
         let mut value = brief_json();
         value["tone"] = json!("wistful");

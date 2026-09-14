@@ -29,7 +29,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, COMPILED_PLAN_SCHEMA_VERSION,
+    compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, COMPILED_PLAN_SCHEMA_VERSION,
 };
 use sceneworks_core::film_plan::{self, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack};
 use sceneworks_core::film_planner::{
@@ -100,13 +100,55 @@ pub struct LlmRequest {
     pub guide: Option<String>,
 }
 
-pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<String, HarnessError>> + Send + 'a>>;
+/// One completed LLM request: the text, and what it cost (sc-22715). `job_id` and
+/// `peak_memory_bytes` are `None` for a backend that runs no job (a scripted fake); the real seam
+/// fills both from the job it created and the metrics block the worker posted for it.
+#[derive(Debug, Clone, Default)]
+pub struct LlmReply {
+    pub text: String,
+    pub job_id: Option<String>,
+    pub elapsed_seconds: f64,
+    pub peak_memory_bytes: Option<u64>,
+}
+
+pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmReply, HarnessError>> + Send + 'a>>;
 
 /// The planner's only dependency on a language model. Implemented over the SceneWorks LLM seam for
 /// real runs and by a scripted fake in tests, so every rule in this module is exercised against
 /// well-formed, malformed, beat-dropping and out-of-envelope replies without a GPU.
 pub trait PlannerLlm: Send + Sync {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_>;
+}
+
+/// The running total of what the planner's LLM work cost, folded into
+/// [`sceneworks_core::film_compile::PlannerCostRecord`] when `compiled.json` is written.
+#[derive(Debug, Clone, Default)]
+struct PlannerCost {
+    job_ids: Vec<String>,
+    elapsed_seconds: f64,
+    peak_memory_bytes: Option<u64>,
+}
+
+impl PlannerCost {
+    fn record(&mut self, reply: &LlmReply) {
+        if let Some(job_id) = &reply.job_id {
+            self.job_ids.push(job_id.clone());
+        }
+        self.elapsed_seconds += reply.elapsed_seconds;
+        if let Some(peak) = reply.peak_memory_bytes {
+            self.peak_memory_bytes = Some(self.peak_memory_bytes.map_or(peak, |max| max.max(peak)));
+        }
+    }
+
+    fn into_record(self, repair_rounds: u32, budget_gb: Option<f64>) -> PlannerCostRecord {
+        PlannerCostRecord {
+            job_ids: self.job_ids,
+            elapsed_seconds: self.elapsed_seconds,
+            peak_memory_bytes: self.peak_memory_bytes,
+            repair_rounds,
+            planner_max_memory_gb: budget_gb,
+        }
+    }
 }
 
 /// [`PlannerLlm`] over the shipped `prompt_refine` seam: create the job through
@@ -134,6 +176,7 @@ impl<'a> SceneWorksLlm<'a> {
 impl PlannerLlm for SceneWorksLlm<'_> {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_> {
         Box::pin(async move {
+            let started = Instant::now();
             let mut body = json!({
                 "prompt": request.prompt,
                 "workflow": request.workflow,
@@ -191,7 +234,20 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                                 "refine job {job_id} completed with no refinedPrompt"
                             )));
                         }
-                        return Ok(text);
+                        // The job's metrics block (`GET /api/v1/jobs/:id/metrics`) carries the
+                        // peak the worker's probe measured for this decode. It is POSTed after
+                        // the terminal progress, so give it the same grace a render's metrics
+                        // get; a worker that measured nothing posts none, and that is `None`,
+                        // never an error — cost telemetry must not fail a plan that generated.
+                        let peak_memory_bytes =
+                            crate::film_harness::job_peak_memory_bytes(self.transport, &job_id)
+                                .await;
+                        return Ok(LlmReply {
+                            text,
+                            job_id: Some(job_id),
+                            elapsed_seconds: started.elapsed().as_secs_f64(),
+                            peak_memory_bytes,
+                        });
                     }
                     "failed" | "canceled" | "interrupted" => {
                         let detail = snapshot
@@ -401,23 +457,61 @@ async fn refiner_findings(
 ) -> Result<Vec<PlanDiagnostic>, HarnessError> {
     let workers =
         crate::film_harness::expect_ok_on(transport, "GET", "/api/v1/workers", None).await?;
-    let advertised = workers
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|worker| worker.get("capabilities").and_then(Value::as_array))
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|capability| capability == "prompt_refine");
-    Ok(if advertised {
+    // A LIVE row only (sc-22715), through the same rule the run and the review preflights use: a
+    // stale `offline` row still advertising `prompt_refine` would queue a decode nothing claims.
+    let advert = crate::film_harness::live_worker_advertising(&workers, "prompt_refine");
+    Ok(if advert.live.is_some() {
         Vec::new()
     } else {
         vec![PlanDiagnostic::plan(
             "planner.llm",
-            "no registered worker advertises prompt_refine, so there is no local model to plan \
-             with; start the worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to register",
+            format!(
+                "no live registered worker advertises prompt_refine{}, so there is no local model \
+                 to plan with; start the worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to \
+                 register, or clear a stale worker row that is shadowing it",
+                crate::film_harness::stale_workers_detail(&advert.stale)
+            ),
         )]
     })
+}
+
+/// The planner's declared memory budget against the API HOST's reported memory (sc-22715), the
+/// same shape as `host_findings` for a plan's `limits.maxMemoryGb`: a budget the host cannot meet
+/// is refused before the first token, and a host that reports no memory at all is refused too —
+/// an unchecked ceiling is not a checked one.
+fn planner_memory_findings(brief: &ProductionBrief, facts: &HostFacts) -> Vec<PlanDiagnostic> {
+    let Some(budget) = brief.limits.planner_max_memory_gb else {
+        // `validate_brief` has already refused an undeclared budget.
+        return Vec::new();
+    };
+    match facts.host_memory_gb() {
+        Some(host) if budget > host => vec![PlanDiagnostic::plan(
+            "limits.plannerMaxMemoryGb",
+            format!(
+                "planner budget {budget} GB exceeds the {host:.1} GB the registered worker reports \
+                 for this host"
+            ),
+        )],
+        Some(_) => Vec::new(),
+        None => vec![PlanDiagnostic::plan(
+            "limits.plannerMaxMemoryGb",
+            "no registered worker reports host memory, so the planner memory budget cannot be \
+             checked before the first decode",
+        )],
+    }
+}
+
+/// Refuse a command that would dispatch work against a hosted endpoint or beside a hosted-LLM
+/// credential (E1, sc-22715). `plan` and `compile` always checked this; every other command that
+/// reaches the API — run, resume, replace-take, review, review-eval, an edit with `--export` —
+/// goes through the same rule now, from the one place the binary builds its transport.
+pub fn local_only_guard(api_url: &str) -> Result<(), HarnessError> {
+    let findings = local_only_findings(api_url, &|name| std::env::var(name).ok());
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(HarnessError::Validation(findings))
+    }
 }
 
 /// Read the brief and the reference pack, refuse anything that is not local, and check both
@@ -464,7 +558,13 @@ async fn prepare(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
+    // The refiner first, then its memory: with no worker at all the answer is "nothing can plan",
+    // not "nothing reports memory" — the second is a consequence of the first.
     let findings = refiner_findings(transport).await?;
+    if !findings.is_empty() {
+        return Err(HarnessError::Validation(findings));
+    }
+    let findings = planner_memory_findings(&brief, &facts);
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
@@ -519,6 +619,7 @@ pub async fn generate(
     let mut request = build_planner_request(&brief, &pack, &caps);
     let mut last_reply;
     let mut round = 0_u32;
+    let mut cost = PlannerCost::default();
     let plan = loop {
         let reply = llm
             .complete(LlmRequest {
@@ -532,6 +633,8 @@ pub async fn generate(
                 guide: None,
             })
             .await?;
+        cost.record(&reply);
+        let reply = reply.text;
         last_reply = reply.clone();
         let findings = match parse_planner_output(&reply) {
             Ok(draft) => {
@@ -589,7 +692,7 @@ pub async fn generate(
             return Err(HarnessError::Validation(findings));
         }
         round += 1;
-        request = build_repair_request(&brief, &last_reply, &findings, round, rounds);
+        request = build_repair_request(&brief, &caps, &last_reply, &findings, round, rounds);
     };
 
     let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
@@ -602,6 +705,8 @@ pub async fn generate(
         &entry,
         facts.lane(),
         &plan_bytes,
+        cost,
+        round,
     )
     .await?;
     Ok(PlannerArtifacts {
@@ -683,6 +788,8 @@ pub async fn compile_existing(
         &entry,
         facts.lane(),
         &plan_bytes,
+        PlannerCost::default(),
+        0,
     )
     .await?;
     Ok(PlannerArtifacts {
@@ -778,6 +885,7 @@ fn write_generated_plan(
 /// Refine each shot's prompt (when asked), compile, and write `compiled.json`. The plan itself is
 /// never written here: `compile` runs against the plan the user edited, byte for byte, and hashes
 /// exactly those bytes so the harness can detect a later edit.
+#[allow(clippy::too_many_arguments)]
 async fn compile_and_write(
     llm: &dyn PlannerLlm,
     options: &PlannerOptions,
@@ -786,6 +894,8 @@ async fn compile_and_write(
     entry: &JsonObject<String, Value>,
     lane: ModelLane,
     plan_bytes: &[u8],
+    mut cost: PlannerCost,
+    repair_rounds: u32,
 ) -> Result<(CompiledPlan, PathBuf), HarnessError> {
     std::fs::create_dir_all(&options.out_dir)?;
     let mut refined = BTreeMap::new();
@@ -798,7 +908,7 @@ async fn compile_and_write(
             // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
             // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
             // names it).
-            let text = llm
+            let reply = llm
                 .complete(LlmRequest {
                     task: None,
                     prompt: shot.prompt.clone(),
@@ -807,10 +917,11 @@ async fn compile_and_write(
                     guide: guide.clone(),
                 })
                 .await?;
-            refined.insert(shot.id.clone(), text);
+            cost.record(&reply);
+            refined.insert(shot.id.clone(), reply.text);
         }
     }
-    let compiled = compile_plan(
+    let mut compiled = compile_plan(
         plan,
         pack,
         &CompileInputs {
@@ -822,6 +933,12 @@ async fn compile_and_write(
         },
     )
     .map_err(HarnessError::Validation)?;
+    // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
+    // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
+    // would read as a measured cost.
+    if !cost.job_ids.is_empty() || repair_rounds > 0 {
+        compiled.planner = Some(cost.into_record(repair_rounds, plan.limits.planner_max_memory_gb));
+    }
     let compiled_path = options.compiled_path();
     std::fs::write(
         &compiled_path,
@@ -943,6 +1060,48 @@ mod tests {
         // An empty value is not a configured endpoint.
         let env = |_: &str| Some("   ".to_owned());
         assert!(local_only_findings("http://127.0.0.1:8000", &env).is_empty());
+    }
+
+    /// E1 (sc-22715): the guard every dispatching command runs from the one place the binary
+    /// builds its transport, and the binary has exactly that one place.
+    #[test]
+    fn every_dispatching_command_builds_its_transport_through_the_local_only_guard() {
+        // Env is process-global, so this asserts on the URL half; the env half is
+        // `hosted_credentials_and_remote_apis_are_refused_before_any_generation` above.
+        let error = local_only_guard("https://api.openai.com/v1").expect_err("hosted is refused");
+        assert!(
+            format!("{error}").contains("not this machine or a private-network host"),
+            "{error}"
+        );
+        // A loopback API passes unless the environment carries a hosted credential, which this
+        // process's tests never set.
+        if HOSTED_LLM_ENV_VARS
+            .iter()
+            .all(|name| std::env::var(name).is_err())
+        {
+            local_only_guard("http://127.0.0.1:8000").expect("loopback is local");
+        }
+        // The binary: ONE constructor for its HTTP transport, and that constructor calls the
+        // guard first. Counting `HttpTransport::new(` is what keeps a future command from
+        // building an unguarded transport of its own.
+        let source = include_str!("bin/film-harness.rs");
+        assert_eq!(
+            source.matches("HttpTransport::new(").count(),
+            1,
+            "film-harness must build its HttpTransport in exactly one place (`guarded_transport`)"
+        );
+        let guarded = source
+            .split("fn guarded_transport(")
+            .nth(1)
+            .expect("guarded_transport exists");
+        let body = guarded
+            .split("HttpTransport::new(")
+            .next()
+            .expect("the transport is built inside guarded_transport");
+        assert!(
+            body.contains("local_only_guard("),
+            "guarded_transport must run the local-only guard BEFORE building the transport"
+        );
     }
 
     #[test]

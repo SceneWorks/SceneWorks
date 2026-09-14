@@ -2270,9 +2270,15 @@ impl TimelineExport<'_> {
     /// carries no decodable audio stream is DROPPED rather than fatal: the picture is the
     /// deliverable, and losing the whole export because one clip turned out to be silent would be
     /// a worse answer than an export with one fewer layer. Everything dropped is logged with the
-    /// track it came from, so a missing layer is diagnosable from the job log.
-    async fn resolve_audio_sources(&self, timing: &PictureTiming) -> Vec<ResolvedAudioSource> {
+    /// track it came from AND returned as a [`DroppedAudioLayer`] (sc-22715), so a missing layer is
+    /// diagnosable from the job RESULT and the render sidecar — not only from a log line nobody
+    /// reads after the fact.
+    async fn resolve_audio_sources(
+        &self,
+        timing: &PictureTiming,
+    ) -> (Vec<ResolvedAudioSource>, Vec<DroppedAudioLayer>) {
         let mut resolved = Vec::new();
+        let mut dropped = Vec::new();
         for placement in audio_placements(&self.timeline, timing) {
             let Ok(asset) = self
                 .store
@@ -2283,6 +2289,7 @@ impl TimelineExport<'_> {
                     track_id = %placement.track_id,
                     "timeline export: audio source asset is missing; dropping it from the mix"
                 );
+                dropped.push(DroppedAudioLayer::new(&placement, "asset_missing"));
                 continue;
             };
             let media_rel = asset
@@ -2295,6 +2302,7 @@ impl TimelineExport<'_> {
                     asset_id = %placement.asset_id,
                     "timeline export: audio source path is unsafe; dropping it from the mix"
                 );
+                dropped.push(DroppedAudioLayer::new(&placement, "path_unsafe"));
                 continue;
             };
             if !media_path.exists() {
@@ -2303,6 +2311,7 @@ impl TimelineExport<'_> {
                     path = %media_path.display(),
                     "timeline export: audio source file is missing; dropping it from the mix"
                 );
+                dropped.push(DroppedAudioLayer::new(&placement, "file_missing"));
                 continue;
             }
             if !source_has_audio_stream("ffmpeg", &media_path).await {
@@ -2312,6 +2321,7 @@ impl TimelineExport<'_> {
                     generated = placement.generated,
                     "timeline export: source carries no audio stream; dropping it from the mix"
                 );
+                dropped.push(DroppedAudioLayer::new(&placement, "no_audio_stream"));
                 continue;
             }
             resolved.push(ResolvedAudioSource {
@@ -2319,7 +2329,7 @@ impl TimelineExport<'_> {
                 media_path,
             });
         }
-        resolved
+        (resolved, dropped)
     }
 
     /// Mux the rendered segments into the project's render directory, write the
@@ -2387,7 +2397,7 @@ impl TimelineExport<'_> {
         // over the finished picture rather than a wider first pass, because the picture pass joins
         // pre-rendered segments whose timing has nothing to do with where a bed or a line sits —
         // a bed spanning three cuts cannot be expressed as a property of any one segment.
-        let audio = self.resolve_audio_sources(&timing).await;
+        let (audio, dropped) = self.resolve_audio_sources(&timing).await;
         if audio.is_empty() {
             mux_segments(
                 "ffmpeg",
@@ -2417,6 +2427,7 @@ impl TimelineExport<'_> {
             .await?;
         }
 
+        let dropped_layers: Vec<Value> = dropped.iter().map(DroppedAudioLayer::to_json).collect();
         let asset = build_render_asset(
             &self.request,
             &self.timeline,
@@ -2426,6 +2437,7 @@ impl TimelineExport<'_> {
             self.spec.height,
             duration,
             &audio,
+            &dropped_layers,
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
         let asset_id = required_value_str(&asset, "id")?.to_owned();
@@ -2440,6 +2452,13 @@ impl TimelineExport<'_> {
             Value::String(self.request.timeline_id.clone()),
         );
         result.insert("renderPath".to_owned(), Value::String(output_rel));
+        // Every layer the mix went without, in the RESULT (sc-22715): the film harness copies it
+        // into the run record's export entry, so "why is the music missing" is answerable from
+        // `run.json` alone.
+        result.insert(
+            "droppedAudioLayers".to_owned(),
+            Value::Array(dropped_layers),
+        );
         result.insert(
             "adapter".to_owned(),
             Value::String("ffmpeg_timeline".to_owned()),
@@ -3214,6 +3233,42 @@ pub(crate) struct ResolvedAudioSource {
     pub(crate) media_path: PathBuf,
 }
 
+/// An [`AudioPlacement`] the export could NOT resolve and therefore mixed without (sc-22715).
+///
+/// `reason` is one of `asset_missing`, `path_unsafe`, `file_missing`, `no_audio_stream` — the four
+/// branches of `TimelineExport::resolve_audio_sources`, named so the job result and the sidecar say
+/// which one, not merely that a layer went missing.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DroppedAudioLayer {
+    pub(crate) asset_id: String,
+    pub(crate) track_id: String,
+    pub(crate) role: String,
+    pub(crate) generated: bool,
+    pub(crate) reason: &'static str,
+}
+
+impl DroppedAudioLayer {
+    fn new(placement: &AudioPlacement, reason: &'static str) -> Self {
+        Self {
+            asset_id: placement.asset_id.clone(),
+            track_id: placement.track_id.clone(),
+            role: placement.role.clone(),
+            generated: placement.generated,
+            reason,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "assetId": self.asset_id,
+            "trackId": self.track_id,
+            "role": self.role,
+            "generated": self.generated,
+            "reason": self.reason,
+        })
+    }
+}
+
 /// Walk the saved timeline into the ordered list of audio sources the export must mix.
 ///
 /// Pure: no store, no ffmpeg. `timing` is the clock of the picture the video pass ACTUALLY
@@ -3875,6 +3930,7 @@ pub(crate) fn build_render_asset(
     height: u32,
     duration: f64,
     audio: &[ResolvedAudioSource],
+    dropped_audio_layers: &[Value],
 ) -> Value {
     let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
@@ -3962,7 +4018,10 @@ pub(crate) fn build_render_asset(
                 } else {
                     "ffmpeg segment concat"
                 },
-                "audioLayers": audio_layers
+                "audioLayers": audio_layers,
+                // The layers that were PLACED but never reached the mix (sc-22715), beside the
+                // ones that did, with the reason each one was dropped.
+                "droppedAudioLayers": dropped_audio_layers
             }
         },
         "lineage": {

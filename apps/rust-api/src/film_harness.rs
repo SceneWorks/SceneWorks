@@ -489,6 +489,24 @@ pub(crate) async fn expect_ok_on(
     .await
 }
 
+/// The `peakMemoryBytes` a job's metrics block reports, against a bare transport, retried for the
+/// same [`METRICS_GRACE`] a render's metrics get. `None` when no block (or no peak) was posted.
+pub(crate) async fn job_peak_memory_bytes(
+    transport: &dyn ApiTransport,
+    job_id: &str,
+) -> Option<u64> {
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    client
+        .job_metrics(job_id, METRICS_RETRY_INTERVAL)
+        .await
+        .and_then(|metrics| metrics.get("peakMemoryBytes").and_then(Value::as_u64))
+        .filter(|bytes| *bytes > 0)
+}
+
 /// The catalog entry for `model_id`, against a bare transport.
 pub(crate) async fn model_entry_for(
     transport: &dyn ApiTransport,
@@ -623,7 +641,10 @@ enum PollStop {
 #[derive(Debug, Clone, Copy)]
 struct PollBounds {
     shot_deadline: Instant,
-    run_deadline: Instant,
+    /// The run's cumulative wall-clock deadline, or `None` for work that runs outside the plan's
+    /// automatic run budget — a human-requested replacement and the export it re-runs, or an
+    /// edit's `--export` (sc-22715). Those are bounded by `shot_deadline` alone.
+    run_deadline: Option<Instant>,
     poll_interval: Duration,
     /// How long a canceled job gets to reach a terminal state: [`CANCEL_GRACE`] capped at the
     /// plan's per-shot budget.
@@ -797,7 +818,7 @@ impl Client<'_> {
             let now = Instant::now();
             let stop = if self.control.is_canceled() {
                 Some(PollStop::Operator)
-            } else if now >= bounds.run_deadline {
+            } else if bounds.run_deadline.is_some_and(|deadline| now >= deadline) {
                 Some(PollStop::RunBudget)
             } else if now >= bounds.shot_deadline {
                 Some(PollStop::ShotBudget)
@@ -919,6 +940,77 @@ pub(crate) struct HostFacts {
     video_worker_id: Option<String>,
     video_gpu_name: Option<String>,
     export_worker: bool,
+    /// Worker rows that advertise `video_generate` / `timeline_export` but are NOT live, so a
+    /// refusal can name the stale row that would have fooled a capability-only check.
+    stale_video_workers: Vec<String>,
+    stale_export_workers: Vec<String>,
+}
+
+/// Worker statuses under which a registered row can actually claim a job. A row that still
+/// advertises a capability with `status: "offline"` is a worker that left; counting it would queue
+/// work nothing will ever claim — the sc-22714 smoke did exactly that against a data dir seeded
+/// from an earlier run, and the review preflight learned the lesson first. Every preflight in the
+/// harness (run, planner, review) now shares [`live_worker_advertising`] (sc-22715).
+pub const LIVE_STATUSES: &[&str] = &["idle", "busy"];
+
+/// The registered workers advertising `capability`, split into the first LIVE one and the rows
+/// that advertise it but are not live (`"<id> (<status>)"`, for a refusal to name).
+pub(crate) struct WorkerAdvert<'a> {
+    pub(crate) live: Option<&'a Value>,
+    pub(crate) stale: Vec<String>,
+}
+
+/// One rule for "is there a worker that will claim this job": a row counts only while its status
+/// is one of [`LIVE_STATUSES`]. Shared by the run preflight (`video_generate`, `timeline_export`),
+/// the planner preflight (`prompt_refine`) and the review preflight (`image_vqa`), so no preflight
+/// can drift back to counting by capability alone.
+pub(crate) fn live_worker_advertising<'a>(
+    workers: &'a Value,
+    capability: &str,
+) -> WorkerAdvert<'a> {
+    let advertises = |worker: &Value| {
+        worker
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| caps.iter().any(|cap| cap == capability))
+    };
+    let live = |worker: &Value| {
+        worker
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| LIVE_STATUSES.contains(&status))
+    };
+    let rows: Vec<&Value> = workers.as_array().into_iter().flatten().collect();
+    WorkerAdvert {
+        live: rows
+            .iter()
+            .copied()
+            .find(|worker| advertises(worker) && live(worker)),
+        stale: rows
+            .iter()
+            .filter(|worker| advertises(worker) && !live(worker))
+            .map(|worker| {
+                format!(
+                    "{} ({})",
+                    worker.get("id").and_then(Value::as_str).unwrap_or("?"),
+                    worker.get("status").and_then(Value::as_str).unwrap_or("?")
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The phrase a refusal appends when stale rows advertise the capability nobody live does.
+pub(crate) fn stale_workers_detail(stale: &[String]) -> String {
+    if stale.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ({} advertise(s) it but is not live: {})",
+            stale.len(),
+            stale.join(", ")
+        )
+    }
 }
 
 impl HostFacts {
@@ -934,30 +1026,30 @@ impl HostFacts {
     pub(crate) fn platform_or_local(&self) -> &str {
         self.platform.as_deref().unwrap_or(std::env::consts::OS)
     }
+
+    /// The memory the API host reports, in GiB, when any registered worker reports one.
+    pub(crate) fn host_memory_gb(&self) -> Option<f64> {
+        self.host_memory_gb
+    }
 }
 
 async fn discover_host(client: &Client<'_>) -> Result<HostFacts, HarnessError> {
     let workers = client.expect_ok("GET", "/api/v1/workers", None).await?;
     let mut facts = HostFacts::default();
-    for worker in workers.as_array().into_iter().flatten() {
-        let capabilities: Vec<&str> = worker
-            .get("capabilities")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if capabilities.contains(&"video_generate") && facts.video_worker_id.is_none() {
-            facts.video_worker_id = worker.get("id").and_then(Value::as_str).map(str::to_owned);
-            facts.video_gpu_name = worker
-                .get("gpuName")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-        }
-        if capabilities.contains(&"timeline_export") {
-            facts.export_worker = true;
-        }
+    // Live rows only (sc-22715): a stale `offline` row still advertising `video_generate` is not
+    // a GPU worker, and a run that counted it would dispatch a render nothing claims.
+    let video = live_worker_advertising(&workers, "video_generate");
+    if let Some(worker) = video.live {
+        facts.video_worker_id = worker.get("id").and_then(Value::as_str).map(str::to_owned);
+        facts.video_gpu_name = worker
+            .get("gpuName")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
     }
+    facts.stale_video_workers = video.stale;
+    let export = live_worker_advertising(&workers, "timeline_export");
+    facts.export_worker = export.live.is_some();
+    facts.stale_export_workers = export.stale;
     let host = client
         .expect_ok("GET", "/api/v1/host-capabilities", None)
         .await?;
@@ -1192,6 +1284,17 @@ fn export_resolution_for(height: u32) -> u32 {
 
 fn seconds_since(start: Instant) -> f64 {
     start.elapsed().as_secs_f64()
+}
+
+/// The audio layers a `timeline_export` result says it mixed WITHOUT (`droppedAudioLayers`, one
+/// object per placed clip whose asset, file or audio stream was missing — sc-22715), copied into
+/// the run record's export entry verbatim. Empty for a result that reports none.
+fn dropped_audio_layers(result: &Value) -> Vec<Value> {
+    result
+        .get("droppedAudioLayers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Write `record` as `run.json` under `out_dir` and, when the project directory is reachable on
@@ -1519,15 +1622,22 @@ fn host_findings(plan: &ProductionPlan, facts: &HostFacts, export: bool) -> Vec<
     if facts.video_worker_id.is_none() {
         findings.push(PlanDiagnostic::plan(
             "model.id",
-            "no registered worker advertises video_generate; start the GPU worker \
-             (SCENEWORKS_WORKER_ONLY=1) and wait for it to register",
+            format!(
+                "no live registered worker advertises video_generate{}; start the GPU worker \
+                 (SCENEWORKS_WORKER_ONLY=1) and wait for it to register, or clear a stale worker \
+                 row that is shadowing it",
+                stale_workers_detail(&facts.stale_video_workers)
+            ),
         ));
     }
     if export && !facts.export_worker {
         findings.push(PlanDiagnostic::plan(
             "export",
-            "no registered worker advertises timeline_export; run the API with \
-             SCENEWORKS_RUN_UTILITY_INPROCESS=1 or start a utility worker",
+            format!(
+                "no live registered worker advertises timeline_export{}; run the API with \
+                 SCENEWORKS_RUN_UTILITY_INPROCESS=1 or start a utility worker",
+                stale_workers_detail(&facts.stale_export_workers)
+            ),
         ));
     }
     match facts.host_memory_gb {
@@ -1580,6 +1690,10 @@ async fn prepare(
 /// One shot's selected take, resolved to everything the timeline needs.
 struct SelectedTake {
     shot_id: String,
+    /// The attempt number the take belongs to — stamped into the picture item's harness block
+    /// (`filmHarness.attempt`) so a later merge can tell "the selection changed" apart from "a
+    /// person pointed this item somewhere else" (sc-22715).
+    attempt: u32,
     take: TakeRecord,
     width: u32,
     height: u32,
@@ -1665,7 +1779,17 @@ struct Session<'a> {
     /// Wall-clock earlier controllers already spent on this run. The plan's `maxRunSeconds` bounds
     /// the run, not one attempt at it, so a resume inherits the spend.
     prior_elapsed: f64,
-    run_deadline: Instant,
+    /// Wall-clock earlier HUMAN-REQUESTED work already spent on this run
+    /// (`humanRequestedElapsedSeconds`), inherited the same way.
+    prior_human_elapsed: f64,
+    /// Whether this controller's own wall-clock is charged to the run's automatic budget
+    /// (`elapsedSeconds`) or booked as human-requested work (`humanRequestedElapsedSeconds`).
+    /// `run` and `resume` charge the run; `replace-take` / `request-repair` do not (sc-22715): a
+    /// replacement the person asked for must not spend the budget the run's own `resume` needs.
+    charges_run_budget: bool,
+    /// `None` for a session outside the run budget (a replacement), so nothing it polls — the
+    /// attempt or the export — can be classified `run_budget`.
+    run_deadline: Option<Instant>,
     role_assets: BTreeMap<String, String>,
     /// The pack's sound clips this run has imported, by role (sc-22712). Rebuilt from the record on
     /// a resume exactly as [`Session::role_assets`] is, so a re-layout after a replacement places
@@ -1676,14 +1800,29 @@ struct Session<'a> {
 }
 
 impl Session<'_> {
-    /// Total wall-clock this run has consumed, across every controller that has held it.
+    /// Total AUTOMATIC wall-clock this run has consumed, across every controller that has held it.
+    /// A controller that does not charge the run budget contributes nothing here.
     fn elapsed(&self) -> f64 {
-        self.prior_elapsed + self.started.elapsed().as_secs_f64()
+        if self.charges_run_budget {
+            self.prior_elapsed + self.started.elapsed().as_secs_f64()
+        } else {
+            self.prior_elapsed
+        }
+    }
+
+    /// Total human-requested wall-clock, the mirror of [`Session::elapsed`].
+    fn human_requested_elapsed(&self) -> f64 {
+        if self.charges_run_budget {
+            self.prior_human_elapsed
+        } else {
+            self.prior_human_elapsed + self.started.elapsed().as_secs_f64()
+        }
     }
 
     /// Write the record. Called after every state transition — this is the durability contract.
     fn persist(&mut self) -> Result<(), HarnessError> {
         self.record.elapsed_seconds = self.elapsed();
+        self.record.human_requested_elapsed_seconds = self.human_requested_elapsed();
         persist_record(
             &self.record,
             &self.out_dir,
@@ -2376,7 +2515,10 @@ impl Session<'_> {
                         );
                         break;
                     }
-                    if Instant::now() >= self.run_deadline {
+                    if self
+                        .run_deadline
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                    {
                         self.halt(
                             RunOutcome::StoppedRunBudget,
                             "run_budget",
@@ -2841,6 +2983,7 @@ impl Session<'_> {
                 let attempt = shot.selected()?;
                 Some(SelectedTake {
                     shot_id: shot.shot_id.clone(),
+                    attempt: attempt.attempt,
                     take: attempt.take.clone()?,
                     width: shot.intended.width,
                     height: shot.intended.height,
@@ -2882,8 +3025,10 @@ impl Session<'_> {
             .map(str::to_owned))
     }
 
-    /// Create (or update) the run's timeline from the selected takes. Pure API writes, no job:
-    /// re-running it after a take changed rewrites one item and leaves the rest alone.
+    /// Create (or MERGE INTO) the run's timeline from the selected takes. Pure API writes, no job:
+    /// re-running it after a take changed rewrites that one item and leaves the rest — order,
+    /// source ranges, version histories, editor-placed items, bus faders — exactly as the saved
+    /// sequence holds them (sc-22715).
     async fn assemble_timeline(&mut self) -> Result<bool, HarnessError> {
         let project_id = self.project_id()?;
         let takes = self.selected_takes();
@@ -2981,12 +3126,32 @@ impl Session<'_> {
             .and_then(Value::as_str)
             .unwrap_or("track_main")
             .to_owned();
-        // Picture. Positions are left at zero and handed to `relayout_timeline` below, which is the
-        // single place that knows how the whole sequence is timed — the re-layout after a
-        // replacement must not be a second, drifting copy of this arithmetic (sc-22712).
-        let mut items = Vec::new();
+        // MERGE, never rebuild (sc-22715). The first assembly of a run creates every picture item;
+        // every later pass — a resume, a replacement — starts from the SAVED sequence and changes
+        // only what the selection changed. Rebuilding from `selected_takes()` (the sc-22710 shape)
+        // silently undid every `trim` / `reorder` / `swap-take` a person had applied through
+        // `edit_timeline`, while `timeline.edits` and the decision log went on recording them: a
+        // record that said "trimmed, reordered" over a sequence that was neither.
+        //
+        // What is kept: every existing picture item — its order, its source range, its
+        // `versionHistory`, its `generatedAudio`, and an item the harness did not place at all.
+        // What changes: an item whose shot now selects a DIFFERENT take is pointed at it (source
+        // range reset to the new take's length, one `replacement` entry appended to its history),
+        // and a shot with no item yet gets one. Positions are then handed to `relayout_timeline`,
+        // the single place that knows how the sequence is timed, in the sequence's EXISTING order
+        // with any new shots after it.
+        let existing_tracks: Vec<Value> = tracks.to_vec();
+        let mut items: Vec<Value> = existing_tracks[track_index]
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        items.sort_by(|left, right| {
+            number(left, "timelineStart", 0.0).total_cmp(&number(right, "timelineStart", 0.0))
+        });
         for SelectedTake {
             shot_id,
+            attempt,
             take,
             job_id,
             ..
@@ -3002,40 +3167,102 @@ impl Session<'_> {
                 .encoded_duration_seconds
                 .filter(|seconds| *seconds > 0.0)
                 .unwrap_or(shot.target_duration_seconds);
-            let item_id = format!(
-                "item_{}_{}",
-                shot.id.to_ascii_lowercase(),
-                &self.record.run_id[4..12]
-            );
-            items.push(json!({
-                "id": item_id,
-                "trackId": track_id,
-                "assetId": take.asset_id,
-                "type": "video",
-                "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
-                "sourceIn": 0.0,
-                "sourceOut": length,
-                "timelineStart": 0.0,
-                "timelineEnd": length,
-                "speed": 1.0,
-                "fit": "fit",
-                "volume": 1.0,
-                // The RESOLVED policy, written into the timeline itself so the export obeys the
-                // saved document rather than re-deriving anything from the plan (sc-22712).
-                "generatedAudio": resolved_generated_audio(&self.plan, shot).as_timeline_str(),
-                "versionHistory": [{
-                    "assetId": take.asset_id,
-                    "source": "original",
-                    "jobId": job_id,
-                    "note": format!("film-harness {} shot {}", self.record.run_id, shot.id),
-                }],
-                HARNESS_KEY: harness_block(ROLE_PICTURE, &self.record.run_id, Some(&shot.id), 0.0),
-            }));
+            let existing = items
+                .iter_mut()
+                .find(|item| harness_str(item, "shotId") == Some(shot_id.as_str()));
+            // "Did the SELECTION change since this item was last aligned with it?" — not "does
+            // the item show the selected asset?". The two differ exactly when a person used
+            // `swap-take` to point the item at a foreign asset (an imported clip): the selection
+            // is unchanged, the item deliberately is not, and rewriting it would revert their
+            // edit. The item's harness block records the attempt it was aligned with; an item
+            // from before that stamp existed falls back to the asset comparison.
+            let selection_changed = |item: &Value| match item
+                .get(HARNESS_KEY)
+                .and_then(|block| block.get("attempt"))
+                .and_then(Value::as_u64)
+            {
+                Some(aligned) => aligned != u64::from(*attempt),
+                None => item.get("assetId").and_then(Value::as_str) != Some(&take.asset_id),
+            };
+            match existing {
+                Some(item) if !selection_changed(item) => {
+                    // The sequence already reflects this selection: nothing about the item moves.
+                }
+                Some(item) => {
+                    // A replacement landed for this shot. Only THIS item changes, and its history
+                    // grows rather than restarting — the take that was there stays addressable.
+                    item["assetId"] = json!(take.asset_id);
+                    item["currentVersionAssetId"] = json!(take.asset_id);
+                    item["sourceIn"] = json!(0.0);
+                    item["sourceOut"] = json!(length);
+                    item[HARNESS_KEY]["attempt"] = json!(attempt);
+                    let entry = json!({
+                        "assetId": take.asset_id,
+                        "source": "replacement",
+                        "jobId": job_id,
+                        "createdAt": utc_now(),
+                        "note": format!("film-harness {} replaced shot {}", self.record.run_id, shot.id),
+                    });
+                    match item.get_mut("versionHistory").and_then(Value::as_array_mut) {
+                        Some(history) => history.push(entry),
+                        None => item["versionHistory"] = json!([entry]),
+                    }
+                    if let Some(versions) = item
+                        .get_mut("versionAssetIds")
+                        .and_then(Value::as_array_mut)
+                    {
+                        if !versions.iter().any(|value| value == &json!(take.asset_id)) {
+                            versions.push(json!(take.asset_id));
+                        }
+                    }
+                }
+                None => {
+                    let item_id = format!(
+                        "item_{}_{}",
+                        shot.id.to_ascii_lowercase(),
+                        &self.record.run_id[4..12]
+                    );
+                    items.push(json!({
+                        "id": item_id,
+                        "trackId": track_id,
+                        "assetId": take.asset_id,
+                        "type": "video",
+                        "displayName": format!("{} — {}", shot.id, shot.beat).chars().take(160).collect::<String>(),
+                        "sourceIn": 0.0,
+                        "sourceOut": length,
+                        "timelineStart": 0.0,
+                        "timelineEnd": length,
+                        "speed": 1.0,
+                        "fit": "fit",
+                        "volume": 1.0,
+                        // The RESOLVED policy, written into the timeline itself so the export
+                        // obeys the saved document rather than re-deriving anything from the plan
+                        // (sc-22712).
+                        "generatedAudio": resolved_generated_audio(&self.plan, shot).as_timeline_str(),
+                        "versionHistory": [{
+                            "assetId": take.asset_id,
+                            "source": "original",
+                            "jobId": job_id,
+                            "note": format!("film-harness {} shot {}", self.record.run_id, shot.id),
+                        }],
+                        HARNESS_KEY: picture_block(&self.record.run_id, &shot.id, *attempt),
+                    }));
+                }
+            }
         }
+        // The cut order the re-layout keeps: the saved sequence's own order, new shots after it.
+        let order: Vec<String> = items
+            .iter()
+            .filter_map(|item| harness_str(item, "shotId").map(str::to_owned))
+            .collect();
 
         // Sound: one dialogue clip per shot that has one, each keeping its offset from the start of
         // its OWN shot, and the two beds placed ONCE across the whole sequence rather than
-        // restarting at every cut. `relayout_timeline` gives all of them their positions.
+        // restarting at every cut. `relayout_timeline` gives all of them their positions. These are
+        // the HARNESS-placed items (each carries a `filmHarness.role`), re-derived from the plan on
+        // every pass exactly as a re-layout after an edit re-derives them; an item on one of these
+        // tracks that the harness did NOT place — the editor's own — is carried over untouched,
+        // as is the track's own fader (`gain` / `muted`), which a person may have moved.
         let mut dialogue_items = Vec::new();
         for SelectedTake { shot_id, .. } in &takes {
             let shot = self
@@ -3088,20 +3315,25 @@ impl Session<'_> {
             }));
         }
 
-        // The ids of the picture items this pass assembled, kept before `items` is moved onto the
-        // track, so the save can be checked against them below.
+        // The ids of every picture item the merged sequence holds, kept before `items` is moved
+        // onto the track, so the save can be checked against them below.
         let intended_item_ids: Vec<String> = items
             .iter()
             .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
             .collect();
+        let mut picture = existing_tracks[track_index].clone();
+        picture["items"] = Value::Array(items);
         let mut tracks = vec![
-            picture_track(&track_id, items),
-            audio_track(
-                DIALOGUE_TRACK_ID,
-                "Dialogue",
-                ROLE_DIALOGUE,
-                &self.plan.sound.dialogue,
-                dialogue_items,
+            picture,
+            merge_harness_audio_track(
+                &existing_tracks,
+                audio_track(
+                    DIALOGUE_TRACK_ID,
+                    "Dialogue",
+                    ROLE_DIALOGUE,
+                    &self.plan.sound.dialogue,
+                    dialogue_items,
+                ),
             ),
         ];
         for (bed_track_id, name, role, bed) in [
@@ -3122,35 +3354,25 @@ impl Session<'_> {
             let Some(asset) = self.sound_assets.get(&bed.role) else {
                 continue;
             };
-            tracks.push(bed_track(
-                bed_track_id,
-                name,
-                role,
-                bed,
-                asset,
-                &self.record.run_id,
+            tracks.push(merge_harness_audio_track(
+                &existing_tracks,
+                bed_track(bed_track_id, name, role, bed, asset, &self.record.run_id),
             ));
         }
         // Keep every track the API created that the harness does not own (the overlay lane and the
         // editor's default audio lane) so a harness timeline opens in the editor unchanged.
-        if let Some(existing) = timeline.get("tracks").and_then(Value::as_array) {
-            for track in existing {
-                let id = track.get("id").and_then(Value::as_str).unwrap_or_default();
-                if !tracks
-                    .iter()
-                    .any(|kept| kept.get("id").and_then(Value::as_str) == Some(id))
-                {
-                    tracks.push(track.clone());
-                }
+        for track in &existing_tracks {
+            let id = track.get("id").and_then(Value::as_str).unwrap_or_default();
+            if !tracks
+                .iter()
+                .any(|kept| kept.get("id").and_then(Value::as_str) == Some(id))
+            {
+                tracks.push(track.clone());
             }
         }
         timeline["tracks"] = Value::Array(tracks);
 
-        let plan_order: Vec<String> = takes
-            .iter()
-            .map(|selected| selected.shot_id.clone())
-            .collect();
-        let planned_duration = relayout_timeline(&mut timeline, Some(&plan_order))?;
+        let planned_duration = relayout_timeline(&mut timeline, Some(&order))?;
         let saved = self
             .client
             .expect_ok(
@@ -3319,6 +3541,7 @@ impl Session<'_> {
             asset_id: None,
             render_path: None,
             error: None,
+            dropped_audio_layers: Vec::new(),
         });
         self.record.export_pending = None;
         self.persist()?;
@@ -3356,6 +3579,7 @@ impl Session<'_> {
             stale: false,
             asset_id,
             render_path,
+            dropped_audio_layers: dropped_audio_layers(&view.result),
             error: (!export_ok).then(|| match poll_stop {
                 PollStop::Terminal => view.failure_text(),
                 PollStop::AssetsUnsettled => format!(
@@ -3476,18 +3700,35 @@ impl Session<'_> {
             .filter(|shot| self.is_selected(&shot.shot_id) && shot.selected_attempt.is_none())
             .map(|shot| shot.shot_id.clone())
             .collect();
+        // An `export_failed` stop is about an export this replacement did not redo (no
+        // `--export`): the run still has no MP4, so the stop — and the `resume` that retries the
+        // export — must survive too (sc-22715).
+        let export_still_owed = !self.export
+            && prior
+                .as_ref()
+                .is_some_and(|(_, stop)| stop.resumable && stop.reason == "export_failed");
         match prior {
-            Some((outcome, stop)) if stop.resumable && !outstanding.is_empty() => {
+            Some((outcome, stop))
+                if stop.resumable && (!outstanding.is_empty() || export_still_owed) =>
+            {
                 self.note_decision(
                     "replace_take",
                     Some(replaced_shot_id),
-                    format!(
-                        "the run's own stop ({}) is left in place: {} still {} no take, so the run \
-                         is still resumable",
-                        stop.reason,
-                        outstanding.join(", "),
-                        if outstanding.len() == 1 { "has" } else { "have" }
-                    ),
+                    if outstanding.is_empty() {
+                        format!(
+                            "the run's own stop ({}) is left in place: the export was not redone, \
+                             so the run is still resumable",
+                            stop.reason
+                        )
+                    } else {
+                        format!(
+                            "the run's own stop ({}) is left in place: {} still {} no take, so the \
+                             run is still resumable",
+                            stop.reason,
+                            outstanding.join(", "),
+                            if outstanding.len() == 1 { "has" } else { "have" }
+                        )
+                    },
                 );
                 self.stop = None;
                 self.record.outcome = outcome;
@@ -3706,7 +3947,9 @@ pub async fn run_with_control(
         record,
         started,
         prior_elapsed: 0.0,
-        run_deadline,
+        prior_human_elapsed: 0.0,
+        charges_run_budget: true,
+        run_deadline: Some(run_deadline),
         role_assets: BTreeMap::new(),
         sound_assets: BTreeMap::new(),
         stop: None,
@@ -3807,7 +4050,8 @@ async fn continue_run(
             let actual = sha256_hex(&bytes);
             if actual != document.sha256 {
                 return Err(HarnessError::Refused(format!(
-                    "the compiled requests changed since run {} started (recorded {}, found                      {actual}); recompile and start a new run",
+                    "the compiled requests changed since run {} started (recorded {}, found \
+                     {actual}); recompile and start a new run",
                     record.run_id, document.sha256
                 )));
             }
@@ -3860,12 +4104,15 @@ fn read_source(
     Ok((fallback.to_path_buf(), bytes))
 }
 
+/// `run_deadline: None` is a session that runs OUTSIDE the plan's automatic run budget (a
+/// replacement): its wall-clock is booked as human-requested and nothing it polls can stop on
+/// `run_budget`.
 fn session_from<'a>(
     transport: &'a dyn ApiTransport,
     options: &'a ResumeOptions,
     continued: Continued,
     started: Instant,
-    run_deadline: Instant,
+    run_deadline: Option<Instant>,
 ) -> Session<'a> {
     Session {
         client: Client {
@@ -3884,6 +4131,8 @@ fn session_from<'a>(
         facts: continued.prepared.facts,
         fps: continued.prepared.fps,
         prior_elapsed: continued.record.elapsed_seconds,
+        prior_human_elapsed: continued.record.human_requested_elapsed_seconds,
+        charges_run_budget: run_deadline.is_some(),
         record: continued.record,
         started,
         run_deadline,
@@ -3922,7 +4171,7 @@ pub async fn resume(
     let remaining =
         (continued.plan.limits.max_run_seconds as f64 - continued.record.elapsed_seconds).max(0.0);
     let run_deadline = started + Duration::from_secs_f64(remaining);
-    let mut session = session_from(transport, options, continued, started, run_deadline);
+    let mut session = session_from(transport, options, continued, started, Some(run_deadline));
     session.record.state = RunState::Running;
     session.record.stop = None;
     session.record.finished_at = None;
@@ -3997,10 +4246,14 @@ pub async fn replace_take(
         )));
     }
     clear_cancel_request(&options.out_dir)?;
-    // One replacement is bounded by the per-shot budget, not by whatever is left of a run budget a
-    // previous controller may already have spent: the human just authorised this one attempt.
-    let run_deadline = started + Duration::from_secs(continued.plan.limits.max_shot_seconds);
-    let mut session = session_from(transport, options, continued, started, run_deadline);
+    // One replacement runs OUTSIDE the run budget (sc-22715): the attempt is bounded by the
+    // per-shot budget and the re-export by its own, and neither is charged to `elapsedSeconds` —
+    // the human just authorised this one attempt, and a replacement that spent the run's remaining
+    // wall-clock would make the run's own `resume` refuse with "raise limits.maxRunSeconds". Its
+    // wall-clock is booked in `humanRequestedElapsedSeconds` instead, so the total cost is still
+    // on the record. With no run deadline, an export that overruns is `export_failed` (resumable),
+    // never `run_budget` (terminal).
+    let mut session = session_from(transport, options, continued, started, None);
     // What the RUN said before this replacement: a replacement is scoped to one shot and must not
     // re-classify the run, so a resumable stop (a cancel, a crash, a failed export) is restored by
     // `finish_replacement` when other selected shots are still outstanding.
@@ -4304,6 +4557,7 @@ fn base_record(
         diagnostics: Vec::new(),
         decisions: Vec::new(),
         elapsed_seconds: 0.0,
+        human_requested_elapsed_seconds: 0.0,
     }
 }
 
@@ -4351,6 +4605,7 @@ fn rejected_record(
             max_shot_seconds: 0,
             max_attempts_per_shot: 0,
             max_memory_gb: 0.0,
+            planner_max_memory_gb: None,
         });
     RunRecord {
         schema_version: RUN_RECORD_SCHEMA_VERSION,
@@ -4394,6 +4649,7 @@ fn rejected_record(
         diagnostics: findings,
         decisions: Vec::new(),
         elapsed_seconds: seconds_since(started),
+        human_requested_elapsed_seconds: 0.0,
     }
 }
 
@@ -5103,6 +5359,15 @@ fn harness_block(role: &str, run_id: &str, shot_id: Option<&str>, offset: f64) -
     })
 }
 
+/// A picture item's harness block: the shot, plus the attempt whose take the item was ALIGNED
+/// with when the harness last wrote it (sc-22715). A merge compares this against the shot's
+/// current `selectedAttempt` to decide whether the selection moved.
+fn picture_block(run_id: &str, shot_id: &str, attempt: u32) -> Value {
+    let mut block = harness_block(ROLE_PICTURE, run_id, Some(shot_id), 0.0);
+    block["attempt"] = json!(attempt);
+    block
+}
+
 fn harness_str<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
     item.get(HARNESS_KEY)?.get(key)?.as_str()
 }
@@ -5143,19 +5408,6 @@ fn ms(value: f64) -> f64 {
     value
 }
 
-fn picture_track(track_id: &str, items: Vec<Value>) -> Value {
-    json!({
-        "id": track_id,
-        "name": "Main",
-        "kind": "video",
-        "role": ROLE_PICTURE,
-        "locked": false,
-        "muted": false,
-        "gain": 1.0,
-        "items": items,
-    })
-}
-
 fn audio_track(id: &str, name: &str, role: &str, bus: &SoundBus, items: Vec<Value>) -> Value {
     json!({
         "id": id,
@@ -5167,6 +5419,40 @@ fn audio_track(id: &str, name: &str, role: &str, bus: &SoundBus, items: Vec<Valu
         "gain": bus.gain.clamp(0.0, 4.0),
         "items": items,
     })
+}
+
+/// Merge a freshly derived harness audio track (`fresh`, with only harness-placed items) onto the
+/// saved one of the same id, if the sequence already has it (sc-22715).
+///
+/// The saved track wins on everything a person may have changed — its fader (`gain`, `muted`),
+/// its name, and every item the harness did NOT place (no `filmHarness.role`); the harness's own
+/// items are the fresh ones, because they are re-derived from the plan on every pass exactly as
+/// `relayout_timeline` re-places them. With no saved track the fresh one is used as is.
+fn merge_harness_audio_track(existing_tracks: &[Value], fresh: Value) -> Value {
+    let id = fresh.get("id").and_then(Value::as_str).unwrap_or_default();
+    let Some(saved) = existing_tracks
+        .iter()
+        .find(|track| track.get("id").and_then(Value::as_str) == Some(id))
+    else {
+        return fresh;
+    };
+    let mut merged = saved.clone();
+    let mut items: Vec<Value> = fresh
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    items.extend(
+        saved
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| harness_str(item, "role").is_none())
+            .cloned(),
+    );
+    merged["items"] = Value::Array(items);
+    merged
 }
 
 /// A bed track carrying exactly one item, placed once for the whole sequence.
@@ -5529,6 +5815,7 @@ async fn export_timeline(
             stale: false,
             asset_id,
             render_path,
+            dropped_audio_layers: dropped_audio_layers(&view.result),
             error: (!ok).then(|| match poll_stop {
                 PollStop::Terminal => view.failure_text(),
                 PollStop::AssetsUnsettled => format!(
@@ -5635,8 +5922,8 @@ pub async fn edit_timeline(
         )
         .await?;
 
-    let (order, detail) = match &edit {
-        TimelineEdit::Reorder { shot_ids } => (Some(shot_ids.clone()), shot_ids.join(" -> ")),
+    let (order, detail, swapped_attempt) = match &edit {
+        TimelineEdit::Reorder { shot_ids } => (Some(shot_ids.clone()), shot_ids.join(" -> "), None),
         TimelineEdit::Trim {
             shot_id,
             source_in,
@@ -5700,6 +5987,7 @@ pub async fn edit_timeline(
             (
                 None,
                 format!("{shot_id} source range {new_in:.3}..{new_out:.3}"),
+                None,
             )
         }
         TimelineEdit::SwapTake { shot_id, asset_id } => {
@@ -5717,6 +6005,23 @@ pub async fn edit_timeline(
                 .and_then(|file| file.get("duration"))
                 .and_then(Value::as_f64)
                 .filter(|seconds| *seconds > 0.0);
+            // The attempt this asset belongs to, when it is one of the shot's OWN takes. The
+            // selection follows it below, and so does the item's aligned-attempt stamp — a later
+            // merge then reads "selection N, item aligned with N" and leaves the swap alone. A
+            // swap onto a FOREIGN asset moves no selection and leaves the stamp as it is, for the
+            // same reason: the selection did not change, so the merge must not touch the item
+            // (sc-22715).
+            let own_attempt = record.shot(shot_id).and_then(|shot| {
+                shot.attempts
+                    .iter()
+                    .find(|attempt| {
+                        attempt
+                            .take
+                            .as_ref()
+                            .is_some_and(|take| &take.asset_id == asset_id)
+                    })
+                    .map(|attempt| attempt.attempt)
+            });
             let item = picture_item_mut(&mut timeline, shot_id)?;
             let previous = item
                 .get("assetId")
@@ -5728,6 +6033,9 @@ pub async fn edit_timeline(
             item["currentVersionAssetId"] = json!(asset_id);
             item["sourceIn"] = json!(0.0);
             item["sourceOut"] = json!(ms(span.max(MIN_ITEM_SECONDS)));
+            if let Some(attempt) = own_attempt {
+                item[HARNESS_KEY]["attempt"] = json!(attempt);
+            }
             if let Some(history) = item.get_mut("versionHistory").and_then(Value::as_array_mut) {
                 history.push(json!({
                     "assetId": asset_id,
@@ -5747,6 +6055,7 @@ pub async fn edit_timeline(
             (
                 None,
                 format!("{shot_id} take {previous} -> {asset_id} ({span:.3}s)"),
+                own_attempt,
             )
         }
     };
@@ -5787,20 +6096,9 @@ pub async fn edit_timeline(
     // `replace-take` and the dependency flags at an attempt the sequence no longer shows. A swap to
     // a foreign asset (an imported clip, not a take of this run) selects no attempt: there is none
     // to select, and the timeline item is then the only thing that says what is in the cut.
-    if let TimelineEdit::SwapTake { shot_id, asset_id } = &edit {
-        if let Some(shot) = record
-            .shots
-            .iter_mut()
-            .find(|entry| &entry.shot_id == shot_id)
-        {
-            if let Some(attempt) = shot.attempts.iter().find(|attempt| {
-                attempt
-                    .take
-                    .as_ref()
-                    .is_some_and(|take| &take.asset_id == asset_id)
-            }) {
-                shot.selected_attempt = Some(attempt.attempt);
-            }
+    if let (TimelineEdit::SwapTake { shot_id, .. }, Some(attempt)) = (&edit, swapped_attempt) {
+        if let Some(shot) = record.shot_mut(shot_id) {
+            shot.selected_attempt = Some(attempt);
         }
     }
     let picture_track_id = picture_track_index(&saved)
@@ -5834,6 +6132,10 @@ pub async fn edit_timeline(
             .and_then(Value::as_u64)
             .unwrap_or(u64::from(DEFAULT_EXPORT_HEIGHT)) as u32;
         let shot_budget = Duration::from_secs(record.limits.max_shot_seconds);
+        // Human-requested work, like a replacement (sc-22715): bounded by the export's own
+        // per-job budget, charged to `humanRequestedElapsedSeconds`, and never classified
+        // `run_budget` — an edit's re-export must not spend the run's automatic wall-clock.
+        let export_started = Instant::now();
         let (export_record, _) = export_timeline(
             &client,
             &project_id,
@@ -5841,8 +6143,8 @@ pub async fn edit_timeline(
             export_resolution_for(tallest),
             existing.fps,
             PollBounds {
-                shot_deadline: Instant::now() + shot_budget,
-                run_deadline: Instant::now() + Duration::from_secs(record.limits.max_run_seconds),
+                shot_deadline: export_started + shot_budget,
+                run_deadline: None,
                 poll_interval: options.poll_interval,
                 cancel_grace: CANCEL_GRACE.min(shot_budget),
                 settle_grace: ASSET_SETTLE_GRACE.min(shot_budget),
@@ -5850,12 +6152,33 @@ pub async fn edit_timeline(
             &record.limits,
         )
         .await?;
-        record.outcome = if export_record.status == "completed" {
-            RunOutcome::Completed
-        } else {
-            RunOutcome::Failed
-        };
+        record.human_requested_elapsed_seconds += export_started.elapsed().as_secs_f64();
+        let export_ok = export_record.status == "completed" && export_record.asset_id.is_some();
         record.export = Some(export_record);
+        // The run's `outcome` / `stop` describe the RUN, and an edit is not a run (sc-22715): a
+        // successful re-export leaves them exactly as they were — a `canceled` or an
+        // `attempts_exhausted` stop is still true after a trim — except an `export_failed` stop,
+        // which is about precisely the export this one just replaced. A failed re-export is
+        // recorded as one, resumable, unless the run already carries a terminal stop of its own.
+        if export_ok {
+            if record
+                .stop
+                .as_ref()
+                .is_some_and(|stop| stop.reason == "export_failed")
+            {
+                record.outcome = RunOutcome::Completed;
+                record.stop = None;
+            }
+        } else if record.stop.as_ref().is_none_or(|stop| stop.resumable) {
+            record.outcome = RunOutcome::Failed;
+            record.stop = Some(RunStop {
+                reason: "export_failed".to_owned(),
+                detail: "the edit's re-export did not complete; `film-harness resume` retries the \
+                         export"
+                    .to_owned(),
+                resumable: true,
+            });
+        }
     } else if let Some(export) = &mut record.export {
         // The sequence just changed under the MP4 that was exported from it, so that MP4 no longer
         // matches the run. 22711's rule holds here exactly as it does for a re-rendered take: the
@@ -5863,9 +6186,20 @@ pub async fn edit_timeline(
         export.stale = true;
     }
 
-    let json = serde_json::to_string_pretty(&record)
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    std::fs::write(&options.run_record_path, format!("{json}\n"))?;
+    // The same write every controller makes (sc-22715): atomic, and mirrored to
+    // `<project>/film-harness/<run_id>/run.json` — an edit rewrote the record with a plain
+    // `fs::write` and left the project's copy describing a sequence that no longer existed.
+    let out_dir = options
+        .run_record_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    persist_record(
+        &record,
+        &out_dir,
+        Path::new(&record.plan.path),
+        Path::new(&record.reference_pack.path),
+    )?;
     Ok(record)
 }
 

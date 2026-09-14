@@ -13,6 +13,12 @@
   // The model block and the limits are copied into the generated plan verbatim, so the planner can
   // never widen a budget or swap the model: MiniMax-H3 on the MLX lane, q4, 24 fps, 576x320 (the
   // cheapest declared canvas, ~14 min per 5.17 s clip).
+  //
+  // `limits.plannerMaxMemoryGb` (sc-22715) is the budget for the PLANNER's own decodes — the plan
+  // draft, each repair round and one prompt rewrite per shot, all on the `prompt_refine` model
+  // (TheDrummer/Anubis-Mini-8B-v1, ~16 GB resident in bf16). It is checked against the API host's
+  // reported memory before the first token, and the measured peak is written into
+  // `compiled.json`'s `planner` block beside it.
   "schemaVersion": 1,
   "id": "courier-workshop-planned",
   "version": 1,
@@ -62,7 +68,8 @@
     "maxRunSeconds": 7200,
     "maxShotSeconds": 2700,
     "maxAttemptsPerShot": 1,
-    "maxMemoryGb": 96
+    "maxMemoryGb": 96,
+    "plannerMaxMemoryGb": 24
   },
   "maxShots": 8
 }
