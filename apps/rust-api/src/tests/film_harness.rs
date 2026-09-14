@@ -199,6 +199,13 @@ pub(crate) struct WorkerScript {
     /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
     /// by the shot's own prompt.
     pub(crate) refine_template: Option<String>,
+    /// sc-23404: fail every `audio_generate` job — the "the TTS model refused / fell over" path.
+    pub(crate) audio_fails: bool,
+    /// sc-23404: never complete an `audio_generate` job (honouring a cancel), so a test can spend
+    /// the plan's `maxShotSeconds` inside a synthesis rather than inside a render.
+    pub(crate) audio_hangs: bool,
+    /// sc-23404: `audio_generate` jobs the fake has claimed, in order: (role, payload).
+    pub(crate) audio_claimed: Vec<(String, Value)>,
 }
 
 impl WorkerScript {
@@ -233,14 +240,17 @@ const HOST_MEMORY_MB: u64 = 128 * 1024;
 /// Every job type the harness drives, which the fake advertises unless a test narrows it.
 ///
 /// `image_vqa` (sc-22714) is what the reviewer's questions ride; `frame_extract` is what turns a
-/// take into timestamped frame evidence; `prompt_refine` (sc-22713) is the planner seam. All of
-/// them are job types the real worker already advertises.
+/// take into timestamped frame evidence; `prompt_refine` (sc-22713) is the planner seam;
+/// `audio_generate` (sc-23404) is the TTS seam a synthesized dialogue line rides. All of them are
+/// job types the real worker already advertises (the macOS worker builds the candle audio lane
+/// unconditionally, so `audio_generate` is advertised on the mlx lane too).
 pub(crate) const FAKE_CAPABILITIES: &[&str] = &[
     "video_generate",
     "timeline_export",
     "frame_extract",
     "image_vqa",
     "prompt_refine",
+    "audio_generate",
 ];
 
 async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
@@ -322,6 +332,11 @@ fn spawn_fake_worker(
                 "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
                 "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
+                // sc-23404: the TTS seam. Writes a deterministic canonical PCM-16 WAV where the
+                // real audio worker writes its clip and reports the same `assetWrites` fact, so
+                // asset persistence, the audio sidecar and the two-phase result rewrite are
+                // production code paths here exactly as they are for a render.
+                "audio_generate" => run_fake_audio_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -640,6 +655,151 @@ async fn run_fake_frame_job(
         }),
     )
     .await;
+}
+
+/// The `audio_generate` job, faked (sc-23404): write a deterministic canonical PCM-16 WAV where the
+/// audio worker writes its clip and report it through the same `assetWrites` fact
+/// `audio_jobs::audio_asset_fact` builds. No TTS weights load; asset persistence, the audio sidecar
+/// and the two-phase result rewrite are the production code paths.
+///
+/// The clip's pitch is derived from the requested VOICE and its length from the text, so a test can
+/// tell one synthesized line from another by decoding the export — the same trick the fixture's
+/// placeholder tones used, now keyed on what was actually asked for rather than on a checked-in
+/// file.
+async fn run_fake_audio_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let role = payload["advanced"]["filmHarness"]["role"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    script
+        .lock()
+        .audio_claimed
+        .push((role.clone(), payload.clone()));
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "running", "stage": "generating", "progress": 0.3,
+            "message": "fake synthesis", "workerId": WORKER_ID, "backend": "candle"
+        }),
+    )
+    .await;
+    if script.lock().audio_fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake tts fault", "error": "fake tts fault: no voice bank",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    if script.lock().audio_hangs {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let prompt = payload["prompt"].as_str().unwrap_or_default().to_owned();
+    let voice = payload["voice"].as_str().map(str::to_owned);
+    let asset_id = format!("asset_tts_{}", &job_id.replace('-', "")[..12]);
+    let media_rel = format!("assets/audios/{asset_id}.wav");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join("assets/audios")).expect("audios dir");
+    let (hz, seconds) = fake_speech_shape(voice.as_deref(), &prompt);
+    let wav = film_harness::fixture_sound_wav(seconds, hz, 9000);
+    std::fs::write(project_dir.join(&media_rel), &wav).expect("fake wav");
+    let fact = json!({
+        "type": "audio",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "audio/wav",
+        "duration": seconds,
+        "sampleRate": film_harness::FIXTURE_SOUND_RATE,
+        "channels": 1,
+        "family": "kokoro",
+        "displayName": prompt.chars().take(56).collect::<String>(),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": "speech",
+        "model": payload["model"],
+        "adapter": "fake_kokoro",
+        "prompt": prompt,
+        "voice": payload["voice"],
+        "language": Value::Null,
+        "targetDurationSecs": Value::Null,
+        "seed": Value::Null,
+        "rawAdapterSettings": {
+            "model": payload["model"],
+            "voice": payload["voice"],
+            "sampleRate": film_harness::FIXTURE_SOUND_RATE,
+            "advanced": payload["advanced"],
+        },
+    });
+    let genset_id = format!("genset_tts_{}", &job_id.replace('-', "")[..12]);
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake synthesis done", "workerId": WORKER_ID, "backend": "candle",
+            "result": {
+                "generationSetId": genset_id,
+                "expectedCount": 1,
+                "adapter": "fake_kokoro",
+                "model": payload["model"],
+                "generationSet": {
+                    "id": genset_id, "mode": "speech", "model": payload["model"],
+                    "prompt": payload["prompt"], "count": 1,
+                    "createdAt": sceneworks_core::time::utc_now()
+                },
+                "assetWrites": [fact]
+            }
+        }),
+    )
+    .await;
+}
+
+/// Pitch and length for one faked synthesized line: a distinct frequency per voice id, and a length
+/// that grows with the text so two lines in the same voice are still distinguishable by duration.
+pub(crate) fn fake_speech_shape(voice: Option<&str>, text: &str) -> (u32, f64) {
+    let hz = match voice {
+        Some("am_michael") => 400,
+        Some("af_heart") => 500,
+        Some(_) => 600,
+        None => 700,
+    };
+    // 25 characters per second, floored at half a second — short enough that a six-shot fixture's
+    // lines all fit inside their shots, long enough to measure.
+    let seconds = ((text.trim().chars().count() as f64) / 25.0).max(0.5);
+    (hz, (seconds * 10.0).round() / 10.0)
 }
 
 /// The `image_vqa` job, faked: answer from the script's table in the shape
@@ -4289,12 +4449,17 @@ async fn the_assembled_sequence_carries_three_independently_controlled_sound_bus
         "the line sits 1.2s into SH020, not 1.2s into the sequence: {}",
         dialogue[0]
     );
+    // The line is SPOKEN by the run now rather than read off a checked-in tone (sc-23404), so its
+    // length is the length of what was said — derived from the same shape the fake synthesizes at,
+    // never a number copied here by hand.
+    let (_, spoken) =
+        fake_speech_shape(Some("am_michael"), "Delivery. I'll leave it on the bench.");
     assert!(
         close(
             dialogue[0]["timelineEnd"].as_f64().unwrap(),
-            5.1667 + 1.2 + 2.0
+            5.1667 + 1.2 + spoken
         ),
-        "the clip is the 2s fixture take: {}",
+        "the clip is the {spoken}s synthesized line: {}",
         dialogue[0]
     );
     assert_eq!(track_of(&saved, "track_dialogue")["gain"], 1.0);
@@ -4986,6 +5151,36 @@ fn checked_in_fixture_sound_matches_the_generator_byte_for_byte() {
              with `film-harness fixture-sound --out config/film-harness/courier-workshop/sound`."
         );
     }
+    // And the generator and the shipped pack agree about which roles are which (sc-23404): every
+    // BED is a checked-in file the loop above just verified, every DIALOGUE role is a line the run
+    // speaks, and no dialogue tone is left behind on disk pretending to be speech.
+    let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("references.jsonc"))
+        .expect("fixture pack");
+    let pack = sceneworks_core::film_plan::parse_reference_pack(&text).expect("pack parses");
+    for entry in &pack.sound {
+        if entry.kind == "dialogue" {
+            assert!(
+                entry.is_synthesized(),
+                "{}: the fixture's dialogue is spoken by the run, not a checked-in tone",
+                entry.role
+            );
+        } else {
+            assert!(!entry.is_synthesized(), "{}", entry.role);
+            assert!(
+                film_harness::FIXTURE_SOUNDS
+                    .iter()
+                    .any(|(role, ..)| *role == entry.role),
+                "{}: a bed the generator does not write",
+                entry.role
+            );
+        }
+    }
+    let spoken = pack
+        .sound
+        .iter()
+        .filter(|entry| entry.is_synthesized())
+        .count();
+    assert_eq!(spoken, 3, "the fixture places three lines");
 }
 
 /// The seam between the two ways a shot's take can change (sc-22711 `replace-take` re-renders,
@@ -6081,4 +6276,548 @@ fn the_checked_in_brief_is_valid_and_matches_the_hand_authored_baseline() {
     // Every beat is coverable inside the model's shortest legal clip and the declared window.
     assert!(brief.required_beats.len() as f64 * 5.1667 >= brief.target_total_seconds.min);
     assert!(brief.max_shots >= brief.required_beats.len());
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-23404 — speech dialogue synthesized through the audio job route
+// ---------------------------------------------------------------------------------------------
+
+/// A pack whose dialogue entries carry `text`, copied into the temp dir so the clips synthesis
+/// writes land somewhere disposable rather than in the checked-in fixture.
+///
+/// `edit` shapes the parsed pack first, so a test can break one entry (drop its text, move it to
+/// the wrong kind) without touching the shipped documents.
+fn speech_pack(harness: &Harness, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    let text = std::fs::read_to_string(harness.fixture_pack()).expect("fixture pack");
+    let mut pack: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+            .expect("fixture pack parses");
+    edit(&mut pack);
+    let dir = harness.temp_dir.path().join("speech-pack");
+    std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+    std::fs::create_dir_all(dir.join("sound")).expect("sound dir");
+    for entry in
+        std::fs::read_dir(Path::new(FIXTURE_DIR).join("references")).expect("fixture references")
+    {
+        let entry = entry.expect("directory entry");
+        std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
+            .expect("plate copies");
+    }
+    for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("sound")).expect("fixture sound") {
+        let entry = entry.expect("directory entry");
+        std::fs::copy(entry.path(), dir.join("sound").join(entry.file_name())).expect("bed copies");
+    }
+    let path = dir.join("references.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+    path
+}
+
+fn audio_job_count(harness: &Harness) -> usize {
+    harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(kind, _, _)| kind == "audio_generate")
+        .count()
+}
+
+/// Reopen a finished run so `resume` walks the whole pipeline — project, references, sound — the
+/// way a crash-resume does, rather than returning at the first "already completed" gate.
+fn reopen_for_resume(harness: &Harness) {
+    harness.edit_run_record(|record| {
+        record["state"] = json!("running");
+        record["outcome"] = json!("failed");
+        record["export"]["stale"] = json!(true);
+        record["stop"] = json!({
+            "reason": "export_failed", "detail": "reopened by the test", "resumable": true
+        });
+    });
+}
+
+/// AC1: a `dialogue` entry carrying `text` yields ONE `audio_generate` job through the real route,
+/// a WAV in the pack directory, a dialogue-bus item at the shot's offset, and provenance in the run
+/// record — model, voice, text, job id and asset id.
+///
+/// Runs on every lane, ffmpeg or not: the synthesized clip is a canonical PCM-16 WAV, which the
+/// import route stores without a transcode (`media_convert::is_canonical_pcm16_wav`), exactly as
+/// the fixture's beds are.
+#[tokio::test]
+async fn a_dialogue_line_with_text_is_synthesized_placed_and_recorded() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    // ONE synthesis job, for the ONE line this two-shot selection places. The recipient's lines
+    // belong to SH050/SH060, which the selection leaves out, so they are never spoken — synthesis
+    // follows the same "only what the run PLACES" rule the import does.
+    assert_eq!(audio_job_count(&harness), 1);
+    assert_eq!(
+        record.synthesized_sound.len(),
+        1,
+        "{:#?}",
+        record.synthesized_sound
+    );
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.role, "courier_line");
+    assert_eq!(line.text, "Delivery. I'll leave it on the bench.");
+    assert_eq!(line.model, "kokoro_82m");
+    assert_eq!(line.voice.as_deref(), Some("am_michael"));
+    assert_eq!(line.status, "completed");
+    assert!(line.job_id.is_some(), "{line:#?}");
+    assert!(line.asset_id.is_some(), "{line:#?}");
+    assert!(line.is_usable(), "{line:#?}");
+
+    // The dispatched body is the real audio route's, and it carries the key a resume adopts by.
+    let (_, payload) = harness
+        .script
+        .lock()
+        .audio_claimed
+        .first()
+        .cloned()
+        .expect("the fake claimed the synthesis job");
+    assert_eq!(payload["prompt"], "Delivery. I'll leave it on the bench.");
+    assert_eq!(payload["model"], "kokoro_82m");
+    assert_eq!(payload["voice"], "am_michael");
+    assert_eq!(
+        payload["advanced"]["filmHarness"]["idempotencyKey"],
+        json!(line.idempotency_key)
+    );
+    assert_eq!(payload["advanced"]["filmHarness"]["role"], "courier_line");
+    // The route resolved the model's manifest entry, which is what says this went through
+    // `create_audio_job` rather than through a hand-built job row.
+    assert_eq!(payload["modelManifestEntry"]["type"], "audio");
+
+    // The WAV is in the PACK directory, under the deterministic name, and it is what was imported.
+    let file = line.file.clone().expect("the clip was written");
+    assert_eq!(
+        file,
+        film_harness::synthesized_sound_file("courier_line", &line.text_sha256)
+    );
+    let on_disk = pack.parent().expect("pack dir").join(&file);
+    assert!(on_disk.is_file(), "{} was not written", on_disk.display());
+    let imported = record
+        .sound
+        .iter()
+        .find(|clip| clip.role == "courier_line")
+        .expect("the spoken line is imported like any other clip");
+    assert_eq!(imported.file, file);
+    assert_eq!(imported.kind, "dialogue");
+    assert_ne!(
+        Some(&imported.asset_id),
+        line.asset_id.as_ref(),
+        "the dialogue bus plays the IMPORTED clip, not the synthesis job's library asset"
+    );
+
+    // The imported asset says it was spoken rather than recorded.
+    let project_id = record.project_id.clone().expect("project created");
+    let (status, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{}", imported.asset_id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+    assert_eq!(asset["type"], "audio", "{asset}");
+    assert_eq!(
+        asset["extra"]["filmHarness"]["synthesized"], true,
+        "{asset}"
+    );
+
+    // And it lands on the dialogue bus at the shot's own offset, for the length that was spoken.
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+    let saved = saved_timeline(&harness.app, &project_id, &timeline.timeline_id).await;
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1, "{dialogue:#?}");
+    assert_eq!(dialogue[0]["filmHarness"]["shotId"], "SH020");
+    assert!(
+        close(dialogue[0]["timelineStart"].as_f64().unwrap(), 5.1667 + 1.2),
+        "{}",
+        dialogue[0]
+    );
+    let (_, spoken) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert!(
+        close(
+            dialogue[0]["timelineEnd"].as_f64().unwrap(),
+            5.1667 + 1.2 + spoken
+        ),
+        "the item is as long as the line that was actually spoken ({spoken}s): {}",
+        dialogue[0]
+    );
+}
+
+/// AC1, second half: a resume after the synthesis completed ADOPTS the clip — no second job, no
+/// second asset, the same file.
+#[tokio::test]
+async fn a_resume_adopts_a_spoken_line_instead_of_speaking_it_again() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(audio_job_count(&harness), 1);
+    let spoken = first.synthesized_sound[0].clone();
+
+    reopen_for_resume(&harness);
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        audio_job_count(&harness),
+        1,
+        "the resume must adopt the clip, not speak the line a second time"
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1);
+    assert_eq!(resumed.synthesized_sound[0], spoken);
+    assert_eq!(resumed.sound.len(), first.sound.len());
+    let project_id = resumed.project_id.clone().expect("project");
+    let (_, jobs) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs?projectId={project_id}&limit=100"),
+        Value::Null,
+    )
+    .await;
+    let audio = jobs
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .filter(|job| job["type"] == "audio_generate")
+        .count();
+    assert_eq!(audio, 1, "the API holds exactly one synthesis job");
+}
+
+/// AC2, first half: a pack entry with neither `text` nor `file`, and `text` on a non-dialogue kind,
+/// are refused BEFORE dispatch and by role. Nothing is created — no project, no job.
+#[tokio::test]
+async fn a_sound_entry_with_no_source_or_a_spoken_bed_is_refused_before_dispatch() {
+    /// How one case breaks the pack: drop the courier's line so its entry has no source at all, or
+    /// give the room-tone bed a line to speak.
+    #[derive(Clone, Copy)]
+    enum Break {
+        NoSource,
+        SpokenBed,
+    }
+    let cases = [
+        (Break::NoSource, "neither `file` nor `text`", "courier_line"),
+        (
+            Break::SpokenBed,
+            "only a `dialogue` entry may carry `text`",
+            "workshop_room_tone",
+        ),
+    ];
+    for (case, needle, label) in cases {
+        let harness = Harness::start(true, vec![]).await;
+        let pack = speech_pack(&harness, |pack| match case {
+            Break::NoSource => {
+                pack["sound"][0]
+                    .as_object_mut()
+                    .expect("entry")
+                    .remove("text");
+            }
+            Break::SpokenBed => {
+                pack["sound"][3]["text"] = json!("a quiet workshop, distant birds");
+            }
+        });
+        let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+        let error = film_harness::run(&harness.transport, &options)
+            .await
+            .unwrap_err();
+        let HarnessError::Validation(findings) = error else {
+            panic!("{label}: expected a validation refusal, got {error}");
+        };
+        let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+        // The finding names the ENTRY by role, not just the array slot.
+        assert!(
+            text.iter()
+                .any(|message| message.contains(needle) && message.contains(label)),
+            "{label}: the finding must name the entry: {text:?}"
+        );
+        assert_eq!(audio_job_count(&harness), 0, "{label}");
+        assert_eq!(harness.project_count().await, 0, "{label}");
+        assert_eq!(harness.run_record()["outcome"], "rejected", "{label}");
+    }
+}
+
+/// AC2, second half: a synthesis that FAILS stops the run with a resumable reason and leaves the
+/// rest of the sequence intact — no render is dispatched, the record says which line and why, and a
+/// resume with a worker that can speak finishes the film.
+#[tokio::test]
+async fn a_failed_synthesis_stops_the_run_resumably_with_the_rest_intact() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.script.lock().audio_fails = true;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("courier_line"),
+        "the stop names the line: {}",
+        stop.detail
+    );
+    assert!(record.is_resumable());
+
+    // Nothing downstream ran: the failure lands BEFORE the first render, which is the point of
+    // speaking the lines before the shots.
+    assert_eq!(harness.video_job_count(), 0);
+    assert!(record.export.is_none());
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.role, "courier_line");
+    assert_eq!(line.status, "failed");
+    assert!(
+        line.error
+            .as_deref()
+            .is_some_and(|error| error.contains("fake tts fault")),
+        "{line:#?}"
+    );
+    assert!(line.asset_id.is_none());
+
+    harness.script.lock().audio_fails = false;
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1, "one record per role");
+    assert_eq!(resumed.synthesized_sound[0].status, "completed");
+    assert_eq!(
+        resumed.synthesized_sound[0].attempt, 2,
+        "the retry is a NEW attempt under a new key, not a re-poll of the failed job"
+    );
+    assert_ne!(
+        resumed.synthesized_sound[0].idempotency_key,
+        line.idempotency_key
+    );
+    assert_eq!(
+        audio_job_count(&harness),
+        2,
+        "one attempt that failed, one that spoke"
+    );
+    assert_eq!(resumed.sound.len(), 3, "{:#?}", resumed.sound);
+}
+
+/// A pack that asks for speech on a host with no TTS worker is told so BEFORE the job exists.
+///
+/// Without this the synthesis would be enqueued, claimed by nobody, and cancelled when the plan's
+/// per-job budget ran out — the run would take `maxShotSeconds` to report "not synthesized" instead
+/// of reporting "nothing here can speak" in a second. The same posture as the `video_generate` and
+/// `image_vqa` preflights, and scoped to the lines still OWED, so a run whose clips are all already
+/// spoken needs no TTS worker at all.
+#[tokio::test]
+async fn speech_with_no_live_audio_worker_is_refused_before_the_job_exists() {
+    let harness = Harness::start(false, vec![]).await;
+    harness.script.lock().capabilities = Some(vec![
+        "video_generate",
+        "timeline_export",
+        "frame_extract",
+        "image_vqa",
+        "prompt_refine",
+    ]);
+    harness.spawn_worker().await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "no_audio_worker", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("courier_line") && stop.detail.contains("audio_generate"),
+        "{}",
+        stop.detail
+    );
+    // Nothing was enqueued and nothing was rendered.
+    assert!(
+        record.synthesized_sound.is_empty(),
+        "{:#?}",
+        record.synthesized_sound
+    );
+    assert_eq!(harness.video_job_count(), 0);
+    assert_eq!(harness.jobs().await.len(), 0);
+}
+
+/// AC2, the limit: a synthesis that runs past the plan's declared per-job budget stops the run
+/// resumably, with nothing rendered.
+#[tokio::test]
+async fn a_synthesis_that_overruns_its_budget_stops_the_run_resumably() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.script.lock().audio_hangs = true;
+    let pack = speech_pack(&harness, |_| {});
+    // The plan's own declared bound, tightened: one second for a synthesis the fake never finishes.
+    let plan = {
+        let text = std::fs::read_to_string(harness.fixture_plan()).expect("plan");
+        let mut plan: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("plan parses");
+        plan["limits"]["maxShotSeconds"] = json!(1);
+        let path = harness.temp_dir.path().join("tight-plan.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    };
+    let options = harness.options(plan, pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("per-job budget"),
+        "the stop says which limit: {}",
+        stop.detail
+    );
+    assert_eq!(record.synthesized_sound[0].status, "timed_out");
+    assert_eq!(harness.video_job_count(), 0);
+}
+
+/// What the synthesis key is keyed on, checked directly rather than through a run.
+///
+/// The role alone would be stable across restarts too — and would make a re-cast line adopt the job
+/// that spoke the old one, so the film would go on saying the wrong thing in the wrong voice. The
+/// attempt is the retry axis: without it, a resume after a failure finds the FAILED job under the
+/// same key and re-reads the same failure forever instead of speaking the line.
+#[test]
+fn the_synthesis_key_separates_content_and_attempts_and_is_stable_otherwise() {
+    let key = |voice: Option<&str>, text: &str, attempt: u32| {
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "courier_line",
+            "kokoro_82m",
+            voice,
+            text,
+            attempt,
+        )
+    };
+    let base = key(Some("am_michael"), "Delivery.", 1);
+    assert_eq!(base, key(Some("am_michael"), "  Delivery.  ", 1));
+    assert!(base.starts_with("run_1:sound:courier_line:"), "{base}");
+    assert!(base.ends_with(":a1"), "{base}");
+    for different in [
+        key(Some("bm_george"), "Delivery.", 1),
+        key(None, "Delivery.", 1),
+        key(Some("am_michael"), "Delivery, sorry.", 1),
+        key(Some("am_michael"), "Delivery.", 2),
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "recipient_line",
+            "kokoro_82m",
+            Some("am_michael"),
+            "Delivery.",
+            1,
+        ),
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "courier_line",
+            "chatterbox_tts",
+            Some("am_michael"),
+            "Delivery.",
+            1,
+        ),
+    ] {
+        assert_ne!(base, different);
+    }
+}
+
+/// The clip's name is deterministic in the role and the line, so the same pack run twice writes the
+/// same file and a resume finds the one it wrote — and a CHANGED line is a different file rather
+/// than a silent overwrite of the one the last export used.
+#[test]
+fn a_synthesized_clips_name_is_deterministic_in_the_role_and_the_line() {
+    let digest = "0123456789abcdef0123";
+    assert_eq!(
+        film_harness::synthesized_sound_file("courier_line", digest),
+        "sound/courier_line.tts-0123456789ab.wav"
+    );
+    assert_ne!(
+        film_harness::synthesized_sound_file("courier_line", digest),
+        film_harness::synthesized_sound_file("recipient_line", digest)
+    );
+}
+
+/// A replacement re-assembles the timeline, and the sound has to survive it.
+///
+/// `assemble_timeline` derives the sound tracks from the session's clip map, and
+/// `merge_harness_audio_track` keeps only the items the harness does NOT own — so a replacement
+/// that re-assembled without re-hydrating the clips did not leave the saved dialogue and beds
+/// alone, it DELETED them, and the re-export came back as picture with nothing under it. That is
+/// the phase-1 evaluation's finding #2, fixed here alongside synthesis because a spoken line is
+/// exactly what it silences.
+#[tokio::test]
+async fn a_replacement_re_assembles_with_the_sound_the_run_already_has() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&before, "track_dialogue").len(), 1);
+    assert_eq!(items_of(&before, "track_ambience").len(), 1);
+    let audio_jobs = audio_job_count(&harness);
+
+    let replaced = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH020",
+        "the parcel is the wrong colour",
+    )
+    .await
+    .expect("the replacement runs");
+    assert_eq!(
+        replaced.shots[1].outcome,
+        ShotOutcome::Rendered,
+        "{}",
+        summary(&replaced)
+    );
+    let after = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(
+        items_of(&after, "track_dialogue").len(),
+        1,
+        "the replacement must not silence the film: {:#?}",
+        track_of(&after, "track_dialogue")
+    );
+    assert_eq!(items_of(&after, "track_ambience").len(), 1);
+    assert_eq!(items_of(&after, "track_music").len(), 1);
+    assert_eq!(
+        audio_job_count(&harness),
+        audio_jobs,
+        "re-hydrating adopts the spoken line; it does not speak it again"
+    );
+    assert_eq!(replaced.sound.len(), record.sound.len());
 }

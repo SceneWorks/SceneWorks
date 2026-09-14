@@ -1185,8 +1185,11 @@ async fn edit(command: &str, args: &[String]) -> ExitCode {
     }
 }
 
-/// `fixture-sound --out DIR` — write the deterministic placeholder clips the fixture pack's sound
+/// `fixture-sound --out DIR` — write the deterministic placeholder clips the fixture pack's BED
 /// roles resolve against (sc-22712).
+///
+/// Only the beds (sc-23404): the fixture's three `dialogue` roles carry `text` and are spoken by
+/// the run through the audio route, so there is no placeholder tone to write for them.
 fn fixture_sound(args: &[String]) -> ExitCode {
     let mut out: Option<PathBuf> = None;
     let mut iter = args.iter();

@@ -1183,6 +1183,53 @@ pub fn idempotency_key(run_id: &str, shot_id: &str, attempt: u32) -> String {
     format!("{run_id}:{shot_id}:a{attempt}")
 }
 
+/// The key one dialogue synthesis dispatches under (sc-23404).
+///
+/// Keyed on the CONTENT as well as the role — model, voice and the trimmed line — rather than on
+/// the role alone. A role-only key would be stable across restarts too, but it would also make
+/// re-casting a line (a new voice, a rewritten line) adopt the job that spoke the OLD one, and the
+/// film would quietly keep saying the wrong thing.
+///
+/// `attempt` is the retry axis, the render key's `a{n}` under a different name: a synthesis that
+/// FAILED must be re-dispatched by the next resume, and a key without it would find the failed job
+/// and re-read the same failure forever. Every part is stable across restarts — the run id is in
+/// the record, the content is in the pack, and the attempt is in the record.
+pub fn dialogue_idempotency_key(
+    run_id: &str,
+    role: &str,
+    model: &str,
+    voice: Option<&str>,
+    text: &str,
+    attempt: u32,
+) -> String {
+    let digest =
+        sha256_hex(format!("{model}\n{}\n{}", voice.unwrap_or(""), text.trim()).as_bytes());
+    format!("{run_id}:sound:{role}:{}:a{attempt}", &digest[..12])
+}
+
+/// Where a synthesized line's WAV lands in the pack directory when the entry pins no `file`.
+///
+/// Deterministic in the role and the line, so the same pack run twice writes the same name and a
+/// resume finds the clip it wrote — and so a changed line is a different file rather than a silent
+/// overwrite of the one the last export used.
+pub fn synthesized_sound_file(role: &str, text_sha256: &str) -> String {
+    let digest: String = text_sha256.chars().take(12).collect();
+    format!("sound/{role}.tts-{digest}.wav")
+}
+
+/// The `type: audio` asset one completed `audio_generate` job produced: its id and its
+/// project-relative media path.
+///
+/// Read off the job result the API rewrote from the worker's `assetWrites` (the same `assets` block
+/// [`take_from_result`] reads a render out of), not off the worker's own fact — the rewrite is what
+/// says the asset is actually persisted.
+fn audio_asset_from_result(result: &Value) -> Option<(String, String)> {
+    let asset = result.get("assets")?.as_array()?.first()?;
+    let id = asset.get("id")?.as_str()?.to_owned();
+    let path = asset.pointer("/file/path")?.as_str()?.to_owned();
+    (!path.is_empty()).then_some((id, path))
+}
+
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
     let asset = result.get("assets")?.as_array()?.first()?;
     let file = asset.get("file").unwrap_or(&Value::Null);
@@ -2093,7 +2140,7 @@ impl Session<'_> {
                     .filter_map(|shot| shot.dialogue_clip.as_ref().map(|clip| clip.role.clone())),
             )
             .collect();
-        let entries: Vec<film_plan::SoundEntry> = self
+        let mut entries: Vec<film_plan::SoundEntry> = self
             .pack
             .sound
             .iter()
@@ -2102,6 +2149,55 @@ impl Session<'_> {
             .collect();
         if entries.is_empty() {
             return Ok(());
+        }
+        // Speak every placed line that has no clip yet, BEFORE the listing below: synthesis creates
+        // assets and writes files, and the import pass that follows must see a pack directory that
+        // already holds them (sc-23404). Each entry comes back with the `file` synthesis wrote, so
+        // from here down a spoken line and a recorded one are the same thing.
+        //
+        // The worker preflight comes first and is scoped to the lines still OWED: a run whose clips
+        // are all already spoken needs no TTS worker at all (that is the `replace-take` case), and
+        // a run that does need one must be told so here rather than enqueue a job nobody claims and
+        // spend the whole per-job budget waiting for it. Same rule as the `video_generate` and
+        // `image_vqa` preflights — LIVE rows only.
+        let owed: Vec<&film_plan::SoundEntry> = entries
+            .iter()
+            .filter(|entry| entry.is_synthesized() && !self.line_already_spoken(entry))
+            .collect();
+        if !owed.is_empty() {
+            let roles: Vec<&str> = owed.iter().map(|entry| entry.role.as_str()).collect();
+            let workers = self
+                .client
+                .expect_ok("GET", "/api/v1/workers", None)
+                .await?;
+            let audio = live_worker_advertising(&workers, "audio_generate");
+            if audio.live.is_none() {
+                self.halt(
+                    RunOutcome::Failed,
+                    "no_audio_worker",
+                    format!(
+                        "the pack asks this run to speak {} ({}) but no live registered worker \
+                         advertises audio_generate{}; start a worker with the audio lane and \
+                         `film-harness resume` speaks them",
+                        roles.len(),
+                        roles.join(", "),
+                        stale_workers_detail(&audio.stale)
+                    ),
+                    true,
+                );
+                return Ok(());
+            }
+        }
+        for entry in &mut entries {
+            if !entry.is_synthesized() {
+                continue;
+            }
+            let Some(file) = self.synthesize_dialogue(&project_id, entry).await? else {
+                // Halted: the stop is recorded, the clips already spoken and imported stay where
+                // they are, and `drive_inner` stops before dispatching a render.
+                return Ok(());
+            };
+            entry.file = Some(file);
         }
         // ONE listing for the whole pass. It does double duty: it carries the stored duration of
         // every clip an earlier controller already imported, and the provenance that finds one it
@@ -2150,7 +2246,16 @@ impl Session<'_> {
                 );
                 continue;
             }
-            let path = pack_dir.join(&entry.file);
+            // Set on every entry by now: a recorded clip declares it, and a synthesized one was
+            // given it by `synthesize_dialogue` above. An entry with neither is a validation
+            // finding the run never gets past.
+            let file = entry.file.clone().ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "sound {:?} has no file to import; the pack declares neither `file` nor `text`",
+                    entry.role
+                ))
+            })?;
+            let path = pack_dir.join(&file);
             let bytes = std::fs::read(&path)?;
             let sha256 = sha256_hex(&bytes);
             // A clip imported by THIS pass is not in the listing above (it was fetched before the
@@ -2163,7 +2268,7 @@ impl Session<'_> {
                         (asset_id, duration)
                     }
                     None => {
-                        self.import_sound(&project_id, entry, &path, &sha256)
+                        self.import_sound(&project_id, entry, &file, &path, &sha256)
                             .await?
                     }
                 };
@@ -2192,7 +2297,7 @@ impl Session<'_> {
             self.record.sound.push(ReferenceAssetRecord {
                 role: entry.role.clone(),
                 kind: entry.kind.clone(),
-                file: entry.file.clone(),
+                file: file.clone(),
                 sha256,
                 asset_id,
                 // A sound entry has no approval flag of its own: approval gates CONDITIONING, and
@@ -2204,6 +2309,369 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// Speak one `dialogue` entry's line through `POST /api/v1/audio/jobs` and leave the WAV in the
+    /// pack directory, so the import pass that follows treats it exactly as a pre-recorded clip
+    /// (sc-23404).
+    ///
+    /// Returns the pack-relative path the clip is at, or `None` when the run has HALTED — the job
+    /// failed, or it ran past a declared limit. A halt leaves everything already spoken and imported
+    /// in the record and stops `drive_inner` before the first render, so a resume picks the sequence
+    /// up where it is rather than re-speaking what is already there.
+    ///
+    /// Resume discipline is the renders': the idempotency key is stamped into the dispatched body's
+    /// `advanced.filmHarness` block and a controller that died between the POST and the record write
+    /// finds its OWN job by that key. What the key covers is model + voice + text + attempt, not
+    /// just the role — so re-casting a line is a different key rather than an adoption of the clip
+    /// that says the old thing in the old voice, and a retry after a failure is a new job rather
+    /// than a re-read of the same failure.
+    ///
+    /// The clip's filename is `<role>.<sha256(text)[..12]>.wav` unless the entry pins one with
+    /// `file`, in which case synthesis writes THERE — that is how a pack keeps a stable name for a
+    /// line it means to check in.
+    async fn synthesize_dialogue(
+        &mut self,
+        project_id: &str,
+        entry: &film_plan::SoundEntry,
+    ) -> Result<Option<String>, HarnessError> {
+        let role = entry.role.clone();
+        let text = entry
+            .synthesis_text()
+            .ok_or_else(|| {
+                HarnessError::Transport(format!("sound {role:?} declares an empty `text`"))
+            })?
+            .to_owned();
+        let model = entry.synthesis_model().to_owned();
+        let voice = entry.synthesis_voice().map(str::to_owned);
+        let text_sha256 = sha256_hex(text.as_bytes());
+        let file = entry
+            .file
+            .clone()
+            .unwrap_or_else(|| synthesized_sound_file(&role, &text_sha256));
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let destination = pack_dir.join(&file);
+
+        // 1. Adopt, continue, or start a new attempt. Exactly one record per role — the record says
+        //    what the film HAS, and two entries for one role would leave a reader guessing.
+        //
+        //    - The line this run already spoke, whose WAV is still where it was written: adopt it.
+        //      No second job, however many times the run is resumed.
+        //    - A record for the same line whose job has NOT ended: continue it under its own key,
+        //      which is the "died between the POST and the record write" window.
+        //    - A record whose job ENDED without a clip, or one made for a line the pack has since
+        //      re-cast: a NEW attempt under a NEW key. Re-polling the finished job under the old
+        //      key would make every resume re-read the same failure and never speak the line.
+        let existing = self
+            .record
+            .synthesized_sound
+            .iter()
+            .position(|line| line.role == role);
+        let continues = existing.is_some_and(|index| {
+            let line = &self.record.synthesized_sound[index];
+            line.matches(&model, voice.as_deref(), &text)
+        });
+        if continues {
+            let index = existing.expect("continues implies a record");
+            // Already IMPORTED: the clip is a project asset the dialogue bus is playing, so whether
+            // the WAV is still in the pack directory no longer matters — a cleaned pack, or a
+            // replacement running months later, must adopt rather than speak the line again.
+            let imported = self
+                .record
+                .sound
+                .iter()
+                .any(|clip| clip.role == role)
+                .then(|| self.record.synthesized_sound[index].file.clone())
+                .flatten();
+            if self.record.synthesized_sound[index].is_usable() {
+                if let Some(file) = imported {
+                    return Ok(Some(file));
+                }
+                if destination.is_file() {
+                    return Ok(Some(file));
+                }
+            }
+        }
+        let index = match existing {
+            Some(index) if continues && !self.record.synthesized_sound[index].is_terminal() => {
+                index
+            }
+            other => {
+                let attempt = other
+                    .map(|index| self.record.synthesized_sound[index].attempt + 1)
+                    .unwrap_or(1);
+                let fresh = film_plan::SynthesizedSoundRecord {
+                    role: role.clone(),
+                    text: text.clone(),
+                    text_sha256: text_sha256.clone(),
+                    model: model.clone(),
+                    voice: voice.clone(),
+                    attempt,
+                    idempotency_key: dialogue_idempotency_key(
+                        &self.record.run_id,
+                        &role,
+                        &model,
+                        voice.as_deref(),
+                        &text,
+                        attempt,
+                    ),
+                    job_id: None,
+                    status: "dispatching".to_owned(),
+                    asset_id: None,
+                    file: None,
+                    error: None,
+                    started_at: utc_now(),
+                    finished_at: None,
+                };
+                let index = match other {
+                    Some(index) => {
+                        self.record.synthesized_sound[index] = fresh;
+                        index
+                    }
+                    None => {
+                        self.record.synthesized_sound.push(fresh);
+                        self.record.synthesized_sound.len() - 1
+                    }
+                };
+                // Persisted BEFORE the job exists, exactly as an attempt is: that is what makes the
+                // key findable by the controller that comes back.
+                self.persist()?;
+                index
+            }
+        };
+        let key = self.record.synthesized_sound[index].idempotency_key.clone();
+        if self.canceled() {
+            self.halt(
+                RunOutcome::Canceled,
+                "canceled",
+                format!("canceled before the dialogue line for {role:?} was synthesized"),
+                true,
+            );
+            return Ok(None);
+        }
+
+        // 2. The job. Adopt one already created under this key before creating anything.
+        let mut job_id = self.record.synthesized_sound[index].job_id.clone();
+        if job_id.is_none() {
+            job_id = self
+                .client
+                .find_job_by_idempotency_key(project_id, &key)
+                .await?;
+        }
+        let created_here = job_id.is_none();
+        if job_id.is_none() {
+            let mut body = json!({
+                "projectId": project_id,
+                "prompt": text,
+                "model": model,
+                "requestedGpu": "auto",
+                "advanced": {
+                    "filmHarness": {
+                        "idempotencyKey": key,
+                        "kind": "dialogue",
+                        "role": role,
+                        "runId": self.record.run_id,
+                        "planId": self.plan.id,
+                        "planVersion": self.plan.version,
+                        "referencePackId": self.pack.id,
+                        "referencePackVersion": self.pack.version,
+                        "textSha256": text_sha256,
+                    }
+                }
+            });
+            if let Some(voice) = &voice {
+                body["voice"] = json!(voice);
+            }
+            let response = self
+                .client
+                .json("POST", "/api/v1/audio/jobs", Some(body))
+                .await?;
+            if !(200..300).contains(&response.status) {
+                // A refused enqueue is deterministic — an unknown voice, a model with no weights —
+                // so retrying it would refuse identically. Say which line, and stop.
+                let detail = format!(
+                    "POST /api/v1/audio/jobs -> {}: {}",
+                    response.status,
+                    api_detail(&response.body)
+                );
+                self.fail_synthesis(index, "rejected", detail.clone());
+                self.persist()?;
+                self.halt(
+                    RunOutcome::Failed,
+                    "dialogue_synthesis_refused",
+                    format!(
+                        "the dialogue line for sound role {role:?} could not be enqueued: \
+                         {detail}; fix the pack entry and `film-harness resume` speaks it"
+                    ),
+                    true,
+                );
+                return Ok(None);
+            }
+            job_id = Some(
+                response
+                    .body
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!(
+                            "audio job response has no id: {}",
+                            response.body
+                        ))
+                    })?
+                    .to_owned(),
+            );
+        }
+        let job_id = job_id.expect("set on every branch above");
+        {
+            let line = &mut self.record.synthesized_sound[index];
+            if created_here {
+                // Nothing has ever run under this key, so the clock starts here — the same reason a
+                // render's does (a record written by a controller that died before its POST landed
+                // must not be charged every hour since).
+                line.started_at = utc_now();
+            }
+            line.job_id = Some(job_id.clone());
+            line.status = "running".to_owned();
+        }
+        self.persist()?;
+
+        // 3. Wait for it, under the plan's own declared limits: one synthesis is bounded by
+        //    `limits.maxShotSeconds` (the same per-job budget the export runs under) and the run by
+        //    `limits.maxRunSeconds`. Neither is a new knob — a speech job is a job.
+        let started = Instant::now();
+        let (view, poll_stop) = self
+            .client
+            .wait_for_job(&job_id, self.bounds(started + self.shot_budget()))
+            .await?;
+        let status = match poll_stop {
+            PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+            PollStop::Operator => "canceled_by_operator".to_owned(),
+            PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+        };
+        let asset = (status == "completed")
+            .then(|| audio_asset_from_result(&view.result))
+            .flatten();
+        let Some((asset_id, media_path)) = asset else {
+            let detail = match poll_stop {
+                PollStop::Terminal => view.failure_text(),
+                PollStop::AssetsUnsettled => format!(
+                    "the synthesis job reached {} but its asset never settled",
+                    view.status
+                ),
+                PollStop::Operator => "canceled by operator during synthesis".to_owned(),
+                PollStop::ShotBudget => format!(
+                    "synthesis exceeded the per-job budget of {}s",
+                    self.plan.limits.max_shot_seconds
+                ),
+                PollStop::RunBudget => format!(
+                    "the run's {}s budget ran out during synthesis",
+                    self.plan.limits.max_run_seconds
+                ),
+            };
+            self.fail_synthesis(index, &status, detail.clone());
+            self.persist()?;
+            let (outcome, reason) = match poll_stop {
+                PollStop::Operator => (RunOutcome::Canceled, "canceled"),
+                PollStop::RunBudget => (RunOutcome::StoppedRunBudget, "run_budget"),
+                _ => (RunOutcome::Failed, "dialogue_synthesis_failed"),
+            };
+            // Resumable on every one of these: the clip is missing, nothing downstream has been
+            // written against it, and a resume re-dispatches this one line and continues. The rest
+            // of the sequence — the clips already spoken, the imports already made — is untouched.
+            self.halt(
+                outcome,
+                reason,
+                format!(
+                    "the dialogue line for sound role {role:?} was not synthesized ({detail}); \
+                     `film-harness resume` speaks it and continues the sequence"
+                ),
+                true,
+            );
+            return Ok(None);
+        };
+
+        // 4. The WAV, into the pack directory. The worker writes canonical PCM-16 RIFF/WAVE, which
+        //    is the one encoding `media_convert::is_canonical_pcm16_wav` copies through — so the
+        //    import below needs no ffmpeg for a clip this run spoke, which is what lets the hosted
+        //    macOS lane (no ffmpeg) exercise the whole path.
+        let project_path = self
+            .record
+            .project_path
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                HarnessError::Transport(
+                    "the run has no project path, so the synthesized clip cannot be written into \
+                     the pack"
+                        .to_owned(),
+                )
+            })?;
+        let source = project_path.join(&media_path);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = std::fs::read(&source).map_err(|error| {
+            HarnessError::Io(format!(
+                "the synthesis job for {role:?} reported {} but it could not be read: {error}",
+                source.display()
+            ))
+        })?;
+        std::fs::write(&destination, &bytes)?;
+        {
+            let line = &mut self.record.synthesized_sound[index];
+            line.status = "completed".to_owned();
+            line.asset_id = Some(asset_id);
+            line.file = Some(file.clone());
+            line.error = None;
+            line.finished_at = Some(utc_now());
+        }
+        self.persist()?;
+        Ok(Some(file))
+    }
+
+    /// Whether this run has already spoken exactly this entry's line and still has the clip — the
+    /// same adoption test [`Session::synthesize_dialogue`] applies, read-only, so the TTS worker
+    /// preflight can be scoped to the lines that are actually still owed.
+    fn line_already_spoken(&self, entry: &film_plan::SoundEntry) -> bool {
+        let Some(text) = entry.synthesis_text() else {
+            return false;
+        };
+        let Some(line) = self
+            .record
+            .synthesized_sound
+            .iter()
+            .find(|line| line.role == entry.role)
+        else {
+            return false;
+        };
+        if !line.matches(entry.synthesis_model(), entry.synthesis_voice(), text)
+            || !line.is_usable()
+        {
+            return false;
+        }
+        if self.record.sound.iter().any(|clip| clip.role == entry.role) {
+            return true;
+        }
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        line.file
+            .as_deref()
+            .is_some_and(|file| pack_dir.join(file).is_file())
+    }
+
+    /// Settle one synthesis record as unfinished, keeping whatever it already knew.
+    fn fail_synthesis(&mut self, index: usize, status: &str, detail: String) {
+        let line = &mut self.record.synthesized_sound[index];
+        line.status = status.to_owned();
+        line.error = Some(detail);
+        line.finished_at = Some(utc_now());
+    }
+
     /// Upload one pack sound clip, with the same `filmHarness` provenance a reference carries so a
     /// controller that dies before recording it can find it again.
     ///
@@ -2213,6 +2681,7 @@ impl Session<'_> {
         &self,
         project_id: &str,
         entry: &film_plan::SoundEntry,
+        file: &str,
         path: &Path,
         sha256: &str,
     ) -> Result<(String, Option<f64>), HarnessError> {
@@ -2232,7 +2701,11 @@ impl Session<'_> {
                 "planId": self.plan.id,
                 "planVersion": self.plan.version,
                 "runId": self.record.run_id,
-                "sourceFile": entry.file,
+                "sourceFile": file,
+                // Whether the clip was SPOKEN by this run rather than put on disk by a human
+                // (sc-23404), so a reader of the project's assets can tell them apart without the
+                // run record in hand.
+                "synthesized": entry.is_synthesized(),
                 "sha256": sha256,
             }
         });
@@ -3773,6 +4246,13 @@ impl Session<'_> {
         // means the sound of a run is settled by the time the first take exists, whichever entry
         // point is driving (sc-22712).
         self.ensure_sound().await?;
+        // A synthesis that failed, was cancelled or ran past a declared limit has already recorded
+        // its stop (sc-23404). Dispatching renders against a sequence that is missing a line would
+        // spend GPU hours on a film the operator would have to re-export anyway, so the run stops
+        // here with everything it has and `resume` speaks the missing line.
+        if self.stop.is_some() {
+            return Ok(false);
+        }
         self.work_shots().await?;
         self.assemble_and_export().await
     }
@@ -4374,8 +4854,21 @@ pub async fn replace_take(
             export.stale = true;
         }
         session.persist()?;
-        // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
-        session.assemble_timeline().await?;
+        // Re-hydrate the clips before re-assembling. `assemble_timeline` derives the sound tracks
+        // from `sound_assets`, and `merge_harness_audio_track` keeps only the items the harness does
+        // NOT own — so re-assembling with an empty map does not leave the saved dialogue and bed
+        // items alone, it DELETES them, and the re-export comes back with picture and no sound (the
+        // phase-1 evaluation's finding #2). `ensure_sound` here adopts every clip the record already
+        // names, including every line already spoken: it uploads nothing and speaks nothing.
+        session.ensure_sound().await?;
+        // A clip that could not be re-hydrated (its file gone from the pack, a re-synthesis that
+        // failed) leaves the session's map short, and re-assembling from a short map is exactly the
+        // deletion this call exists to prevent. Leave the saved timeline alone and let the stop say
+        // so: the sequence keeps the sound it has, and the replacement's take is still recorded.
+        if session.stop.is_none() {
+            // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
+            session.assemble_timeline().await?;
+        }
     } else {
         // The shot now has NO selected take, and the timeline was deliberately not rewritten (that
         // would drop the shot out of the sequence entirely). So the timeline — and the MP4 rendered
@@ -4549,6 +5042,7 @@ fn base_record(
         selected_shot_ids,
         references: Vec::new(),
         sound: Vec::new(),
+        synthesized_sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -4641,6 +5135,7 @@ fn rejected_record(
         selected_shot_ids: options.shot_ids.clone().unwrap_or_default(),
         references: Vec::new(),
         sound: Vec::new(),
+        synthesized_sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -4726,14 +5221,17 @@ pub fn write_fixture_images(out_dir: &Path) -> Result<Vec<PathBuf>, HarnessError
     Ok(written)
 }
 
-/// Placeholder sound for the fixture pack (sc-22712): `(role, seconds, hz, amplitude)`.
+/// Placeholder BED sound for the fixture pack (sc-22712): `(role, seconds, hz, amplitude)`.
 ///
 /// The two beds are long enough to play under the WHOLE six-shot sequence (6 x 5.1667s ~= 31s)
 /// without running out, because a bed that stops partway would make the one thing this fixture is
 /// meant to demonstrate — continuous sound across intentional cuts — unobservable.
+///
+/// The fixture's three DIALOGUE roles are NOT here (sc-23404): they carry `text` and are spoken by
+/// the run through the audio route, so there is no placeholder tone left to write for them. The
+/// tones were placeholders for exactly this, and a "with-dialogue" export that carried a 400 Hz
+/// beep instead of a line was the thing they were standing in for.
 pub const FIXTURE_SOUNDS: &[(&str, f64, u32, i16)] = &[
-    ("courier_line", 2.0, 400, 9000),
-    ("recipient_line", 2.0, 500, 9000),
     ("workshop_room_tone", 32.0, 100, 2600),
     ("main_theme", 32.0, 250, 3600),
 ];

@@ -95,6 +95,38 @@ pub const SOUND_KINDS: &[&str] = &["dialogue", "ambience", "music", "sfx"];
 /// likely to have on disk.
 const SOUND_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
 
+/// TTS models a `dialogue` entry may name in `model` (sc-23404).
+///
+/// Deliberately a short explicit list rather than "any `type: audio` catalog id": a `sfx` or music
+/// model posted here would enqueue happily and come back as something nobody can speak, and the
+/// point of naming it in the pack is that a reader knows what voice they are asking for. Every id
+/// here is a speech model the audio route already serves; the per-model voice/language surface is
+/// still owned by the generator's own `validate` at the gen-core floor, which is why `voice` is
+/// bounded here but never allow-listed.
+pub const SOUND_SYNTHESIS_MODELS: &[&str] = &[
+    "kokoro_82m",
+    "chatterbox_tts",
+    "moss_tts_realtime",
+    "moss_ttsd_v05",
+];
+
+/// The TTS model a `dialogue` entry that names none synthesizes through. Matches the audio route's
+/// own default (`apps/rust-api/src/defaults.rs`), so an entry that says nothing gets what a caller
+/// posting the bare route would get.
+pub const DEFAULT_SOUND_SYNTHESIS_MODEL: &str = "kokoro_82m";
+
+/// Longest line a `dialogue` entry may ask to have synthesized.
+///
+/// A declared finite bound, not a guess at the model's ceiling: the audio route bounds the prompt
+/// at 4000 characters and each model's advertised `audio.maxDurationSecs` is the real cap the
+/// worker applies. This is the harness's own — a "line" in a film plan that runs past a thousand
+/// characters is a document error, and catching it here costs no GPU.
+pub const MAX_DIALOGUE_TEXT_CHARS: usize = 1_000;
+
+/// Longest voice id a `dialogue` entry may name. The route bounds nothing here (the generator owns
+/// the per-model voice bank), so the pack bounds the string it would interpolate.
+const MAX_SOUND_VOICE_CHARS: usize = 64;
+
 /// Widest gain the plan admits on a bus, a bed or a line. Matches the timeline's own per-track
 /// ceiling (`project_store::validate_timeline_track`), so a plan cannot express a level the
 /// timeline would then refuse to persist.
@@ -390,7 +422,8 @@ pub struct ReferencePack {
     pub sound: Vec<SoundEntry>,
 }
 
-/// One approved audio file the plan's sound roles resolve against.
+/// One approved audio clip the plan's sound roles resolve against — a file on disk, a line the run
+/// synthesizes, or (when both are given) a line synthesized INTO the named file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SoundEntry {
@@ -399,9 +432,65 @@ pub struct SoundEntry {
     /// One of [`SOUND_KINDS`]. A role may only be placed on the bus its kind names.
     pub kind: String,
     /// Audio path relative to the pack document's directory.
-    pub file: String,
+    ///
+    /// Optional only because an entry may carry [`SoundEntry::text`] instead (sc-23404): synthesis
+    /// writes the clip into the pack directory and the run records the path it wrote. An entry
+    /// carrying BOTH is synthesized into the named path, which is how a pack pins the filename of
+    /// a line it means to keep. An entry with NEITHER is a finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(default)]
     pub description: String,
+    /// The line to speak (sc-23404). `dialogue` entries only — a synthesized bed or sound effect is
+    /// a different job type with a different surface, and letting `text` sit on an `ambience` entry
+    /// would quietly enqueue a TTS model against a room-tone description.
+    ///
+    /// Present ⇒ the run synthesizes the clip through `POST /api/v1/audio/jobs` during
+    /// `ensure_sound`, under the plan's own `limits`, and imports the result exactly as it imports
+    /// a pre-recorded one. Absent ⇒ [`SoundEntry::file`] is a clip a human put there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Voice id for the synthesis (e.g. Kokoro's `am_michael`). `None` ⇒ the model's own default.
+    /// NOT allow-listed here: the per-model voice bank is the generator's, and an unknown id is a
+    /// typed refusal at the gen-core floor rather than a guess this document could make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// TTS model, one of [`SOUND_SYNTHESIS_MODELS`]. `None` ⇒ [`DEFAULT_SOUND_SYNTHESIS_MODEL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl SoundEntry {
+    /// Whether this entry's clip is produced by the run rather than read off disk.
+    pub fn is_synthesized(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// The line to speak, trimmed — the exact text the synthesis job is sent, and the text the
+    /// clip's deterministic name is digested from, so both agree on one canonicalization.
+    pub fn synthesis_text(&self) -> Option<&str> {
+        self.text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The TTS model this entry synthesizes through.
+    pub fn synthesis_model(&self) -> &str {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or(DEFAULT_SOUND_SYNTHESIS_MODEL)
+    }
+
+    /// The voice this entry asks for, if any.
+    pub fn synthesis_voice(&self) -> Option<&str> {
+        self.voice
+            .as_deref()
+            .map(str::trim)
+            .filter(|voice| !voice.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1248,14 +1337,18 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        let file = Path::new(&entry.file);
+        findings.extend(validate_sound_source(&field, entry));
+        let Some(declared) = entry.file.as_deref() else {
+            continue;
+        };
+        let file = Path::new(declared);
         let extension_ok = file
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
                 SOUND_AUDIO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
             });
-        if entry.file.trim().is_empty()
+        if declared.trim().is_empty()
             || file.is_absolute()
             || file
                 .components()
@@ -1263,20 +1356,102 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
         {
             findings.push(PlanDiagnostic::plan(
                 format!("{field}.file"),
-                format!(
-                    "file {:?} must be a relative path inside the pack directory",
-                    entry.file
-                ),
+                format!("file {declared:?} must be a relative path inside the pack directory"),
             ));
         } else if !extension_ok {
             findings.push(PlanDiagnostic::plan(
                 format!("{field}.file"),
                 format!(
-                    "file {:?} must be audio ({})",
-                    entry.file,
+                    "file {declared:?} must be audio ({})",
                     SOUND_AUDIO_EXTENSIONS.join(", ")
                 ),
             ));
+        }
+    }
+    findings
+}
+
+/// Where one sound entry's audio comes from: a file, a synthesized line, or — the finding this
+/// exists for — neither (sc-23404).
+///
+/// Every finding names the entry by ROLE as well as by index, because the operator reading it is
+/// looking at a pack whose entries they know by name, and "referencePack.sound[2]" alone makes them
+/// count array elements to find out which line the harness refused to speak.
+fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    let role = entry.role.as_str();
+    let has_file = entry
+        .file
+        .as_deref()
+        .is_some_and(|file| !file.trim().is_empty());
+    let text = entry.text.as_deref();
+    match text {
+        None => {
+            if !has_file {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.file"),
+                    format!(
+                        "sound {role:?} declares neither `file` nor `text`; a pack entry is either \
+                         a clip on disk or a `dialogue` line to synthesize"
+                    ),
+                ));
+            }
+            // `voice` / `model` are synthesis knobs. Carried without a line to speak they say the
+            // author meant to write one, so they are a finding rather than an ignored field.
+            for (name, value) in [("voice", &entry.voice), ("model", &entry.model)] {
+                if value.is_some() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.{name}"),
+                        format!(
+                            "sound {role:?} sets `{name}` but has no `text`; \
+                             `{name}` only applies to a synthesized dialogue line"
+                        ),
+                    ));
+                }
+            }
+        }
+        Some(text) => {
+            if entry.kind != "dialogue" {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.text"),
+                    format!(
+                        "sound {role:?} is kind {:?}; only a `dialogue` entry may carry `text` \
+                         (synthesis speaks a line, it does not render a bed or an effect)",
+                        entry.kind
+                    ),
+                ));
+            }
+            let length = text.trim().chars().count();
+            if length == 0 || length > MAX_DIALOGUE_TEXT_CHARS {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.text"),
+                    format!(
+                        "sound {role:?}: `text` must be 1-{MAX_DIALOGUE_TEXT_CHARS} characters, \
+                         got {length}"
+                    ),
+                ));
+            }
+            let model = entry.synthesis_model();
+            if !SOUND_SYNTHESIS_MODELS.contains(&model) {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.model"),
+                    format!(
+                        "sound {role:?}: unknown speech model {model:?}; expected one of {}",
+                        SOUND_SYNTHESIS_MODELS.join(", ")
+                    ),
+                ));
+            }
+            if let Some(voice) = entry.voice.as_deref() {
+                let voice = voice.trim();
+                if voice.is_empty() || voice.chars().count() > MAX_SOUND_VOICE_CHARS {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.voice"),
+                        format!(
+                            "sound {role:?}: `voice` must be 1-{MAX_SOUND_VOICE_CHARS} characters"
+                        ),
+                    ));
+                }
+            }
         }
     }
     findings
@@ -1437,7 +1612,18 @@ pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> V
         }
     }
     for (index, entry) in pack.sound.iter().enumerate() {
-        let path = pack_dir.join(&entry.file);
+        // A synthesized line has no file on disk until the run speaks it — including one that also
+        // names a `file`, which is the path synthesis WRITES rather than one a human already put
+        // there. Checking for it here would refuse every speech pack before its first run
+        // (sc-23404); `ensure_sound` fails loudly if the clip does not appear.
+        if entry.is_synthesized() {
+            continue;
+        }
+        let Some(declared) = entry.file.as_deref() else {
+            // Structural: `validate_reference_pack` already named this entry. Nothing to stat.
+            continue;
+        };
+        let path = pack_dir.join(declared);
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
             Ok(_) => findings.push(PlanDiagnostic::plan(
@@ -1921,6 +2107,92 @@ pub struct ReferenceAssetRecord {
     pub approved: bool,
 }
 
+/// One dialogue line this run SYNTHESIZED (sc-23404) — the provenance of a clip nobody recorded,
+/// kept beside the imported-clip record rather than folded into it.
+///
+/// Two asset ids are in play and they are not the same thing: [`Self::asset_id`] is the `type:
+/// audio` asset the synthesis job produced in the project's library, and the clip the DIALOGUE BUS
+/// plays is the pack-directory copy imported afterwards, which appears in [`RunRecord::sound`] like
+/// any pre-recorded clip. Keeping both is what lets a reader go from the line in the film back to
+/// the job that spoke it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthesizedSoundRecord {
+    pub role: String,
+    /// The exact text the job was sent (trimmed), so a reader can check the line against the plan's
+    /// `dialogue` intent without opening the job table.
+    pub text: String,
+    /// `sha256(text)` — the deterministic half of the clip's filename.
+    pub text_sha256: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Which try this is, counting the first. A synthesis that failed is retried by the NEXT
+    /// `resume` under a new attempt and therefore a new key — re-polling the failed job under the
+    /// old one would make every resume re-read the same failure and never speak the line.
+    ///
+    /// At most one new attempt per line per invocation, so a retry loop is the operator's to run,
+    /// not the harness's to spin; the run's `limits.maxRunSeconds` bounds it either way. The plan's
+    /// `maxAttemptsPerShot` deliberately does NOT apply: it caps GPU renders, and capping a
+    /// seconds-long TTS call with it would make "resumable" untrue on the fixture's cap of 1.
+    #[serde(default = "default_attempt")]
+    pub attempt: u32,
+    /// Stamped into the dispatched body's `advanced.filmHarness` block, exactly as a render's is:
+    /// a controller that died between the POST and this write finds its OWN job instead of speaking
+    /// the line twice. Covers model + voice + text, so changing the voice is a different key rather
+    /// than an adoption of the wrong clip.
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// `dispatching` while the job is being created, `running` while it is polled, then the job's
+    /// own terminal status (`completed` / `failed` / `canceled` / `timed_out`).
+    pub status: String,
+    /// The `type: audio` asset the synthesis job wrote into the project library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// Pack-relative path the WAV was written to — the entry's `file` from here on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+fn default_attempt() -> u32 {
+    1
+}
+
+/// Statuses a synthesis record will not leave on its own. A record in one of these has a job that
+/// reached its end; anything else is a job a later pass keeps polling.
+pub const TERMINAL_SYNTHESIS_STATUSES: &[&str] = &[
+    "completed",
+    "failed",
+    "rejected",
+    "canceled",
+    "canceled_by_operator",
+    "timed_out",
+];
+
+impl SynthesizedSoundRecord {
+    /// Whether this line is spoken, written into the pack, and ready to import.
+    pub fn is_usable(&self) -> bool {
+        self.status == "completed" && self.asset_id.is_some() && self.file.is_some()
+    }
+
+    /// Whether this record's job is over, however it ended.
+    pub fn is_terminal(&self) -> bool {
+        TERMINAL_SYNTHESIS_STATUSES.contains(&self.status.as_str())
+    }
+
+    /// Whether this record was made for exactly the line the pack now asks for. A pack edited
+    /// between passes re-casts the line rather than adopting the clip that says the old thing.
+    pub fn matches(&self, model: &str, voice: Option<&str>, text: &str) -> bool {
+        self.model == model && self.voice.as_deref() == voice && self.text == text
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntendedState {
@@ -2281,9 +2553,15 @@ pub struct RunRecord {
     pub selected_shot_ids: Vec<String>,
     #[serde(default)]
     pub references: Vec<ReferenceAssetRecord>,
-    /// Sound files the run imported, with the same shape as `references` (sc-22712).
+    /// Sound files the run imported, with the same shape as `references` (sc-22712). A synthesized
+    /// line appears here too, once its WAV is in the pack directory — from the dialogue bus's point
+    /// of view a spoken line and a recorded one are the same thing.
     #[serde(default)]
     pub sound: Vec<ReferenceAssetRecord>,
+    /// Dialogue lines this run SPOKE, with the model, voice, text, job and asset behind each
+    /// (sc-23404). Empty on a run whose pack carries only pre-recorded clips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_sound: Vec<SynthesizedSoundRecord>,
     #[serde(default)]
     pub shots: Vec<ShotRunRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3033,6 +3311,7 @@ mod tests {
             selected_shot_ids: vec!["SH010".into()],
             references: vec![],
             sound: vec![],
+            synthesized_sound: vec![],
             shots: vec![],
             timeline: None,
             export: None,
@@ -3228,5 +3507,197 @@ mod tests {
         });
         assert!(!shot.attempts[1].has_live_take());
         assert!(shot.attempts[2].has_live_take());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-23404 — synthesized dialogue entries
+    // -----------------------------------------------------------------------------------------
+
+    /// A pack carrying exactly `sound`, so the findings under test are the sound findings.
+    fn sound_pack(entries: Value) -> ReferencePack {
+        serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "pack",
+            "version": 1,
+            "references": [
+                { "role": "plate", "kind": "plate", "file": "references/plate.png" }
+            ],
+            "sound": entries,
+        }))
+        .expect("pack parses")
+    }
+
+    fn sound_findings(entries: Value) -> Vec<PlanDiagnostic> {
+        validate_reference_pack(&sound_pack(entries))
+    }
+
+    fn lines(findings: &[PlanDiagnostic]) -> String {
+        findings
+            .iter()
+            .map(|finding| format!("{}: {}", finding.field, finding.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_dialogue_entry_may_carry_text_instead_of_a_file() {
+        let findings = sound_findings(json!([
+            { "role": "line", "kind": "dialogue", "text": "Delivery." },
+            { "role": "voiced", "kind": "dialogue", "text": "Hello.", "voice": "af_heart", "model": "chatterbox_tts" },
+            // `text` AND `file`: synthesis writes INTO the named path.
+            { "role": "pinned", "kind": "dialogue", "text": "Oh.", "file": "sound/pinned.wav" },
+            { "role": "bed", "kind": "ambience", "file": "sound/bed.wav" },
+        ]));
+        assert!(findings.is_empty(), "{}", lines(&findings));
+    }
+
+    #[test]
+    fn an_entry_with_neither_text_nor_file_is_refused_by_role() {
+        let findings = sound_findings(json!([
+            { "role": "silent_line", "kind": "dialogue", "description": "nothing to play" },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].file");
+        assert!(
+            findings[0].message.contains("silent_line")
+                && findings[0].message.contains("neither `file` nor `text`"),
+            "the finding must name the entry: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn text_on_a_non_dialogue_kind_is_refused_by_role() {
+        for kind in ["ambience", "music", "sfx"] {
+            let findings = sound_findings(json!([
+                { "role": "bed", "kind": kind, "text": "a quiet workshop" },
+            ]));
+            let named: Vec<_> = findings
+                .iter()
+                .filter(|finding| finding.field == "referencePack.sound[0].text")
+                .collect();
+            assert_eq!(named.len(), 1, "{kind}: {}", lines(&findings));
+            assert!(
+                named[0].message.contains("bed") && named[0].message.contains("dialogue"),
+                "{kind}: {}",
+                named[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn synthesis_knobs_without_a_line_to_speak_are_findings() {
+        let findings = sound_findings(json!([
+            { "role": "recorded", "kind": "dialogue", "file": "sound/recorded.wav",
+              "voice": "af_heart", "model": "kokoro_82m" },
+        ]));
+        let fields: Vec<&str> = findings.iter().map(|f| f.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            vec![
+                "referencePack.sound[0].voice",
+                "referencePack.sound[0].model"
+            ],
+            "{}",
+            lines(&findings)
+        );
+    }
+
+    #[test]
+    fn an_unknown_speech_model_or_an_overlong_line_is_refused() {
+        let findings = sound_findings(json!([
+            { "role": "wrong_model", "kind": "dialogue", "text": "hi", "model": "minimax_h3" },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].model");
+        assert!(
+            findings[0].message.contains("kokoro_82m"),
+            "{}",
+            findings[0].message
+        );
+
+        let long = "a".repeat(MAX_DIALOGUE_TEXT_CHARS + 1);
+        let findings = sound_findings(json!([
+            { "role": "long", "kind": "dialogue", "text": long },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].text");
+
+        let findings = sound_findings(json!([
+            { "role": "blank", "kind": "dialogue", "text": "   " },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].text");
+
+        let findings = sound_findings(json!([
+            { "role": "voiceless", "kind": "dialogue", "text": "hi", "voice": "   " },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].voice");
+    }
+
+    #[test]
+    fn every_shipped_speech_model_is_accepted_and_the_default_is_one_of_them() {
+        assert!(SOUND_SYNTHESIS_MODELS.contains(&DEFAULT_SOUND_SYNTHESIS_MODEL));
+        for model in SOUND_SYNTHESIS_MODELS {
+            let findings = sound_findings(json!([
+                { "role": "line", "kind": "dialogue", "text": "hi", "model": model },
+            ]));
+            assert!(findings.is_empty(), "{model}: {}", lines(&findings));
+        }
+    }
+
+    #[test]
+    fn a_synthesized_entry_is_not_checked_for_a_file_on_disk() {
+        let dir = std::env::temp_dir().join(format!("film-plan-sound-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("references")).expect("dir");
+        std::fs::write(dir.join("references/plate.png"), b"x").expect("plate");
+        // Neither `sound/line.wav` (pinned by the synthesized entry) nor the derived name exists
+        // yet: the clip is produced by the run, so the existence check must let it through.
+        let pack = sound_pack(json!([
+            { "role": "line", "kind": "dialogue", "text": "Delivery." },
+            { "role": "pinned", "kind": "dialogue", "text": "Oh.", "file": "sound/line.wav" },
+        ]));
+        let findings = validate_reference_pack_files(&pack, &dir);
+        assert!(findings.is_empty(), "{}", lines(&findings));
+
+        // A RECORDED entry whose file is missing is still a finding — this exemption is about
+        // synthesis, not about relaxing the check.
+        let pack = sound_pack(json!([
+            { "role": "recorded", "kind": "dialogue", "file": "sound/gone.wav" },
+        ]));
+        let findings = validate_reference_pack_files(&pack, &dir);
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert!(
+            findings[0].message.contains("recorded"),
+            "{}",
+            findings[0].message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_entry_round_trips_its_synthesis_fields_and_omits_what_it_does_not_carry() {
+        let entry: SoundEntry = serde_json::from_value(json!({
+            "role": "line", "kind": "dialogue", "text": "  Delivery.  ", "voice": " am_michael "
+        }))
+        .expect("entry parses");
+        assert!(entry.is_synthesized());
+        assert_eq!(entry.synthesis_text(), Some("Delivery."));
+        assert_eq!(entry.synthesis_voice(), Some("am_michael"));
+        assert_eq!(entry.synthesis_model(), DEFAULT_SOUND_SYNTHESIS_MODEL);
+
+        let recorded: SoundEntry = serde_json::from_value(json!({
+            "role": "bed", "kind": "ambience", "file": "sound/bed.wav"
+        }))
+        .expect("entry parses");
+        assert!(!recorded.is_synthesized());
+        // A pack written before synthesis existed serializes back to exactly what it was: no
+        // `text` / `voice` / `model` keys appear on an entry that carries none.
+        let json = serde_json::to_value(&recorded).expect("serializes");
+        assert_eq!(
+            json,
+            json!({ "role": "bed", "kind": "ambience", "file": "sound/bed.wav", "description": "" })
+        );
     }
 }
