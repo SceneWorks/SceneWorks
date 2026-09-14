@@ -1287,7 +1287,19 @@ test("contract_estimate is keyed on the ladder's inputs: a sequential row on a n
     CONTRACT_LADDER_BACKENDS.includes(row.backend),
   );
   const estimates = candle.filter((row) => row.basis === "contract_estimate");
-  assert.ok(estimates.length > 0, "the catalog has contract-only ladder cells");
+  // Captures can replace the last contract-only row with measured evidence. Keep the
+  // fallback's positive case covered independently of which cells have been measured.
+  const contractCell = (await catalogCells(matrix)).find((row) =>
+    publishesContract(row) && CONTRACT_LADDER_BACKENDS.includes(row.backend) &&
+    !isReceiptPricedRoute(row.route) && manifestSequentialRow(manifest, row) !== null,
+  );
+  assert.ok(contractCell, "the catalog has an eligible contract-only fallback");
+  const contractEvidence = contractEstimateEvidence(manifest, MANIFEST_PATH, "sha", contractCell);
+  assert.ok(contractEvidence, "an unmeasured eligible cell has contract estimate evidence");
+  assert.equal(
+    contractEvidence.values.sequentialPeakGb,
+    String(manifestSequentialRow(manifest, contractCell)),
+  );
   // SHAPE: every contract_estimate row carries the row it rescales and sits on a route the
   // worker would actually rescale for.
   for (const row of estimates) {

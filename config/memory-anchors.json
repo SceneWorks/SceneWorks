@@ -12289,21 +12289,18 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'lora' overlay (the largest is on provider 'qwen_image_edit'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "95c44032615c9aed8589425259b045ef6948bb86b4a465c5e753c6fdee0592f2",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-bf16-candle-evidence.json",
+        "sha256": "1a33cb5bc0850619acf08ea1ca0bc36a29bfea57c86269d60d2a814da0a6021d",
+        "recordId": "imc-6542e765777fb005f77d",
+        "envelopeBytes": 58222182400,
         "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "53.2",
           "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "87.4"
+          "overlay": "lora"
         }
       }
     },
@@ -12314,21 +12311,18 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q4",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'lora' overlay (the largest is on provider 'qwen_image_edit'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "95c44032615c9aed8589425259b045ef6948bb86b4a465c5e753c6fdee0592f2",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q4-candle-evidence.json",
+        "sha256": "f18b3e7b2d5a7c073f480c6673aeceb5613f379ceec9a5224ae7469e7cb4db2c",
+        "recordId": "imc-a0bc087cc2e5d991f935",
+        "envelopeBytes": 41344303104,
         "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "33.1",
           "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "57"
+          "overlay": "lora"
         }
       }
     },
@@ -12339,21 +12333,18 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q8",
-      "basis": "contract_estimate",
-      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence and the row in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'lora' overlay (the largest is on provider 'qwen_image_edit'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "95c44032615c9aed8589425259b045ef6948bb86b4a465c5e753c6fdee0592f2",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q8-candle-evidence.json",
+        "sha256": "bbb52814d8c7f934f3587fbb427e921d74f39df3657127a80e4bb6ca90c05b77",
+        "recordId": "imc-c2835920fa3e95aece8c",
+        "envelopeBytes": 42988470272,
         "values": {
-          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
-          "sequentialPeakGb": "39.3",
           "provider": "qwen_image_edit",
-          "abi": "1",
-          "vramGbByTier": "65.8"
+          "overlay": "lora"
         }
       }
     },
