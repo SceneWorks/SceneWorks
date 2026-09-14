@@ -27,6 +27,14 @@ rejects the take a shot is carrying and dispatches exactly one more for it (`req
 verb with a review's flags folded into the reason). **`swap-take` edits the timeline**: it points an
 item at a take the run already has, and renders nothing.
 
+**Evaluated once, end to end, on 2026-09-14** — see
+[film-harness-evaluation-2026-09-14.md](film-harness-evaluation-2026-09-14.md) (sc-22715): the
+six-shot hand-authored film rendered, reviewed, repaired, trimmed and exported offline on the dev
+Mac; interrupt/resume and isolated replacement demonstrated; the local planner compared with the
+hand plan; H3 and LTX-2.5 cells; the assisted reviewer measured on the shipped and two new labeled
+sets (`config/film-harness/review-eval/evaluation-2026-09-14-*.jsonc`); four defects found and
+fixed; and a **revise** recommendation with its reasoning.
+
 ## Documents
 
 | Document | Schema | Fixture |
@@ -325,7 +333,13 @@ A shot may declare `dependsOn: [{ shotId, kind, note }]`, with `kind` either:
 A generated plan carries the edge its chain already states: `film-harness plan` writes a
 `continuity` edge for every `conditioning.chainFromShotId`, so a planner-written film has something
 to flag when a take it continues is replaced. The planner is never asked for edges beyond that; a
-human adds the rest by editing `plan.json`.
+human adds the rest by editing `plan.json`. Measured on the sc-22715 evaluation: the planner
+wrote **no** chains for the six-beat brief, so its plan had no edges, and the shipped
+`review.jsonc` — whose `acrossCut` questions require an edge to compare against — refused to
+review it ("acrossCut needs the shot to declare a dependsOn edge"). Add the edges to `plan.json`
+before `review`, or review with a plan that drops the `acrossCut` questions (the evaluation's
+`planner/review.noedges.jsonc`); `review-eval` is unaffected because a labeled case brings its own
+`adjacentFrames`.
 
 Edges must name another shot in the same plan and may not form a cycle. They are declarations, not
 wiring: nothing here reaches the model. Their one job is to tell the harness who to **flag** when a
