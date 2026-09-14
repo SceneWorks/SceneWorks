@@ -1258,8 +1258,32 @@ impl Harness {
         Path::new(FIXTURE_DIR).join("plan.jsonc")
     }
 
+    /// The shipped pack, verbatim, COPIED into this harness's temp dir with its plates and beds.
+    ///
+    /// A copy rather than the checked-in path because the pack directory is now written to
+    /// (sc-23404): a run speaks its `dialogue` entries and leaves the WAVs beside the beds, so
+    /// pointing the tests at `config/film-harness/courier-workshop` would have them write into the
+    /// source tree and race each other on one filename under `cargo test`'s parallelism. The
+    /// document is byte-for-byte the shipped one, so `reference_pack.sha256` is unchanged; only its
+    /// directory moves. `checked_in_fixture_sound_matches_the_generator_byte_for_byte` reads the
+    /// shipped path directly, which is where that guarantee belongs.
     pub(crate) fn fixture_pack(&self) -> PathBuf {
-        Path::new(FIXTURE_DIR).join("references.jsonc")
+        let dir = self.temp_dir.path().join("fixture-pack");
+        let path = dir.join("references.jsonc");
+        if path.is_file() {
+            return path;
+        }
+        for sub in ["references", "sound"] {
+            std::fs::create_dir_all(dir.join(sub)).expect("pack dir");
+            for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join(sub)).expect("fixture dir") {
+                let entry = entry.expect("directory entry");
+                std::fs::copy(entry.path(), dir.join(sub).join(entry.file_name()))
+                    .expect("fixture file copies");
+            }
+        }
+        std::fs::copy(Path::new(FIXTURE_DIR).join("references.jsonc"), &path)
+            .expect("pack document copies");
+        path
     }
 
     /// The shipped pack with its `sound` array emptied, copied into the temp dir so the relative
@@ -5433,7 +5457,9 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
     assert_eq!(artifacts.plan_path, options.out_dir.join("plan.json"));
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -5730,7 +5756,9 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     // The stale compiled document is refused rather than dispatched.
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -5829,7 +5857,9 @@ async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_p
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         // Found beside the plan, exactly as a run started from the plan directory would.
         compiled_path: None,
         project_id: None,
@@ -5944,7 +5974,9 @@ async fn a_hand_edited_compiled_request_is_refused_instead_of_dispatched() {
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -6288,26 +6320,15 @@ fn the_checked_in_brief_is_valid_and_matches_the_hand_authored_baseline() {
 /// `edit` shapes the parsed pack first, so a test can break one entry (drop its text, move it to
 /// the wrong kind) without touching the shipped documents.
 fn speech_pack(harness: &Harness, edit: impl FnOnce(&mut Value)) -> PathBuf {
-    let text = std::fs::read_to_string(harness.fixture_pack()).expect("fixture pack");
+    // `fixture_pack` already gives every harness its own copy of the pack and its media, which is
+    // what keeps a run's synthesized clips out of the checked-in fixture; this only rewrites the
+    // document in place beside them.
+    let path = harness.fixture_pack();
+    let text = std::fs::read_to_string(&path).expect("fixture pack");
     let mut pack: Value =
         serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
             .expect("fixture pack parses");
     edit(&mut pack);
-    let dir = harness.temp_dir.path().join("speech-pack");
-    std::fs::create_dir_all(dir.join("references")).expect("pack dir");
-    std::fs::create_dir_all(dir.join("sound")).expect("sound dir");
-    for entry in
-        std::fs::read_dir(Path::new(FIXTURE_DIR).join("references")).expect("fixture references")
-    {
-        let entry = entry.expect("directory entry");
-        std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
-            .expect("plate copies");
-    }
-    for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("sound")).expect("fixture sound") {
-        let entry = entry.expect("directory entry");
-        std::fs::copy(entry.path(), dir.join("sound").join(entry.file_name())).expect("bed copies");
-    }
-    let path = dir.join("references.json");
     std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
     path
 }

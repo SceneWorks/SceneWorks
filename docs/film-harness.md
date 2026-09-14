@@ -163,12 +163,12 @@ changes.
 - The clips the worker writes are canonical PCM-16 WAVs, so the import copies them through **without
   ffmpeg** (`media_convert::is_canonical_pcm16_wav`) exactly as it does the fixture's beds.
 
-A **replacement** re-hydrates the run's clips (`ensure_sound`, which adopts and uploads nothing)
-before it re-assembles the timeline. It has to: the sound tracks are re-derived from the session's
-clip map on every pass and `merge_harness_audio_track` keeps only the items the harness does *not*
-own, so re-assembling with an empty map deleted the dialogue and the beds rather than leaving them
-alone — the phase-1 evaluation's finding #2, which is what made `hand-film-FINAL-30s.mp4` come back
-with no lines in it.
+A **replacement** re-hydrates the run's clips (`ensure_sound`, sc-22715's fix for the evaluation's
+finding #2) before it re-assembles the timeline; for a spoken line that adopts the clip the record
+already names and dispatches nothing. If a clip cannot be re-hydrated at all — its file gone from
+the pack, a re-synthesis that failed, no live TTS worker — the replacement records its take and
+leaves the saved timeline alone rather than re-assembling from a short clip map, which is the
+deletion `ensure_sound` is there to prevent.
 
 The fixture's two **beds** are deterministic placeholder tones (`film-harness fixture-sound`) — one
 frequency per role, so the bed buses are distinguishable by ear when checking an export. Its three

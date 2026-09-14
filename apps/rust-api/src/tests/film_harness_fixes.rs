@@ -936,7 +936,9 @@ async fn resume_refuses_compiled_requests_that_changed_under_it() {
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: None,
         project_id: None,
         shot_ids: None,
@@ -1313,11 +1315,16 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
     {
         let mut script = harness.script.lock();
         script.real_takes = true;
+        // Everything the harness drives EXCEPT `timeline_export`, which is the one job this test
+        // hands to the REAL utility worker. `audio_generate` stays on the fake (sc-23404): the
+        // fixture's dialogue is synthesized, and the point here is the real ffmpeg MIX, not a real
+        // Kokoro decode.
         script.capabilities = Some(vec![
             "video_generate",
             "frame_extract",
             "image_vqa",
             "prompt_refine",
+            "audio_generate",
         ]);
         script.behaviors = fast(&["SH010", "SH020"])
             .into_iter()
