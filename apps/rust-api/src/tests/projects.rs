@@ -287,6 +287,19 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(timeline["projectId"], project_id);
     assert_eq!(timeline["tracks"].as_array().unwrap().len(), 3);
+    // Every track ships with a role and a bus fader (sc-22712). A new timeline is at unity, which
+    // is what "the editor has not changed anything" has to sound like.
+    let roles: Vec<&str> = timeline["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| track["role"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(roles, vec!["picture", "overlay", "sound"]);
+    for track in timeline["tracks"].as_array().unwrap() {
+        assert_eq!(track["gain"], json!(1.0), "{track}");
+        assert_eq!(track["muted"], json!(false), "{track}");
+    }
 
     let timeline_id = timeline["id"].as_str().expect("timeline id").to_owned();
     timeline["tracks"][0]["items"] = json!([
@@ -322,6 +335,11 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
         saved["tracks"][0]["items"][0]["versionHistory"][0]["source"],
         "original"
     );
+    // An item that says nothing about its own audio gets the defaults that keep an existing
+    // project sounding exactly as it did: no fades, and its generated audio out of the mix.
+    assert_eq!(saved["tracks"][0]["items"][0]["fadeInSeconds"], json!(0.0));
+    assert_eq!(saved["tracks"][0]["items"][0]["fadeOutSeconds"], json!(0.0));
+    assert_eq!(saved["tracks"][0]["items"][0]["generatedAudio"], "mute");
 
     let (status, timelines) = request(
         app.clone(),
@@ -366,6 +384,109 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
     let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(queue["counts"]["queued"], 2);
+}
+
+/// sc-22715 (H): the audio bus and item fields (`gain`, `muted`, `role` on a track;
+/// `generatedAudio`, `fadeInSeconds`, `fadeOutSeconds`, `volume` on an item) round-trip through
+/// PUT → GET at NON-default values. The sibling test above proves only the defaults — a store that
+/// re-wrote every fader to 1.0 on save would pass it. No ffmpeg: nothing here renders.
+#[tokio::test]
+async fn timeline_audio_bus_and_item_fields_round_trip_at_non_default_values() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Bus Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, mut timeline) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/timelines"),
+        json!({ "name": "Buses", "aspectRatio": "16:9", "fps": 24 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let timeline_id = timeline["id"].as_str().expect("timeline id").to_owned();
+
+    timeline["tracks"][0]["items"] = json!([{
+        "id": "item-picture",
+        "trackId": "track_main",
+        "assetId": "asset-take",
+        "type": "video",
+        "displayName": "Take",
+        "sourceIn": 0.0,
+        "sourceOut": 4.0,
+        "timelineStart": 0.0,
+        "timelineEnd": 4.0,
+        "speed": 1,
+        "fit": "fit",
+        "volume": 0.8,
+        "generatedAudio": "include",
+        "fadeInSeconds": 0.25,
+        "fadeOutSeconds": 0.5
+    }]);
+    timeline["tracks"][2]["gain"] = json!(0.35);
+    timeline["tracks"][2]["muted"] = json!(true);
+    timeline["tracks"][2]["role"] = json!("ambience");
+    timeline["tracks"][2]["items"] = json!([{
+        "id": "item-bed",
+        "trackId": "track_audio",
+        "assetId": "asset-bed",
+        "type": "audio",
+        "displayName": "Bed",
+        "sourceIn": 1.5,
+        "sourceOut": 5.5,
+        "timelineStart": 0.0,
+        "timelineEnd": 4.0,
+        "speed": 1,
+        "fit": "fit",
+        "volume": 1.6,
+        "fadeInSeconds": 1.0,
+        "fadeOutSeconds": 1.5
+    }]);
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": timeline }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, read_back) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_back}");
+    for (label, document) in [("PUT response", &saved), ("GET", &read_back)] {
+        let picture = &document["tracks"][0]["items"][0];
+        assert_eq!(picture["generatedAudio"], "include", "{label}: {picture}");
+        assert_eq!(picture["fadeInSeconds"], json!(0.25), "{label}: {picture}");
+        assert_eq!(picture["fadeOutSeconds"], json!(0.5), "{label}: {picture}");
+        assert_eq!(picture["volume"], json!(0.8), "{label}: {picture}");
+        let bus = &document["tracks"][2];
+        assert_eq!(bus["gain"], json!(0.35), "{label}: {bus}");
+        assert_eq!(bus["muted"], json!(true), "{label}: {bus}");
+        assert_eq!(bus["role"], "ambience", "{label}: {bus}");
+        let bed = &bus["items"][0];
+        assert_eq!(bed["volume"], json!(1.6), "{label}: {bed}");
+        assert_eq!(bed["fadeInSeconds"], json!(1.0), "{label}: {bed}");
+        assert_eq!(bed["fadeOutSeconds"], json!(1.5), "{label}: {bed}");
+        assert_eq!(bed["sourceIn"], json!(1.5), "{label}: {bed}");
+        assert_eq!(bed["sourceOut"], json!(5.5), "{label}: {bed}");
+        assert_eq!(
+            bed["generatedAudio"], "mute",
+            "an audio item keeps the default: {bed}"
+        );
+    }
+    assert_eq!(saved["duration"].as_f64(), Some(4.0));
 }
 
 #[tokio::test]

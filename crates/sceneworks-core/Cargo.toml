@@ -16,6 +16,10 @@ parking_lot = "0.12"
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
+# sc-22713: a planner draft is corrected by a local 8B model that cannot count lines, so a parse
+# failure has to name the FIELD ("shots[3].startState"), not the offset. Already in the lock via
+# axum, so this adds no package to the build.
+serde_path_to_error = "0.1"
 mime_guess = "2.0"
 url = "2.5"
 # sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.

@@ -1,0 +1,36 @@
+{
+  // Approved reference pack for the courier/workshop/red-parcel fixture (epic 22708, sc-22710).
+  // Each entry has an explicit role the plan's shots address; the images are deterministic
+  // placeholder plates written by `film-harness fixture-images` (576x320, one flat colour with a
+  // bench line — see `FIXTURE_REFERENCES` in apps/rust-api/src/film_harness.rs). Replace a file
+  // with a real approved plate and bump `version`; the roles and the plan do not change.
+  "schemaVersion": 1,
+  "id": "courier-workshop-refs",
+  "version": 1,
+  "description": "Placeholder plates for the courier/workshop/red-parcel sequence.",
+  "references": [
+    { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "The courier: blue jacket, carries the parcel." },
+    { "role": "recipient", "kind": "character", "file": "references/recipient.png", "description": "The recipient: grey work apron, rolled sleeves." },
+    { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png", "description": "Small bright red cardboard parcel." },
+    { "role": "workshop_location", "kind": "location", "file": "references/workshop_location.png", "description": "Cluttered woodworking workshop, door camera-left." },
+    { "role": "workbench_table", "kind": "prop", "file": "references/workbench_table.png", "description": "Long wooden workbench, sawdust, centre of frame." },
+    { "role": "house_style", "kind": "style", "file": "references/house_style.png", "description": "Warm late-afternoon light, film grain, natural colour." },
+    { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png", "description": "Wide keyframe plate of the workshop used as the first frame of the image-conditioned shots." }
+  ],
+  // Approved sound (sc-22712). Sound roles live in the same namespace as reference roles but are
+  // placed through different slots — a `dialogue` role goes on a shot's `dialogueClip`, and the
+  // `ambience`/`music` roles go on the plan's `sound` beds. They are never conditioning.
+  //
+  // The clips are deterministic placeholder tones written by `film-harness fixture-sound`
+  // (`FIXTURE_SOUNDS` in apps/rust-api/src/film_harness.rs): mono 8 kHz PCM-16 triangle waves at
+  // one frequency each, so the three buses are trivially distinguishable by ear when checking the
+  // POC export. Replace a file with real recorded audio and bump `version`; nothing else changes.
+  // The two beds are 32s — long enough to play under the whole six-shot sequence without a gap,
+  // which is the point of placing them once instead of per shot.
+  "sound": [
+    { "role": "courier_line", "kind": "dialogue", "file": "sound/courier_line.wav", "description": "Placeholder for the courier's line (400 Hz, 2s)." },
+    { "role": "recipient_line", "kind": "dialogue", "file": "sound/recipient_line.wav", "description": "Placeholder for the recipient's lines (500 Hz, 2s)." },
+    { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav", "description": "Continuous workshop room tone (100 Hz, 32s)." },
+    { "role": "main_theme", "kind": "music", "file": "sound/main_theme.wav", "description": "Continuous music bed (250 Hz, 32s)." }
+  ]
+}
