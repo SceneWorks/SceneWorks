@@ -155,13 +155,35 @@ pub struct ApiResponse {
     pub body: Value,
 }
 
+/// The API's answer to a file request: HTTP status plus the raw body. A non-2xx body is kept as-is
+/// so a refusal's JSON detail can still be read out of it.
+#[derive(Debug, Clone)]
+pub struct BytesResponse {
+    pub status: u16,
+    pub bytes: Vec<u8>,
+}
+
 pub type TransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ApiResponse, HarnessError>> + Send + 'a>>;
+
+pub type BytesTransportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BytesResponse, HarnessError>> + Send + 'a>>;
 
 /// The harness's only dependency on the outside world. Implemented over `reqwest` for the binary
 /// and over an in-process `axum::Router` in tests.
 pub trait ApiTransport: Send + Sync {
     fn call(&self, request: ApiRequest) -> TransportFuture<'_>;
+
+    /// GET a file the API serves as BYTES rather than as JSON — a project's stored media
+    /// (`/api/v1/projects/:id/files/*path`), which is how a synthesized dialogue clip (sc-23404)
+    /// reaches the pack directory.
+    ///
+    /// A separate method rather than a flag on [`ApiRequest`] because the two answers have
+    /// different shapes: [`ApiResponse`] parses its body as JSON, and a WAV is not JSON. It is the
+    /// download seam, so it must go through the transport like every other request: `--api` may
+    /// legitimately point at a SceneWorks API on another machine on the private network, whose
+    /// project directory this process cannot read.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_>;
 }
 
 #[derive(Debug)]
@@ -1230,6 +1252,54 @@ fn audio_asset_from_result(result: &Value) -> Option<(String, String)> {
     (!path.is_empty()).then_some((id, path))
 }
 
+/// Download one of a project's stored media files over the API.
+///
+/// Through the transport, not off the disk: `--api` may point at a SceneWorks API elsewhere on the
+/// private network, whose project directory this process cannot read.
+async fn download_media(
+    transport: &dyn ApiTransport,
+    project_id: &str,
+    media_path: &str,
+) -> Result<Vec<u8>, HarnessError> {
+    if !is_safe_media_path(media_path) {
+        return Err(HarnessError::Transport(format!(
+            "the API reported the file at {media_path:?}, which is not a plain relative media \
+             path inside the project"
+        )));
+    }
+    let path = format!("/api/v1/projects/{project_id}/files/{media_path}");
+    let response = transport.get_bytes(path.clone()).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(HarnessError::Api {
+            method: "GET",
+            path,
+            status: response.status,
+            detail: api_detail(&serde_json::from_slice(&response.bytes).unwrap_or(Value::Null)),
+        });
+    }
+    if response.bytes.is_empty() {
+        return Err(HarnessError::Transport(format!(
+            "GET {path} returned an empty file"
+        )));
+    }
+    Ok(response.bytes)
+}
+
+/// A project-relative media path that is safe to interpolate into the file route: no absolute
+/// path, no `..`, no escaping or encoding needed.
+fn is_safe_media_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == ".."
+                || segment == "."
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+}
+
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
     let asset = result.get("assets")?.as_array()?.first()?;
     let file = asset.get("file").unwrap_or(&Value::Null);
@@ -2224,11 +2294,26 @@ impl Session<'_> {
                 .and_then(Value::as_f64)
                 .filter(|seconds| *seconds > 0.0)
         };
-        let recorded: BTreeMap<String, String> = self
+        // Keyed on (role, FILE), not on the role alone. `record.sound` is append-only and a role's
+        // clip is not immutable — a pack can re-cast a `dialogue` line or swap the recording a role
+        // points at — and a map keyed on the role alone would hand the bus back the asset made from
+        // the OLD file. The file is what the asset was made from, so it is what the adoption has to
+        // agree on.
+        //
+        // A GUARD rather than a live path: the pack-sha check in `open_session` means a changed
+        // pack is a new run, so today nothing can reach `ensure_sound` with a `record.sound` entry
+        // the entries disagree with. It costs one tuple and it means the adoption is correct on its
+        // own terms instead of correct only because something upstream refuses.
+        let recorded: BTreeMap<(String, String), String> = self
             .record
             .sound
             .iter()
-            .map(|clip| (clip.role.clone(), clip.asset_id.clone()))
+            .map(|clip| {
+                (
+                    (clip.role.clone(), clip.file.clone()),
+                    clip.asset_id.clone(),
+                )
+            })
             .collect();
         let pack_dir = self
             .pack_path
@@ -2236,16 +2321,6 @@ impl Session<'_> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         for entry in &entries {
-            if let Some(asset_id) = recorded.get(&entry.role) {
-                self.sound_assets.insert(
-                    entry.role.clone(),
-                    SoundAsset {
-                        asset_id: asset_id.clone(),
-                        duration_seconds: stored_duration(asset_id),
-                    },
-                );
-                continue;
-            }
             // Set on every entry by now: a recorded clip declares it, and a synthesized one was
             // given it by `synthesize_dialogue` above. An entry with neither is a validation
             // finding the run never gets past.
@@ -2255,6 +2330,16 @@ impl Session<'_> {
                     entry.role
                 ))
             })?;
+            if let Some(asset_id) = recorded.get(&(entry.role.clone(), file.clone())) {
+                self.sound_assets.insert(
+                    entry.role.clone(),
+                    SoundAsset {
+                        asset_id: asset_id.clone(),
+                        duration_seconds: stored_duration(asset_id),
+                    },
+                );
+                continue;
+            }
             let path = pack_dir.join(&file);
             let bytes = std::fs::read(&path)?;
             let sha256 = sha256_hex(&bytes);
@@ -2321,9 +2406,18 @@ impl Session<'_> {
     /// Resume discipline is the renders': the idempotency key is stamped into the dispatched body's
     /// `advanced.filmHarness` block and a controller that died between the POST and the record write
     /// finds its OWN job by that key. What the key covers is model + voice + text + attempt, not
-    /// just the role — so re-casting a line is a different key rather than an adoption of the clip
-    /// that says the old thing in the old voice, and a retry after a failure is a new job rather
-    /// than a re-read of the same failure.
+    /// just the role — so a retry after a failure is a new job rather than a re-read of the same
+    /// failure.
+    ///
+    /// RE-CASTING a line is not something this run does: `resume` and `replace-take` refuse a pack
+    /// whose bytes no longer hash to what the run started from ("a changed reference pack is a new
+    /// run, not a resume"), so an edited line reaches this code only through a fresh `run`. The
+    /// content half of the key still earns its place inside ONE run: a line whose text or voice does
+    /// not match the record's is a new attempt rather than an adoption, which is what a record
+    /// carried over from an aborted earlier shape of the pack needs. When that happens the stale
+    /// `record.sound` entry is dropped with it — `record.sound` is append-only, and an entry naming
+    /// the old asset would otherwise be re-adopted by `ensure_sound` even where the pack pins
+    /// `file` and the clip's name never changed.
     ///
     /// The clip's filename is `<role>.<sha256(text)[..12]>.wav` unless the entry pins one with
     /// `file`, in which case synthesis writes THERE — that is how a pack keeps a stable name for a
@@ -2435,6 +2529,20 @@ impl Session<'_> {
                         self.record.synthesized_sound.len() - 1
                     }
                 };
+                // A fresh attempt means the clip this film will play is NEW — a line this record
+                // does not match, or a retry after one that failed. `record.sound` is append-only,
+                // so an entry left from an earlier attempt still names the OLD asset and the import
+                // pass in `ensure_sound` would adopt it: the bus would go on saying the old thing
+                // in the old voice. Dropping it here is the half the (role, file) key cannot do,
+                // because a pack that PINS `file` re-casts a line without the clip's NAME ever
+                // changing — what changed is the `text_sha256` this record was just rewritten with.
+                //
+                // A GUARD, like that key: `open_session` refuses a pack whose bytes moved, so a
+                // re-cast is a new run and nothing today reaches this line with a stale clip. It is
+                // two statements, and it means the record cannot describe a film that says one
+                // thing and plays another.
+                self.record.sound.retain(|clip| clip.role != role);
+                self.sound_assets.remove(&role);
                 // Persisted BEFORE the job exists, exactly as an attempt is: that is what makes the
                 // key findable by the controller that comes back.
                 self.persist()?;
@@ -2596,28 +2704,31 @@ impl Session<'_> {
         //    is the one encoding `media_convert::is_canonical_pcm16_wav` copies through — so the
         //    import below needs no ffmpeg for a clip this run spoke, which is what lets the hosted
         //    macOS lane (no ffmpeg) exercise the whole path.
-        let project_path = self
+        //
+        //    The bytes come over the TRANSPORT, like every other media hop the harness makes.
+        //    `--api` may legitimately name a private-network address, a `.local` name or a bare
+        //    hostname (docs/film-harness.md), and the API host "may be a different machine" — on
+        //    any such host reaching into its project directory is an io error, not a clip. The
+        //    local read survives only as a FAST PATH for the common loopback case, where the file
+        //    really is right there and copying it through HTTP buys nothing.
+        let source = self
             .record
             .project_path
             .as_deref()
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                HarnessError::Transport(
-                    "the run has no project path, so the synthesized clip cannot be written into \
-                     the pack"
-                        .to_owned(),
-                )
-            })?;
-        let source = project_path.join(&media_path);
+            .map(|path| Path::new(path).join(&media_path))
+            .filter(|source| source.is_file());
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let bytes = std::fs::read(&source).map_err(|error| {
-            HarnessError::Io(format!(
-                "the synthesis job for {role:?} reported {} but it could not be read: {error}",
-                source.display()
-            ))
-        })?;
+        let bytes = match &source {
+            Some(source) => std::fs::read(source).map_err(|error| {
+                HarnessError::Io(format!(
+                    "the synthesis job for {role:?} reported {} but it could not be read: {error}",
+                    source.display()
+                ))
+            })?,
+            None => download_media(self.client.transport, project_id, &media_path).await?,
+        };
         std::fs::write(&destination, &bytes)?;
         {
             let line = &mut self.record.synthesized_sound[index];
@@ -4959,7 +5070,14 @@ pub async fn replace_take(
     // Not re-exporting is a deliberate choice, not a failure: the replacement succeeded, the
     // existing MP4 is marked stale, and the run is as finished as this invocation was asked to make
     // it. Only a failed replacement leaves the run failed (with the stop set above).
-    let export_ok = if replaced && session.export {
+    //
+    // `session.stop.is_none()` gates the export for the same reason it gates the re-assembly above:
+    // a clip that could not be re-hydrated left the saved timeline deliberately untouched, so it is
+    // the STALE timeline — the one carrying the take the human just replaced — that an export would
+    // render from, and `run_export` writes `stale: false` over the `stale: true` set above,
+    // recording a fresh MP4 of old material as current. Leave the MP4 that exists, keep the record
+    // saying it is stale, and let the stop say why.
+    let export_ok = if replaced && session.export && session.stop.is_none() {
         session.run_export().await?
     } else {
         replaced
@@ -5411,6 +5529,27 @@ impl ApiTransport for HttpTransport {
                 serde_json::from_str(&text).unwrap_or(Value::String(text))
             };
             Ok(ApiResponse { status, body })
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        Box::pin(async move {
+            let url = format!("{}{}", self.base_url, path);
+            let mut builder = self.client.get(&url);
+            if let Some(token) = &self.token {
+                builder = builder.header("x-sceneworks-token", token);
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?;
+            let status = response.status().as_u16();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
         })
     }
 }

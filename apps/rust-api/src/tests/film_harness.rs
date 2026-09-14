@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::film_harness::{
-    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, ResumeOptions,
-    RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
+    self, ApiRequest, ApiResponse, ApiTransport, BytesResponse, BytesTransportFuture, HarnessError,
+    RequestBody, ResumeOptions, RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
 };
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
@@ -72,6 +72,99 @@ impl ApiTransport for RouterTransport {
             };
             Ok(ApiResponse { status, body })
         })
+    }
+
+    /// The bytes half (sc-23404): the same `oneshot` driver, without the JSON parse — what a
+    /// synthesized dialogue clip is fetched through.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .expect("request builds");
+            let response = app
+                .oneshot(request)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?;
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
+        })
+    }
+}
+
+/// An [`ApiTransport`] over the in-process router that logs every file DOWNLOAD, and can answer
+/// `GET /api/v1/projects…` with the project's `path` relocated to a directory this process cannot
+/// read.
+///
+/// Relocated, that is how a REMOTE API host looks from the controller (sc-23404): `--api` may name
+/// a private-network address, a `.local` name or a bare hostname, and the API host "may be a
+/// different machine" (docs/film-harness.md), whose project directory is simply not on this
+/// filesystem. Not relocated, it is the loopback case, unchanged. Everything else — the routes, the
+/// job table, the assets — is the real in-process API either way.
+pub(crate) struct CountingTransport {
+    inner: RouterTransport,
+    /// Where the project documents claim their directories are, or `None` to leave them alone.
+    relocate_to: Option<PathBuf>,
+    pub(crate) downloads: Arc<Mutex<Vec<String>>>,
+}
+
+impl CountingTransport {
+    /// The API is on THIS machine: its project directory really is where it says it is.
+    pub(crate) fn local(app: axum::Router) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            relocate_to: None,
+            downloads: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The API is on ANOTHER machine: every project directory it names is unreadable here.
+    pub(crate) fn remote(app: axum::Router, unreachable_root: PathBuf) -> Self {
+        Self {
+            relocate_to: Some(unreachable_root),
+            ..Self::local(app)
+        }
+    }
+}
+
+impl ApiTransport for CountingTransport {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        // Only the project documents carry a host-local `path` — the list, one project, and the
+        // CREATE that answers with the freshly made one, which is the response `ensure_project`
+        // reads on a first run. Narrowed by depth so a nested route (`…/projects/{id}/assets`,
+        // five segments) is passed through untouched.
+        let relocate_to = self.relocate_to.clone().filter(|_| {
+            request.path.starts_with("/api/v1/projects") && request.path.matches('/').count() <= 4
+        });
+        let inner = self.inner.call(request);
+        Box::pin(async move {
+            let mut response = inner.await?;
+            if let Some(root) = relocate_to.filter(|_| (200..300).contains(&response.status)) {
+                let relocate = |project: &mut Value| {
+                    if let Some(id) = project.get("id").and_then(Value::as_str) {
+                        let path = root.join(id);
+                        project["path"] = json!(path.to_string_lossy());
+                    }
+                };
+                match &mut response.body {
+                    Value::Array(projects) => projects.iter_mut().for_each(relocate),
+                    project @ Value::Object(_) => relocate(project),
+                    _ => {}
+                }
+            }
+            Ok(response)
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.downloads.lock().push(path.clone());
+        self.inner.get_bytes(path)
     }
 }
 
@@ -137,6 +230,10 @@ impl ApiTransport for ScriptedTransport {
             }
             Ok(response)
         })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
     }
 }
 
@@ -2547,6 +2644,10 @@ impl ApiTransport for FaultTransport {
                 "simulated controller death".to_owned(),
             ))
         })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
     }
 }
 
@@ -6333,13 +6434,24 @@ fn speech_pack(harness: &Harness, edit: impl FnOnce(&mut Value)) -> PathBuf {
     path
 }
 
-fn audio_job_count(harness: &Harness) -> usize {
-    harness
-        .script
-        .lock()
-        .claimed
-        .iter()
-        .filter(|(kind, _, _)| kind == "audio_generate")
+/// The synthesis jobs the API holds for one project, read out of the JOB TABLE.
+///
+/// Not out of the fake worker's claim log: that log is the fake's own bookkeeping and says what a
+/// worker picked UP, so a job the harness enqueued that nobody claimed — the thing an
+/// "exactly one job was created" assertion most needs to catch — would not appear in it at all.
+async fn audio_job_count(harness: &Harness, project_id: &str) -> usize {
+    let (status, jobs) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs?projectId={project_id}&limit=100"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{jobs}");
+    jobs.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|job| job["type"] == "audio_generate")
         .count()
 }
 
@@ -6382,10 +6494,11 @@ async fn a_dialogue_line_with_text_is_synthesized_placed_and_recorded() {
         summary(&record)
     );
 
+    let project_id = record.project_id.clone().expect("project created");
     // ONE synthesis job, for the ONE line this two-shot selection places. The recipient's lines
     // belong to SH050/SH060, which the selection leaves out, so they are never spoken — synthesis
     // follows the same "only what the run PLACES" rule the import does.
-    assert_eq!(audio_job_count(&harness), 1);
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
     assert_eq!(
         record.synthesized_sound.len(),
         1,
@@ -6444,7 +6557,6 @@ async fn a_dialogue_line_with_text_is_synthesized_placed_and_recorded() {
     );
 
     // The imported asset says it was spoken rather than recorded.
-    let project_id = record.project_id.clone().expect("project created");
     let (status, asset) = request(
         harness.app.clone(),
         "GET",
@@ -6491,7 +6603,8 @@ async fn a_resume_adopts_a_spoken_line_instead_of_speaking_it_again() {
     let first = film_harness::run(&harness.transport, &options)
         .await
         .expect("run completes");
-    assert_eq!(audio_job_count(&harness), 1);
+    let project_id = first.project_id.clone().expect("project");
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
     let spoken = first.synthesized_sound[0].clone();
 
     reopen_for_resume(&harness);
@@ -6503,28 +6616,14 @@ async fn a_resume_adopts_a_spoken_line_instead_of_speaking_it_again() {
         summary(&resumed)
     );
     assert_eq!(
-        audio_job_count(&harness),
+        audio_job_count(&harness, &project_id).await,
         1,
         "the resume must adopt the clip, not speak the line a second time"
     );
     assert_eq!(resumed.synthesized_sound.len(), 1);
     assert_eq!(resumed.synthesized_sound[0], spoken);
     assert_eq!(resumed.sound.len(), first.sound.len());
-    let project_id = resumed.project_id.clone().expect("project");
-    let (_, jobs) = request(
-        harness.app.clone(),
-        "GET",
-        &format!("/api/v1/jobs?projectId={project_id}&limit=100"),
-        Value::Null,
-    )
-    .await;
-    let audio = jobs
-        .as_array()
-        .expect("jobs")
-        .iter()
-        .filter(|job| job["type"] == "audio_generate")
-        .count();
-    assert_eq!(audio, 1, "the API holds exactly one synthesis job");
+    assert_eq!(resumed.project_id.as_deref(), Some(project_id.as_str()));
 }
 
 /// AC2, first half: a pack entry with neither `text` nor `file`, and `text` on a non-dialogue kind,
@@ -6573,7 +6672,7 @@ async fn a_sound_entry_with_no_source_or_a_spoken_bed_is_refused_before_dispatch
                 .any(|message| message.contains(needle) && message.contains(label)),
             "{label}: the finding must name the entry: {text:?}"
         );
-        assert_eq!(audio_job_count(&harness), 0, "{label}");
+        assert!(harness.jobs().await.is_empty(), "{label}");
         assert_eq!(harness.project_count().await, 0, "{label}");
         assert_eq!(harness.run_record()["outcome"], "rejected", "{label}");
     }
@@ -6636,7 +6735,11 @@ async fn a_failed_synthesis_stops_the_run_resumably_with_the_rest_intact() {
         line.idempotency_key
     );
     assert_eq!(
-        audio_job_count(&harness),
+        audio_job_count(
+            &harness,
+            resumed.project_id.as_deref().expect("project created")
+        )
+        .await,
         2,
         "one attempt that failed, one that spoke"
     );
@@ -6810,7 +6913,7 @@ async fn a_replacement_re_assembles_with_the_sound_the_run_already_has() {
     let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
     assert_eq!(items_of(&before, "track_dialogue").len(), 1);
     assert_eq!(items_of(&before, "track_ambience").len(), 1);
-    let audio_jobs = audio_job_count(&harness);
+    let audio_jobs = audio_job_count(&harness, &project_id).await;
 
     let replaced = film_harness::replace_take(
         &harness.transport,
@@ -6836,9 +6939,420 @@ async fn a_replacement_re_assembles_with_the_sound_the_run_already_has() {
     assert_eq!(items_of(&after, "track_ambience").len(), 1);
     assert_eq!(items_of(&after, "track_music").len(), 1);
     assert_eq!(
-        audio_job_count(&harness),
+        audio_job_count(&harness, &project_id).await,
         audio_jobs,
         "re-hydrating adopts the spoken line; it does not speak it again"
     );
     assert_eq!(replaced.sound.len(), record.sound.len());
+}
+
+/// The synthesized clip reaches the pack over the TRANSPORT, not off the API host's disk.
+///
+/// Every other media hop the harness makes is HTTP, and `--api` may legitimately name a
+/// private-network address, a `.local` name or a bare hostname — the API host "may be a different
+/// machine" (docs/film-harness.md). Reading the worker's WAV straight out of the project directory
+/// worked only when that directory happened to be on this filesystem; on any other host every
+/// synthesis died with an io error. The local read survives as a FAST PATH for the loopback case,
+/// which is the second half of this test.
+#[tokio::test]
+async fn a_synthesized_clip_is_fetched_over_the_file_route_when_the_project_dir_is_not_local() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    // The API's project directories, as this controller would see them across a network: named,
+    // and not there.
+    let transport = CountingTransport::remote(
+        harness.app.clone(),
+        harness.temp_dir.path().join("another-machine"),
+    );
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "a remote API host must not break synthesis: {}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let project_path = record.project_path.clone().expect("project path");
+    assert!(
+        !Path::new(&project_path).is_dir(),
+        "the fast path must genuinely be unavailable for this to mean anything: {project_path}"
+    );
+
+    // The file route is what carried it, once, for the one line that was spoken.
+    let downloads = transport.downloads.lock().clone();
+    assert_eq!(downloads.len(), 1, "{downloads:?}");
+    assert!(
+        downloads[0].starts_with(&format!(
+            "/api/v1/projects/{project_id}/files/assets/audios/"
+        )) && downloads[0].ends_with(".wav"),
+        "{downloads:?}"
+    );
+
+    // And the bytes that arrived are the clip the worker wrote, not an empty or truncated file.
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.status, "completed", "{line:#?}");
+    let file = line.file.clone().expect("the clip was written");
+    let written = std::fs::read(pack.parent().expect("pack dir").join(&file))
+        .expect("the clip is in the pack");
+    let (hz, seconds) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert_eq!(
+        written,
+        film_harness::fixture_sound_wav(seconds, hz, 9000),
+        "the downloaded clip must be the WAV the worker wrote"
+    );
+    // It was imported and placed exactly as a locally-read clip is.
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&saved, "track_dialogue").len(), 1, "{saved}");
+
+    // The loopback half: the same run against an API whose project directory IS readable here
+    // downloads nothing, because the fast path has the file.
+    let local = Harness::start(true, vec![]).await;
+    let local_pack = speech_pack(&local, |_| {});
+    let local_transport = CountingTransport::local(local.app.clone());
+    let local_record = film_harness::run(
+        &local_transport,
+        &local.options(local.fixture_plan(), local_pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .expect("run completes");
+    assert_eq!(
+        local_record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&local_record)
+    );
+    assert!(
+        Path::new(local_record.project_path.as_deref().expect("project path")).is_dir(),
+        "the loopback case has the project directory right here"
+    );
+    assert!(
+        local_transport.downloads.lock().is_empty(),
+        "a local project directory is read directly: {:?}",
+        local_transport.downloads.lock()
+    );
+}
+
+/// A `replace-take --export` whose sound could not be re-hydrated must not re-export.
+///
+/// `ensure_sound` stopping is what says the session's clip map is SHORT, so the re-assembly is
+/// deliberately skipped and the saved timeline keeps the take the human just replaced. Exporting
+/// anyway renders a fresh MP4 from that stale timeline — and `run_export` writes
+/// `ExportRecord { stale: false }` over the `stale: true` the replacement set, so the record would
+/// claim the MP4 is current when it carries exactly the material that was rejected.
+#[tokio::test]
+async fn a_replacement_whose_sound_cannot_be_rehydrated_does_not_re_export() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let exports_before = harness.export_job_count();
+    assert!(!record.export.as_ref().expect("exported").stale);
+
+    // Take the spoken line away from the record and from the pack, so the replacement's
+    // `ensure_sound` has to speak it again — and make the TTS lane fail, so it cannot.
+    let spoken_file = record.synthesized_sound[0]
+        .file
+        .clone()
+        .expect("the clip was written");
+    std::fs::remove_file(pack.parent().expect("pack dir").join(&spoken_file))
+        .expect("clip removed");
+    harness.edit_run_record(|record| {
+        let kept: Vec<Value> = record["sound"]
+            .as_array()
+            .expect("sound")
+            .iter()
+            .filter(|clip| clip["role"] != json!("courier_line"))
+            .cloned()
+            .collect();
+        record["sound"] = json!(kept);
+        record["synthesizedSound"][0]["status"] = json!("failed");
+        record["synthesizedSound"][0]["assetId"] = Value::Null;
+        record["synthesizedSound"][0]["file"] = Value::Null;
+    });
+    harness.script.lock().audio_fails = true;
+
+    let replaced = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH020",
+        "the parcel is the wrong colour",
+    )
+    .await
+    .expect("the replacement runs");
+
+    // The take landed, and the run stopped on the line it could not re-speak.
+    assert_eq!(
+        replaced.shots[1].outcome,
+        ShotOutcome::Rendered,
+        "{}",
+        summary(&replaced)
+    );
+    let stop = replaced.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+
+    // No re-export, and the record still says the MP4 on disk is stale.
+    assert_eq!(
+        harness.export_job_count(),
+        exports_before,
+        "a stale timeline must not be rendered into a fresh MP4"
+    );
+    let export = replaced
+        .export
+        .as_ref()
+        .expect("the first export is recorded");
+    assert!(
+        export.stale,
+        "the export must stay stale when the timeline it came from was not rewritten: {export:#?}"
+    );
+    // And the saved timeline really was left alone.
+    let after = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(after, before, "the saved timeline must be untouched");
+}
+
+/// Re-casting a line is a NEW RUN, not a resume — and inside one run a record that no longer
+/// matches the pack drops the clip it made.
+///
+/// The first half is the guard `resume` / `replace-take` already apply: the pack's bytes are hashed
+/// at start and a changed document is refused, so an edited line can never reach a running record.
+/// The second half is what makes the refusal safe to rely on: a fresh run of the edited pack speaks
+/// the NEW line, and — crucially for a pack that PINS `file`, where the clip's name never changes —
+/// the stale `sound[]` entry is dropped rather than re-adopted by the import pass.
+#[tokio::test]
+async fn re_casting_a_line_is_refused_by_resume_and_spoken_by_a_fresh_run() {
+    let harness = Harness::start(true, vec![]).await;
+    // A PINNED file, so the re-cast cannot be told apart by the clip's name.
+    let pack = speech_pack(&harness, |pack| {
+        pack["sound"][0]["file"] = json!("sound/courier_line.wav");
+    });
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(first.outcome, RunOutcome::Completed, "{}", summary(&first));
+    assert_eq!(
+        first.synthesized_sound[0].file.as_deref(),
+        Some("sound/courier_line.wav")
+    );
+    assert_eq!(
+        first.synthesized_sound[0].text,
+        "Delivery. I'll leave it on the bench."
+    );
+
+    // Re-cast the line in place, at the same pinned path.
+    let text = std::fs::read_to_string(&pack).expect("pack");
+    let mut document: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text)).expect("parses");
+    document["sound"][0]["text"] = json!("Delivery. It's on the bench, then.");
+    std::fs::write(&pack, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+    // A resume will not have it: the pack no longer hashes to what the run started from.
+    reopen_for_resume(&harness);
+    let refusal = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .unwrap_err();
+    let HarnessError::Refused(message) = refusal else {
+        panic!("expected a refusal, got {refusal}");
+    };
+    assert!(
+        message.contains("reference pack") && message.contains("a new run, not a resume"),
+        "{message}"
+    );
+
+    // A FRESH run of the edited pack speaks the NEW line into the same pinned path — which is what
+    // the refusal above sends the operator to do.
+    let mut fresh_options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    fresh_options.out_dir = harness.temp_dir.path().join("recast-out");
+    let second = film_harness::run(&harness.transport, &fresh_options)
+        .await
+        .expect("the re-cast run completes");
+    assert_eq!(
+        second.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&second)
+    );
+    assert_eq!(
+        second.synthesized_sound[0].text,
+        "Delivery. It's on the bench, then."
+    );
+    assert_eq!(
+        second.synthesized_sound[0].file.as_deref(),
+        Some("sound/courier_line.wav"),
+        "the pinned path is where the re-cast line is written"
+    );
+    assert_eq!(
+        second
+            .sound
+            .iter()
+            .filter(|clip| clip.role == "courier_line")
+            .count(),
+        1,
+        "exactly one clip per role: {:#?}",
+        second.sound
+    );
+    // The line the film now says is as long as the NEW text, measured off the sequence — a re-cast
+    // that had been adopted rather than spoken would still be the 1.5s of the old line.
+    let project_id = second.project_id.clone().expect("project");
+    let timeline_id = second
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1, "{dialogue:#?}");
+    let (_, spoken) = fake_speech_shape(Some("am_michael"), &second.synthesized_sound[0].text);
+    assert!(
+        close(
+            dialogue[0]["timelineEnd"].as_f64().unwrap()
+                - dialogue[0]["timelineStart"].as_f64().unwrap(),
+            spoken
+        ),
+        "the placed item is as long as the RE-CAST line ({spoken}s): {}",
+        dialogue[0]
+    );
+}
+
+/// A `dialogue` entry carrying BOTH `text` and `file`: synthesis writes into the PINNED path, and
+/// everything downstream treats it as the recorded clip at that path.
+///
+/// This is how a pack keeps a stable, checkable-in name for a line it means to keep — the derived
+/// `sound/<role>.tts-<sha>.wav` name is gitignored precisely because it is an output. The
+/// `destination` / `imported` interplay is the part worth an end-to-end test rather than a
+/// validator unit test: the adoption on resume reads `record.sound` FIRST (so a pack whose clip has
+/// been cleaned away still adopts) and only then falls back to the pinned file being on disk.
+#[tokio::test]
+async fn a_dialogue_entry_with_both_text_and_file_synthesizes_into_the_pinned_path() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |pack| {
+        pack["sound"][0]["file"] = json!("sound/courier_line.wav");
+    });
+    let pack_dir = pack.parent().expect("pack dir").to_path_buf();
+    let pinned = pack_dir.join("sound/courier_line.wav");
+    assert!(!pinned.exists(), "the pinned clip does not exist yet");
+
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+
+    // Synthesis wrote THERE, not under the derived name.
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.file.as_deref(), Some("sound/courier_line.wav"));
+    assert!(pinned.is_file(), "{} was not written", pinned.display());
+    assert!(
+        !pack_dir
+            .join(film_harness::synthesized_sound_file(
+                "courier_line",
+                &line.text_sha256
+            ))
+            .exists(),
+        "a pinned `file` replaces the derived name; it does not write both"
+    );
+    let (hz, seconds) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert_eq!(
+        std::fs::read(&pinned).expect("pinned clip"),
+        film_harness::fixture_sound_wav(seconds, hz, 9000)
+    );
+
+    // And it is the clip the import and the bus use.
+    let imported = record
+        .sound
+        .iter()
+        .find(|clip| clip.role == "courier_line")
+        .expect("imported");
+    assert_eq!(imported.file, "sound/courier_line.wav");
+    assert_eq!(imported.kind, "dialogue");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&saved, "track_dialogue").len(), 1, "{saved}");
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
+
+    // `imported` before `destination`: a resume whose pack directory has been CLEANED still adopts
+    // the asset the record names rather than speaking the line a second time.
+    std::fs::remove_file(&pinned).expect("clip removed");
+    reopen_for_resume(&harness);
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        audio_job_count(&harness, &project_id).await,
+        1,
+        "the record already names the imported clip; nothing is spoken again"
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1);
+    assert_eq!(
+        resumed
+            .sound
+            .iter()
+            .filter(|clip| clip.role == "courier_line")
+            .count(),
+        1
+    );
+    assert!(
+        !pinned.exists(),
+        "adopting must not re-download the clip into the pack"
+    );
 }

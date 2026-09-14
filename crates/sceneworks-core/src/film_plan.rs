@@ -308,7 +308,14 @@ pub struct PlanModel {
 pub struct PlanLimits {
     /// Wall-clock budget for the whole run, including the export.
     pub max_run_seconds: u64,
-    /// Wall-clock budget for one attempt of one shot (and for the export job).
+    /// Wall-clock budget for one JOB the run dispatches: one attempt of one shot, the export job,
+    /// and — since sc-23404 — one dialogue synthesis (`POST /api/v1/audio/jobs`) for a `dialogue`
+    /// sound entry carrying `text`.
+    ///
+    /// There is deliberately no separate `maxSpeechSeconds`: a speech job is a job, it is dispatched
+    /// and polled on exactly the same seam as a render, and a second knob would be one more number
+    /// a plan author has to get right for no bound this one does not already state. A pack whose
+    /// lines need longer than a shot does raises this value.
     pub max_shot_seconds: u64,
     /// Attempts per shot, counting the first. `1` means no retry.
     pub max_attempts_per_shot: u32,

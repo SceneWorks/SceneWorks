@@ -147,11 +147,26 @@ changes.
   `file`, in which case synthesis writes *there*. The derived name is gitignored (`*.tts-*.wav`) —
   it is an output, reproducible from the pack. A pack that means to keep a recording pins `file`.
 - **Limits**: one synthesis is bounded by the plan's own `limits.maxShotSeconds` (the per-job budget
-  the export runs under) and the run by `limits.maxRunSeconds`. No new knob.
+  a shot attempt and the export run under) and the run by `limits.maxRunSeconds`. There is
+  deliberately no `maxSpeechSeconds`: a speech job is a job, dispatched and polled on the same seam
+  as a render, and a second knob would be one more number to get right for no bound this one does
+  not already state. A pack whose lines need longer than a shot does raises `maxShotSeconds`.
 - **Resume** adopts. The idempotency key is stamped into `advanced.filmHarness.idempotencyKey` and
-  covers model + voice + the trimmed text, so a controller that died after the POST finds its own
-  job, and *re-casting* a line (a new voice, a rewritten line) is a different key that is spoken
-  again rather than an adoption of the clip that says the old thing.
+  covers model + voice + the trimmed text + the attempt, so a controller that died after the POST
+  finds its own job and a retry after a failure is a new job rather than a re-read of the same
+  failure.
+- **Re-casting a line is a NEW RUN, not a resume.** `resume` and `replace-take` hash the pack's
+  bytes and refuse a document that no longer matches what the run started from ("a changed reference
+  pack is a new run, not a resume"), so a rewritten line or a swapped voice never reaches a running
+  record — start a fresh `run`, which speaks it. The content half of the key still earns its place
+  *inside* one run: a record whose text or voice does not match the pack is a new attempt rather
+  than an adoption, and the stale `sound[]` entry is dropped with it, so the dialogue bus cannot
+  re-adopt the asset made from the old line — including where the pack **pins `file`** and the
+  clip's name never changed.
+- **The clip comes over the transport.** The synthesized WAV is fetched with
+  `GET /api/v1/projects/{projectId}/files/{mediaPath}` like every other media hop, because `--api`
+  may name an API on another machine (see below) whose project directory this process cannot read.
+  A project directory that *is* on this filesystem is read directly, as a fast path.
 - **A synthesis that fails, is refused, is cancelled or overruns its limit stops the run with a
   resumable stop** (`dialogue_synthesis_failed` / `dialogue_synthesis_refused`) *before the first
   render*. The lines already spoken and the clips already imported stay in the record;
@@ -168,7 +183,10 @@ finding #2) before it re-assembles the timeline; for a spoken line that adopts t
 already names and dispatches nothing. If a clip cannot be re-hydrated at all — its file gone from
 the pack, a re-synthesis that failed, no live TTS worker — the replacement records its take and
 leaves the saved timeline alone rather than re-assembling from a short clip map, which is the
-deletion `ensure_sound` is there to prevent.
+deletion `ensure_sound` is there to prevent. `--export` is **skipped** on that path for the same
+reason: the timeline it would render from is the stale one, still carrying the take the human just
+replaced, and a re-export would record a fresh MP4 of old material as current. The existing MP4 is
+left where it is and `export.stale` stays `true`.
 
 The fixture's two **beds** are deterministic placeholder tones (`film-harness fixture-sound`) — one
 frequency per role, so the bed buses are distinguishable by ear when checking an export. Its three
@@ -987,6 +1005,14 @@ export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
 SCENEWORKS_SMOKE_DIR=~/SceneWorks/film-harness-evidence/sc-23404/speech-export \
   scripts/film-harness-smoke.sh
 ```
+
+The script **copies the pack** (document, `references/`, `sound/`) into `$SCENEWORKS_SMOKE_DIR` and
+points `--references` there, so the clips the run speaks land in the smoke directory rather than in
+the checked-in `config/film-harness/courier-workshop/sound/`, and two concurrent smokes do not race
+on one `sound/<role>.tts-<sha>.wav`. The document is copied byte-for-byte, so the run record's
+`referencePack.sha256` is unchanged; only the directory moves. An explicit `REFERENCES=` is taken as
+given and not copied — a caller pointing at their own pack has already chosen where it lives, and
+that directory is written to.
 
 `SHOTS=SH010,SH020,SH030,SH040,SH050,SH060` renders the whole film and speaks all three lines, at
 six times the GPU cost. Then probe the export for the lines, which is what says they are *in the

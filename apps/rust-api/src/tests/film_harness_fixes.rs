@@ -1488,7 +1488,8 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
             "{label} must not step at the cut: {b:.5} -> {a:.5}"
         );
     }
-    // The line sits 1.2s into SH020 (6.37s..8.37s in the file) and nowhere else.
+    // The line sits 1.2s into SH020 — 6.37s..7.87s in the file, the 1.5s the fake speaks that
+    // text for — and nowhere else.
     let line_inside = tone_level(&decode_window(&render_path, 6.7, 0.4), 400.0);
     let line_outside = tone_level(&decode_window(&render_path, 2.0, 0.4), 400.0);
     assert!(
