@@ -29,7 +29,7 @@ use serde_json::{Map, Value};
 use crate::film_plan::{
     parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits, PlanModel,
     PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning, ShotDependency,
-    PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
+    BINDABLE_REFERENCE_KINDS, PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{default_fps, default_resolution, reference_caps};
@@ -351,8 +351,17 @@ impl PlannerCapabilities {
     /// bind, so on such a pack the mode and the cap come off the envelope entirely rather than
     /// being offered and then refused a decode later — the planner emits the modes it emitted
     /// before this story, and the plan resolves to the base checkpoint throughout.
+    ///
+    /// "Can fill" is counted over [`BINDABLE_REFERENCE_KINDS`] only. An approved `style` or `plate`
+    /// is not something a `reference_to_video` shot may bind — a style is a look rather than a
+    /// subject, and a plate is placed through the keyframe slots — so a pack approving only those
+    /// two fills no reference shot and narrows exactly as an empty pack does.
     pub fn narrowed_to_pack(mut self, pack: &ReferencePack) -> Self {
-        if pack.references.iter().any(|entry| entry.approved) {
+        if pack
+            .references
+            .iter()
+            .any(|entry| entry.approved && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str()))
+        {
             return self;
         }
         self.modes.retain(|mode| mode != "reference_to_video");
@@ -1904,6 +1913,62 @@ mod tests {
             !section.contains("reference_to_video is the DEFAULT"),
             "{section}"
         );
+    }
+
+    /// sc-23405 review. "The pack can fill a reference shot" counts only the kinds a
+    /// `reference_to_video` shot may BIND ([`BINDABLE_REFERENCE_KINDS`]).
+    ///
+    /// A pack may approve a style and a plate and still approve no SUBJECT: Ref2VA binds every image
+    /// as a thing to depict, a style is a look rather than a thing, and a plate is placed through the
+    /// keyframe slots instead. Counting either as "fillable" offers the planner a mode whose every
+    /// use would be refused a decode later — the narrowing has to agree with what a shot can bind,
+    /// not merely with whether the pack has any approved row at all.
+    #[test]
+    fn a_pack_approving_only_a_style_and_a_plate_fills_no_reference_shot() {
+        let brief = brief();
+        let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        let style_and_plate_only: ReferencePack = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "courier-refs",
+            "version": 1,
+            "references": [
+                { "role": "house_style", "kind": "style", "file": "references/style.png", "description": "Approved look." },
+                { "role": "workshop_plate", "kind": "plate", "file": "references/plate.png", "description": "Approved plate." }
+            ]
+        }))
+        .expect("pack parses");
+        // Both rows are APPROVED — the narrowing must turn on the KIND, not on approval.
+        assert!(style_and_plate_only
+            .references
+            .iter()
+            .all(|entry| entry.approved));
+
+        let narrowed = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&style_and_plate_only);
+        assert_eq!(
+            narrowed.modes, base.modes,
+            "an approved style and an approved plate are not subjects a reference shot can bind, \
+             so the envelope is the phase-1 one"
+        );
+        assert_eq!(narrowed.max_reference_images, 0);
+        assert!(!narrowed.offers_references());
+
+        // The control: add ONE approved bindable row to the same pack and it widens again, so what
+        // this asserts is the kind filter and not a narrowing that never widens.
+        let mut with_a_subject = style_and_plate_only;
+        with_a_subject.references.push(
+            serde_json::from_value(json!({
+                "role": "courier", "kind": "character", "file": "references/courier.png",
+                "description": "Blue jacket."
+            }))
+            .expect("entry parses"),
+        );
+        let widened = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&with_a_subject);
+        assert!(widened.offers_references());
+        assert_eq!(widened.max_reference_images, 9);
     }
 
     /// sc-23405. The worked example and the standing reference rule follow the ENVELOPE, for the

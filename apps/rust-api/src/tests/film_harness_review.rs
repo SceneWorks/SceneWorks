@@ -2327,12 +2327,12 @@ fn every_cut_question_compares_a_reference_both_sides_of_the_cut_bind() {
             .iter()
             .find(|shot| shot.id == shot_id)
             .unwrap_or_else(|| panic!("{shot_id} is in plan.v2.jsonc"));
-        shot.conditioning
-            .reference_roles
-            .iter()
-            .chain(shot.continuity_roles.iter())
-            .cloned()
-            .collect()
+        // CONDITIONING only. `continuityRoles` is a continuity DECLARATION — it says the role is
+        // meant to stay the same across the cut — and does not put the image on either request, so
+        // chaining it in would let a question pass on two shots that were both conditioned on
+        // nothing. That is the documented miss this test exists to catch, so the set it compares is
+        // exactly the roles the compiled requests carry (sc-23405 review).
+        shot.conditioning.reference_roles.clone()
     };
 
     let mut checked = 0_usize;

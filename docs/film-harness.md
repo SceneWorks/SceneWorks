@@ -667,6 +667,20 @@ none, which is the ordinary hand-authored case and stays legal.
 **Choosing the pack.** The plan names roles, never files, so it runs against any pack that declares
 them. `--references` selects which:
 
+- **The checked-in stand-in pack beside it**, `config/film-harness/courier-workshop/references.jsonc`
+  — deterministic placeholder plates from `film-harness fixture-images`. It proves the *plumbing*:
+  the right checkpoint, the right payload, the right record. It cannot prove likeness, because the
+  plates are flat colour. It is what the smoke scripts fall back to when `REFERENCES=` is unset;
+  `--references` itself is always required on the command line.
+- **A generated pack** written by `film-harness make-references --spec references.spec.jsonc`
+  (sc-23403) — Krea 2 plates of one courier, one recipient, one red parcel, one workshop and one
+  workbench, all from the same verbatim workshop description. This is the pack the sc-23405 evidence
+  was produced against,
+  `~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc`. It is *not* checked in
+  (PNGs), so it is named by `--references` on the command line.
+- **A pack the user supplied themselves**, declaring the same seven roles. References are
+  user-provided input; Krea 2 is only how the test fixtures were made.
+
 `scripts/film-harness-smoke.sh` takes both as `PLAN=` / `REFERENCES=`, so the two-shot GPU smoke on
 the generated pack is one line:
 

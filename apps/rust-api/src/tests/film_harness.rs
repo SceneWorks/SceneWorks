@@ -1580,6 +1580,74 @@ impl Harness {
         path
     }
 
+    /// The shipped pack with every BINDABLE reference unapproved — only the `style` and the `plate`
+    /// stay approved — copied into the temp dir so the relative `file` paths still resolve.
+    ///
+    /// This, and not a pack that approves literally nothing, is the reachable "the pack fills no
+    /// reference shot" case, for two reasons found while covering this seam:
+    ///
+    ///   * the ANCHOR RULE (`film_plan.rs`) makes every shot name at least one APPROVED role in its
+    ///     conditioning slots or `continuityRoles`, so on a pack that approves nothing EVERY shot of
+    ///     EVERY plan is a finding and no plan can be produced at all; and
+    ///   * `brief.requiredBeats[].requiredRoles` must each be approved by the pack, so the shipped
+    ///     brief refuses an all-unapproved pack up front, before an envelope is ever built.
+    ///
+    /// Approving the style and the plate satisfies both — `house_style` is what every shot of the
+    /// scripted drafts declares — while approving no SUBJECT a `reference_to_video` shot could bind
+    /// (`BINDABLE_REFERENCE_KINDS`: character/prop/location). `sound` is left alone: a pack that
+    /// approves no conditioning images still carries its beds, and the lines are what SH020/SH050/
+    /// SH060 speak.
+    pub(crate) fn fixture_pack_without_bindable_references(&self) -> PathBuf {
+        let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
+        let mut pack: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("fixture pack parses");
+        let entries = pack["references"]
+            .as_array_mut()
+            .expect("the pack declares references");
+        assert!(!entries.is_empty(), "the shipped pack declares references");
+        let mut approved_kinds = Vec::new();
+        for entry in entries {
+            let entry = entry.as_object_mut().expect("reference entry object");
+            let bindable = sceneworks_core::film_plan::BINDABLE_REFERENCE_KINDS
+                .contains(&entry["kind"].as_str().expect("every entry declares a kind"));
+            // Explicit `false`: `approved` DEFAULTS to true when the key is absent, so removing the
+            // key would approve the entry instead of unapproving it.
+            entry.insert("approved".to_owned(), json!(!bindable));
+            if !bindable {
+                approved_kinds.push(entry["kind"].as_str().unwrap().to_owned());
+            }
+        }
+        approved_kinds.sort();
+        approved_kinds.dedup();
+        assert_eq!(
+            approved_kinds,
+            vec!["plate".to_owned(), "style".to_owned()],
+            "the shipped pack must still leave exactly a style and a plate approved, or this \
+             fixture no longer anchors the shots it is used with"
+        );
+        let dir = self.temp_dir.path().join("pack-unbindable");
+        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("references"))
+            .expect("fixture references dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
+                .expect("plate copies");
+        }
+        std::fs::create_dir_all(dir.join("sound")).expect("sound dir");
+        for entry in
+            std::fs::read_dir(Path::new(FIXTURE_DIR).join("sound")).expect("fixture sound dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("sound").join(entry.file_name()))
+                .expect("bed copies");
+        }
+        let path = dir.join("references.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+        path
+    }
+
     /// Copy the checked-in fixture into the temp dir with `edit` applied to the parsed plan, so a
     /// test can break one field without touching the shipped documents.
     ///
@@ -6520,6 +6588,96 @@ async fn the_reference_partition_the_planner_will_use_is_gated_by_install_state(
             .requests
             .iter()
             .all(|request| request.model == "minimax_h3_ref"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// sc-23405 review, E1 at the SEAM. A pack that approves no BINDABLE reference plans a text-only
+/// film and is never asked for the reference weights — even though the catalog SERVES the reference
+/// partition and that partition is not installed.
+///
+/// This is the pack half of the property
+/// `planning_without_a_reference_partition_in_the_catalog_stays_on_the_base_checkpoint` holds for the
+/// catalog half, and it is a separate test because it fails for a different reason. The narrowing
+/// that carries it — `narrowed_to_pack` inside `resolve_envelope` — had no harness-level cover: both
+/// pack fixtures approve all seven roles, so deleting the call left all 159 film_harness tests green
+/// while a pack that fills no reference shot still set `gate_reference` and made
+/// `plan --require-installed` demand the 18.78 GB `transformer_ref` for a plan that could never load
+/// it. That is the sc-23402/E1 regression, asserted here through the whole planner rather than only
+/// on `narrowed_to_pack` directly.
+///
+/// The pack approves a style and a plate rather than nothing at all, and the brief's `requiredRoles`
+/// are stripped, because a pack approving NOTHING is refused before an envelope exists — the anchor
+/// rule and `requiredRoles` both demand an approved role. See
+/// `fixture_pack_without_bindable_references`. What is left is the case the narrowing actually has
+/// to carry: approved references that are not SUBJECTS, so no `reference_to_video` shot could bind
+/// one.
+#[tokio::test]
+async fn a_pack_that_fills_no_reference_shot_plans_a_text_only_film_on_a_reference_serving_catalog()
+{
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The FULL catalog: `minimax_h3_ref` is present and is NOT installed. With an approving pack
+    // this exact transport + `require_installed` refuses by name
+    // (`the_reference_partition_the_planner_will_use_is_gated_by_install_state`), which is what
+    // makes a plan coming back here evidence that the envelope narrowed.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    // `requiredRoles` stripped: they name the subjects this pack deliberately does not approve, and
+    // an unmet required role is a refusal on the BRIEF, which would mask the envelope question.
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    for beat in brief["requiredBeats"].as_array_mut().unwrap() {
+        beat.as_object_mut().unwrap().remove("requiredRoles");
+    }
+    let brief_path = harness.temp_dir.path().join("brief-no-required-roles.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+
+    let mut options = planner_options(&harness, "planned-unbindable-pack");
+    options.brief_path = brief_path;
+    options.reference_pack_path = harness.fixture_pack_without_bindable_references();
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a pack that fills no reference shot must not demand the reference weights");
+
+    // No shot was offered references, so none binds any.
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "a pack approving no bindable subject fills no reference shot"
+    );
+    // The envelope told the planner so in as many words: the phase-1 envelope, not the widened one.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(request.contains("THIS CHECKPOINT HAS NONE"), "{request}");
+    assert!(
+        !request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    // And every compiled request stays on the base partition, so nothing here loads the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
         "{:?}",
         artifacts
             .compiled
