@@ -3419,15 +3419,72 @@ fn evaluate_request_with_budget_using_bundle(
     additional_evidence: &[MemoryEvidence],
     evidence_bundle: Option<&EvidenceBundle>,
 ) -> WorkerResult<MlxRequestEvaluation> {
+    select_request_with_budget_using_bundle(
+        MlxAdmissionPhase::Generation,
+        generator
+            .descriptor()
+            .capabilities
+            .component_precision_floors,
+        generator.memory_strategy_contract(),
+        |base| generator.predicted_memory_peak_from_base(base),
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        warm_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        additional_evidence,
+        evidence_bundle,
+    )?
+    .into_evaluation()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MlxAdmissionPhase {
+    TierProbe,
+    Generation,
+}
+
+/// A budget refusal is distinct from invalid artifacts/contracts: only the former can try a
+/// lower installed tier. Keep the original request-scoped diagnostic through tier selection.
+pub(crate) enum MlxRequestAdmission {
+    Admitted(Box<MlxRequestEvaluation>),
+    Rejected(WorkerError),
+}
+
+impl MlxRequestAdmission {
+    fn into_evaluation(self) -> WorkerResult<MlxRequestEvaluation> {
+        match self {
+            Self::Admitted(evaluation) => Ok(*evaluation),
+            Self::Rejected(error) => Err(error),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_request_with_budget_using_bundle(
+    phase: MlxAdmissionPhase,
+    declared_floors: &'static [gen_core::ComponentPrecisionFloor],
+    declared_contract: Option<&MemoryProviderContract>,
+    predict_peak: impl FnOnce(u64) -> gen_core::MemoryPeakBreakdown,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    budget: MemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[MemoryEvidence],
+    evidence_bundle: Option<&EvidenceBundle>,
+) -> WorkerResult<MlxRequestAdmission> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
-    // after the concrete generator is loaded, then use that tier for every evidence/cache identity
+    // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity
     // in this request so uniform-q4 measurements cannot authorize a mixed-precision provider.
-    let declared_floors = generator
-        .descriptor()
-        .capabilities
-        .component_precision_floors;
     let provider_floors = active_component_floors(declared_floors, plan.tier.quant);
     let mut effective_plan;
     let plan = if plan.tier.component_precision_floors == provider_floors {
@@ -3443,7 +3500,7 @@ fn evaluate_request_with_budget_using_bundle(
     let geometry = request_geometry(inputs);
     let (mode, mode_key) = provider_request_mode(plan.engine_id, inputs);
     let mut fallback_contract;
-    let provider_contract = if let Some(contract) = generator.memory_strategy_contract() {
+    let provider_contract = if let Some(contract) = declared_contract {
         contract
     } else {
         fallback_contract = MemoryProviderContract::compatibility_default(
@@ -3761,7 +3818,7 @@ fn evaluate_request_with_budget_using_bundle(
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
     // Exact evidence already describes the whole request peak and therefore remains authoritative.
     let contract_base_peak_bytes = plan.contract_base_peak_bytes(total_peak_bytes, contract);
-    let base_prediction = generator.predicted_memory_peak_from_base(contract_base_peak_bytes);
+    let base_prediction = predict_peak(contract_base_peak_bytes);
     let evidence_peak_bytes = admission
         .evidence
         .iter()
@@ -3906,15 +3963,17 @@ fn evaluate_request_with_budget_using_bundle(
                     )
                 })
                 .unwrap_or_default();
-            return Err(WorkerError::InvalidPayload(format!(
-                "{} request {}x{} count {} needs at least {:.2} GiB at its smallest verified \
+            return Ok(MlxRequestAdmission::Rejected(WorkerError::InvalidPayload(
+                format!(
+                    "{} request {}x{} count {} needs at least {:.2} GiB at its smallest verified \
                  MLX host boundary, but no exact candidate fits the live unified-memory budget\
                  {alternative}",
-                plan.model_id,
-                inputs.width,
-                inputs.height,
-                inputs.count.max(1),
-                minimum_required_host as f64 / BYTES_PER_GIB,
+                    plan.model_id,
+                    inputs.width,
+                    inputs.height,
+                    inputs.count.max(1),
+                    minimum_required_host as f64 / BYTES_PER_GIB,
+                ),
             )));
         }
     } else {
@@ -3995,7 +4054,17 @@ fn evaluate_request_with_budget_using_bundle(
         },
     });
     let resident_allowance_credit = if admission.path == AdmissionPath::Legacy {
-        attributable_resident_bytes
+        if phase == MlxAdmissionPhase::TierProbe && load_policy == OffloadPolicy::Resident {
+            // A cold probe charges the FULL pipeline and gives no live allocation credit. Its
+            // Resident uncertainty allowance must nevertheless exclude the declared constructor
+            // weights, just as the loaded gate excludes weights already present. Otherwise moving
+            // this decision before load inflates the allowance and falsely rejects fitting tiers.
+            // This affects only Resident's margin, never the peak/budget or optimized candidates;
+            // the constructor floor and final live-allocation check still apply independently.
+            contract.total_resident_bytes()
+        } else {
+            attributable_resident_bytes
+        }
     } else {
         0
     };
@@ -4100,7 +4169,7 @@ fn evaluate_request_with_budget_using_bundle(
                     )
                 })
                 .unwrap_or_default();
-            return Err(WorkerError::InvalidPayload(format!(
+            return Ok(MlxRequestAdmission::Rejected(WorkerError::InvalidPayload(format!(
                 "{} request {}x{} count {} needs {:.2} GiB for the complete pipeline but only {:.2} GiB is safely available \
                  ({:.2} GiB total, {:.2} GiB unrelated active allocations, {:.2} GiB reserved){}",
                 plan.engine_id,
@@ -4113,7 +4182,7 @@ fn evaluate_request_with_budget_using_bundle(
                 budget.committed_bytes as f64 / BYTES_PER_GIB,
                 budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB,
                 alternative,
-            )));
+            ))));
         }
         // sc-18096 retired the "no measured evidence ⇒ refuse" meaning of this arm: every
         // implemented rung of a legacy route now carries an estimate-backed candidate, so the
@@ -4206,7 +4275,11 @@ fn evaluate_request_with_budget_using_bundle(
         predicted_peak_bytes
     };
     tracing::info!(
-        event = "memory_strategy_request_selected",
+        event = if phase == MlxAdmissionPhase::TierProbe {
+            "memory_strategy_tier_candidate_selected"
+        } else {
+            "memory_strategy_request_selected"
+        },
         route = plan.engine_id,
         backend = "mlx",
         tier = ?plan.tier,
@@ -4256,12 +4329,16 @@ fn evaluate_request_with_budget_using_bundle(
         },
     };
     tracing::info!(
-        event = "mlx_decode_quality_request_audit",
+        event = if phase == MlxAdmissionPhase::TierProbe {
+            "mlx_decode_quality_tier_candidate_audit"
+        } else {
+            "mlx_decode_quality_request_audit"
+        },
         route = plan.engine_id,
         decisions = ?evaluation.decode_quality_decisions,
         "recorded typed request-scoped decode-quality decisions"
     );
-    Ok(evaluation)
+    Ok(MlxRequestAdmission::Admitted(Box::new(evaluation)))
 }
 
 #[cfg(target_os = "macos")]
@@ -4307,6 +4384,72 @@ fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: MemoryGeometry) -> 
     } else {
         plan.generic_total_peak_bytes(geometry)
     }
+}
+
+/// Preserve the constructor's weights floor for eager/unadopted loads. Sequential specs have
+/// already been authorized by the exact declaration or the existing load gate. This diagnostic
+/// describes the limiting load working set, not the unrelated resident activation estimate.
+#[cfg(target_os = "macos")]
+pub(crate) fn preflight_load_rejection(engine_id: &str, spec: &LoadSpec) -> Option<WorkerError> {
+    if spec.offload_policy == OffloadPolicy::Sequential {
+        return None;
+    }
+    let ResidencyOutcome::Reject { available_gb, .. } = decide_residency_for_spec(engine_id, spec)
+    else {
+        return None;
+    };
+    let (total, text, _) = spec_component_bytes(engine_id, spec);
+    let staged = engine_supports_sequential(engine_id);
+    let weights = if staged {
+        staged_weights_gb(total, text)
+    } else {
+        total as f64 / BYTES_PER_GIB
+    };
+    let reserve = crate::fit_gate::legacy_unified_reserve(available_gb).gb;
+    Some(WorkerError::InvalidPayload(format!(
+        "{engine_id} cannot load this tier: its {} model weights need {weights:.2} GiB, \
+         but only {:.2} GiB is available after the OS reserve ({available_gb:.2} GiB total). \
+         No supported deferred load was selected; use a smaller installed tier or a Mac with more memory.",
+        if staged { "largest simultaneous component set of" } else { "resident" },
+        (available_gb - reserve).max(0.0),
+    )))
+}
+
+/// Evaluate a fully prepared candidate without constructing a generator or allocating tensors.
+/// The registry contract is queried against the same spec handed to the cache on selection.
+#[cfg(target_os = "macos")]
+pub(crate) fn preflight_request(
+    spec: &LoadSpec,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    budget: MemoryBudget,
+) -> WorkerResult<MlxRequestAdmission> {
+    let contract = crate::inference_runtime::media()
+        .memory_strategy_contract(plan.engine_id, spec)
+        .map_err(|error| {
+            crate::classify_engine_error("MLX pre-load memory contract failed", error)
+        })?;
+    select_request_with_budget_using_bundle(
+        MlxAdmissionPhase::TierProbe,
+        declared_component_floors(plan.engine_id),
+        contract.as_ref(),
+        |base| {
+            contract.as_ref().map_or(
+                gen_core::MemoryPeakBreakdown::from_unattributed(base),
+                |contract| contract.predicted_peak_from_base(base),
+            )
+        },
+        plan,
+        inputs,
+        MemoryCacheState::Cold,
+        spec.offload_policy,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        budget,
+        request_total_peak_bytes(plan, request_geometry(inputs)),
+        0,
+        &[],
+        None,
+    )
 }
 
 /// Evaluate one real MLX request after cache lookup and immediately before generation.
@@ -5985,18 +6128,6 @@ pub(crate) fn residency_for_dir(
 ) -> ResidencyOutcome {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
     decide_residency_for_spec(engine_id, &spec)
-}
-
-/// The on-disk WEIGHT bytes (GiB) a `spec` loads — the weights half of the number
-/// [`decide_residency_for_spec`] rejects on (`Σweights + `[`HEADROOM_GB`]).
-///
-/// For the reject message (sc-15154). The peak alone cannot be read: on a small budget the flat
-/// headroom dominates it, so a tier whose real install is 7 GB is refused with a ~25 GB figure and
-/// the number reads like the wrong tier's total. Naming both makes the split legible — and makes a
-/// mis-scoped footprint visible instead of hiding inside a constant.
-#[cfg(target_os = "macos")]
-pub(crate) fn spec_weights_gb(engine_id: &str, spec: &LoadSpec) -> f64 {
-    spec_component_bytes(engine_id, spec).0 as f64 / BYTES_PER_GIB
 }
 
 /// Build the actionable over-budget rejection. `staged_gb` is `Some` when sequential residency was
@@ -20643,3 +20774,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mlx_tier_admission_tests.rs"]
+mod tier_admission_tests;
