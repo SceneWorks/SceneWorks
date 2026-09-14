@@ -138,10 +138,21 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
     let pack = read_pack(&build.pack_path);
     assert_eq!(pack.id, "courier-workshop-refs");
     assert_eq!(pack.references.len(), 7, "5 generated + 2 inherited");
-    assert_eq!(pack.sound.len(), 4, "the source pack's sound is copied");
+    assert_eq!(pack.sound.len(), 5, "the source pack's sound is copied");
     for entry in &pack.sound {
+        // A synthesized line (sc-23404) carries `text` and no clip on disk: the run that USES this
+        // pack speaks it, so `make-references` has nothing to copy for it. Everything else — the
+        // room tone and the music bed — must really be there.
+        let Some(file) = entry.file.as_deref().filter(|_| !entry.is_synthesized()) else {
+            assert!(
+                entry.is_synthesized(),
+                "sound {:?} declares neither a file nor a line to speak",
+                entry.role
+            );
+            continue;
+        };
         assert!(
-            options.out_dir.join(&entry.file).is_file(),
+            options.out_dir.join(file).is_file(),
             "sound {:?} was not copied",
             entry.role
         );

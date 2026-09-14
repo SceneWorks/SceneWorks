@@ -6,7 +6,10 @@
   // with a real approved plate and bump `version`; the roles and the plan do not change.
   "schemaVersion": 1,
   "id": "courier-workshop-refs",
-  "version": 1,
+  // 2 (sc-23404): the three dialogue roles became synthesized lines instead of placeholder tones,
+  // and SH060's line moved to its own `recipient_reveal_line` role so each of the three placements
+  // speaks its own text.
+  "version": 2,
   "description": "Placeholder plates for the courier/workshop/red-parcel sequence.",
   "references": [
     { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "The courier: blue jacket, carries the parcel." },
@@ -21,15 +24,22 @@
   // placed through different slots — a `dialogue` role goes on a shot's `dialogueClip`, and the
   // `ambience`/`music` roles go on the plan's `sound` beds. They are never conditioning.
   //
-  // The clips are deterministic placeholder tones written by `film-harness fixture-sound`
-  // (`FIXTURE_SOUNDS` in apps/rust-api/src/film_harness.rs): mono 8 kHz PCM-16 triangle waves at
-  // one frequency each, so the three buses are trivially distinguishable by ear when checking the
-  // POC export. Replace a file with real recorded audio and bump `version`; nothing else changes.
-  // The two beds are 32s — long enough to play under the whole six-shot sequence without a gap,
+  // The two BEDS are deterministic placeholder tones written by `film-harness fixture-sound`
+  // (`FIXTURE_SOUNDS` in apps/rust-api/src/film_harness.rs): mono 8 kHz PCM-16 triangle waves at one
+  // frequency each, so the two bed buses stay trivially distinguishable by ear when checking the
+  // POC export. They are 32s — long enough to play under the whole six-shot sequence without a gap,
   // which is the point of placing them once instead of per shot.
+  //
+  // The three DIALOGUE entries carry `text` instead of a file (sc-23404): the run speaks each line
+  // through `POST /api/v1/audio/jobs` during `ensure_sound`, writes the WAV into `sound/` under a
+  // name derived from the role and the line's sha, and imports it on the dialogue bus exactly as it
+  // imports a recorded clip. Each line is the one the shot's own `dialogue` INTENT already states,
+  // so the film says out loud what the plan says it says. Replace a `text` with a `file` pointing at
+  // a real recording and bump `version`; nothing else changes.
   "sound": [
-    { "role": "courier_line", "kind": "dialogue", "file": "sound/courier_line.wav", "description": "Placeholder for the courier's line (400 Hz, 2s)." },
-    { "role": "recipient_line", "kind": "dialogue", "file": "sound/recipient_line.wav", "description": "Placeholder for the recipient's lines (500 Hz, 2s)." },
+    { "role": "courier_line", "kind": "dialogue", "voice": "am_michael", "text": "Delivery. I'll leave it on the bench.", "description": "The courier's line in SH020." },
+    { "role": "recipient_line", "kind": "dialogue", "voice": "af_heart", "text": "Huh. That's not mine.", "description": "The recipient's line in SH050, quietly, as she notices the parcel." },
+    { "role": "recipient_reveal_line", "kind": "dialogue", "voice": "af_heart", "text": "Oh. Oh, that's lovely.", "description": "The recipient's line in SH060, as the lid lifts." },
     { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav", "description": "Continuous workshop room tone (100 Hz, 32s)." },
     { "role": "main_theme", "kind": "music", "file": "sound/main_theme.wav", "description": "Continuous music bed (250 Hz, 32s)." }
   ]

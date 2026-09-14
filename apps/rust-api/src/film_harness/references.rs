@@ -309,11 +309,17 @@ fn resolve_inherited(spec: &ReferenceSpec, spec_dir: &Path) -> (Inherited, Vec<P
     for (file, what) in references
         .iter()
         .map(|entry| (entry.file.clone(), format!("reference {:?}", entry.role)))
-        .chain(
-            sound
-                .iter()
-                .map(|entry| (entry.file.clone(), format!("sound {:?}", entry.role))),
-        )
+        .chain(sound.iter().filter_map(|entry| {
+            // A synthesized line (sc-23404) has no clip on disk to inherit — `ensure_sound` speaks
+            // it and overwrites `file` with what synthesis wrote. An entry that pins a filename
+            // alongside its `text` is synthesized INTO that name, so there is still nothing here
+            // to require on disk.
+            entry
+                .file
+                .clone()
+                .filter(|_| !entry.is_synthesized())
+                .map(|file| (file, format!("sound {:?}", entry.role)))
+        }))
     {
         let path = source_dir.join(&file);
         match std::fs::metadata(&path) {
@@ -627,7 +633,9 @@ fn assert_replaceable_pack(out_dir: &Path) -> Result<(), HarnessError> {
         .references
         .iter()
         .map(|entry| entry.file.as_str())
-        .chain(pack.sound.iter().map(|entry| entry.file.as_str()))
+        // A synthesized line may declare no `file` at all (sc-23404); one that pins a filename
+        // still declares that path, so it is not swept as a stray.
+        .chain(pack.sound.iter().filter_map(|entry| entry.file.as_deref()))
         .filter_map(|file| file.split('/').next())
         .collect();
     for entry in std::fs::read_dir(out_dir)? {
@@ -723,11 +731,12 @@ async fn generate_into(
         entries.push(entry.clone());
     }
     for entry in &inherited.sound {
-        copy_into(
-            &inherited.source_dir.join(&entry.file),
-            pending,
-            &entry.file,
-        )?;
+        // Same rule as the inherit-time existence check above: a synthesized line has no clip on
+        // disk to carry forward, because the inheriting run speaks it itself (sc-23404).
+        let Some(file) = entry.file.as_deref().filter(|_| !entry.is_synthesized()) else {
+            continue;
+        };
+        copy_into(&inherited.source_dir.join(file), pending, file)?;
     }
     let pack = ReferencePack {
         schema_version: film_plan::REFERENCE_PACK_SCHEMA_VERSION,
