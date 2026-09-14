@@ -35,9 +35,13 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   if (!binding?.project_id || !Array.isArray(binding.assets) || binding.assets.length !== 120) die("tuple-local API project/asset binding is missing");
   const imported = new Map(binding.assets.map((item) => [item.case_index, item]));
   const route = (row, suffix, tier = "1b") => { const asset = imported.get(row.case_index); if (!asset?.asset_id || asset.input_png_sha256 !== row.input_png.sha256) die("imported project asset identity mismatches source row"); return { case_id: `quality-v1-${row.case_index}${suffix}`, projectId: binding.project_id, sourceAssetId: asset.asset_id, model: tier === "8b" ? "starvector_8b" : "starvector_1b", source_svg: row.svg.path, source_svg_sha256: row.svg.sha256, input_png: row.input_png.path, input_png_sha256: row.input_png.sha256, reference_png: row.reference.path, reference_png_sha256: row.reference.sha256, sampling: row.sampling, detailBudget: row.detail_budget }; };
+  const routeScenarios = (records, label, tier) => {
+    if (!Array.isArray(records)) die(`pre-provisioned ${label} cases are missing`);
+    return records.map((record, index) => ({ ...route(rows[index % rows.length], `-${label}`, tier), ...record }));
+  };
   const parityRows = corpus.upstream_image_quality_cases.sources.flatMap((_, sourceIndex) => rows.slice(sourceIndex * 30, sourceIndex * 30 + 5));
   if (parityRows.length !== 20) die("pinned corpus must select five deterministic parity rows from each of four sources");
-  const tuples = Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => { const tier = tuple.split(":")[1]; return [tuple, { image_quality: rows.map((row) => route(row, "", tier)), deterministic_parity: parityRows.map((row, seed) => ({ ...route(row, "-parity", tier), seed })), lifecycle: index.lifecycle_cases?.[tuple], limits: index.limit_cases?.[tuple] }]; }));
+  const tuples = Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => { const tier = tuple.split(":")[1]; return [tuple, { image_quality: rows.map((row) => route(row, "", tier)), deterministic_parity: parityRows.map((row, seed) => ({ ...route(row, "-parity", tier), seed })), lifecycle: routeScenarios(index.lifecycle_cases?.[tuple], "lifecycle", tier), limits: routeScenarios(index.limit_cases?.[tuple], "limit", tier) }]; }));
   if (!hostileGenerator) {
     await verifyUpstreamExecution(upstreamRoot);
     // The same two immutable model-specific oracle bundles serve both backends.

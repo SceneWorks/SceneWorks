@@ -98,3 +98,44 @@ test("authenticated upstream-only failure advances execution without rewriting n
   await writeFile(path.join(output, "execution-attempts/failed-upstream/upstream.zip"), "substituted archive");
   await assert.rejects(() => verifyExecutionPredecessor(config, output, native), /evidence bytes differ/);
 });
+
+test("authenticated native failure retains upstream, raw, and combined archives as one successor", async (t) => {
+  const { config, output, root } = await fixture(t), bytes = await readFile(path.join(root, "77.zip"));
+  const campaign = "failed-native";
+  const sourceArtifacts = [
+    ["upstream", "88", `starvector-upstream-${campaign}`],
+    ["raw", "89", `starvector-terminal-mlx-1b-${campaign}`],
+    ["combined", "90", `starvector-terminal-receipt-${campaign}`],
+  ].map(([role, id, name]) => ({ role, id, name, size: bytes.length, digest: `sha256:${sha(bytes)}` }));
+  for (const input of sourceArtifacts) await writeFile(path.join(root, `${input.id}.zip`), bytes);
+  const value = {
+    stage: "native",
+    predecessor_campaign_id: config.campaign_id,
+    campaign_id: campaign,
+    inference_revision: "c".repeat(40),
+    sceneworks_revision: "d".repeat(40),
+    workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/server-candle-linux.yml", run_id: "101", run_attempt: 1, head_sha: "d".repeat(40), conclusion: "failure" },
+    failure: { code: "native_model_receipt_unproven", phase: "execution", tuple: "mlx:1b" },
+    source_artifacts: sourceArtifacts,
+  };
+  config.execution_predecessor = value;
+  const run = { id: 101, run_attempt: 1, head_sha: value.sceneworks_revision, path: value.workflow.path, event: "workflow_dispatch", status: "completed", conclusion: "failure" };
+  const artifacts = sourceArtifacts.map((input) => ({ id: Number(input.id), name: input.name, size_in_bytes: input.size, digest: input.digest, expired: false, workflow_run: { id: 101, head_sha: run.head_sha } }));
+  const conclusions = { "upstream-reference": "success", "mlx-1b": "failure", "mlx-8b": "skipped", "cuda-1b": "skipped", "cuda-8b": "skipped", "seal-receipt": "failure" };
+  const jobs = { total_count: 6, jobs: Object.entries(conclusions).map(([stage, conclusion]) => ({ name: `starvector-campaign / ${stage}`, head_sha: run.head_sha, conclusion })) };
+  const fetchImpl = async (url) => {
+    const artifactIndex = sourceArtifacts.findIndex((input) => url.includes(`/artifacts/${input.id}`));
+    return { ok: true, json: async () => artifactIndex >= 0 ? artifacts[artifactIndex] : url.includes("/jobs?") ? jobs : run };
+  };
+  await prepareRecovery(config, output, { archiveRoot: root, token: "fixture-token", fetchImpl });
+  const native = await verifyRecovery(config, output, { campaignRunId: "next", permanentPin: value.inference_revision });
+  assert.deepEqual(await verifyExecutionPredecessor(config, output, native), value);
+  for (const input of sourceArtifacts) await checkedRecoveryFile(output, `execution-attempts/${campaign}/${input.role}.zip`, { size: input.size, sha256: input.digest.slice(7) });
+
+  assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: { ...value, source_artifacts: value.source_artifacts.slice(0, 2) } }, run, artifacts, jobs), /artifact census/);
+  const wrongArtifact = artifacts.map((entry) => ({ ...entry })); wrongArtifact[2].digest = `sha256:${"e".repeat(64)}`;
+  assert.throws(() => validateExecutionPredecessor(config, run, wrongArtifact, jobs), /combined artifact differs/);
+  const wrongJobs = structuredClone(jobs); wrongJobs.jobs.find((job) => job.name.endsWith("mlx-8b")).conclusion = "success";
+  assert.throws(() => validateExecutionPredecessor(config, run, artifacts, wrongJobs), /mlx-8b/);
+  assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: { ...value, failure: { ...value.failure, code: "generic_error" } } }, run, artifacts, jobs), /failure identity/);
+});

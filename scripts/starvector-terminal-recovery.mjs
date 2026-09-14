@@ -91,21 +91,36 @@ export async function prepareRecovery(config, output, { archiveRoot, token = pro
 // scopes. An upstream-only failure has no native tuple receipt to quarantine.
 export function validateExecutionPredecessor(config, run, artifact, jobs) {
   const value = config.execution_predecessor, workflow = value?.workflow, input = value?.source_artifact;
-  if (!value || value.stage !== "upstream-reference" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.campaign_id ?? "") || value.campaign_id === config.campaign_id || !/^[a-f0-9]{40}$/.test(value.inference_revision ?? "") || !/^[a-f0-9]{40}$/.test(value.sceneworks_revision ?? "")) fail("invalid execution predecessor identity");
+  if (!value || !["upstream-reference", "native"].includes(value.stage) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.campaign_id ?? "") || value.campaign_id === config.campaign_id || !/^[a-f0-9]{40}$/.test(value.inference_revision ?? "") || !/^[a-f0-9]{40}$/.test(value.sceneworks_revision ?? "")) fail("invalid execution predecessor identity");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.predecessor_campaign_id ?? "") || value.predecessor_campaign_id === value.campaign_id) fail("failed execution lacks its original claim predecessor");
   if (workflow?.repository !== "SceneWorks/SceneWorks" || ![".github/workflows/starvector-terminal.yml", ".github/workflows/server-candle-linux.yml"].includes(workflow.path) || !/^[1-9][0-9]*$/.test(workflow.run_id ?? "") || !Number.isSafeInteger(workflow.run_attempt) || workflow.run_attempt < 1 || workflow.head_sha !== value.sceneworks_revision || !["failure", "cancelled", "timed_out"].includes(workflow.conclusion)) fail("invalid failed execution workflow");
   if (String(run?.id) !== workflow.run_id || run.run_attempt !== workflow.run_attempt || run.head_sha !== workflow.head_sha || run.path !== workflow.path || run.event !== "workflow_dispatch" || run.status !== "completed" || run.conclusion !== workflow.conclusion) fail("authenticated failed execution workflow differs");
-  if (!/^[1-9][0-9]*$/.test(input?.id ?? "") || input.name !== `starvector-upstream-${value.campaign_id}` || !Number.isSafeInteger(input.size) || input.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(input.digest ?? "") || String(artifact?.id) !== input.id || artifact.name !== input.name || artifact.size_in_bytes !== input.size || artifact.digest !== input.digest || artifact.expired !== false || String(artifact.workflow_run?.id) !== workflow.run_id || artifact.workflow_run?.head_sha !== workflow.head_sha) fail("authenticated upstream artifact differs");
   if (!Array.isArray(jobs?.jobs) || jobs.total_count !== jobs.jobs.length) fail("failed execution job census is incomplete");
-  for (const stage of ["upstream-reference", "mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"]) {
+  if (value.stage === "upstream-reference") {
+    if (!/^[1-9][0-9]*$/.test(input?.id ?? "") || input.name !== `starvector-upstream-${value.campaign_id}` || !Number.isSafeInteger(input.size) || input.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(input.digest ?? "") || String(artifact?.id) !== input.id || artifact.name !== input.name || artifact.size_in_bytes !== input.size || artifact.digest !== input.digest || artifact.expired !== false || String(artifact.workflow_run?.id) !== workflow.run_id || artifact.workflow_run?.head_sha !== workflow.head_sha) fail("authenticated upstream artifact differs");
+    for (const stage of ["upstream-reference", "mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"]) {
+      const matches = jobs.jobs.filter(job => job.name === stage || job.name.endsWith(` / ${stage}`));
+      if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || (stage === "upstream-reference" ? !["failure", "cancelled", "timed_out"].includes(matches[0].conclusion) : matches[0].conclusion !== "skipped")) fail(`execution predecessor did not leave ${stage} in the required state`);
+    }
+    return value;
+  }
+  if (value.failure?.code !== "native_model_receipt_unproven" || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b") fail("invalid native execution failure identity");
+  const expectedRoles = ["upstream", "raw", "combined"], inputs = value.source_artifacts, artifacts = Array.isArray(artifact) ? artifact : [];
+  if (!Array.isArray(inputs) || inputs.length !== expectedRoles.length || artifacts.length !== expectedRoles.length) fail("native execution artifact census differs");
+  for (const [index, role] of expectedRoles.entries()) {
+    const expected = inputs[index], observed = artifacts[index];
+    const name = role === "upstream" ? `starvector-upstream-${value.campaign_id}` : role === "raw" ? `starvector-terminal-mlx-1b-${value.campaign_id}` : `starvector-terminal-receipt-${value.campaign_id}`;
+    if (expected?.role !== role || !/^[1-9][0-9]*$/.test(expected.id ?? "") || expected.name !== name || !Number.isSafeInteger(expected.size) || expected.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(expected.digest ?? "") || String(observed?.id) !== expected.id || observed.name !== expected.name || observed.size_in_bytes !== expected.size || observed.digest !== expected.digest || observed.expired !== false || String(observed.workflow_run?.id) !== workflow.run_id || observed.workflow_run?.head_sha !== workflow.head_sha) fail(`authenticated native ${role} artifact differs`);
+  }
+  for (const [stage, conclusion] of [["upstream-reference", "success"], ["mlx-1b", "failure"], ["mlx-8b", "skipped"], ["cuda-1b", "skipped"], ["cuda-8b", "skipped"], ["seal-receipt", "failure"]]) {
     const matches = jobs.jobs.filter(job => job.name === stage || job.name.endsWith(` / ${stage}`));
-    if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || (stage === "upstream-reference" ? !["failure", "cancelled", "timed_out"].includes(matches[0].conclusion) : matches[0].conclusion !== "skipped")) fail(`execution predecessor did not leave ${stage} in the required state`);
+    if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || matches[0].conclusion !== conclusion) fail(`native execution predecessor did not leave ${stage} in the required state`);
   }
   return value;
 }
 
 async function prepareExecutionPredecessor(config, output, { archiveRoot, token, fetchImpl }) {
-  const value = config.execution_predecessor, workflow = value.workflow, input = value.source_artifact;
+  const value = config.execution_predecessor, workflow = value.workflow;
   if (!token) fail("Actions read token required for failed execution verification");
   const get = async (endpoint, binary = false) => {
     const response = await fetchImpl(`https://api.github.com/repos/SceneWorks/SceneWorks/${endpoint}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(60000) });
@@ -113,14 +128,16 @@ async function prepareExecutionPredecessor(config, output, { archiveRoot, token,
     return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
   };
   // The attempt-specific endpoint never substitutes a newer re-run's outcome.
-  const base = `actions/runs/${workflow.run_id}/attempts/${workflow.run_attempt}`;
-  const run = await get(base), artifact = await get(`actions/artifacts/${input.id}`), jobs = await get(`${base}/jobs?per_page=100`);
-  validateExecutionPredecessor(config, run, artifact, jobs);
-  const bytes = archiveRoot ? await readFile(path.join(archiveRoot, `${input.id}.zip`)) : await get(`actions/artifacts/${input.id}/zip`, true);
-  if (bytes.length !== input.size || `sha256:${sha(bytes)}` !== input.digest) fail("failed execution archive identity differs");
+  const base = `actions/runs/${workflow.run_id}/attempts/${workflow.run_attempt}`, inputs = value.stage === "native" ? value.source_artifacts : [value.source_artifact];
+  const run = await get(base), artifacts = await Promise.all(inputs.map((input) => get(`actions/artifacts/${input.id}`))), jobs = await get(`${base}/jobs?per_page=100`);
+  validateExecutionPredecessor(config, run, value.stage === "native" ? artifacts : artifacts[0], jobs);
   const root = `execution-attempts/${value.campaign_id}`;
-  await put(output, `${root}/upstream.zip`, bytes);
-  await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, artifact, jobs }));
+  for (const input of inputs) {
+    const bytes = archiveRoot ? await readFile(path.join(archiveRoot, `${input.id}.zip`)) : await get(`actions/artifacts/${input.id}/zip`, true);
+    if (bytes.length !== input.size || `sha256:${sha(bytes)}` !== input.digest) fail("failed execution archive identity differs");
+    await put(output, `${root}/${value.stage === "native" ? input.role : "upstream"}.zip`, bytes);
+  }
+  await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, ...(value.stage === "native" ? { artifacts } : { artifact: artifacts[0] }), jobs }));
 }
 
 // Ordered upstream-only history is retained separately from native receipts.
@@ -144,8 +161,9 @@ export async function verifyExecutionPredecessor(config, root, nativePredecessor
     const bytes = await checkedRecoveryFile(root, metadataPath, { size: info.size, sha256: sha(await readFile(path.join(root, metadataPath))) });
     const metadata = JSON.parse(bytes);
     if (stable(metadata.predecessor) !== stable(value)) fail("failed execution declaration differs from prepared evidence");
-    validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, metadata.artifact, metadata.jobs);
-    await checkedRecoveryFile(root, `${relative}/upstream.zip`, { size: value.source_artifact.size, sha256: value.source_artifact.digest.slice(7) });
+    validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, value.stage === "native" ? metadata.artifacts : metadata.artifact, metadata.jobs);
+    const inputs = value.stage === "native" ? value.source_artifacts : [value.source_artifact];
+    for (const input of inputs) await checkedRecoveryFile(root, `${relative}/${value.stage === "native" ? input.role : "upstream"}.zip`, { size: input.size, sha256: input.digest.slice(7) });
   }
   return config.execution_predecessor ?? nativePredecessor;
 }

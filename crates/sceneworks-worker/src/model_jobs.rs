@@ -3113,6 +3113,84 @@ mod artifact_provenance_tests {
         );
     }
 
+    #[test]
+    fn exact_revision_handoff_repairs_an_unstamped_mirrored_v2_receipt_once() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "starvector/terminal-copy";
+        let model_id = "starvector_1b";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot");
+        std::fs::write(snapshot.join("model.safetensors"), b"exact weights").expect("weights");
+        let managed = data.path().join("models").join(safe_download_dir(model_id));
+        std::fs::create_dir_all(&managed).expect("managed receipt dir");
+        let entry = json!({
+            "schemaVersion": 2,
+            "repo": repo,
+            "modelId": model_id,
+            "variant": "default",
+            "snapshotRevision": revision,
+            "resolvedFiles": ["model.safetensors"],
+            "artifactTreeStamp": null,
+        });
+        let mut envelope = entry.clone();
+        envelope["receipts"] = json!([entry]);
+        let marker = managed.join(INSTALL_MARKER);
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&envelope).expect("receipt json"),
+        )
+        .expect("receipt");
+
+        assert_eq!(
+            huggingface_receipt_weights_dir_at_revision(
+                data.path(),
+                repo,
+                revision,
+                Some(model_id),
+                None,
+            ),
+            Some(snapshot.clone()),
+            "the strict native handoff must establish proof for an exact unstamped v2 receipt"
+        );
+        let repaired: Value =
+            serde_json::from_slice(&std::fs::read(&marker).expect("repaired receipt"))
+                .expect("receipt json");
+        let stamp = repaired["artifactTreeStamp"]
+            .as_str()
+            .expect("top-level stamp");
+        assert!(is_sha256_fingerprint(stamp));
+        assert_eq!(repaired["artifactTreeStampSource"], "repair");
+        assert_eq!(repaired["receipts"][0]["artifactTreeStamp"], stamp);
+        assert_eq!(repaired["receipts"][0]["artifactTreeStampSource"], "repair");
+
+        std::fs::write(snapshot.join("model.safetensors"), b"mutated after repair")
+            .expect("mutate weights");
+        let before_rejected_read = std::fs::read(&marker).expect("receipt before rejected read");
+        assert_eq!(
+            huggingface_receipt_weights_dir_at_revision(
+                data.path(),
+                repo,
+                revision,
+                Some(model_id),
+                None,
+            ),
+            None,
+            "an existing mismatched stamp must remain fail-closed"
+        );
+        assert_eq!(
+            std::fs::read(&marker).expect("receipt after rejected read"),
+            before_rejected_read,
+            "the native handoff must never repair over recorded integrity drift"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn hf_tree_stamp_detects_in_place_blob_mutation_beneath_unchanged_snapshot_symlink() {
@@ -3202,8 +3280,13 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     model_id: Option<&str>,
     variant: Option<&str>,
 ) -> Option<PathBuf> {
+    // An exact-revision native provider is itself a provenance consumer. A source-produced v2
+    // receipt may predate download-time tree stamping (or have crossed a verified offline-library
+    // materialization boundary), so establish the canonical locked/atomic baseline when the stamp
+    // is absent. Existing stamp drift is never repaired, and the requested repository/revision is
+    // still checked below before a path can cross the native load boundary.
     let resolved =
-        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Allow)?;
     let identity = &resolved.provenance.as_ref()?.identity;
     if identity.repository != repo || identity.revision != revision {
         return None;
