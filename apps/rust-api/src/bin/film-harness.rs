@@ -1,5 +1,5 @@
 //! `film-harness` — plan, compile and render a production plan into a SceneWorks sequence through a
-//! running SceneWorks API (epic 22708, sc-22710 + sc-22713).
+//! running SceneWorks API (epic 22708, sc-22710, sc-22711, sc-22713, sc-22714).
 //!
 //! ```text
 //! film-harness plan         --brief BRIEF.json --references REFERENCES.json --out DIR [--api URL]
@@ -116,14 +116,6 @@ replace-take rejects the take a shot is carrying and renders exactly ONE more fo
              --export the existing export is only marked stale.
 cancel       asks a run in another shell to stop; status prints what a record says without touching
              the API. A directory with no run.json in it is refused, not created.
-
-ONE CONTROLLER PER RUN DIRECTORY: run, resume and replace-take each rewrite --out/run.json as they
-go and nothing locks it, so two held against the same directory at once interleave their writes.
-The idempotency keys make a SEQUENTIAL replay safe; they are not a lock. `run` refuses a directory
-that already holds a record — use resume, or a different --out.
-
-             the API.
-
 review       samples the selected take of each shot at the review plan's declared positions (the
              frame_extract job), puts each declared question to the image_vqa job (SenseNova-U1-8B)
              and writes an observed-state document per take under <out>/reviews/. It renders
@@ -140,6 +132,11 @@ request-repair  ONE bounded repair attempt through replace-take, with the review
 review-eval  scores the reviewer against a fixed labeled set of correct and deliberately broken
              takes and reports detections, misses, false alarms, abstentions and overclaims.
 review-fixtures writes the placeholder frames a labeled set names.
+
+ONE CONTROLLER PER RUN DIRECTORY: run, resume and replace-take each rewrite --out/run.json as they
+go and nothing locks it, so two held against the same directory at once interleave their writes.
+The idempotency keys make a SEQUENTIAL replay safe; they are not a lock. `run` refuses a directory
+that already holds a record — use resume, or a different --out.
 
 REVIEW IS ASSISTIVE, NOT QUALITY ASSURANCE. A local vision model both misses real faults and flags
 correct takes; nothing it says approves, rejects or conditions anything.
