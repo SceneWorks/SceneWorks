@@ -1588,3 +1588,130 @@ fn both_ffmpeg_reachable_helpers_fall_back_to_the_path_probe_when_the_override_i
     );
     assert_eq!(FAKE_REFINE_PEAK_BYTES, 9_000_000_000);
 }
+
+// ---------------------------------------------------------------------------------------------
+// sc-22715 evaluation finding — a replacement dropped every dialogue line from the sequence
+// ---------------------------------------------------------------------------------------------
+
+/// `replace-take` re-assembled the timeline without adopting the run's sound assets, so the merge
+/// re-derived an EMPTY dialogue track over the saved one and every line the run had placed was
+/// gone from the sequence and the next export (seen on the 2026-09-14 evaluation film: three lines
+/// after the run, none after the first `request-repair`). The beds only survived because a bed
+/// track with no asset is skipped and then carried over as a track the harness does not own.
+///
+/// The sound-carrying fixture pack; SH020 places the courier's line at +1.2 s. The editor turns
+/// that line down before the replacement, which also exercises the Step-0 merge rule.
+#[tokio::test]
+async fn a_replacement_keeps_the_dialogue_lines_the_run_placed() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let lines = items_of(&saved, "track_dialogue");
+    assert_eq!(lines.len(), 1, "SH020's line is placed by the run: {saved}");
+    let line_id = lines[0]["id"].as_str().expect("item id").to_owned();
+
+    // The editor turns the line down and gives it fades.
+    let mut edited = saved.clone();
+    let line = edited["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .iter_mut()
+        .find(|track| track["id"] == json!("track_dialogue"))
+        .expect("dialogue track")["items"]
+        .as_array_mut()
+        .expect("items")
+        .iter_mut()
+        .find(|item| item["id"] == json!(line_id))
+        .expect("the line");
+    line["volume"] = json!(0.4);
+    line["fadeInSeconds"] = json!(0.25);
+    line["fadeOutSeconds"] = json!(0.5);
+    let (status, body) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": edited }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "the courier is the wrong person",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(after.outcome, RunOutcome::Completed, "{}", summary(&after));
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let lines = items_of(&saved, "track_dialogue");
+    let kept = lines
+        .iter()
+        .find(|item| item["id"] == json!(line_id))
+        .unwrap_or_else(|| {
+            panic!("the replacement dropped SH020's dialogue line from the sequence: {saved}")
+        });
+    let sh020_start = picture_item(&saved, "SH020")["timelineStart"]
+        .as_f64()
+        .expect("start");
+    assert!(
+        close(kept["timelineStart"].as_f64().unwrap(), sh020_start + 1.2),
+        "the line still sits at its shot's start plus its offset: {kept}"
+    );
+    assert_eq!(
+        kept["assetId"],
+        json!(
+            record
+                .sound
+                .iter()
+                .find(|clip| clip.role == "courier_line")
+                .expect("the line's clip")
+                .asset_id
+        ),
+        "the clip is the one the run imported, adopted rather than re-uploaded: {kept}"
+    );
+    assert_eq!(
+        kept["volume"],
+        json!(0.4),
+        "the editor's volume survives: {kept}"
+    );
+    assert_eq!(kept["fadeInSeconds"], json!(0.25));
+    assert_eq!(kept["fadeOutSeconds"], json!(0.5));
+    assert_eq!(
+        after.sound.len(),
+        record.sound.len(),
+        "the replacement adopted the clips instead of importing them again: {}",
+        summary(&after)
+    );
+    for track_id in ["track_ambience", "track_music"] {
+        assert_eq!(
+            items_of(&saved, track_id).len(),
+            1,
+            "{track_id} still carries its bed: {saved}"
+        );
+    }
+}

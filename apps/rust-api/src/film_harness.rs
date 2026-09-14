@@ -4374,6 +4374,13 @@ pub async fn replace_take(
             export.stale = true;
         }
         session.persist()?;
+        // The re-assembly re-derives the harness's own dialogue and bed items from the plan and
+        // needs the sound assets to place them (sc-22715 evaluation). Without this the merge
+        // re-derived an EMPTY dialogue track over the saved one and every line the run had placed
+        // was dropped from the sequence — the beds only survived because a bed track with no
+        // asset is skipped and then kept as "not the harness's". `ensure_sound` adopts the clips
+        // the record already names; it uploads nothing on this path.
+        session.ensure_sound().await?;
         // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
         session.assemble_timeline().await?;
     } else {
