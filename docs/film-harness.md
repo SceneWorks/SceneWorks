@@ -27,6 +27,14 @@ rejects the take a shot is carrying and dispatches exactly one more for it (`req
 verb with a review's flags folded into the reason). **`swap-take` edits the timeline**: it points an
 item at a take the run already has, and renders nothing.
 
+**Evaluated once, end to end, on 2026-09-14** — see
+[film-harness-evaluation-2026-09-14.md](film-harness-evaluation-2026-09-14.md) (sc-22715): the
+six-shot hand-authored film rendered, reviewed, repaired, trimmed and exported offline on the dev
+Mac; interrupt/resume and isolated replacement demonstrated; the local planner compared with the
+hand plan; H3 and LTX-2.5 cells; the assisted reviewer measured on the shipped and two new labeled
+sets (`config/film-harness/review-eval/evaluation-2026-09-14-*.jsonc`); four defects found and
+fixed; and a **revise** recommendation with its reasoning.
+
 ## Documents
 
 | Document | Schema | Fixture |
@@ -370,7 +378,13 @@ A shot may declare `dependsOn: [{ shotId, kind, note }]`, with `kind` either:
 A generated plan carries the edge its chain already states: `film-harness plan` writes a
 `continuity` edge for every `conditioning.chainFromShotId`, so a planner-written film has something
 to flag when a take it continues is replaced. The planner is never asked for edges beyond that; a
-human adds the rest by editing `plan.json`.
+human adds the rest by editing `plan.json`. Measured on the sc-22715 evaluation: the planner
+wrote **no** chains for the six-beat brief, so its plan had no edges, and the shipped
+`review.jsonc` — whose `acrossCut` questions require an edge to compare against — refused to
+review it ("acrossCut needs the shot to declare a dependsOn edge"). Add the edges to `plan.json`
+before `review`, or review with a plan that drops the `acrossCut` questions (the evaluation's
+`planner/review.noedges.jsonc`); `review-eval` is unaffected because a labeled case brings its own
+`adjacentFrames`.
 
 Edges must name another shot in the same plan and may not form a cycle. They are declarations, not
 wiring: nothing here reaches the model. Their one job is to tell the harness who to **flag** when a
@@ -449,10 +463,15 @@ state.
 
 ### Cancellation
 
-`film-harness cancel --out DIR` (or Ctrl-C in the running shell) stops new dispatch, cancels the
-in-flight job through the existing cancel route, leaves every finished take in the project, skips
-the timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already
-spent are not re-spent: a cancel is not a retry.
+`film-harness cancel --out DIR` (or Ctrl-C in the running shell, or a plain `kill <pid>` — SIGTERM
+is handled exactly as SIGINT since the sc-22715 evaluation, where a `kill` of the controller took
+the crash path and left the in-flight job unmentioned) stops new dispatch, cancels the in-flight
+job through the existing cancel route, leaves every finished take in the project, skips the
+timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already spent
+are not re-spent: a cancel is not a retry. A controller killed any other way (SIGKILL, a crash,
+a reboot) leaves the record `running` with the job still named in it, and `resume` adopts that job
+at whatever state it reached — measured on the same evaluation, the resumed controller found the
+render 32 % through and simply polled it to completion, enqueuing nothing.
 
 A directory with no `run.json` in it is **refused** (exit 2), not created: a mistyped `--out` that
 printed "cancel requested" and exited 0 while the render kept going is the one thing a cancel must
@@ -479,6 +498,31 @@ asset stays in the project), and dispatches **exactly one** new attempt for that
 replacement is `humanRequested`, so it neither spends nor respects the plan's automatic attempt cap;
 it does not loop, and a failed replacement stops with `replacement_failed` rather than trying again.
 Every other shot's takes, jobs and assets are untouched.
+
+**A replacement adopts the run's sound before it re-assembles** (sc-22715 evaluation). The
+re-assembly re-derives the harness's dialogue and bed items from the plan and needs the imported
+clips to place them; `replace-take` used to skip that step, so its merge re-derived an EMPTY
+dialogue track over the saved one and every line the run had placed disappeared from the sequence
+and the next export (the beds survived only because a bed track with no clip is skipped and then
+kept as a track the harness does not own). The clips are adopted from the record — nothing is
+re-uploaded — and a re-derived item keeps the editor's `volume` / `fadeInSeconds` /
+`fadeOutSeconds` from the saved item of the same role and shot.
+
+**Attempt `n` renders at the plan's seed plus `(n − 1) × 1000`** (`film_compile::ATTEMPT_SEED_STRIDE`,
+sc-22715 evaluation). The MLX render is deterministic for a seed — two runs of the fixture's SH010
+at seed 22710, four hours apart, were pixel-identical frame for frame — so a replacement that kept
+the plan's seed would re-render the very take it had just rejected. The plan's seed is attempt 1
+exactly as before; the seed actually dispatched is stamped into the job's
+`advanced.filmHarness.seed` and comes back in the take's recipe, and it is the only thing about a
+later attempt's request that differs from the compiled one: prompt, geometry, duration and
+conditioning are the compiled request's, unchanged.
+
+The stride is 1000 rather than 1 because a plan's own per-shot seeds are usually spaced by one: the
+shipped courier fixture numbers its six shots 22710…22715, so an offset of `n − 1` made SH020's
+second attempt and SH030's first the same seed, and the 2026-09-14 evaluation run dispatched 22712,
+22714 and 22715 twice each. With the stride a dispatched seed identifies the (shot, attempt) pair it
+came from, which is what makes "was this take re-rendered, or is it the same draw?" answerable from
+the record alone.
 
 A replacement runs **outside the run's automatic budgets** (sc-22715): the attempt is bounded by
 `limits.maxShotSeconds`, its `--export` by the export's own per-job budget, and neither is charged
