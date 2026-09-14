@@ -539,20 +539,27 @@ fn fixture_images(args: &[String]) -> ExitCode {
     }
 }
 
-/// Cancel the in-flight run on SIGINT, and exit on a second one.
+/// Cancel the in-flight run on SIGINT or SIGTERM, and exit on a second one.
 ///
-/// The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns SIGINT for the
-/// rest of the process, so without it a second Ctrl-C would be swallowed and the operator would
-/// have no way out but another signal.
+/// The second listener is not optional: once a signal stream has been awaited, tokio owns that
+/// signal for the rest of the process, so without it a second Ctrl-C would be swallowed and the
+/// operator would have no way out but another signal.
+///
+/// SIGTERM is handled exactly as Ctrl-C (sc-22715 evaluation): a plain `kill <pid>` of the
+/// controller used to take the crash path — the process died with the record left `running`, the
+/// in-flight job unmentioned, and the operator's intent (stop this run) unrecorded. The record
+/// was still resumable, which is what `resume` is for, but a signal the operator sent on purpose
+/// deserves the cancel path: the job is cancelled through the API and the record says `canceled`.
 fn spawn_interrupt_handler(control: RunControl) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+        let mut signals = StopSignals::listen();
+        if signals.next().await {
             eprintln!(
                 "film-harness: interrupt received — canceling the in-flight job and writing the \
                  run record; interrupt again to exit now (the render keeps going)"
             );
             control.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
+            if signals.next().await {
                 eprintln!(
                     "film-harness: second interrupt — exiting without a run record; the worker \
                      may still be rendering (cancel it in the job list)"
@@ -561,6 +568,60 @@ fn spawn_interrupt_handler(control: RunControl) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+/// The signals that mean "stop this run": SIGINT (Ctrl-C) everywhere, and SIGTERM (`kill`) on
+/// unix. Registering the streams once, up front, is what lets a second signal be observed at all.
+struct StopSignals {
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+}
+
+impl StopSignals {
+    fn listen() -> Self {
+        Self {
+            #[cfg(unix)]
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .ok(),
+        }
+    }
+
+    /// Resolves `true` on the next SIGINT or SIGTERM; `false` only if neither can be listened for.
+    async fn next(&mut self) -> bool {
+        #[cfg(unix)]
+        {
+            match self.terminate.as_mut() {
+                Some(terminate) => tokio::select! {
+                    interrupt = tokio::signal::ctrl_c() => interrupt.is_ok(),
+                    signal = terminate.recv() => signal.is_some(),
+                },
+                None => tokio::signal::ctrl_c().await.is_ok(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.is_ok()
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stop_signal_tests {
+    use super::StopSignals;
+
+    /// A `kill <pid>` (SIGTERM) reaches the same listener as Ctrl-C. The stream is registered
+    /// before the signal is raised, so the raise is observed rather than terminating the test
+    /// binary — which is exactly the difference between the cancel path and the crash path.
+    #[tokio::test]
+    async fn sigterm_is_a_stop_signal() {
+        let mut signals = StopSignals::listen();
+        assert!(signals.terminate.is_some(), "SIGTERM stream registered");
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).expect("raise SIGTERM");
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), signals.next())
+            .await
+            .expect("the signal is observed within 5s");
+        assert!(observed);
+    }
 }
 
 fn exit_code_for(record: &RunRecord) -> ExitCode {

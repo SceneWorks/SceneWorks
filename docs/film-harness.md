@@ -404,10 +404,15 @@ state.
 
 ### Cancellation
 
-`film-harness cancel --out DIR` (or Ctrl-C in the running shell) stops new dispatch, cancels the
-in-flight job through the existing cancel route, leaves every finished take in the project, skips
-the timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already
-spent are not re-spent: a cancel is not a retry.
+`film-harness cancel --out DIR` (or Ctrl-C in the running shell, or a plain `kill <pid>` — SIGTERM
+is handled exactly as SIGINT since the sc-22715 evaluation, where a `kill` of the controller took
+the crash path and left the in-flight job unmentioned) stops new dispatch, cancels the in-flight
+job through the existing cancel route, leaves every finished take in the project, skips the
+timeline and export, and records `outcome: canceled` with a resumable stop. Attempts already spent
+are not re-spent: a cancel is not a retry. A controller killed any other way (SIGKILL, a crash,
+a reboot) leaves the record `running` with the job still named in it, and `resume` adopts that job
+at whatever state it reached — measured on the same evaluation, the resumed controller found the
+render 32 % through and simply polled it to completion, enqueuing nothing.
 
 A directory with no `run.json` in it is **refused** (exit 2), not created: a mistyped `--out` that
 printed "cancel requested" and exited 0 while the render kept going is the one thing a cancel must
@@ -434,6 +439,15 @@ asset stays in the project), and dispatches **exactly one** new attempt for that
 replacement is `humanRequested`, so it neither spends nor respects the plan's automatic attempt cap;
 it does not loop, and a failed replacement stops with `replacement_failed` rather than trying again.
 Every other shot's takes, jobs and assets are untouched.
+
+**A replacement adopts the run's sound before it re-assembles** (sc-22715 evaluation). The
+re-assembly re-derives the harness's dialogue and bed items from the plan and needs the imported
+clips to place them; `replace-take` used to skip that step, so its merge re-derived an EMPTY
+dialogue track over the saved one and every line the run had placed disappeared from the sequence
+and the next export (the beds survived only because a bed track with no clip is skipped and then
+kept as a track the harness does not own). The clips are adopted from the record — nothing is
+re-uploaded — and a re-derived item keeps the editor's `volume` / `fadeInSeconds` /
+`fadeOutSeconds` from the saved item of the same role and shot.
 
 **Attempt `n` renders at the plan's seed plus `n − 1`** (sc-22715 evaluation). The MLX render is
 deterministic for a seed — two runs of the fixture's SH010 at seed 22710, four hours apart, were
