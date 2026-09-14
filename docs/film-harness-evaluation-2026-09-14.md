@@ -67,7 +67,23 @@ declared) — `hand-film/run/run.json`, `hand-film/run.log`:
 Run outcome `completed` in 3924 s of automatic work (`elapsedSeconds`) and 1437 s of
 human-requested work (`humanRequestedElapsedSeconds`: two replacements + one re-export) at the
 capped verdict; 2448 s human-requested after the out-of-cap SH040 replacement. 9 attempts, 9
-completed, 0 failed, 0 worker or harness errors. Timeline `timeline_7d8ba8c6d9be4fd3d7dd4675aaa681ec`
+completed, 0 failed, 0 worker or harness errors.
+
+**Which file says `completed`.** The snapshots `hand-film/run.json.v1-after-run` through
+`run.json.v5-before-sh040-replacement` all read `outcome: "completed"`, `stop: null` — that is the
+run's verdict, and it is what the sentence above is about. The record a reader opens today,
+`hand-film/run/run.json` (== `run.json.v6-after-sh040-replacement`), reads `outcome: "failed"`,
+`stop.reason: "attempts_exhausted"`, `resumable: false`. **That is a defect of the binary that
+wrote it, fixed in this PR** (§3.2 fix 5), not a second verdict: the out-of-cap `replace-take` on
+SH040 succeeded, and `finish_replacement` fell through to the run-level classifier, which
+re-derived the outcome over EVERY selected shot. SH050 has `selectedAttempt: null` — the human
+rejected both its takes — so "all rendered" was false and `completed` was overwritten by a stop
+about a shot the replacement never touched. v5 and v6 carry identical SH050 state, which is the
+proof that nothing about SH050 changed and only the verdict did. On the fixed binary that
+replacement leaves `outcome: "completed"` with no stop, and only `export.stale` moves. No file in
+the evidence directory was rewritten after the fact; v6 is left exactly as the pass produced it.
+
+Timeline `timeline_7d8ba8c6d9be4fd3d7dd4675aaa681ec`
 (`exports/hand-film-timeline.json`): 6 picture items in plan order, one `trim` edit (SH020
 `sourceIn 0 → 1.0`), duration **30.000 s** (the rubric's floor; the plate head of SH020-a2 is
 ~1.5 s, so 0.5 s of dissolve remains — §4). Three exports: `hand-film-v1-before-review.mp4`
@@ -88,6 +104,32 @@ clips and the three line clips as project assets, the export jobs and their side
 | 1 | `cb22fdb11` | `replace-take` dispatched the compiled request's seed unchanged, and the MLX render is **deterministic for a seed**: today's SH010 and the sc-22715 sound-smoke SH010 (same seed 22710, four hours apart) are pixel-identical in all three sampled frames (`manual/determinism_check.txt`, mean abs diff 0.0 per channel). A replacement would have re-rendered the very take it rejected. | attempt *n* dispatches seed + *n* − 1, stamped into `advanced.filmHarness.seed` and read back from the take's recipe (SH020-a2 = 22712, SH050-a2 = 22715 in the record); unit test in `film_compile` |
 | 2 | `dde338536` | after the first `request-repair`, the saved timeline's `track_dialogue` had **0 items** (3 before): `replace_take` re-assembled without `ensure_sound`, so the merge re-derived an empty dialogue track over the saved one. The beds survived only because a bed track with no clip is skipped and then kept as "not the harness's". Consequence: `hand-film-FINAL-30s.mp4` mixes ambience + music but **no dialogue lines**; `hand-film-v1-before-review.mp4` has all three (`hand-film/export-probe-v1.json`: 400 Hz line 0.0793 inside SH020's slot, 500 Hz 0.0793 / 0.0635 inside SH050's and SH060's, 0.0 outside; beds 0.00795 / 0.00631 identical either side of all five cuts). | `replace_take` calls `ensure_sound` (adopts the recorded clips, uploads nothing) before `assemble_timeline`; integration test over the sound-carrying fixture through the real routes |
 | 3 | `8b7725d3e` | `kill <pid>` (SIGTERM) of the `run` controller took the crash path: the process died in 1 s with the record `running`, `stop: null`, the in-flight job unmentioned (`planner/run.json.after-sigterm`) — only SIGINT was listened for | SIGINT and SIGTERM are both stop signals, registered up front; test raises SIGTERM at the listener |
+
+### 3.2b Defects found by the adversarial review OF this report, fixed in this PR
+
+Fix 2 above was an incomplete fix for its own defect, and reading the evidence for the rest of the
+report turned up five more. Each has a test that fails on the code the finding is about.
+
+| # | what the evidence showed | fix |
+| --- | --- | --- |
+| 4 | Fix 2 restored the dialogue track but not every line on it. The picture track is MERGED onto the saved sequence (so a shot whose take was rejected keeps its item and stays in the cut) while the audio tracks were re-derived from `selected_takes()` — which no longer names that shot. The evaluation's own re-assembly shows it: `run.json.v1` `track_dialogue` **3** items → `v3` **0** (fix 2's defect) → `v6` **2**, and `hand-film-FINAL-with-dialogue-30s.mp4` is permanently missing SH050's line while SH050's picture sits in the cut at 19.67–24.83 s. Reachable by any successful `replace-take` on an unrelated shot after a `reject-take`. | the harness's dialogue items are derived from the merged PICTURE's shot list (`order`), not from the selection, so a line survives exactly as long as its shot is on screen; a line whose shot HAS left the cut is still dropped by `relayout_timeline`. Integration test: reject SH050, replace SH060, both lines survive and SH050 is not re-selected |
+| 5 | The record a reader opens says `failed` / `attempts_exhausted` while the run's own snapshots say `completed` (§3.1). A successful `replace-take` on SH040 routed through `finish_replacement` → `finish()`, which re-derives the RUN's outcome from every selected shot — so a shot the human had rejected flipped the whole run's verdict because a different shot was replaced. | `finish_replacement` leaves a `completed` run's verdict alone when the replacement it was asked about landed (the `edit_timeline` rule, stated for the generation side); only `export.stale` moves. A landed replacement whose re-export failed records `export_failed` (resumable), not a stop about another shot. Test: completed run → reject SH050 → `replace-take` SH060 → outcome stays `completed`, SH050 still `selectedAttempt: null` |
+| 6 | `StopSignals::next` built a fresh `tokio::signal::ctrl_c()` inside its `select!`, so the SIGINT stream lived for one call and was dropped whenever the SIGTERM arm won. A second Ctrl-C arriving between the first `next()` returning and the second being awaited was delivered to nothing — the operator's only way out of a 45-minute render, swallowed. (True for SIGTERM, which was held in the struct; false for SIGINT, which the doc comment claimed.) | a `signal(SignalKind::interrupt())` stream is held beside `terminate` for the life of the watcher. Test raises SIGTERM, observes it, raises SIGINT while nothing is awaiting, and requires the next call to return it |
+| 7 | Registering SIGTERM installs a process-wide tokio handler that is never uninstalled, and the watcher was `abort()`ed as soon as the command returned — so for the tail of the process (printing the record, the last flush) a plain `kill <pid>` was swallowed and did nothing at all. | the watcher is told the run is over through a oneshot instead of being aborted, and goes on watching: a stop signal in the tail terminates the process with the code a shell reports (130 / 143). Test drives `watch_stop_signals` with an injected exit and a SIGTERM after completion |
+| 8 | Attempt offsets of `+1` overlapped the plan's per-shot seed stride: the shipped fixture seeds its shots 22710…22715, and this run dispatched **22712, 22714 and 22715 twice each** — SH020-a2 = SH030-a1 = 22712, SH040-a2 = SH050-a1 = 22714, SH050-a2 = SH060-a1 = 22715. A dispatched seed did not identify the render it came from. | attempt *n* dispatches `seed + (n − 1) × 1000` (`film_compile::ATTEMPT_SEED_STRIDE`, documented in `docs/film-harness.md`); per-attempt seed provenance in the record is unchanged. Unit test asserts the stride, not just the first two attempts |
+| 9 | `reject-take` left the shot `outcome: "rendered"` with `selectedAttempt: null` and nothing anywhere saying that it stays in the sequence carrying the rejected take — unlike the failed-replacement path, which writes exactly that note. A reader of the record could not tell what the cut shows for SH050. | the reject path writes the same explicit decision note; test asserts it names both what the cut shows and the command that changes it |
+| — | `config/film-harness/review-eval/evaluation-2026-09-14-takes.jsonc` and `…-planner-takes.jsonc` (added by this PR) were loaded by no test | a test enumerates every `*.jsonc` in that directory, parses it, resolves the `reviewPlan` it declares, validates it, and checks every frame path is a plain name under the media root; the four checked-in sets are asserted present so an empty enumeration cannot pass |
+
+Fixes 4 and 5 are **not** reflected in any exported file in the evidence directory, and cannot be
+without a GPU: `assemble_timeline` — the only code that re-derives the harness's sound items — is
+reached from `run`, `resume` and a successful `replace-take` only. The hand film's record is
+`finished` and not resumable (whether it reads `failed`/`attempts_exhausted` as it does today or
+`completed` as the fixed binary would write), so `resume` refuses it; `run` and `replace-take` each
+dispatch a `video_generate` job. The `--export` re-layout path (`trim` / `reorder` / `swap-take`
+with `--export`) reads the SAVED timeline document and never re-derives sound, so it re-exports the
+two-line sequence unchanged — it cannot restore an item that is already absent. Fix 4 is therefore
+proved by the integration test through the real routes rather than by a new MP4, and
+`hand-film-FINAL-with-dialogue-30s.mp4` stays what the pass produced: two of the three lines.
 
 A completed run is not resumable and an edit only re-lays what is saved, so nothing short of
 another render re-assembles the hand film's dialogue after fix 2. The declared cap of two
@@ -334,13 +376,18 @@ ranking.
 
 ### 5.1 Supported conclusions (and confidence)
 
-1. **Engineering: the harness works as documented, end to end, offline, on this Mac** — plan,
-   compile, validate, run, review, human decisions, bounded replacement, interrupt/resume with
-   adoption, edit + re-export, and a record that explains every take. Confidence **high**: every
-   claim above is read off a run record, a job table, a timeline document or a decoded file that
-   is in the evidence directory. Four defects were found by the pass and fixed with tests in this
-   PR (§3.2); one of them (the dialogue drop) reached a delivered file, which is exactly why the
-   integrated pass was worth running.
+1. **Engineering: every documented step of the harness ran end to end, offline, on this Mac** —
+   plan, compile, validate, run, review, human decisions, bounded replacement, interrupt/resume
+   with adoption, edit + re-export, and a record that explains every take. Confidence **high** for
+   that: every claim above is read off a run record, a job table, a timeline document or a decoded
+   file that is in the evidence directory. It did **not** work as documented on the first pass:
+   four defects were found by the pass itself (§3.2) and six more by the adversarial review of this
+   report (§3.2b), all fixed with tests in this PR. Two of them reached delivered artifacts — the
+   dialogue drop reached the exported film (and its incomplete first fix left `…-with-dialogue-30s.mp4`
+   missing SH050's line), and the outcome flip left the run record a reader opens saying `failed`
+   where the run had `completed`. That is exactly why the integrated pass was worth running; a
+   reader should take "works as documented" to mean "works as documented at this PR's HEAD", not
+   "worked at the start of the pass".
 2. **Research: a coherent 30-second film did not come out of this configuration, and the reason is
    specific.** Per-shot action and costume were reliable; **location and prop identity were not
    held across shots**, because nothing in the pipeline conditions one shot on another — placeholder
@@ -366,7 +413,8 @@ ranking.
    under the rubric (no loop was run on them). Peak memory per attempt in the tables above
    (`metrics.peakMemoryBytes` for every one); maxima 14.24 GB (H3 5.17 s), 28.90 GB (H3 6.58 s
    planner shot), 24.89 GB (LTX-2.5). Hands-on repair minutes: **12.5 min** of agent wall clock
-   over 15 timed steps (rubric scoring, decisions, edits — `manual/TIMING.log`); a person viewing
+   over 18 timed steps (rubric scoring, decisions, edits — `manual/TIMING.log` has 20 start/stop
+   pairs, 2 of which are GPU waits and excluded; `manual/metrics.json` carries the 18); a person viewing
    36 frames and five exports would take longer. Planner decode: 351 s, 16.87 GiB. Reviewer: 122
    VQA calls in 600 s of `review` plus 553 s of `review-eval` on real weights. Failures: harness
    0, planner 0, reviewer 0, worker **1** (Metal submissions-ignored after ~5 h, §3.5, recovered by
@@ -407,14 +455,17 @@ chaining, placeholder plates). Revise the experiment, then decide again.
 | Last-frame chaining as `conditioning: chain` (a `conditioning` edge that actually conditions) | SH020-a2 → SH030 held the parcel object when the take before it did; nothing else did | MiniMax-H3 keyframe mode exists; harness design chose not to wire it (docs: "nothing conditions on the previous shot's last frame") — a product decision |
 | Reference conditioning on a checkpoint that has it (LTX-2.5 references, or an H3 reference checkpoint) | H3 base has `maxReferenceAssets: 0`; the harness already resolves `referenceRoles` | which model; §4.5 cells |
 | Planner prompt contract: forbid camera moves unless asked, require jacket/door/bench facts from the pack, emit seeds and `dependsOn` | P-SH020 black jacket, three framings per take, no seeds | one more planner story; measure against the same brief |
-| Re-render the hand film's SH040 (the deviant room) and re-export on the fixed code to get a final with dialogue | §4.1; fix 2 | ~13 min GPU; changes nothing in the conclusions |
+| Re-render any one hand-film shot on this PR's HEAD and re-export, to get a final carrying all **three** lines | §3.2b fix 4: the SH040 re-render already done under fix 2 produced only two, and no CPU-only path re-assembles sound | ~13 min GPU; changes nothing in the conclusions |
 | Review questions that abstain on close-ups (a "can the wall be seen" gate before the pegboard question) | `sh040_cut`, planner `sh020_cut` overclaims | small review-plan change; re-measure on the new sets |
 
 ### 5.5 Reproducible artifacts
 
 `README.md` in the evidence directory indexes: `BUDGETS.md`, `RUBRIC.md`, `stack.sh` / `fh.sh` /
 `mark.sh`, `commands.log` (every command with start/end/exit), `api.log`, `worker.log`,
-`lsof/sockets.log`, `hand-film/` (run record and its four snapshots, review docs, three probes,
-decision logs), `planner/` (plan, compiled, run record before/after SIGTERM and resume, job
+`lsof/sockets.log`, `hand-film/` (run record and its six snapshots, `run.json.v1-after-run`
+through `run.json.v6-after-sh040-replacement` — v1–v5 read `completed`, v6 reads
+`failed`/`attempts_exhausted` for the reason in §3.1 and §3.2b fix 5, and `run/run.json` is the
+same document as v6 — review docs, three probes, decision logs), `planner/` (plan, compiled, run
+record before/after SIGTERM and resume, job
 tables, interrupt log), `ltx/`, `review-eval/`, `frames/`, `exports/`, `manual/` (scores, timing,
 metrics, isolation and determinism checks, plan comparison).

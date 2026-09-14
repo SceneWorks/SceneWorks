@@ -3263,14 +3263,23 @@ impl Session<'_> {
         // every pass exactly as a re-layout after an edit re-derives them; an item on one of these
         // tracks that the harness did NOT place — the editor's own — is carried over untouched,
         // as is the track's own fader (`gain` / `muted`), which a person may have moved.
+        //
+        // Derived from `order` — the shots the merged PICTURE holds — and not from
+        // `selected_takes()` (sc-22715). The two are not the same set: the picture is merged onto
+        // the saved sequence, so a shot whose take was rejected (`reject-take`, or a replacement
+        // that produced nothing) keeps its item and stays in the cut, while its selection is gone.
+        // Deriving the lines from the selection dropped exactly those shots' dialogue on the next
+        // re-assembly — the 2026-09-14 evaluation's own film lost SH050's line to a `replace-take`
+        // on SH040, and the line is not the harness's to delete while the shot it belongs to is
+        // still on screen. A line whose shot HAS left the cut is still dropped, by
+        // `relayout_timeline`, which is where "is this shot in the sequence" is actually known.
         let mut dialogue_items = Vec::new();
-        for SelectedTake { shot_id, .. } in &takes {
-            let shot = self
-                .plan
-                .shots
-                .iter()
-                .find(|shot| &shot.id == shot_id)
-                .expect("selected takes come from the plan");
+        for shot_id in &order {
+            let Some(shot) = self.plan.shots.iter().find(|shot| &shot.id == shot_id) else {
+                // An item the harness placed for a shot the plan no longer names. Its picture item
+                // is carried over untouched above; there is no plan clip to derive a line from.
+                continue;
+            };
             let Some(clip) = &shot.dialogue_clip else {
                 continue;
             };
@@ -3686,11 +3695,19 @@ impl Session<'_> {
     /// the `resume` that was going to render them. A replacement decides one shot's outcome and
     /// nothing else: when the run carried a resumable stop and other selected shots are still
     /// outstanding, that stop is left exactly where it was.
+    ///
+    /// The same rule holds for a run that had NO stop, which is to say one that `completed`
+    /// (sc-22715). `all_rendered` is false the moment any selected shot has no selection — a
+    /// `reject-take` leaves exactly that — so classifying through [`Session::finish`] turned a
+    /// completed run into `failed` / `attempts_exhausted` because a DIFFERENT shot was replaced.
+    /// That is the `edit_timeline` rule stated for the generation side: a replacement is not a
+    /// run, and a verdict the run reached is not re-opened by one. The evaluation film's own
+    /// record read `failed` for exactly this reason while its snapshots read `completed`.
     fn finish_replacement(
         &mut self,
         export_ok: bool,
         replaced_shot_id: &str,
-        prior: Option<(RunOutcome, RunStop)>,
+        prior: (RunOutcome, Option<RunStop>),
     ) -> Result<(), HarnessError> {
         let outstanding: Vec<String> = self
             .record
@@ -3700,15 +3717,24 @@ impl Session<'_> {
             .filter(|shot| self.is_selected(&shot.shot_id) && shot.selected_attempt.is_none())
             .map(|shot| shot.shot_id.clone())
             .collect();
+        // Did THIS replacement land a take on the shot it was asked about? That, and not the state
+        // of every other shot, is what this invocation decided.
+        let replacement_succeeded = self
+            .record
+            .shots
+            .iter()
+            .find(|shot| shot.shot_id == replaced_shot_id)
+            .is_some_and(|shot| shot.selected_attempt.is_some());
         // An `export_failed` stop is about an export this replacement did not redo (no
         // `--export`): the run still has no MP4, so the stop — and the `resume` that retries the
         // export — must survive too (sc-22715).
         let export_still_owed = !self.export
             && prior
+                .1
                 .as_ref()
-                .is_some_and(|(_, stop)| stop.resumable && stop.reason == "export_failed");
+                .is_some_and(|stop| stop.resumable && stop.reason == "export_failed");
         match prior {
-            Some((outcome, stop))
+            (outcome, Some(stop))
                 if stop.resumable && (!outstanding.is_empty() || export_still_owed) =>
             {
                 self.note_decision(
@@ -3733,6 +3759,41 @@ impl Session<'_> {
                 self.stop = None;
                 self.record.outcome = outcome;
                 self.record.stop = Some(stop);
+                self.record.state = RunState::Finished;
+                self.record.finished_at = Some(utc_now());
+                self.persist()
+            }
+            // The run reached its verdict with no stop of its own — it COMPLETED — and this
+            // replacement landed. `finish` would re-derive that verdict from every selected shot,
+            // so a shot whose take a human rejected flips the whole run to `attempts_exhausted`
+            // because another shot was replaced. Only the export moves: it no longer matches the
+            // sequence, which `replace_take` already recorded as `stale`.
+            (RunOutcome::Completed, None) if replacement_succeeded && self.stop.is_none() => {
+                if export_ok {
+                    self.note_decision(
+                        "replace_take",
+                        Some(replaced_shot_id),
+                        format!(
+                            "the run's own outcome (completed) is left in place: this replacement \
+                             decided shot {replaced_shot_id} and no other shot's state was \
+                             re-judged"
+                        ),
+                    );
+                    self.record.outcome = RunOutcome::Completed;
+                    self.record.stop = None;
+                } else {
+                    // The take landed and the re-export did not: that, and only that, is what
+                    // this invocation failed at — `attempts_exhausted` would name a different
+                    // shot's state as the reason and refuse the `resume` that retries the export.
+                    self.record.outcome = RunOutcome::Failed;
+                    self.record.stop = Some(RunStop {
+                        reason: "export_failed".to_owned(),
+                        detail: "the replacement landed but its re-export did not complete; \
+                                 `film-harness resume` retries the export"
+                            .to_owned(),
+                        resumable: true,
+                    });
+                }
                 self.record.state = RunState::Finished;
                 self.record.finished_at = Some(utc_now());
                 self.persist()
@@ -4256,12 +4317,10 @@ pub async fn replace_take(
     let mut session = session_from(transport, options, continued, started, None);
     // What the RUN said before this replacement: a replacement is scoped to one shot and must not
     // re-classify the run, so a resumable stop (a cancel, a crash, a failed export) is restored by
-    // `finish_replacement` when other selected shots are still outstanding.
-    let prior_stop = session
-        .record
-        .stop
-        .clone()
-        .map(|stop| (session.record.outcome, stop));
+    // `finish_replacement` when other selected shots are still outstanding — and a run that
+    // finished with no stop at all (`completed`) keeps that verdict, which is why the OUTCOME is
+    // carried here even when there is no stop beside it (sc-22715).
+    let prior_verdict = (session.record.outcome, session.record.stop.clone());
     session.record.state = RunState::Running;
     session.record.stop = None;
     session.record.finished_at = None;
@@ -4417,7 +4476,7 @@ pub async fn replace_take(
     } else {
         replaced
     };
-    session.finish_replacement(export_ok, shot_id, prior_stop)?;
+    session.finish_replacement(export_ok, shot_id, prior_verdict)?;
     Ok(session.record)
 }
 
@@ -5522,6 +5581,12 @@ fn audio_track(id: &str, name: &str, role: &str, bus: &SoundBus, items: Vec<Valu
 /// `fadeOutSeconds`, which are the editor's per-item controls and were being reset to the plan's
 /// values on every resume and replacement (sc-22715). With no saved track the fresh one is used
 /// as is.
+///
+/// Dropping the saved harness items is only safe because the fresh set is derived from the shots
+/// the merged PICTURE holds, not from the selection: a saved harness item whose shot is still in
+/// the cut has a fresh counterpart here, and one whose shot has left the cut is meant to go. When
+/// the fresh set came from `selected_takes()` instead, a shot that kept its picture item but lost
+/// its selection (a rejected take) had neither — and its line vanished from the sequence.
 fn merge_harness_audio_track(existing_tracks: &[Value], fresh: Value) -> Value {
     let id = fresh.get("id").and_then(Value::as_str).unwrap_or_default();
     let Some(saved) = existing_tracks

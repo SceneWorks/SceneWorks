@@ -463,13 +463,21 @@ kept as a track the harness does not own). The clips are adopted from the record
 re-uploaded — and a re-derived item keeps the editor's `volume` / `fadeInSeconds` /
 `fadeOutSeconds` from the saved item of the same role and shot.
 
-**Attempt `n` renders at the plan's seed plus `n − 1`** (sc-22715 evaluation). The MLX render is
-deterministic for a seed — two runs of the fixture's SH010 at seed 22710, four hours apart, were
-pixel-identical frame for frame — so a replacement that kept the plan's seed would re-render the
-very take it had just rejected. The plan's seed is attempt 1 exactly as before; the seed actually
-dispatched is stamped into the job's `advanced.filmHarness.seed` and comes back in the take's
-recipe, and it is the only thing about a later attempt's request that differs from the compiled
-one: prompt, geometry, duration and conditioning are the compiled request's, unchanged.
+**Attempt `n` renders at the plan's seed plus `(n − 1) × 1000`** (`film_compile::ATTEMPT_SEED_STRIDE`,
+sc-22715 evaluation). The MLX render is deterministic for a seed — two runs of the fixture's SH010
+at seed 22710, four hours apart, were pixel-identical frame for frame — so a replacement that kept
+the plan's seed would re-render the very take it had just rejected. The plan's seed is attempt 1
+exactly as before; the seed actually dispatched is stamped into the job's
+`advanced.filmHarness.seed` and comes back in the take's recipe, and it is the only thing about a
+later attempt's request that differs from the compiled one: prompt, geometry, duration and
+conditioning are the compiled request's, unchanged.
+
+The stride is 1000 rather than 1 because a plan's own per-shot seeds are usually spaced by one: the
+shipped courier fixture numbers its six shots 22710…22715, so an offset of `n − 1` made SH020's
+second attempt and SH030's first the same seed, and the 2026-09-14 evaluation run dispatched 22712,
+22714 and 22715 twice each. With the stride a dispatched seed identifies the (shot, attempt) pair it
+came from, which is what makes "was this take re-rendered, or is it the same draw?" answerable from
+the record alone.
 
 A replacement runs **outside the run's automatic budgets** (sc-22715): the attempt is bounded by
 `limits.maxShotSeconds`, its `--export` by the export's own per-job budget, and neither is charged

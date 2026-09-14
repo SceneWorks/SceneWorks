@@ -26,6 +26,15 @@ use crate::MAX_PROMPT_CHARS;
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
 pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 1;
 
+/// How far apart one shot's successive attempts are seeded (sc-22715).
+///
+/// Attempt `n` of a shot renders at `seed + (n - 1) * ATTEMPT_SEED_STRIDE`, so the seed a run
+/// dispatches identifies a (shot, attempt) pair rather than only a shot. Anything smaller than the
+/// gap a plan leaves between its own per-shot seeds makes two different renders share a seed: the
+/// shipped courier fixture seeds its six shots 22710..22715, so at a stride of 1 SH020's second
+/// attempt and SH030's first were the same number.
+pub const ATTEMPT_SEED_STRIDE: i64 = 1000;
+
 /// Where a compiled request's prompt text came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -390,14 +399,24 @@ impl CompiledRequest {
         if let Some(negative) = self.negative_prompt.as_deref() {
             body["negativePrompt"] = json!(negative);
         }
-        // Attempt `n` renders at `seed + (n - 1)` (sc-22715). The MLX render is deterministic for
-        // a seed — two runs of the fixture's SH010 at seed 22710 were pixel-identical — so a
-        // replacement that kept the plan's seed would re-render the very take it rejects. The
-        // plan's seed is still attempt 1, the derivation is recorded (`filmHarness.seed`, and the
-        // take's recipe), and it is the only thing about the dispatched request that varies by
-        // attempt: the prompt, the geometry and the conditioning are the compiled request's.
+        // Attempt `n` renders at `seed + (n - 1) * ATTEMPT_SEED_STRIDE` (sc-22715). The MLX render
+        // is deterministic for a seed — two runs of the fixture's SH010 at seed 22710 were
+        // pixel-identical — so a replacement that kept the plan's seed would re-render the very
+        // take it rejects. The plan's seed is still attempt 1, the derivation is recorded
+        // (`filmHarness.seed`, and the take's recipe), and it is the only thing about the
+        // dispatched request that varies by attempt: the prompt, the geometry and the conditioning
+        // are the compiled request's.
+        //
+        // The STRIDE is what keeps a seed unique per (shot, attempt) within a run. A stride of 1
+        // collides with the plan's own per-shot seed spacing — the shipped fixture numbers its
+        // shots 22710, 22711, … 22715, so SH020's second attempt and SH030's first were both
+        // seed 22712, and the 2026-09-14 evaluation dispatched 22712, 22714 and 22715 twice each
+        // in one run. A shot's attempts are therefore spaced far enough apart that no plausible
+        // plan puts two shots inside one shot's attempt range.
         if let Some(seed) = self.seed {
-            let attempt_seed = seed.wrapping_add(i64::from(context.attempt.saturating_sub(1)));
+            let attempt_seed = seed.wrapping_add(
+                i64::from(context.attempt.saturating_sub(1)).wrapping_mul(ATTEMPT_SEED_STRIDE),
+            );
             body["seed"] = json!(attempt_seed);
             body["advanced"]["filmHarness"]["seed"] = json!(attempt_seed);
         }
@@ -781,10 +800,38 @@ mod tests {
         assert_eq!(back, compiled);
     }
 
+    /// The attempt offset is a STRIDE, not `+1` (sc-22715). The shipped courier fixture seeds its
+    /// shots one apart (22710..22715), so a stride of 1 made SH020's second attempt and SH030's
+    /// first the same seed — the 2026-09-14 evaluation run dispatched 22712, 22714 and 22715 twice
+    /// each. The seed a run dispatches has to identify the (shot, attempt) pair it came from.
     #[test]
     fn a_later_attempt_renders_at_the_plans_seed_offset_by_its_attempt_number() {
         let compiled = compiled(BTreeMap::new());
         let assets = role_assets();
+        // Every attempt of a shot whose plan seed is `base`, dispatched through the real body
+        // builder. Taking it from `to_job_body` rather than computing it here is the point: the
+        // derivation is what is under test, not the constant.
+        let seeds_from = |base: i64| -> Vec<i64> {
+            let mut request = compiled.request("SH010").unwrap().clone();
+            request.seed = Some(base);
+            (1..=8u32)
+                .map(|attempt| {
+                    let context = DispatchContext {
+                        project_id: "proj_1",
+                        run_id: "run_abc",
+                        plan_id: "courier-workshop",
+                        plan_version: 2,
+                        attempt,
+                        tier: Some("q4"),
+                        idempotency_key: None,
+                        role_assets: &assets,
+                    };
+                    request.to_job_body(&context).unwrap()["seed"]
+                        .as_i64()
+                        .expect("a seeded request dispatches a seed")
+                })
+                .collect()
+        };
         let body_for = |attempt: u32| {
             let context = DispatchContext {
                 project_id: "proj_1",
@@ -806,9 +853,29 @@ mod tests {
         // render, because the MLX pipeline is deterministic for a seed.
         assert_eq!(body_for(1)["seed"], 7);
         assert_eq!(body_for(1)["advanced"]["filmHarness"]["seed"], 7);
-        assert_eq!(body_for(2)["seed"], 8);
-        assert_eq!(body_for(2)["advanced"]["filmHarness"]["seed"], 8);
-        assert_eq!(body_for(5)["seed"], 11);
+        assert_eq!(body_for(2)["seed"], 1007);
+        assert_eq!(body_for(2)["advanced"]["filmHarness"]["seed"], 1007);
+        assert_eq!(body_for(5)["seed"], 4007);
+        // A plan that numbers its shots one apart — which every fixture and the evaluation plan do
+        // (22710…22715) — must not have one shot's later attempts land on the next shot's renders.
+        // At an offset of `n − 1` they did: SH020-a2, SH030-a1 and three more pairs were the same
+        // seed in one run, so a dispatched seed no longer said which render it belonged to.
+        let (first, next) = (seeds_from(22710), seeds_from(22711));
+        for seed in &first {
+            assert!(
+                !next.contains(seed),
+                "seed {seed} is dispatched for two different shots of the same run: {first:?} vs \
+                 {next:?}"
+            );
+        }
+        assert_eq!(
+            first
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            first.len(),
+            "no shot repeats a seed across its own attempts: {first:?}"
+        );
         // Nothing else about the request varies by attempt.
         let (one, two) = (body_for(1), body_for(2));
         for key in ["prompt", "mode", "duration", "fps", "width", "height"] {
