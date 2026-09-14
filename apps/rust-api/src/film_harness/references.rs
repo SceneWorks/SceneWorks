@@ -45,9 +45,9 @@ use serde_json::{json, Map as JsonObject, Value};
 use tokio::time::Instant;
 
 use super::{
-    api_detail, host_facts_for, job_peak_memory_bytes, live_worker_advertising, model_entry_for,
-    model_tier_installed, sha256_hex, stale_workers_detail, ApiTransport, Client, HarnessError,
-    PollBounds, PollStop, RunControl, BYTES_PER_GB, CANCEL_GRACE,
+    api_detail, host_facts_for, job_peak_memory_bytes, live_worker_advertising,
+    model_tier_installed, plan_catalog_for, sha256_hex, stale_workers_detail, ApiTransport, Client,
+    HarnessError, PollBounds, PollStop, RunControl, BYTES_PER_GB, CANCEL_GRACE,
 };
 
 /// The pack document a run writes into `--out`.
@@ -175,13 +175,17 @@ pub async fn make_references(
         .clone()
         .unwrap_or_else(|| spec.model.id.clone());
     let tier = options.tier.clone().or_else(|| spec.model.tier.clone());
-    let entry = model_entry_for(transport, &model_id).await?;
+    // `include_reference: false` (sc-23402): a generator dispatches `text_to_image` on this one
+    // model and nothing else, so it never resolves — and must never gate on — a family's reference
+    // partition. The plates it renders BECOME references; it does not condition on any.
+    let catalog = plan_catalog_for(transport, &model_id, false).await?;
+    let entry = catalog.base_entry();
     let facts = host_facts_for(transport).await?;
-    let mut findings = model_findings(&spec, &model_id, tier.as_deref(), entry.as_ref(), options);
+    let mut findings = model_findings(&spec, &model_id, tier.as_deref(), entry, options);
     let lane = facts.lane();
     // Geometry per role, which is also the last thing that can be answered without a render.
     let mut geometry: BTreeMap<String, (u32, u32)> = BTreeMap::new();
-    if let Some(entry) = entry.as_ref() {
+    if let Some(entry) = entry {
         for (index, role) in spec.references.iter().enumerate() {
             match resolve_geometry(&spec, role, entry) {
                 Ok(size) => {
@@ -194,7 +198,7 @@ pub async fn make_references(
             }
         }
     }
-    findings.extend(host_findings(&spec, &facts, entry.as_ref(), lane, transport).await?);
+    findings.extend(host_findings(&spec, &facts, entry, lane, transport).await?);
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
