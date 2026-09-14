@@ -234,6 +234,8 @@ class OracleTests(unittest.TestCase):
             with self.assertRaisesRegex(oracle.SvgCaseRejected, 'case 0: provider SVG attribute fill-rule is not allowed'):
                 oracle.render_upstream_svg('sanitizer', raw, rendered, 0)
         self.assertEqual(run.call_args.args[0], ['sanitizer', 'run', str(raw), str(rendered), '--preview-size', '512'])
+        self.assertEqual(run.call_args.kwargs['encoding'], 'utf-8')
+        self.assertEqual(run.call_args.kwargs['errors'], 'strict')
         self.assertEqual(raw.read_text(), original)
         self.assertEqual((self.root / 'sanitizer.stdout.log').read_text(), result.stdout)
         self.assertEqual((self.root / 'sanitizer.stderr.log').read_text(), 'diagnostic')
@@ -308,7 +310,7 @@ class OracleTests(unittest.TestCase):
             rendered.mkdir()
             (rendered / 'canonical.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
             (rendered / 'preview.png').write_bytes(b'preview')
-        with patch.object(oracle, 'generate', side_effect=lambda unused_model, row, unused_device: ('<svg id="%s"/>' % row['case_index'], {'generated_tokens': row['case_index']})), \
+        with patch.object(oracle, 'generate', side_effect=lambda unused_model, row, unused_device: ('<svg id="%s"><!-- en dash – --></svg>' % row['case_index'], {'generated_tokens': row['case_index']})), \
              patch.object(oracle, 'render_upstream_svg', side_effect=render), \
              patch.dict(oracle.sys.modules, {'PIL': fake_pil}):
             cases, rejections = oracle.collect_cases(SimpleNamespace(sanitizer='sanitizer'), {'rows': rows}, object(), object(), output, tier_root, events.append)
@@ -319,6 +321,8 @@ class OracleTests(unittest.TestCase):
         self.assertTrue((tier_root / 'case-02/raw.svg').is_file())
         self.assertTrue((tier_root / 'case-02/sanitizer.stdout.log').is_file())
         self.assertTrue((tier_root / 'case-19/raw.svg').is_file())
+        self.assertEqual((tier_root / 'case-19/raw.svg').read_bytes(),
+                         '<svg id="19"><!-- en dash – --></svg>'.encode('utf-8'))
         rejected = [event for event in events if event['event'] == 'case_rejected']
         keys = ['case_index', 'source_case_index', 'seed', 'input_png_sha256', 'error_code',
                 'raw_svg_sha256', 'sanitizer_stdout', 'sanitizer_stderr']

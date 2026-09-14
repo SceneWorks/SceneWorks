@@ -538,10 +538,11 @@ def render_upstream_svg(sanitizer, raw_path, rendered, case_index):
     # Keep the exact generated SVG and renderer diagnostics even when policy
     # rejects it. Comparison uses an explicit raster size, never rewritten SVG.
     result = subprocess.run([sanitizer, 'run', str(raw_path), str(rendered), '--preview-size', '512'],
-                            capture_output=True, text=True, timeout=60, check=False)
+                            capture_output=True, text=True, encoding='utf-8', errors='strict',
+                            timeout=60, check=False)
     case_root = Path(raw_path).parent
-    (case_root / 'sanitizer.stdout.log').write_text(result.stdout)
-    (case_root / 'sanitizer.stderr.log').write_text(result.stderr)
+    (case_root / 'sanitizer.stdout.log').write_bytes(result.stdout.encode('utf-8'))
+    (case_root / 'sanitizer.stderr.log').write_bytes(result.stderr.encode('utf-8'))
     if result.returncode:
         fail('canonical renderer failed for case ' + str(case_index) + ': exit ' + str(result.returncode)
              + '; see sanitizer.stderr.log')
@@ -583,7 +584,9 @@ def collect_cases(args, facts, model, device, output, tier_root, record, cases=N
         case_root = tier_root / ('case-%02d' % row['case_index']); case_root.mkdir()
         record({'event': 'case_started', 'started_at': time.time(), **row})
         raw, generation = generate(model, row, device)
-        raw_path = case_root / 'raw.svg'; raw_path.write_text(raw)
+        # Serialize the upstream Python string identically on Windows and Unix. Locale-default
+        # text I/O turned U+2013 into CP1252 0x96 on the Windows oracle host.
+        raw_path = case_root / 'raw.svg'; raw_path.write_bytes(raw.encode('utf-8'))
         rendered = case_root / 'rendered'
         try:
             render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
