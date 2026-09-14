@@ -850,7 +850,8 @@ pub(crate) struct VectorDetailBudget {
 impl Default for VectorDetailBudget {
     fn default() -> Self {
         Self {
-            // Common limit of both registered StarVector-1B providers (MLX: 4000, Candle: 4096).
+            // Omitted requests retain the product's conservative cost default. Detailed callers
+            // explicitly select the advertised model-specific context-derived capacity.
             max_new_tokens: 4_000,
             max_svg_bytes: 256 * 1_024,
             max_wall_time_ms: 120_000,

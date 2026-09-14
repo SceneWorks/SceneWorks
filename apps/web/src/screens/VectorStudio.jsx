@@ -10,20 +10,33 @@ import { terminalStatuses } from "../constants.js";
 export const VECTOR_DETAIL_PRESETS = Object.freeze({
   draft: { label: "Draft", maxNewTokens: 2048, maxSvgBytes: 131072, maxWallTimeMs: 60000 },
   standard: { label: "Standard", maxNewTokens: 3000, maxSvgBytes: 196608, maxWallTimeMs: 90000 },
-  detailed: { label: "Detailed", maxNewTokens: 4000, maxSvgBytes: 262144, maxWallTimeMs: 120000 },
+  // Detailed uses the selected model's declared context-derived cap below. This sentinel never
+  // reaches the API because `vectorDetailBudget` clamps it to that catalog limit.
+  detailed: {
+    label: "Detailed",
+    maxNewTokens: Number.MAX_SAFE_INTEGER,
+    maxSvgBytes: 262144,
+    maxWallTimeMs: 120000,
+  },
+});
+
+const VECTOR_DETAIL_FALLBACK = Object.freeze({
+  maxNewTokens: 4000,
+  maxSvgBytes: 262144,
+  maxWallTimeMs: 120000,
 });
 
 // Presentation labels never cross the API's deny_unknown_fields boundary. Catalog limits are
 // authoritative; recipe budgets are preserved separately and validated rather than silently clamped.
 export function vectorDetailBudget(preset, model) {
   return Object.fromEntries(["maxNewTokens", "maxSvgBytes", "maxWallTimeMs"].map((key) =>
-    [key, Math.min(preset[key], model?.vector?.[key] ?? VECTOR_DETAIL_PRESETS.detailed[key])],
+    [key, Math.min(preset[key], model?.vector?.[key] ?? VECTOR_DETAIL_FALLBACK[key])],
   ));
 }
 
 function budgetFitsModel(budget, model) {
   return ["maxNewTokens", "maxSvgBytes", "maxWallTimeMs"].every((key) =>
-    Number.isSafeInteger(budget?.[key]) && budget[key] > 0 && budget[key] <= (model?.vector?.[key] ?? VECTOR_DETAIL_PRESETS.detailed[key]),
+    Number.isSafeInteger(budget?.[key]) && budget[key] > 0 && budget[key] <= (model?.vector?.[key] ?? VECTOR_DETAIL_FALLBACK[key]),
   );
 }
 

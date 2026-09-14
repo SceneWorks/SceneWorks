@@ -26396,7 +26396,8 @@
       "capabilities": ["image_to_svg"],
       "vector": {
         "acceptsTextGuidance": false,
-        "maxNewTokens": 4000,
+        // 8192 decoder positions minus the exact 257-image-token + 2-token `<svg` prefill.
+        "maxNewTokens": 7933,
         "maxSvgBytes": 262144,
         "maxWallTimeMs": 120000,
         // Exact immutable safetensor lower bound: 4,995,740,600 + 146,964,720 bytes. This is not a
@@ -26471,7 +26472,8 @@
       "capabilities": ["image_to_svg"],
       "vector": {
         "acceptsTextGuidance": false,
-        "maxNewTokens": 4000,
+        // 16000 decoder positions minus the exact 576-image-token + 2-token `<svg` prefill.
+        "maxNewTokens": 15422,
         "maxSvgBytes": 262144,
         "maxWallTimeMs": 120000,
         // Exact immutable safetensor lower bound from the four shards consumed by both native
