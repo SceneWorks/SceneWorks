@@ -26493,7 +26493,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
+            "inferenceRevision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
@@ -26521,27 +26521,27 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3e41ad99dfe4680f88a5448d8bbd417f5f6fc6e15a459b651fecfd87d0210916",
+              "sha256": "3a392daba8146ea1b93e6e5703060f498640e0711fd8fc5a20fc707312659b05",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
                   "byteSize": 25857,
-                  "sha256": "3fb0feec6773f76004f7ff56a877cd55ee560e9c80ed5eea1dd92c4b193b387d"
+                  "sha256": "d4c07e6e077b43900d1121d9fa36d45699d672a55bd671da59be8cb944e2f7af"
                 },
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
-                  "byteSize": 24475,
-                  "sha256": "6acf45f918e807f8da29ba5b5aa01e9fa86ce2ee9d7ec180ff37c770d23a0e2a"
+                  "byteSize": 24698,
+                  "sha256": "0023117e2d9185eca5a4452a4ab05277ec9a8fbbbca0f465663e2d26c9312218"
                 },
                 {
                   "path": "Cargo.lock",
                   "byteSize": 250690,
-                  "sha256": "4cc930618c7e119a0190d4732413079392fb98771baa1e42abb1b5f03a35b169"
+                  "sha256": "074bdaa1f977ef3f0a2277e3c43a77352c2dfefa5283fc014cea7b141ff53402"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9798,
-                  "sha256": "ddf604b0e81db79af4bfdc1577f4422f9f8ac2b6df8e92bb5117cc5ecee22fe6"
+                  "sha256": "275a6f964d8b62b97eaaf502d28044c07aa8ac8296fd54e3e6d023575aa736e1"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -26556,7 +26556,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
-                  "sha256": "85caa3f5ae6a79100dafc170d49d8db2ba66d0c65305f9717f594d0af5ab6c76"
+                  "sha256": "5ca3bfd2d67c0374057832d9d2364af9124a6750f30871df6f16e9650e5c8d32"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -26605,8 +26605,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 201660,
-                  "sha256": "77b483061aaead284aaa683ca319b4b0e9ffe6eb0217fd057cc917cb76f6cfc2"
+                  "byteSize": 206992,
+                  "sha256": "b27daef7fcd9ba2f156a7080a36e0b4b460fabbfb9034b860150ef2215f23b39"
                 },
                 {
                   "path": "package.json",
@@ -26620,8 +26620,8 @@
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
-                  "byteSize": 2816,
-                  "sha256": "8f0cc4ba30d5f3b39e7bcf2299fa859f92a0ca713a2ccc1a665422c15ca22661"
+                  "byteSize": 2928,
+                  "sha256": "2c0a00c1a91ed5a0acfc9a1e253ca2d7a14b8cbf69a686b9148ad3ade10ec637"
                 },
                 {
                   "path": "release/starvector-terminal-metrics-lock-v1.json",
@@ -26665,8 +26665,8 @@
                 },
                 {
                   "path": "scripts/lib/starvector-terminal-upstream-reference.mjs",
-                  "byteSize": 4535,
-                  "sha256": "46f74b7a2882e2aab9e3e7d9e7cb8f3882ad669d7d5a3c757cdb2882b413bb75"
+                  "byteSize": 8056,
+                  "sha256": "06077f5aa1a20dc622a86813ee22be1ab8f412402bd7ec3b9c6d32497cafa3c9"
                 },
                 {
                   "path": "scripts/lib/terminal-tree-identity.mjs",
@@ -26690,13 +26690,13 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-campaign.mjs",
-                  "byteSize": 7020,
-                  "sha256": "40fb7decb7493b0bce19d8795c5ebfbb75b739b779c1829e7e3dc0caef1a67a0"
+                  "byteSize": 7421,
+                  "sha256": "7c2c4464dd915b81f9921d6c5925a3b07f54f8cd82f00cb05d31511c4fe00d90"
                 },
                 {
                   "path": "scripts/starvector-terminal-case-bundle.mjs",
-                  "byteSize": 7821,
-                  "sha256": "e032f8a3973857baeca2ff42dfc434a300382883cb06c702d1d4fe0fdfbe9db8"
+                  "byteSize": 8563,
+                  "sha256": "96569222637ed67ce78bc6b76ab2f04fb526e72a25be275ddbd17a0dd4df37b6"
                 },
                 {
                   "path": "scripts/starvector-terminal-cli.mjs",
@@ -26710,13 +26710,13 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-metrics.py",
-                  "byteSize": 14997,
-                  "sha256": "2698ba375283941dc735e80108ee8a2401d606ca4852820348820302ad0513b2"
+                  "byteSize": 18978,
+                  "sha256": "cef8dd8c8f9d77c1c07f0ed6d331578c349b6406ee7866726b06aed21cf97899"
                 },
                 {
                   "path": "scripts/starvector-terminal-producer.mjs",
-                  "byteSize": 34576,
-                  "sha256": "87d57c35693c54aa9a241afe36924d92da4b1768d031db8f4f48b5e4140aaf36"
+                  "byteSize": 35283,
+                  "sha256": "249cd146ffbdf5fcb0050d9e7f29ac628dc8eabe65e5887a93ecaded4b08bd6e"
                 },
                 {
                   "path": "scripts/starvector-terminal-product-service.mjs",
@@ -26725,8 +26725,8 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-provision.mjs",
-                  "byteSize": 49863,
-                  "sha256": "3a0ac8f4d39a7e150951112cdce3145a02246723a3b96916a671cf4fb38f4c96"
+                  "byteSize": 50207,
+                  "sha256": "855ab1a11121a5a86f5cf327edfc3c7f8de19b7809cc1bf7027622b243b3248b"
                 },
                 {
                   "path": "scripts/starvector-terminal-recovery.mjs",
@@ -26735,13 +26735,13 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-route.mjs",
-                  "byteSize": 37084,
-                  "sha256": "e1b538425a23b88a2012352bd5387ae92dbc4c7db3aab6d911ab2802339d074d"
+                  "byteSize": 39805,
+                  "sha256": "b8ffd7018875fac0819e3d8ecc0f0e6f59331cde45e253a9e643a88cfda9b503"
                 },
                 {
                   "path": "scripts/starvector-terminal-upstream-oracle.py",
-                  "byteSize": 45214,
-                  "sha256": "e2e5979b466bd36c96000715cf0c9f0ed13f7ee42784c8d32fb14f5bdf436429"
+                  "byteSize": 51047,
+                  "sha256": "695a992b1d26368c407d9c7d3dd78743383e1c5fc0775041c92d708e1156b284"
                 },
                 {
                   "path": "scripts/starvector-terminal-upstream.mjs",
