@@ -134,7 +134,9 @@ OPTIONS (run):
   --out DIR              Run record directory (default film-harness-runs/<utc-timestamp>)
   --poll-seconds N       Job polling cadence in seconds (default 5)
   --no-export            Skip the timeline assembly and MP4 export
-  --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
+  --skip-install-check   Do not refuse a model/tier the catalog reports as not installed.
+                         The check covers the reference partition only when a SELECTED shot
+                         resolves to it, so --shots on a text-only selection never demands it.
 
 MAKE-REFERENCES OPTIONS (TEST FIXTURES ONLY — in the product the user supplies the references):
   --spec SPEC.jsonc      The reference spec to render (prompts, roles, limits, inherited roles)

@@ -2002,6 +2002,182 @@ pub fn plan_fps(plan: &ProductionPlan, entry: &Map<String, Value>) -> Option<u32
     plan.model.fps.or_else(|| default_fps(entry))
 }
 
+// ---------------------------------------------------------------------------------------------
+// Model partitions (sc-23402)
+// ---------------------------------------------------------------------------------------------
+
+/// Families whose REFERENCE conditioning ships as a second catalog entry, as
+/// `(base model id, reference partition model id)`.
+///
+/// MiniMax-H3 is two 18.78 GB DiT checkpoints under one family: `minimax_h3` serves
+/// `text_to_video | image_to_video | first_last_frame` and declares `limits.maxReferenceAssets: 0`,
+/// while `minimax_h3_ref` serves `reference_to_video` ONLY and declares 9 images / 3 clips / 3
+/// audio (`config/manifests/builtin.models.jsonc`; the routing arm that refuses the other pairings
+/// is `jobs_store::routing::mlx`, "routing a t2v request at the reference one loads the wrong
+/// checkpoint").
+///
+/// A plan therefore declares the FAMILY once — `model.id: "minimax_h3"` — and each shot resolves to
+/// the partition its own conditioning needs. The alternative, a per-shot model override, would let
+/// a plan mix unrelated families inside one sequence; this table cannot, because the only id it can
+/// ever produce is the declared model's own reference partition.
+const REFERENCE_PARTITIONS: &[(&str, &str)] = &[("minimax_h3", "minimax_h3_ref")];
+
+/// The reference partition of `model_id`, when its family has one.
+pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
+    REFERENCE_PARTITIONS
+        .iter()
+        .find(|(base, _)| *base == model_id)
+        .map(|(_, reference)| *reference)
+}
+
+/// Which catalog entry one shot renders through, and why.
+///
+/// The reason is not decoration: it is written onto the compiled request, the dispatched payload's
+/// provenance and the attempt record, so a run says which of a family's checkpoints produced each
+/// take without anyone re-deriving it from the plan (epic 23401 E1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShotPartition {
+    /// The catalog model id this shot dispatches as.
+    pub model_id: String,
+    /// One sentence saying why that partition and not the other.
+    pub reason: String,
+}
+
+/// The partition a shot of `plan_model_id` binding `reference_roles` roles renders through.
+///
+/// References are OPTIONAL input: a shot that binds none is never refused for it, it simply stays
+/// on the plan's declared model. Only a shot that actually binds reference roles moves, and only
+/// when the declared model's family HAS a reference partition — otherwise it stays put and
+/// [`validate_plan_against_model`] refuses it against the declared model's own
+/// `limits.maxReferenceAssets`, which is the same refusal a single-entry family has always given.
+pub fn resolve_shot_partition(plan_model_id: &str, reference_roles: usize) -> ShotPartition {
+    match (reference_roles, reference_partition_for(plan_model_id)) {
+        (0, _) | (_, None) => ShotPartition {
+            model_id: plan_model_id.to_owned(),
+            reason: if reference_roles == 0 {
+                format!("no reference roles; renders on the plan's model {plan_model_id}")
+            } else {
+                format!(
+                    "{reference_roles} reference role(s); {plan_model_id} has no separate \
+                     reference partition, so the shot renders on it directly"
+                )
+            },
+        },
+        (_, Some(reference)) => ShotPartition {
+            model_id: reference.to_owned(),
+            reason: format!(
+                "{reference_roles} reference role(s); {plan_model_id} declares no reference \
+                 conditioning, so the shot renders on its family's reference partition {reference}"
+            ),
+        },
+    }
+}
+
+/// The catalog entries a plan's shots may resolve to: the plan's declared model, plus the family's
+/// reference partition when the catalog serves one.
+///
+/// It is a view over borrowed entries rather than an owned map so the one resolution rule
+/// ([`Self::resolve`]) is shared by the validator, the compiler and the harness driver. A shot is
+/// checked against the limits of the entry it will ACTUALLY dispatch as — the whole point of the
+/// split, since the two partitions disagree on `capabilities` and `limits.maxReferenceAssets`.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelEntries<'a> {
+    base_id: &'a str,
+    base: &'a Map<String, Value>,
+    reference: Option<(&'a str, &'a Map<String, Value>)>,
+}
+
+impl<'a> ModelEntries<'a> {
+    /// A plan whose shots all render through one entry: no reference partition is available, so a
+    /// shot that binds references is judged against `entry`'s own declared caps.
+    pub fn single(model_id: &'a str, entry: &'a Map<String, Value>) -> Self {
+        Self {
+            base_id: model_id,
+            base: entry,
+            reference: None,
+        }
+    }
+
+    /// The plan's entry plus the family's reference partition as the catalog serves it. `reference`
+    /// is `None` when the catalog has no such entry — which becomes a finding on the first shot
+    /// that needs it, never a silent dispatch at the base checkpoint.
+    pub fn with_reference_partition(
+        model_id: &'a str,
+        entry: &'a Map<String, Value>,
+        reference: Option<(&'a str, &'a Map<String, Value>)>,
+    ) -> Self {
+        Self {
+            base_id: model_id,
+            base: entry,
+            reference,
+        }
+    }
+
+    pub fn base_entry(&self) -> &'a Map<String, Value> {
+        self.base
+    }
+
+    /// The partition a shot binding `reference_roles` roles resolves to, with its catalog entry.
+    /// The entry is `None` exactly when the resolved partition is not one this view holds.
+    fn resolve(&self, reference_roles: usize) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        let partition = resolve_shot_partition(self.base_id, reference_roles);
+        if partition.model_id == self.base_id {
+            return (partition, Some(self.base));
+        }
+        let entry = self
+            .reference
+            .and_then(|(id, entry)| (id == partition.model_id).then_some(entry));
+        (partition, entry)
+    }
+
+    /// The partition `shot` resolves to, with its catalog entry.
+    pub fn resolve_shot(&self, shot: &Shot) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        self.resolve(shot.conditioning.reference_roles.len())
+    }
+
+    /// The catalog entry for an already-resolved partition, paired back with it.
+    pub fn resolve_shot_partition_entry(
+        &self,
+        partition: &ShotPartition,
+    ) -> (&'a str, Option<&'a Map<String, Value>>) {
+        if partition.model_id == self.base_id {
+            return (self.base_id, Some(self.base));
+        }
+        match self.reference {
+            Some((id, entry)) if id == partition.model_id => (id, Some(entry)),
+            _ => (self.base_id, None),
+        }
+    }
+
+    /// Every distinct partition `plan`'s shots resolve to, in plan order.
+    pub fn partitions_used(&self, plan: &ProductionPlan) -> Vec<ShotPartition> {
+        let mut used: Vec<ShotPartition> = Vec::new();
+        for shot in &plan.shots {
+            let (partition, _) = self.resolve_shot(shot);
+            if !used.iter().any(|seen| seen.model_id == partition.model_id) {
+                used.push(partition);
+            }
+        }
+        if used.is_empty() {
+            used.push(resolve_shot_partition(self.base_id, 0));
+        }
+        used
+    }
+}
+
+/// The finding for a shot whose resolved partition is not in the catalog this run judged against.
+fn missing_partition_finding(shot_id: &str, partition: &ShotPartition) -> PlanDiagnostic {
+    PlanDiagnostic::shot(
+        shot_id,
+        "conditioning.referenceRoles",
+        format!(
+            "{} is not in this API's model catalog, so this shot cannot be dispatched ({}); \
+             install it in the Model Manager, or drop the shot's reference roles",
+            partition.model_id, partition.reason
+        ),
+    )
+}
+
 /// Output geometry for `shot`: the shot's `resolution`, else the plan's, else the model's
 /// declared default.
 pub fn shot_resolution(
@@ -2020,19 +2196,43 @@ pub fn shot_resolution(
 /// resolution against the declared menus and caps, reference counts against the declared caps,
 /// negative prompts against `video.supportsNegativePrompt`, and the plan's memory budget against
 /// the model's declared minimum on `lane`.
+///
+/// Every per-shot rule is checked against the entry of the partition that shot RESOLVES to
+/// (sc-23402), not against the plan's declared model: on a split family the two entries declare
+/// different `capabilities` and different `limits.maxReferenceAssets`, so judging a
+/// `reference_to_video` shot against the base entry would refuse a shot the route would have
+/// accepted, and judging a `text_to_video` shot against the reference entry would refuse one the
+/// base checkpoint renders every day.
 pub fn validate_plan_against_model(
     plan: &ProductionPlan,
-    entry: &Map<String, Value>,
+    entries: &ModelEntries<'_>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     let model_id = plan.model.id.as_str();
-    if let Some(minimum) = model_min_memory_gb(entry, lane) {
+    let entry = entries.base_entry();
+    // `limits.maxMemoryGb` bounds ONE JOB's observed peak (`AttemptRecord::peak_memory_gb`), and
+    // shots dispatch one job at a time — a run never has two partitions resident at once. So the
+    // budget has to clear the LARGEST declared minimum among the partitions this plan uses, not
+    // their sum: every partition must fit on its own, and the largest is the binding one. Checking
+    // the declared model's alone would let a plan whose reference shots need more sail past
+    // preflight and blow the budget mid-run.
+    let binding = entries
+        .partitions_used(plan)
+        .into_iter()
+        .filter_map(|partition| {
+            let (_, entry) = entries.resolve_shot_partition_entry(&partition);
+            let minimum = model_min_memory_gb(entry?, lane)?;
+            Some((partition.model_id, minimum))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right));
+    if let Some((partition_id, minimum)) = binding {
         if plan.limits.max_memory_gb < minimum {
             findings.push(PlanDiagnostic::plan(
                 "limits.maxMemoryGb",
                 format!(
-                    "budget {} GB is below {model_id}'s declared {}.minMemoryGb of {minimum} GB",
+                    "budget {} GB is below {partition_id}'s declared {}.minMemoryGb of {minimum} \
+                     GB",
                     plan.limits.max_memory_gb,
                     lane.manifest_key()
                 ),
@@ -2049,42 +2249,55 @@ pub fn validate_plan_against_model(
     if let Some(message) = fps_limit_error(model_id, fps, entry) {
         findings.push(PlanDiagnostic::plan("model.fps", message));
     }
-    let capabilities: Vec<&str> = entry
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect();
-    let supports_negative = entry
-        .get("video")
-        .and_then(Value::as_object)
-        .and_then(|video| video.get("supportsNegativePrompt"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let caps = reference_caps(entry);
-    let limits = entry.get("limits").and_then(Value::as_object);
-    let duration_menu: Vec<f64> = limits
-        .and_then(|limits| limits.get("durations"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_f64)
-        .collect();
-    let resolution_menu: Vec<(u32, u32)> = limits
-        .and_then(|limits| limits.get("resolutions"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter_map(parse_resolution)
-        .collect();
-    let max_pixels = limits
-        .and_then(|limits| limits.get("maxPixels"))
-        .and_then(Value::as_u64);
 
     for shot in &plan.shots {
         let id = shot.id.as_str();
+        let (partition, partition_entry) = entries.resolve_shot(shot);
+        let Some(entry) = partition_entry else {
+            findings.push(missing_partition_finding(id, &partition));
+            continue;
+        };
+        let model_id = partition.model_id.as_str();
+        let capabilities: Vec<&str> = entry
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let supports_negative = entry
+            .get("video")
+            .and_then(Value::as_object)
+            .and_then(|video| video.get("supportsNegativePrompt"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let caps = reference_caps(entry);
+        let limits = entry.get("limits").and_then(Value::as_object);
+        let duration_menu: Vec<f64> = limits
+            .and_then(|limits| limits.get("durations"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .collect();
+        let resolution_menu: Vec<(u32, u32)> = limits
+            .and_then(|limits| limits.get("resolutions"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(parse_resolution)
+            .collect();
+        let max_pixels = limits
+            .and_then(|limits| limits.get("maxPixels"))
+            .and_then(Value::as_u64);
+        // A partition whose fps menu disagrees with the plan's would render a different cadence
+        // than the sequence is cut at; the plan-level check above only saw the base entry.
+        if partition.model_id != plan.model.id {
+            if let Some(message) = fps_limit_error(model_id, fps, entry) {
+                findings.push(PlanDiagnostic::shot(id, "model.fps", message));
+            }
+        }
         let mode = shot.conditioning.mode.as_str();
         if !capabilities.contains(&mode) {
             findings.push(PlanDiagnostic::shot(
@@ -2184,7 +2397,7 @@ pub fn validate_all(
     plan: &ProductionPlan,
     pack: &ReferencePack,
     pack_dir: Option<&Path>,
-    model_entry: Option<(&Map<String, Value>, ModelLane)>,
+    model_entry: Option<(&ModelEntries<'_>, ModelLane)>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = validate_plan_structure(plan);
     findings.extend(validate_reference_pack(pack));
@@ -2195,8 +2408,8 @@ pub fn validate_all(
     if let Some(dir) = pack_dir {
         findings.extend(validate_reference_pack_files(pack, dir));
     }
-    if let Some((entry, lane)) = model_entry {
-        findings.extend(validate_plan_against_model(plan, entry, lane));
+    if let Some((entries, lane)) = model_entry {
+        findings.extend(validate_plan_against_model(plan, entries, lane));
     }
     findings
 }
@@ -2389,9 +2602,17 @@ pub struct ModelRecord {
     /// Backend label the worker reported on the first completed take (`mlx` / `cuda` / ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_observed: Option<String>,
-    /// Primary weights download for the requested tier, as the manifest declares it.
+    /// Primary weights download for the requested tier, as the manifest declares it. The DECLARED
+    /// model's own row — see `partition_weights` for what a mixed run actually loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Value>,
+    /// The primary weights download for the requested tier of EVERY partition this run dispatches
+    /// on, keyed by catalog model id (sc-23402 review). On a split family the reference partition's
+    /// `transformer_ref` rows are a second 18.78 GB download that `weights` above never named, so a
+    /// mixed run's record could not say which files produced its reference takes. A run that uses
+    /// one partition carries one entry, and it is the same row as `weights`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partition_weights: BTreeMap<String, Value>,
     pub hardware: HardwareRecord,
 }
 
@@ -2478,6 +2699,15 @@ pub struct AttemptRecord {
     /// instead of enqueuing a second one.
     #[serde(default)]
     pub idempotency_key: String,
+    /// The catalog model id this attempt was DISPATCHED as — the partition the shot resolved to,
+    /// which on a split family is not the plan's declared model (sc-23402). It is the same string
+    /// the compiled request carries and the same string the job payload's `model` holds, so the
+    /// three cannot disagree about which checkpoint produced the take.
+    #[serde(default)]
+    pub resolved_model_id: String,
+    /// Why that partition and not the other, in one sentence ([`ShotPartition::reason`]).
+    #[serde(default)]
+    pub partition_reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
@@ -2881,6 +3111,11 @@ mod tests {
         })
     }
 
+    /// The single-entry view of a catalog entry, for the tests whose plans use one partition.
+    fn single_entries(entry: &Map<String, Value>) -> ModelEntries<'_> {
+        ModelEntries::single("minimax_h3", entry)
+    }
+
     fn model_entry() -> Map<String, Value> {
         json!({
             "id": "minimax_h3",
@@ -2922,7 +3157,12 @@ mod tests {
         assert!(validate_plan_structure(&plan).is_empty());
         assert!(validate_reference_pack(&pack).is_empty());
         assert!(validate_plan_against_pack(&plan, &pack).is_empty());
-        assert!(validate_plan_against_model(&plan, &model_entry(), ModelLane::Mlx).is_empty());
+        assert!(validate_plan_against_model(
+            &plan,
+            &single_entries(&model_entry()),
+            ModelLane::Mlx
+        )
+        .is_empty());
     }
 
     #[test]
@@ -3159,15 +3399,25 @@ mod tests {
     fn model_findings_cover_mode_duration_resolution_references_negative_prompt_and_memory() {
         let mut value = plan_json();
         value["limits"]["maxMemoryGb"] = json!(32);
+        // A shot that binds references but asks for a keyframe mode. It resolves to the reference
+        // partition (sc-23402), and the capability check runs against THAT entry's declared modes —
+        // which is the whole point of resolving per shot.
         value["shots"][0]["conditioning"] =
-            json!({ "mode": "reference_to_video", "referenceRoles": ["red_parcel"] });
+            json!({ "mode": "image_to_video", "referenceRoles": ["red_parcel"] });
         value["shots"][0]["negativePrompt"] = json!("blurry");
         value["shots"][1]["targetDurationSeconds"] = json!(6.0);
         value["shots"][1]["resolution"] = json!("640x360");
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
         let findings = messages(&validate_plan_against_model(
             &plan,
-            &model_entry(),
+            &entries,
             ModelLane::Mlx,
         ));
         assert!(
@@ -3177,16 +3427,11 @@ mod tests {
             "{findings:?}"
         );
         assert!(
-            findings.iter().any(
-                |m| m.contains("[SH010] conditioning.mode") && m.contains("reference_to_video")
-            ),
-            "{findings:?}"
-        );
-        assert!(
             findings
                 .iter()
-                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
-                    && m.contains("maxReferenceAssets")),
+                .any(|m| m.contains("[SH010] conditioning.mode")
+                    && m.contains("minimax_h3_ref")
+                    && m.contains("image_to_video")),
             "{findings:?}"
         );
         assert!(
@@ -3214,7 +3459,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
-            &model_entry(),
+            &single_entries(&model_entry()),
             ModelLane::Mlx,
         ));
         assert!(
@@ -3226,6 +3471,214 @@ mod tests {
         assert!(
             findings.iter().any(|m| m.contains("model.fps")),
             "{findings:?}"
+        );
+    }
+
+    /// The reference partition's catalog entry, as `minimax_h3_ref` declares itself: the SAME
+    /// geometry as the base entry and 9 reference images where the base declares 0
+    /// (`config/manifests/builtin.models.jsonc`, asserted equal by
+    /// `both_minimax_h3_partitions_declare_one_geometry`).
+    fn reference_model_entry() -> Map<String, Value> {
+        json!({
+            "id": "minimax_h3_ref",
+            "capabilities": ["reference_to_video"],
+            "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+            "defaults": { "duration": 5.1667, "fps": 24, "resolution": "1344x768" },
+            "limits": {
+                "durations": [5.1667, 5.875, 14.375],
+                "hardMinDuration": 5.1667,
+                "hardMaxDuration": 14.375,
+                "fps": [24],
+                "maxPixels": 1032192,
+                "resolutions": ["1344x768", "576x320"],
+                "maxReferenceAssets": 9
+            },
+            "mlx": { "minMemoryGb": 64 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
+    /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402).
+    fn mixed_plan_json() -> Value {
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["red_parcel", "workshop_plate"]
+        });
+        value["shots"][1]["conditioning"] = json!({ "mode": "text_to_video" });
+        value
+    }
+
+    #[test]
+    fn each_shot_is_validated_against_the_partition_it_resolves_to() {
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        // Both shots validate: the reference shot against `minimax_h3_ref` (which declares
+        // reference_to_video and 9 images), the bare one against `minimax_h3`.
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(findings.is_empty(), "{findings:?}");
+        let resolved: Vec<(String, String)> = plan
+            .shots
+            .iter()
+            .map(|shot| {
+                let (partition, entry) = entries.resolve_shot(shot);
+                assert!(entry.is_some(), "{} resolved to no entry", shot.id);
+                (shot.id.clone(), partition.model_id)
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![
+                ("SH010".to_owned(), "minimax_h3_ref".to_owned()),
+                ("SH020".to_owned(), "minimax_h3".to_owned()),
+            ]
+        );
+
+        // Without the partition in the catalog the reference shot is refused BY NAME rather than
+        // dispatched at the base checkpoint, and the shot that binds nothing is untouched.
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &single_entries(&base),
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.iter().any(|m| m.contains("[SH010]")
+                && m.contains("minimax_h3_ref")
+                && m.contains("not in this API's model catalog")),
+            "{findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|m| m.contains("[SH020]")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_resolved_partitions_limits_are_what_refuse_a_shot() {
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+
+        // Ten roles exceed the reference partition's declared nine.
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"]["referenceRoles"] =
+            json!((0..10).map(|i| format!("role_{i}")).collect::<Vec<_>>());
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains("minimax_h3_ref")
+                    && m.contains('9')),
+            "{findings:?}"
+        );
+
+        // A family with no reference partition keeps the old rule: the declared model's own
+        // `limits.maxReferenceAssets` is what refuses the shot.
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &ModelEntries::single("ltx_2_5", &base),
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains("ltx_2_5")),
+            "{findings:?}"
+        );
+
+        // A reference_to_video shot with NO roles never reaches the partition table: it is a
+        // structural contradiction, refused naming the shot and the requirement.
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"] = json!({ "mode": "reference_to_video" });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("at least one reference role")),
+            "{findings:?}"
+        );
+
+        // References are OPTIONAL: a shot that binds none is never refused for it.
+        let plan: ProductionPlan = serde_json::from_value(plan_json()).unwrap();
+        assert!(
+            validate_plan_against_model(&plan, &entries, ModelLane::Mlx).is_empty(),
+            "a plan with no reference shots must still validate on a split family"
+        );
+    }
+
+    #[test]
+    fn the_memory_budget_must_clear_every_partition_so_the_largest_minimum_binds() {
+        let mut value = mixed_plan_json();
+        value["limits"]["maxMemoryGb"] = json!(70);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let base = model_entry();
+        let mut reference = reference_model_entry();
+        reference.insert("mlx".to_owned(), json!({ "minMemoryGb": 80 }));
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.iter().any(|m| m.contains("limits.maxMemoryGb")
+                && m.contains("minimax_h3_ref")
+                && m.contains("80")),
+            "the budget bounds ONE job's peak and each partition must fit on its own, so the \
+             larger of the two minimums binds: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_family_with_no_reference_partition_resolves_to_itself() {
+        let partition = resolve_shot_partition("ltx_2_5", 3);
+        assert_eq!(partition.model_id, "ltx_2_5");
+        assert!(
+            partition.reason.contains("no separate reference partition"),
+            "{}",
+            partition.reason
+        );
+        assert_eq!(reference_partition_for("ltx_2_5"), None);
+        assert_eq!(
+            reference_partition_for("minimax_h3"),
+            Some("minimax_h3_ref")
+        );
+        // The reference partition named as the plan's own model stays put.
+        assert_eq!(
+            resolve_shot_partition("minimax_h3_ref", 2).model_id,
+            "minimax_h3_ref"
         );
     }
 
@@ -3272,7 +3725,7 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         ));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("shots[0].id"));
@@ -3654,6 +4107,8 @@ mod tests {
         let attempt = |number: u32, human: bool, take: bool| AttemptRecord {
             attempt: number,
             idempotency_key: format!("run_1:SH010:a{number}"),
+            resolved_model_id: "minimax_h3".into(),
+            partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
             job_id: Some(format!("job{number}")),
             status: "completed".into(),
             started_at: "t".into(),
