@@ -47,6 +47,13 @@ pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
 /// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
 /// durable resume state: `state`, `stop`, per-attempt idempotency keys and rejections, per-shot
 /// take selection and review flags, and the human decision log.
+///
+/// sc-22714 adds `shots[].reviews` and `shots[].humanDecision` **within version 2**, deliberately:
+/// both are optional, defaulted and skipped when empty, so a record written before them still
+/// reads and a record written with them still resumes on a build without them. Bumping the version
+/// would refuse in-flight runs for a purely additive index. The observed state they point at is a
+/// separate document with its own version
+/// ([`crate::film_review::OBSERVED_STATE_SCHEMA_VERSION`]).
 pub const RUN_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// Conditioning modes a shot may declare. Each mode fixes which reference slots it takes, which
@@ -1766,13 +1773,55 @@ pub struct ReviewFlag {
     pub reason: String,
 }
 
+/// One review of one take, indexed in the run record. The **observations themselves live in their
+/// own document** ([`crate::film_review::ObservedState`]) at `record_path`: this is a pointer and a
+/// count, never the observed state itself, so nothing a vision model said can be mistaken for part
+/// of the run's intent (sc-22714).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeReviewSummary {
+    /// `<runId>:<shotId>:a<attempt>:r<n>`.
+    pub review_id: String,
+    pub reviewed_at: String,
+    /// The attempt whose take was reviewed.
+    pub attempt: u32,
+    /// Path of the observed-state document, relative to the run directory.
+    pub record_path: String,
+    /// `image_vqa` for the API seam, `scripted` for a fake. A `scripted` summary is evidence of a
+    /// rehearsal, not of a review.
+    pub backend: String,
+    pub model: String,
+    pub observations: u32,
+    pub unobserved: u32,
+    /// Flags a person has to look at (`mismatch` + `unobserved`, not the `uncertain` tail).
+    pub actionable_flags: u32,
+    pub topics_flagged: Vec<String>,
+    /// Set when a declared review limit ended it early.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
+}
+
+/// Where a human got to on one shot. Only a person writes this; a review never does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanTakeDecision {
+    /// `accepted` or `rejected`.
+    pub state: String,
+    pub at: String,
+    /// The attempt the decision was about.
+    pub attempt: u32,
+    pub reason: String,
+}
+
 /// One human decision, in the order the decisions were made: the provenance half of the production
-/// record. Replay adds nothing here — only a person's `resume`, `cancel` or `replace-take` does.
+/// record. Replay adds nothing here — only a person's `resume`, `cancel`, `replace-take`,
+/// `accept-take`, `reject-take` or `request-repair` does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductionDecision {
     pub at: String,
-    /// `resume`, `cancel`, or `replace_take`.
+    /// `resume`, `cancel`, `replace_take`, `review`, `accept_take`, `reject_take` or
+    /// `request_repair`.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shot_id: Option<String>,
@@ -1985,6 +2034,15 @@ pub struct ShotRunRecord {
     /// human resolves these; the harness never regenerates a flagged shot on its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs_review: Vec<ReviewFlag>,
+    /// Every vision-assisted review this shot has had, oldest first (sc-22714). Append-only: a
+    /// re-review never replaces the evidence of an earlier one. Each entry POINTS AT an
+    /// observed-state document; none of them carries observed values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<TakeReviewSummary>,
+    /// The human's standing decision on this shot's take, if they have made one. Absent means
+    /// nobody has looked yet — which is not the same as approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_decision: Option<HumanTakeDecision>,
 }
 
 impl ShotRunRecord {
@@ -2006,6 +2064,22 @@ impl ShotRunRecord {
                 .count(),
         )
         .unwrap_or(u32::MAX)
+    }
+
+    /// The most recent review of this shot, if it has had one.
+    pub fn latest_review(&self) -> Option<&TakeReviewSummary> {
+        self.reviews.last()
+    }
+
+    /// The most recent review OF THE SELECTED TAKE. A review of a take that has since been
+    /// replaced says nothing about the one selected now, so the accept/repair paths ask for this
+    /// rather than for `latest_review`.
+    pub fn review_of_selected(&self) -> Option<&TakeReviewSummary> {
+        let attempt = self.selected_attempt?;
+        self.reviews
+            .iter()
+            .rev()
+            .find(|review| review.attempt == attempt)
     }
 
     /// The next attempt number for this shot (attempt numbers never repeat within a shot).
@@ -3100,6 +3174,8 @@ mod tests {
             attempts: vec![attempt(1, false, false), attempt(2, false, true)],
             selected_attempt: Some(2),
             needs_review: Vec::new(),
+            reviews: Vec::new(),
+            human_decision: None,
         };
         assert_eq!(shot.automatic_attempts(), 2);
         assert_eq!(shot.next_attempt_number(), 3);

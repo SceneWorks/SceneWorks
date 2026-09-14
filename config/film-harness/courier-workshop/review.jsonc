@@ -1,0 +1,383 @@
+{
+  // Review questions for the courier/workshop/red-parcel fixture (epic 22708, sc-22714).
+  // Schema: crates/sceneworks-core/src/film_review.rs (`ReviewPlan`).
+  //
+  // This is a THIRD document beside plan.jsonc and references.jsonc, deliberately: the intended
+  // state lives in the plan (`shots[].startState` / `endState`), and how to INTERROGATE a take is
+  // review configuration with its own version. Nothing here is sent to a generation model — these
+  // questions only ever reach the `image_vqa` understanding job, and what comes back is written to
+  // an observed-state document that no later shot reads.
+  //
+  // ---------------------------------------------------------------------------------------------
+  // EVERY QUESTION IS CLOSED AND PRESUPPOSITION-FREE. That is not style: the sc-22714 real-weights
+  // smoke (SenseNova-U1-8B, evidence in ~/SceneWorks/film-harness-evidence/sc-22714/) showed the
+  // model answers closed short questions stably and open ones inconsistently. An open "Is there a
+  // parcel? What colour?" produced a two-paragraph essay on one frame and "no small parcel or box"
+  // on the next of the same take; "What colour is the jacket" answered "is red" with the colour
+  // AFTER the noun, which no phrase token could catch. So each question now names its allowed
+  // answers, and every token below is a single word or a short phrase the model can emit verbatim.
+  //
+  // Fields:
+  //   topic        one of the seven continuity dimensions the benchmark tests
+  //   intended     the plan's claim, restated for the human who reads the flag
+  //   ask          the question put to the vision model, verbatim (reproducible from this file)
+  //   expect       answer words meaning the take agrees with the intent
+  //   contradict   answer words meaning it contradicts the intent
+  //   frames       which sampled frames to grade on: first / last / all / any
+  //   mustObserve  an UNOBSERVED answer is itself an actionable flag. Set on every handoff and
+  //                action-completion question: a thing nobody saw is never recorded as completed.
+  //   acrossCut    COMPARE this take's answer against the adjacent selected take's — see below
+  //
+  // Matching is word-indexed and polarity-aware (`film_review::grade_answer`): tokens match whole
+  // words, tolerate up to three intervening modifiers, and an `expect` word inside a negated clause
+  // counts as a CONTRADICTION, so "No, this is not a cluttered woodworking workshop" can no longer
+  // score a match on the bare word "workshop". An answer carrying an "I cannot tell" marker, or
+  // matching neither list, is UNOBSERVED and carries no value at all. Silence is not agreement.
+  "schemaVersion": 1,
+  "id": "courier-workshop-review",
+  "version": 2,
+  "description": "Character, costume, location, parcel identity/custody, action completion and cut continuity for the courier/workshop sequence, as closed questions with declared answer vocabularies.",
+
+  // Three frames per take: the opening state, the middle, and the end state the plan's `endState`
+  // describes. Strictly increasing fractions of the take's own duration.
+  "sampling": { "positions": [0.08, 0.5, 0.94] },
+
+  // Declared BEFORE anything is dispatched. A review that reaches one of these stops, records why,
+  // and keeps the partial evidence. Measured on real weights: ~3 s per answer once the model is
+  // resident, so a whole shot's review is well inside maxSeconds; maxAnswerSeconds covers the cold
+  // load (~38 s) plus a wide margin.
+  // maxNewTokens bounds ONE answer's length (the questions are closed, so the answers are a word
+  // or a sentence); maxMemoryGb is the review's memory ceiling, checked against the API HOST's
+  // reported memory before anything is dispatched. 16 GB is SenseNova-U1-8B's own declared
+  // `minMemoryGb` — a host below it cannot answer a single question, and failing there wastes a
+  // project, a timeline and every frame the review already extracted.
+  "limits": {
+    "maxSeconds": 1200,
+    "maxFramesPerShot": 3,
+    "maxQuestionsPerShot": 8,
+    "maxAnswerSeconds": 180,
+    "maxNewTokens": 192,
+    "maxMemoryGb": 16
+  },
+
+  // A contradiction the model hedged ("it appears blue") is reported `uncertain` rather than
+  // `mismatch`, so the doubt survives into the record instead of being rounded up to a fact.
+  // Hedges are read clause-locally: "Yes, there is a person. The room appears to be a workshop."
+  // hedges the room, not the person.
+  "uncertainBelow": 0.5,
+
+  "shots": {
+    "SH010": {
+      "questions": [
+        {
+          "id": "sh010_location", "topic": "location", "frames": "all",
+          "intended": "A cluttered woodworking workshop with a long wooden workbench.",
+          "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
+          "expect": ["workshop"],
+          "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
+        },
+        {
+          "id": "sh010_courier", "topic": "character_identity", "frames": "last",
+          "intended": "A courier is standing in the doorway.",
+          "ask": "Is at least one person visible in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          "id": "sh010_courier_jacket", "topic": "costume", "frames": "last",
+          "intended": "The courier wears a blue jacket.",
+          "ask": "What colour is the jacket worn by the person in this frame? Answer with exactly one colour word, or the word unclear.",
+          "expect": ["blue", "navy"],
+          "contradict": ["red", "green", "yellow", "grey", "gray", "black", "brown", "white", "orange", "purple", "pink"]
+        },
+        {
+          "id": "sh010_parcel", "topic": "parcel_identity", "frames": "last",
+          "intended": "The courier is holding a small bright red parcel.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          "id": "sh010_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The parcel is in the courier's hands, not on the workbench.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          "expect": ["hands"],
+          "contradict": ["surface", "workbench", "bench", "table", "floor", "ground", "nobody"]
+        },
+        {
+          "id": "sh010_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "By the end of the shot the door is open.",
+          "ask": "Is the door in this frame open or closed? Answer with exactly one word: open, closed, or unclear.",
+          "expect": ["open"],
+          "contradict": ["closed", "shut"]
+        }
+      ]
+    },
+
+    "SH020": {
+      "questions": [
+        {
+          "id": "sh020_location", "topic": "location", "frames": "all",
+          "intended": "The same cluttered woodworking workshop as SH010.",
+          "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
+          "expect": ["workshop"],
+          "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
+        },
+        {
+          "id": "sh020_courier", "topic": "character_identity", "frames": "all",
+          "intended": "The courier is in frame throughout the shot.",
+          "ask": "Is at least one person visible in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          "id": "sh020_courier_jacket", "topic": "costume", "frames": "all",
+          "intended": "The courier still wears the blue jacket.",
+          "ask": "What colour is the jacket worn by the person in this frame? Answer with exactly one colour word, or the word unclear.",
+          "expect": ["blue", "navy"],
+          "contradict": ["red", "green", "yellow", "grey", "gray", "black", "brown", "white", "orange", "purple", "pink"]
+        },
+        {
+          "id": "sh020_parcel", "topic": "parcel_identity", "frames": "all",
+          "intended": "The same small bright red parcel.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          "id": "sh020_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The parcel is still in the courier's hands at the workbench.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          "expect": ["hands"],
+          "contradict": ["surface", "workbench", "bench", "table", "floor", "ground", "nobody"]
+        },
+        {
+          "id": "sh020_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "By the end of the shot the courier has reached the workbench.",
+          "ask": "Is the person in this frame standing at the workbench? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          // COMPARATIVE. `acrossCut` puts this same closed question to the last frame of SH010's
+          // selected take as well, and the two answers are held against each other: same answer =
+          // continuous, different answers = a jump, either side unclear = unobserved.
+          //
+          // The feature has to be one a single frame cannot fake and the model can name in one
+          // word. SH010's workshop has a pegboard of hanging hand tools behind the bench; a
+          // different workshop will not. The PREVIOUS version of this question asked each frame
+          // independently whether it was "a woodworking workshop" — both sides answered yes, and
+          // the real, visible fact that SH020 renders a DIFFERENT workshop was reported as a clean
+          // cut (the documented miss in the first smoke).
+          //
+          // `frames: "last"` rather than "first": the first frame of an image-conditioned shot is
+          // the approved conditioning plate, which carries no scene of its own, so the comparable
+          // evidence is where the shot settles.
+          "id": "sh020_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
+          "intended": "SH020 continues SH010's workshop — the same room, with the same pegboard of hand tools behind the bench.",
+          "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        }
+      ]
+    },
+
+    "SH030": {
+      "questions": [
+        {
+          "id": "sh030_bench", "topic": "location", "frames": "all",
+          "intended": "Close on the sawdust-covered wooden workbench.",
+          "ask": "What is the surface in this frame made of? Answer with exactly one word: wood, stone, metal, fabric, or unclear.",
+          "expect": ["wood", "wooden"],
+          "contradict": ["stone", "metal", "fabric", "plastic", "carpet", "tile"]
+        },
+        {
+          "id": "sh030_sleeve", "topic": "costume", "frames": "first",
+          "intended": "The hands lowering the parcel wear the courier's blue jacket sleeves.",
+          "ask": "What colour are the sleeves of the hands in this frame? Answer with exactly one colour word, the word none if no hands are visible, or the word unclear.",
+          "expect": ["blue", "navy"],
+          "contradict": ["none", "grey", "gray", "red", "green", "yellow", "black", "brown", "white"]
+        },
+        {
+          "id": "sh030_parcel", "topic": "parcel_identity", "frames": "all",
+          "intended": "The same small bright red parcel.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          "id": "sh030_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The parcel is resting on the workbench on its own; nobody is holding it.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          // "nobody" is agreement here, not a contradiction: nobody having the parcel is exactly
+          // what "resting on the bench on its own" means. It is a contradiction only in SH010/SH020,
+          // where the courier is supposed to be carrying it.
+          "expect": ["surface", "workbench", "bench", "table", "nobody"],
+          "contradict": ["hands", "held", "holding"]
+        },
+        {
+          "id": "sh030_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "The hands let go of the parcel and withdraw from frame.",
+          "ask": "Are any hands touching the parcel in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["no"],
+          "contradict": ["yes"]
+        },
+        {
+          // COMPARATIVE against SH020's selected take: a close-up cannot see the room, so the
+          // feature that carries across this cut is the PROP — the parcel SH020 brought to the
+          // bench is the one SH030 sets down.
+          "id": "sh030_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
+          "intended": "SH030 sets down the same red parcel SH020 carried to the bench.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        }
+      ]
+    },
+
+    "SH040": {
+      "questions": [
+        {
+          "id": "sh040_location", "topic": "location", "frames": "all",
+          "intended": "The same workshop, wide, matching SH010's setup.",
+          "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
+          "expect": ["workshop"],
+          "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
+        },
+        {
+          "id": "sh040_parcel", "topic": "parcel_identity", "frames": "all",
+          "intended": "The red parcel stays on the workbench for the whole shot.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          "id": "sh040_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The parcel is left on the workbench; the courier does not take it with them.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          "expect": ["surface", "workbench", "bench", "table", "nobody"],
+          "contradict": ["hands", "held", "holding"]
+        },
+        {
+          "id": "sh040_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "By the end of the shot the door is closed and the courier has gone.",
+          "ask": "Is the door in this frame open or closed? Answer with exactly one word: open, closed, or unclear.",
+          "expect": ["closed", "shut"],
+          "contradict": ["open"]
+        },
+        {
+          "id": "sh040_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
+          "intended": "SH040 is the same room SH030 left the parcel in — the same pegboard of hand tools behind the bench.",
+          "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        }
+      ]
+    },
+
+    "SH050": {
+      "questions": [
+        {
+          "id": "sh050_location", "topic": "location", "frames": "all",
+          "intended": "The same workshop.",
+          "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
+          "expect": ["workshop"],
+          "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
+        },
+        {
+          "id": "sh050_recipient", "topic": "character_identity", "frames": "last",
+          "intended": "The recipient — a woman, not the courier — is at the workbench.",
+          "ask": "Is at least one person visible in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          "id": "sh050_recipient_apron", "topic": "costume", "frames": "last",
+          "intended": "The recipient wears a grey work apron, not the courier's blue jacket.",
+          "ask": "What is the person in this frame wearing on their upper body? Answer with exactly one word: apron, jacket, shirt, coat, or unclear.",
+          "expect": ["apron"],
+          "contradict": ["jacket", "coat", "shirt", "hoodie", "sweater"]
+        },
+        {
+          "id": "sh050_parcel", "topic": "parcel_identity", "frames": "all",
+          "intended": "The red parcel is still on the workbench, sealed.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          // Custody is asked of EVERY shot the parcel is in, SH050 included: the parcel sitting
+          // untouched on the bench is exactly what this shot claims, and a shot with no custody
+          // question is a shot where the parcel can quietly change hands with nobody asking.
+          // Same vocabulary and polarity as SH040's: on the bench is agreement, in hands is not.
+          "id": "sh050_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The red parcel is still on the workbench, sealed; the recipient has not picked it up.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          "expect": ["surface", "workbench", "bench", "table", "nobody"],
+          "contradict": ["hands", "held", "holding"]
+        },
+        {
+          "id": "sh050_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "By the end of the shot the recipient is at the bench looking down at the parcel.",
+          "ask": "Is the person in this frame standing at the workbench? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          "id": "sh050_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
+          "intended": "SH050 is the same room SH040 closed the door on — the same pegboard of hand tools behind the bench.",
+          "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        }
+      ]
+    },
+
+    "SH060": {
+      "questions": [
+        {
+          "id": "sh060_bench", "topic": "location", "frames": "all",
+          "intended": "Close on the sawdust-covered wooden workbench.",
+          "ask": "What is the surface in this frame made of? Answer with exactly one word: wood, stone, metal, fabric, or unclear.",
+          "expect": ["wood", "wooden"],
+          "contradict": ["stone", "metal", "fabric", "plastic", "carpet", "tile"]
+        },
+        {
+          "id": "sh060_apron_sleeve", "topic": "costume", "frames": "all",
+          "intended": "The hands opening the parcel wear the recipient's grey apron sleeve.",
+          "ask": "What colour are the sleeves of the hands in this frame? Answer with exactly one colour word, the word none if no hands are visible, or the word unclear.",
+          "expect": ["grey", "gray"],
+          "contradict": ["none", "blue", "navy", "red", "green", "yellow", "black", "brown", "white"]
+        },
+        {
+          "id": "sh060_parcel", "topic": "parcel_identity", "frames": "all",
+          "intended": "The same small bright red parcel.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          "id": "sh060_parcel_custody", "topic": "parcel_custody", "frames": "all", "mustObserve": true,
+          "intended": "The recipient's hands are on the parcel; the courier does not reappear.",
+          "ask": "Are any hands touching the parcel in this frame? Answer with exactly one word: yes, no, or unclear.",
+          "expect": ["yes"],
+          "contradict": ["no"]
+        },
+        {
+          "id": "sh060_action", "topic": "action_completion", "frames": "last", "mustObserve": true,
+          "intended": "By the end of the shot the parcel is open with its flaps folded back.",
+          "ask": "Is the parcel in this frame open or sealed? Answer with exactly one word: open, sealed, or unclear.",
+          "expect": ["open"],
+          "contradict": ["sealed", "closed", "shut", "taped"]
+        },
+        {
+          "id": "sh060_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
+          "intended": "SH060 opens the same red parcel SH050 found sealed on the bench.",
+          "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
+          "expect": ["red"],
+          "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        }
+      ]
+    }
+  }
+}

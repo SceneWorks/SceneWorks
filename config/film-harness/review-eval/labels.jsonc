@@ -1,0 +1,277 @@
+{
+  // The fixed labeled set the reviewer is scored against (epic 22708, sc-22714).
+  // Schema: crates/sceneworks-core/src/film_review.rs (`EvalSet`).
+  //
+  // Eleven cases: four correct takes and seven deliberately broken ones, one per fault the
+  // benchmark cares about — wrong parcel colour, missing character, wrong location, an action that
+  // never finished, a handoff the camera never showed, a discontinuous cut, and wrong costume.
+  // `expected` is what a CORRECT reviewer should report per question; anything else is a miss, a
+  // false alarm or an overclaim, and `film-harness review-eval` counts each separately.
+  //
+  // THE MEDIA IS PLACEHOLDER. `frames/*.png` are flat deterministic plates written by
+  // `film-harness review-fixtures --set config/film-harness/review-eval/labels.jsonc`, exactly as
+  // the reference-pack plates are. They exist so this set is self-contained and the deterministic
+  // tests — which drive the scripted backend and never look at a pixel — run anywhere. Pointing a
+  // real vision model at them measures nothing. For a real measurement use `real-takes.jsonc`
+  // beside this file, whose `mediaRoot` names frames of actual MiniMax-H3 takes.
+  //
+  // `unobserved` as an EXPECTED verdict is not a weaker `match`: it is the label for "the answer is
+  // not in this footage", and a reviewer that reports match or mismatch there is counted as an
+  // OVERCLAIM — the failure mode where an uncertain reading becomes a fact.
+  "schemaVersion": 1,
+  "id": "courier-review-eval",
+  "version": 1,
+  "description": "Correct and deliberately broken courier/workshop takes, labeled per review question.",
+  "mediaRoot": "frames",
+  "reviewPlan": "../courier-workshop/review.jsonc",
+
+  "cases": [
+    {
+      "id": "sh020_correct",
+      "shotId": "SH020",
+      "label": "correct",
+      "description": "The courier in the blue jacket crosses the workshop with the red parcel and reaches the bench.",
+      "frames": [
+        { "file": "sh020_correct_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh020_correct_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh020_correct_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh020_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh020_location": "match",
+        "sh020_courier": "match",
+        "sh020_courier_jacket": "match",
+        "sh020_parcel": "match",
+        "sh020_parcel_custody": "match",
+        "sh020_action": "match",
+        "sh020_cut": "match"
+      }
+    },
+    {
+      "id": "sh030_correct",
+      "shotId": "SH030",
+      "label": "correct",
+      "description": "Blue sleeves lower the red parcel onto the bench and withdraw.",
+      "frames": [
+        { "file": "sh030_correct_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh030_correct_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh030_correct_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "match",
+        "sh030_parcel": "match",
+        "sh030_parcel_custody": "match",
+        "sh030_action": "match",
+        "sh030_cut": "match"
+      }
+    },
+    {
+      "id": "sh060_correct",
+      "shotId": "SH060",
+      "label": "correct",
+      "description": "Grey apron sleeves open the red parcel; the flaps end folded back.",
+      "frames": [
+        { "file": "sh060_correct_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh060_correct_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh060_correct_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh060_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh060_bench": "match",
+        "sh060_apron_sleeve": "match",
+        "sh060_parcel": "match",
+        "sh060_parcel_custody": "match",
+        "sh060_action": "match",
+        "sh060_cut": "match"
+      }
+    },
+    {
+      "id": "sh050_correct",
+      "shotId": "SH050",
+      "label": "correct",
+      "description": "The recipient in the grey apron comes in and reaches the bench where the red parcel sits.",
+      "frames": [
+        { "file": "sh050_correct_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh050_correct_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh050_correct_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh050_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh050_location": "match",
+        "sh050_recipient": "match",
+        "sh050_recipient_apron": "match",
+        "sh050_parcel": "match",
+        "sh050_parcel_custody": "match",
+        "sh050_action": "match",
+        "sh050_cut": "match"
+      }
+    },
+
+    {
+      "id": "sh030_wrong_parcel_colour",
+      "shotId": "SH030",
+      "label": "wrong_parcel_colour",
+      "description": "Everything as intended except the parcel, which comes out blue.",
+      "frames": [
+        { "file": "sh030_wrong_parcel_colour_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh030_wrong_parcel_colour_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh030_wrong_parcel_colour_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_wrong_parcel_colour_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "match",
+        "sh030_parcel": "mismatch",
+        "sh030_parcel_custody": "match",
+        "sh030_action": "match",
+        "sh030_cut": "mismatch"
+      }
+    },
+    {
+      "id": "sh020_missing_courier",
+      "shotId": "SH020",
+      "label": "missing_character",
+      "description": "The workshop renders, but nobody ever walks into frame.",
+      "frames": [
+        { "file": "sh020_missing_courier_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh020_missing_courier_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh020_missing_courier_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh020_missing_courier_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh020_location": "match",
+        "sh020_courier": "mismatch",
+        "sh020_courier_jacket": "unobserved",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "unobserved",
+        "sh020_action": "mismatch",
+        "sh020_cut": "mismatch"
+      }
+    },
+    {
+      "id": "sh020_wrong_location",
+      "shotId": "SH020",
+      "label": "wrong_location",
+      "description": "The courier and parcel are right, but the room drifts into a domestic kitchen.",
+      "frames": [
+        { "file": "sh020_wrong_location_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh020_wrong_location_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh020_wrong_location_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh020_wrong_location_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh020_location": "mismatch",
+        "sh020_courier": "match",
+        "sh020_courier_jacket": "match",
+        "sh020_parcel": "match",
+        "sh020_parcel_custody": "match",
+        "sh020_action": "mismatch",
+        "sh020_cut": "mismatch"
+      }
+    },
+    {
+      "id": "sh030_unfinished_action",
+      "shotId": "SH030",
+      "label": "unfinished_action",
+      "description": "The parcel is lowered but never let go: the shot ends with it still in the hands.",
+      "frames": [
+        { "file": "sh030_unfinished_action_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh030_unfinished_action_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh030_unfinished_action_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_unfinished_action_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "match",
+        "sh030_parcel": "match",
+        "sh030_parcel_custody": "mismatch",
+        "sh030_action": "mismatch",
+        "sh030_cut": "match"
+      }
+    },
+    {
+      "id": "sh030_occluded_handoff",
+      "shotId": "SH030",
+      "label": "unobserved_handoff",
+      "description": "The handoff happens behind the courier's back: the camera never shows whether the parcel was let go. The reviewer must report UNOBSERVED, not completed.",
+      "frames": [
+        { "file": "sh030_occluded_handoff_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh030_occluded_handoff_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh030_occluded_handoff_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_occluded_handoff_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "match",
+        "sh030_parcel": "match",
+        "sh030_parcel_custody": "unobserved",
+        "sh030_action": "unobserved",
+        "sh030_cut": "match"
+      }
+    },
+    {
+      "id": "sh030_cut_discontinuity",
+      "shotId": "SH030",
+      "label": "cut_discontinuity",
+      "description": "The shot is internally fine, but it opens on an empty bench — it does not continue from the parcel SH020 carried to it.",
+      "frames": [
+        { "file": "sh030_cut_discontinuity_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh030_cut_discontinuity_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh030_cut_discontinuity_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_cut_discontinuity_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_cut": "mismatch",
+        "sh030_parcel_custody": "match",
+        "sh030_action": "match"
+      }
+    },
+    {
+      "id": "sh050_wrong_costume",
+      "shotId": "SH050",
+      "label": "wrong_costume",
+      "description": "The recipient arrives wearing the courier's blue jacket instead of the grey apron.",
+      "frames": [
+        { "file": "sh050_wrong_costume_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh050_wrong_costume_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh050_wrong_costume_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh050_wrong_costume_prev.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh050_location": "match",
+        "sh050_recipient": "match",
+        "sh050_recipient_apron": "mismatch",
+        "sh050_parcel": "match",
+        // Only the costume is wrong in this take: the parcel is where it should be.
+        "sh050_parcel_custody": "match",
+        "sh050_action": "match",
+        "sh050_cut": "match"
+      }
+    }
+  ]
+}
