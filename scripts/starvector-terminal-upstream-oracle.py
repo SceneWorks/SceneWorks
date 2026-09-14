@@ -56,6 +56,20 @@ SOURCE_INDICES = [base + i for base in (0, 30, 60, 90) for i in range(5)]
 _CAIRO_HANDLES = []
 
 
+class SvgCaseRejected(ValueError):
+    """A generated SVG was explicitly rejected by the canonical sanitizer."""
+
+    def __init__(self, case_index, event):
+        self.case_index = case_index
+        self.event = event
+        super().__init__('upstream SVG rejected by canonical renderer: case '
+                         + str(case_index) + ': ' + event['error_code'])
+
+
+class CollectedSvgRejections(ValueError):
+    """All planned cases ran, but at least one SVG was rejected."""
+
+
 def native_cairo_files(lock):
     files = {}
     for package in lock['windows_cairo']['packages']:
@@ -183,6 +197,18 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             value.update(block)
     return value.hexdigest()
+
+
+def absolute_regular_file(value, description):
+    item = Path(value)
+    if not item.is_absolute():
+        fail(description + ' path must be absolute')
+    for component in [item, *item.parents]:
+        if component.is_symlink() or getattr(component, 'is_junction', lambda: False)():
+            fail(description + ' path must not traverse links')
+    if not item.is_file():
+        fail(description + ' is missing or not a regular file')
+    return item
 
 
 def local_file(root, relative):
@@ -357,13 +383,14 @@ def validate(args, packages=True):
         if (pinned.get('revision') and component['revision'] != pinned['revision']) or (pinned.get('config_sha256') and component['config_sha256'] != pinned['config_sha256']):
             fail('component identity mismatch: ' + key)
         configs[key] = str(verified_file(args.components_root, component['config_path'], component['config_sha256']))
-    if not Path(args.sanitizer).is_file():
-        fail('production sanitizer binary is missing')
+    sanitizer = absolute_regular_file(args.sanitizer, 'production sanitizer binary')
+    args.sanitizer = str(sanitizer)
     rows = select_rows(args.assets_root)
     runtime = import_upstream_runtime(args.upstream_root, lock) if packages else None
     return {'lock': lock, 'source_sha256': source_hash, 'model_root': str(model_root), 'model_inventory_sha256': model_hash,
             'config_path': str(config_path), 'processor_path': str(processor_path), 'components': components,
-            'component_configs': configs, 'rows': rows, 'weight_map': mapping, 'runtime': runtime}
+            'component_configs': configs, 'rows': rows, 'weight_map': mapping, 'runtime': runtime,
+            'sanitizer_sha256': digest(sanitizer)}
 
 
 @contextlib.contextmanager
@@ -523,10 +550,62 @@ def render_upstream_svg(sanitizer, raw_path, rendered, case_index):
     except (ValueError, TypeError):
         fail('canonical renderer returned invalid JSON for case ' + str(case_index)
              + '; see sanitizer.stdout.log')
-    if not isinstance(event, dict) or event.get('outcome') != 'sanitized_inert':
-        code = event.get('error_code', 'missing error_code') if isinstance(event, dict) else 'invalid result'
-        fail('upstream SVG rejected by canonical renderer: case ' + str(case_index) + ': ' + str(code))
+    if not isinstance(event, dict):
+        fail('canonical renderer returned invalid result for case ' + str(case_index))
+    if event.get('outcome') == 'rejected':
+        if (not isinstance(event.get('error_code'), str) or not event['error_code']
+                or event.get('canonical_svg_sha256') is not None
+                or event.get('preview_png_sha256') is not None
+                or event.get('published_paths') != [] or event.get('staging_residue') != []
+                or event.get('result_contains_inline_svg') is not False or os.path.lexists(rendered)):
+            fail('canonical renderer returned invalid rejection for case ' + str(case_index))
+        raise SvgCaseRejected(case_index, event)
+    if event.get('outcome') != 'sanitized_inert':
+        fail('canonical renderer returned invalid result for case ' + str(case_index))
+    svg = absolute_regular_file(Path(rendered) / 'canonical.svg', 'canonical renderer SVG')
+    preview = absolute_regular_file(Path(rendered) / 'preview.png', 'canonical renderer preview')
+    if (set(event) != {'outcome', 'error_code', 'canonical_svg_sha256', 'preview_png_sha256',
+                       'published_paths', 'staging_residue', 'result_contains_inline_svg'}
+            or event.get('error_code') != 'sanitized_inert'
+            or event.get('canonical_svg_sha256') != digest(svg)
+            or event.get('preview_png_sha256') != digest(preview)
+            or event.get('published_paths') != ['canonical.svg', 'preview.png']
+            or event.get('staging_residue') != []
+            or event.get('result_contains_inline_svg') is not False):
+        fail('canonical renderer returned invalid success for case ' + str(case_index))
     return event
+
+
+def collect_cases(args, facts, model, device, output, tier_root, record, cases=None, rejections=None):
+    cases = [] if cases is None else cases
+    rejections = [] if rejections is None else rejections
+    for row in facts['rows']:
+        case_root = tier_root / ('case-%02d' % row['case_index']); case_root.mkdir()
+        record({'event': 'case_started', 'started_at': time.time(), **row})
+        raw, generation = generate(model, row, device)
+        raw_path = case_root / 'raw.svg'; raw_path.write_text(raw)
+        rendered = case_root / 'rendered'
+        try:
+            render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
+        except SvgCaseRejected as exc:
+            rejection = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
+            rejection.update(error_code=exc.event['error_code'], raw_svg_sha256=digest(raw_path),
+                             sanitizer_stdout=(case_root / 'sanitizer.stdout.log').relative_to(output).as_posix(),
+                             sanitizer_stderr=(case_root / 'sanitizer.stderr.log').relative_to(output).as_posix())
+            rejections.append(rejection)
+            record({'event': 'case_rejected', **rejection, **generation})
+            continue
+        svg = local_file(rendered, 'canonical.svg'); preview = local_file(rendered, 'preview.png')
+        from PIL import Image
+        with Image.open(preview) as image:
+            if image.size != (512, 512):
+                fail('upstream canonical preview is not 512x512')
+        case = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
+        case.update(upstream_svg=svg.relative_to(output).as_posix(), upstream_svg_sha256=digest(svg),
+                    upstream_preview_png=preview.relative_to(output).as_posix(), upstream_preview_png_sha256=digest(preview))
+        cases.append(case)
+        record({'event': 'case_completed', **case, **generation, 'raw_svg_sha256': digest(raw_path)})
+    return cases, rejections
 
 
 def worker(args, facts):
@@ -548,46 +627,44 @@ def worker(args, facts):
     tier_root = output / ('upstream-' + args.tier)
     tier_root.mkdir(parents=True, exist_ok=False)
     transcript_path = tier_root / 'transcript.jsonl'
-    cases = []
+    cases, rejections = [], []
     with transcript_path.open('x') as transcript:
         def record(event):
             transcript.write(json.dumps(event, separators=(',', ':')) + '\n'); transcript.flush(); os.fsync(transcript.fileno())
         record({'event': 'start', 'implementation_revision': facts['lock']['implementation_revision'],
                 'source_sha256': facts['source_sha256'], 'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
+                'sanitizer_sha256': facts['sanitizer_sha256'],
                 'components': facts['components'], 'runtime': facts['runtime'], 'attention_implementation': 'eager', 'embedding_initialization': 'exact-local-tokenizer-size-before-strict-checkpoint-load',
                 'max_rss_gib': args.max_rss_gib, 'max_vram_gib': args.max_vram_gib, 'timeout_seconds': args.timeout_seconds})
         try:
             model, coverage = load_model(facts, device)
             record({'event': 'model_loaded', **coverage})
-            for row in facts['rows']:
-                case_root = tier_root / ('case-%02d' % row['case_index']); case_root.mkdir()
-                record({'event': 'case_started', 'started_at': time.time(), **row})
-                raw, generation = generate(model, row, device)
-                raw_path = case_root / 'raw.svg'; raw_path.write_text(raw)
-                rendered = case_root / 'rendered'
-                render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
-                svg = local_file(rendered, 'canonical.svg'); preview = local_file(rendered, 'preview.png')
-                from PIL import Image
-                with Image.open(preview) as image:
-                    if image.size != (512, 512):
-                        fail('upstream canonical preview is not 512x512')
-                case = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
-                case.update(upstream_svg=svg.relative_to(output).as_posix(), upstream_svg_sha256=digest(svg),
-                            upstream_preview_png=preview.relative_to(output).as_posix(), upstream_preview_png_sha256=digest(preview))
-                cases.append(case)
-                record({'event': 'case_completed', **case, **generation, 'raw_svg_sha256': digest(raw_path)})
-            del model
-            torch.cuda.empty_cache()
+            try:
+                collect_cases(args, facts, model, device, output, tier_root, record, cases, rejections)
+            finally:
+                del model
+                torch.cuda.empty_cache()
+            if rejections:
+                indices = ','.join(str(item['case_index']) for item in rejections)
+                raise CollectedSvgRejections('canonical renderer rejected ' + str(len(rejections))
+                                             + ' of ' + str(len(facts['rows']))
+                                             + ' planned SVG cases: ' + indices)
             record({'event': 'completed', 'cases': len(cases), 'peak_cuda_bytes': torch.cuda.max_memory_allocated(device)})
         except BaseException as exc:
-            record({'event': 'failed', 'error': str(exc), 'completed_cases': len(cases)})
+            event = {'event': 'failed', 'error': str(exc), 'completed_cases': len(cases)}
+            if isinstance(exc, CollectedSvgRejections):
+                event['failure_kind'] = 'svg_case_rejections'
+            if rejections:
+                event.update(collected_cases=len(cases) + len(rejections), rejected_cases=rejections)
+            record(event)
             raise
     config_copy = tier_root / 'config.json'; shutil.copyfile(facts['config_path'], config_copy)
     processor_copy = tier_root / 'processor.json'; shutil.copyfile(facts['processor_path'], processor_copy)
     value = {'schema_version': 1, 'upstream_reference': reference_metadata(facts, args.tier, config_copy, processor_copy, transcript_path),
         'config_path': config_copy.relative_to(output).as_posix(), 'processor_path': processor_copy.relative_to(output).as_posix(),
         'transcript_path': transcript_path.relative_to(output).as_posix(), 'cases': cases}
-    durable_json(output / ('upstream-reference-' + args.tier + '.json'), value)
+    suffix = '.pending.json' if args.defer_manifest else '.json'
+    durable_json(output / ('upstream-reference-' + args.tier + suffix), value)
 
 
 def reference_metadata(facts, tier, config_path, processor_path, transcript_path):
@@ -599,7 +676,52 @@ def reference_metadata(facts, tier, config_path, processor_path, transcript_path
             'processor_sha256': digest(processor_path), 'transcript_sha256': digest(transcript_path)}
 
 
-def supervise(args):
+def verify_collected_rejections(output, tier, rows):
+    transcript = absolute_regular_file(Path(output) / ('upstream-' + tier) / 'transcript.jsonl',
+                                       'upstream rejection transcript')
+    try:
+        events = [json.loads(line) for line in transcript.read_text().splitlines()]
+    except (ValueError, OSError, TypeError):
+        fail('upstream rejection transcript is invalid')
+    starts = [event for event in events if event.get('event') == 'case_started']
+    results = [event for event in events if event.get('event') in ('case_completed', 'case_rejected')]
+    if len(rows) != 20 or len(starts) != len(rows) or len(results) != len(rows):
+        fail('upstream rejection transcript does not cover all planned cases')
+    for index, (row, started, result) in enumerate(zip(rows, starts, results)):
+        identity = {key: row[key] for key in ['case_index', 'source_case_index', 'seed', 'input_png_sha256']}
+        if index != row['case_index'] or any(started.get(key) != value or result.get(key) != value for key, value in identity.items()):
+            fail('upstream rejection transcript case identity differs')
+    rejected = [event for event in results if event['event'] == 'case_rejected']
+    final = events[-1] if events else {}
+    keys = ['case_index', 'source_case_index', 'seed', 'input_png_sha256', 'error_code',
+            'raw_svg_sha256', 'sanitizer_stdout', 'sanitizer_stderr']
+    summaries = [{key: event.get(key) for key in keys} for event in rejected]
+    if (not rejected or final.get('event') != 'failed' or final.get('failure_kind') != 'svg_case_rejections'
+            or final.get('collected_cases') != len(rows)
+            or final.get('completed_cases') != len(rows) - len(rejected)
+            or final.get('rejected_cases') != summaries):
+        fail('upstream rejection transcript has no authenticated terminal rejection summary')
+    tier_root = Path(output) / ('upstream-' + tier)
+    for item in summaries:
+        index = item['case_index']
+        case_root = tier_root / ('case-%02d' % index)
+        raw = absolute_regular_file(case_root / 'raw.svg', 'rejected raw SVG')
+        stdout = absolute_regular_file(case_root / 'sanitizer.stdout.log', 'rejected sanitizer stdout')
+        absolute_regular_file(case_root / 'sanitizer.stderr.log', 'rejected sanitizer stderr')
+        expected_stdout = (case_root / 'sanitizer.stdout.log').relative_to(output).as_posix()
+        expected_stderr = (case_root / 'sanitizer.stderr.log').relative_to(output).as_posix()
+        try:
+            sanitizer_event = json.loads(stdout.read_text())
+        except (ValueError, OSError, TypeError):
+            fail('rejected sanitizer stdout is invalid')
+        if (item['raw_svg_sha256'] != digest(raw) or item['sanitizer_stdout'] != expected_stdout
+                or item['sanitizer_stderr'] != expected_stderr or sanitizer_event.get('outcome') != 'rejected'
+                or sanitizer_event.get('error_code') != item['error_code']):
+            fail('rejected case evidence differs from transcript')
+    return summaries
+
+
+def supervise(args, facts):
     import psutil
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
     if (output / ('upstream-' + args.tier)).exists() or (output / ('upstream-reference-' + args.tier + '.json')).exists():
@@ -635,6 +757,10 @@ def supervise(args):
                 if time.monotonic() - start > args.timeout_seconds:
                     fail('hard runtime deadline exceeded')
                 time.sleep(1)
+            if process.returncode == 3:
+                verify_collected_rejections(output, args.tier, facts['rows'])
+                raise CollectedSvgRejections('upstream tier completed with rejected SVG cases; '
+                                             'preserved process log, raw SVGs, sanitizer logs, and transcript')
             if process.returncode:
                 fail('upstream worker failed; preserved process log and partial transcript')
         finally:
@@ -660,6 +786,7 @@ def main():
     parser.add_argument('--max-rss-gib', type=float, default=40)
     parser.add_argument('--max-vram-gib', type=float, default=30)
     parser.add_argument('--min-free-vram-gib', type=float, default=24)
+    parser.add_argument('--defer-manifest', action='store_true')
     args = parser.parse_args()
     if not (1 <= args.timeout_seconds <= 14400 and 1 <= args.max_rss_gib <= 64 and 1 <= args.max_vram_gib <= 80 and 1 <= args.min_free_vram_gib <= args.max_vram_gib):
         fail('invalid execution resource bounds')
@@ -673,12 +800,15 @@ def main():
     elif args.command == '_worker':
         worker(args, facts)
     else:
-        supervise(args)
+        supervise(args, facts)
 
 
 if __name__ == '__main__':
     try:
         main()
+    except CollectedSvgRejections as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(3)
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

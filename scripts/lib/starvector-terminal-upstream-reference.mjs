@@ -14,9 +14,9 @@ async function verified(root, relative, digest) {
   return file;
 }
 
-export async function loadUpstreamReference(root, tier, rows) {
+export async function loadUpstreamReference(root, tier, rows, { pending = false } = {}) {
   if (!root || !path.isAbsolute(root) || !["1b", "8b"].includes(tier)) fail("absolute shared oracle root and model tier required");
-  const manifestPath = path.join(root, `upstream-reference-${tier}.json`);
+  const manifestPath = path.join(root, `upstream-reference-${tier}${pending ? ".pending" : ""}.json`);
   const info = await lstat(manifestPath);
   if (!info.isFile() || info.isSymbolicLink()) fail("oracle manifest is not a regular file");
   const value = JSON.parse(await readFile(manifestPath, "utf8")), reference = value.upstream_reference;

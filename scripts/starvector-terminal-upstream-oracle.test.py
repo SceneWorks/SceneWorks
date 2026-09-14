@@ -21,7 +21,7 @@ spec.loader.exec_module(oracle)
 class OracleTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -226,9 +226,12 @@ class OracleTests(unittest.TestCase):
     def test_upstream_renderer_uses_comparison_canvas_preserves_raw_and_error(self):
         raw = self.root / 'raw.svg'; original = '<svg viewBox="0 0 80 80"><path fill-rule="evenodd"/></svg>'
         raw.write_text(original); rendered = self.root / 'rendered'
-        result = SimpleNamespace(returncode=0, stdout=json.dumps({'outcome': 'rejected', 'error_code': 'provider SVG attribute fill-rule is not allowed'}), stderr='diagnostic')
+        rejected = {'outcome': 'rejected', 'error_code': 'provider SVG attribute fill-rule is not allowed',
+                    'canonical_svg_sha256': None, 'preview_png_sha256': None, 'published_paths': [],
+                    'staging_residue': [], 'result_contains_inline_svg': False}
+        result = SimpleNamespace(returncode=0, stdout=json.dumps(rejected), stderr='diagnostic')
         with patch.object(oracle.subprocess, 'run', return_value=result) as run:
-            with self.assertRaisesRegex(ValueError, 'case 0: provider SVG attribute fill-rule is not allowed'):
+            with self.assertRaisesRegex(oracle.SvgCaseRejected, 'case 0: provider SVG attribute fill-rule is not allowed'):
                 oracle.render_upstream_svg('sanitizer', raw, rendered, 0)
         self.assertEqual(run.call_args.args[0], ['sanitizer', 'run', str(raw), str(rendered), '--preview-size', '512'])
         self.assertEqual(raw.read_text(), original)
@@ -242,13 +245,113 @@ class OracleTests(unittest.TestCase):
             (SimpleNamespace(returncode=1, stdout='', stderr='disk failure'), 'exit 1'),
             (SimpleNamespace(returncode=0, stdout='not json', stderr=''), 'invalid JSON'),
             (SimpleNamespace(returncode=0, stdout='[]', stderr=''), 'invalid result'),
+            (SimpleNamespace(returncode=0, stdout=json.dumps({'outcome': 'rejected', 'error_code': 'bad', 'published_paths': ['unexpected']}), stderr=''), 'invalid rejection'),
         ]:
             with self.subTest(error=error), patch.object(oracle.subprocess, 'run', return_value=result):
                 with self.assertRaisesRegex(ValueError, error):
                     oracle.render_upstream_svg('sanitizer', raw, self.root / 'rendered', 0)
-        accepted = {'outcome': 'sanitized_inert'}
+        rendered = self.root / 'rendered'; rendered.mkdir()
+        svg = rendered / 'canonical.svg'; svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        preview = rendered / 'preview.png'; preview.write_bytes(b'preview')
+        accepted = {'outcome': 'sanitized_inert', 'error_code': 'sanitized_inert',
+                    'canonical_svg_sha256': oracle.digest(svg), 'preview_png_sha256': oracle.digest(preview),
+                    'published_paths': ['canonical.svg', 'preview.png'], 'staging_residue': [],
+                    'result_contains_inline_svg': False}
         with patch.object(oracle.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(accepted), stderr='')):
-            self.assertEqual(oracle.render_upstream_svg('sanitizer', raw, self.root / 'rendered', 0), accepted)
+            self.assertEqual(oracle.render_upstream_svg('sanitizer', raw, rendered, 0), accepted)
+        changed = {**accepted, 'canonical_svg_sha256': '0' * 64}
+        with patch.object(oracle.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(changed), stderr='')):
+            with self.assertRaisesRegex(ValueError, 'invalid success'):
+                oracle.render_upstream_svg('sanitizer', raw, rendered, 0)
+
+    def test_rejection_detects_dangling_output_link(self):
+        raw = self.root / 'raw.svg'; raw.write_text('<svg/>')
+        rendered = self.root / 'rendered'; rendered.symlink_to(self.root / 'missing', target_is_directory=True)
+        rejected = {'outcome': 'rejected', 'error_code': 'invalid SVG', 'canonical_svg_sha256': None,
+                    'preview_png_sha256': None, 'published_paths': [], 'staging_residue': [],
+                    'result_contains_inline_svg': False}
+        with patch.object(oracle.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rejected), stderr='')):
+            with self.assertRaisesRegex(ValueError, 'invalid rejection'):
+                oracle.render_upstream_svg('sanitizer', raw, rendered, 0)
+
+    def test_absolute_regular_file_rejects_relative_and_linked_sanitizers(self):
+        sanitizer = self.root / 'sanitize'; sanitizer.write_bytes(b'binary')
+        self.assertEqual(oracle.absolute_regular_file(sanitizer, 'sanitizer'), sanitizer)
+        with self.assertRaisesRegex(ValueError, 'must be absolute'):
+            oracle.absolute_regular_file('sanitize', 'sanitizer')
+        link = self.root / 'sanitize-link'; link.symlink_to(sanitizer)
+        with self.assertRaisesRegex(ValueError, 'must not traverse links'):
+            oracle.absolute_regular_file(link, 'sanitizer')
+
+    def test_case_rejection_collects_all_later_rows_and_keeps_raw_logs(self):
+        rows = [{'case_index': index, 'source_case_index': index, 'seed': index,
+                 'input_png_sha256': hashlib.sha256(str(index).encode()).hexdigest()}
+                for index in range(20)]
+        output = self.root / 'output'; tier_root = output / 'upstream-1b'
+        tier_root.mkdir(parents=True)
+        events = []
+        class Preview:
+            size = (512, 512)
+            def __enter__(self): return self
+            def __exit__(self, *unused): return False
+        fake_pil = SimpleNamespace(Image=SimpleNamespace(open=lambda unused: Preview()))
+        def render(unused_sanitizer, raw_path, rendered, case_index):
+            case_root = raw_path.parent
+            sanitizer_event = {'outcome': 'rejected', 'error_code': 'provider SVG is invalid',
+                               'canonical_svg_sha256': None, 'preview_png_sha256': None,
+                               'published_paths': [], 'staging_residue': [],
+                               'result_contains_inline_svg': False}
+            (case_root / 'sanitizer.stdout.log').write_text(json.dumps(sanitizer_event if case_index == 2 else {'outcome': 'sanitized_inert'}))
+            (case_root / 'sanitizer.stderr.log').write_text('')
+            if case_index == 2:
+                raise oracle.SvgCaseRejected(case_index, {'outcome': 'rejected', 'error_code': 'provider SVG is invalid'})
+            rendered.mkdir()
+            (rendered / 'canonical.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+            (rendered / 'preview.png').write_bytes(b'preview')
+        with patch.object(oracle, 'generate', side_effect=lambda unused_model, row, unused_device: ('<svg id="%s"/>' % row['case_index'], {'generated_tokens': row['case_index']})), \
+             patch.object(oracle, 'render_upstream_svg', side_effect=render), \
+             patch.dict(oracle.sys.modules, {'PIL': fake_pil}):
+            cases, rejections = oracle.collect_cases(SimpleNamespace(sanitizer='sanitizer'), {'rows': rows}, object(), object(), output, tier_root, events.append)
+        self.assertEqual(len(cases), 19)
+        self.assertEqual([item['case_index'] for item in rejections], [2])
+        self.assertEqual([event['event'] for event in events].count('case_started'), 20)
+        self.assertEqual([event['event'] for event in events].count('case_rejected'), 1)
+        self.assertTrue((tier_root / 'case-02/raw.svg').is_file())
+        self.assertTrue((tier_root / 'case-02/sanitizer.stdout.log').is_file())
+        self.assertTrue((tier_root / 'case-19/raw.svg').is_file())
+        rejected = [event for event in events if event['event'] == 'case_rejected']
+        keys = ['case_index', 'source_case_index', 'seed', 'input_png_sha256', 'error_code',
+                'raw_svg_sha256', 'sanitizer_stdout', 'sanitizer_stderr']
+        events.append({'event': 'failed', 'failure_kind': 'svg_case_rejections', 'completed_cases': 19,
+                       'collected_cases': 20, 'rejected_cases': [{key: event[key] for key in keys} for event in rejected]})
+        (tier_root / 'transcript.jsonl').write_text('\n'.join(json.dumps(event) for event in events) + '\n')
+        self.assertEqual([item['case_index'] for item in oracle.verify_collected_rejections(output, '1b', rows)], [2])
+        (tier_root / 'case-02/raw.svg').write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'differs from transcript'):
+            oracle.verify_collected_rejections(output, '1b', rows)
+
+    def test_non_rejection_renderer_failure_stops_case_collection_immediately(self):
+        rows = [{'case_index': index, 'source_case_index': index, 'seed': index,
+                 'input_png_sha256': hashlib.sha256(str(index).encode()).hexdigest()}
+                for index in range(20)]
+        output = self.root / 'output'; tier_root = output / 'upstream-1b'
+        tier_root.mkdir(parents=True)
+        cases, rejections = [], []
+        def render(unused_sanitizer, raw_path, unused_rendered, case_index):
+            if case_index == 0:
+                (raw_path.parent / 'sanitizer.stdout.log').write_text('rejected')
+                (raw_path.parent / 'sanitizer.stderr.log').write_text('')
+                raise oracle.SvgCaseRejected(case_index, {'outcome': 'rejected', 'error_code': 'invalid SVG'})
+            raise ValueError('sanitizer process failed')
+        with patch.object(oracle, 'generate', return_value=('<svg/>', {})), \
+             patch.object(oracle, 'render_upstream_svg', side_effect=render):
+            with self.assertRaisesRegex(ValueError, 'sanitizer process failed'):
+                oracle.collect_cases(SimpleNamespace(sanitizer='sanitizer'), {'rows': rows}, object(), object(), output, tier_root, lambda unused: None, cases, rejections)
+        self.assertTrue((tier_root / 'case-00/raw.svg').is_file())
+        self.assertTrue((tier_root / 'case-01/raw.svg').is_file())
+        self.assertFalse((tier_root / 'case-02').exists())
+        self.assertEqual(cases, [])
+        self.assertEqual([item['case_index'] for item in rejections], [0])
 
     def rows(self):
         rows = []

@@ -1959,7 +1959,10 @@ fn allowed_attribute(element: &str, attribute: &str) -> bool {
     );
     common
         || match element {
-            "svg" => matches!(attribute, "xmlns" | "width" | "height" | "viewBox"),
+            "svg" => matches!(
+                attribute,
+                "xmlns" | "width" | "height" | "viewBox" | "preserveAspectRatio"
+            ),
             "path" => attribute == "d",
             "rect" => matches!(attribute, "x" | "y" | "width" | "height" | "rx" | "ry"),
             "circle" => matches!(attribute, "cx" | "cy" | "r"),
@@ -2054,6 +2057,9 @@ fn validate_attribute_resource_budget(
         "viewBox" => {
             parse_viewbox_values(value)?;
         }
+        "preserveAspectRatio" => {
+            validate_preserve_aspect_ratio(value)?;
+        }
         "stroke-miterlimit" => {
             let values = parse_number_list(value, true, key, true)?;
             if values.len() != 1 || values[0] <= 0.0 {
@@ -2082,6 +2088,47 @@ fn validate_attribute_resource_budget(
         _ => {}
     }
     Ok(())
+}
+
+fn validate_preserve_aspect_ratio(value: &str) -> WorkerResult<()> {
+    let mut tokens = value.split_ascii_whitespace();
+    let first = tokens.next().ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG preserveAspectRatio is empty".to_owned())
+    })?;
+    let align = if first == "defer" {
+        tokens.next().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "provider SVG preserveAspectRatio defer requires an alignment".to_owned(),
+            )
+        })?
+    } else {
+        first
+    };
+    if align == "none" {
+        if tokens.next().is_none() {
+            return Ok(());
+        }
+    } else if matches!(
+        align,
+        "xMinYMin"
+            | "xMidYMin"
+            | "xMaxYMin"
+            | "xMinYMid"
+            | "xMidYMid"
+            | "xMaxYMid"
+            | "xMinYMax"
+            | "xMidYMax"
+            | "xMaxYMax"
+    ) {
+        match tokens.next() {
+            None => return Ok(()),
+            Some("meet" | "slice") if tokens.next().is_none() => return Ok(()),
+            _ => {}
+        }
+    }
+    Err(WorkerError::InvalidPayload(
+        "provider SVG preserveAspectRatio must use the SVG alignment grammar".to_owned(),
+    ))
 }
 
 fn coordinate_attribute(element: &str, key: &str) -> bool {
@@ -3167,6 +3214,37 @@ mod tests {
     }
 
     #[test]
+    fn root_preserve_aspect_ratio_uses_only_the_svg_alignment_grammar() {
+        for value in ["none", "xMidYMid", "xMinYMax meet", "defer xMaxYMin slice"] {
+            let canonical = sanitize_svg(&format!(
+                "<svg viewBox=\"0 0 16 8\" preserveAspectRatio=\"{value}\"><rect width=\"16\" height=\"8\"/></svg>"
+            ))
+            .expect("standard preserveAspectRatio value");
+            assert_eq!((canonical.width, canonical.height), (16, 8));
+            assert!(canonical
+                .svg
+                .contains(&format!("preserveAspectRatio=\"{value}\"")));
+        }
+
+        for value in [
+            "",
+            "xMidYMid meet slice",
+            "none meet",
+            "xCenterYCenter",
+            "xMidYMid url(https://example.invalid/a)",
+            "xMidYMid javascript:alert(1)",
+        ] {
+            assert!(
+                sanitize_svg(&format!(
+                    "<svg viewBox=\"0 0 16 8\" preserveAspectRatio=\"{value}\"></svg>"
+                ))
+                .is_err(),
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
     fn discarded_content_obeys_all_attribute_and_element_budgets() {
         let attributes = |count: usize| {
             (0..count)
@@ -3345,6 +3423,34 @@ mod tests {
         assert_eq!(pixels.get_pixel(16, 2)[3], 0);
         assert_eq!(pixels.get_pixel(16, 16)[3], 255);
         assert_eq!(pixels.get_pixel(16, 29)[3], 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_case_four_preserves_viewbox_aspect_ratio_rendering() {
+        let raw = include_bytes!("../tests/fixtures/starvector/upstream-34841832913-case-04.svg");
+        let canonical =
+            terminal_sanitize_svg_bytes(raw).expect("actual upstream case four accepted");
+        assert_eq!((canonical.width, canonical.height), (1000, 1000));
+        assert!(canonical
+            .canonical_svg
+            .contains("viewBox=\"0 0 1000 1000\""));
+        assert!(canonical
+            .canonical_svg
+            .contains("preserveAspectRatio=\"xMidYMid\""));
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (_, preview) = terminal_write_sanitized_pair_with_preview_size(
+            &canonical,
+            &temp.path().join("actual-upstream-case-04"),
+            Some(512),
+        )
+        .await
+        .expect("actual case renders through the canonical CLI seam");
+        let pixels = image::open(preview).expect("preview PNG").to_rgba8();
+        assert_eq!(pixels.dimensions(), (512, 512));
+        assert!(
+            pixels.pixels().any(|pixel| pixel[3] > 0),
+            "actual visible geometry renders"
+        );
     }
 
     #[test]

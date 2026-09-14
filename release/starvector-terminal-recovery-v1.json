@@ -69,23 +69,23 @@
   },
   "execution_predecessor": {
     "stage": "upstream-reference",
-    "predecessor_campaign_id": "sc22261-81fda3-da2e3275-d2a3f67884914ced",
-    "campaign_id": "sc22261-fff98b-fc98652c-adf8f18aa1c74281",
+    "predecessor_campaign_id": "sc22261-fff98b-fc98652c-adf8f18aa1c74281",
+    "campaign_id": "sc22261-fff98b-bb52b61e-4c7e92a8d13f6b04",
     "inference_revision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
-    "sceneworks_revision": "fc98652c91f27de7ee1a240bc045895fcb63d185",
+    "sceneworks_revision": "bb52b61edd17e1ae3fa9b1200fce766b162a0010",
     "workflow": {
       "repository": "SceneWorks/SceneWorks",
       "path": ".github/workflows/server-candle-linux.yml",
-      "run_id": "34835393738",
+      "run_id": "34841832913",
       "run_attempt": 1,
-      "head_sha": "fc98652c91f27de7ee1a240bc045895fcb63d185",
+      "head_sha": "bb52b61edd17e1ae3fa9b1200fce766b162a0010",
       "conclusion": "failure"
     },
     "source_artifact": {
-      "id": "10343863628",
-      "name": "starvector-upstream-sc22261-fff98b-fc98652c-adf8f18aa1c74281",
-      "size": 39947,
-      "digest": "sha256:5e13c8f60cef66dcd7ce7a6dcb74e179fba27a72cfb13cf6878efecf428d25d4"
+      "id": "10346612022",
+      "name": "starvector-upstream-sc22261-fff98b-bb52b61e-4c7e92a8d13f6b04",
+      "size": 64954,
+      "digest": "sha256:c7ae59276c8c86831213eadc9dcca9d7e5aecee08735b8d1bf26e139bbb739df"
     }
   },
   "execution_history": [
@@ -129,6 +129,27 @@
         "name": "starvector-upstream-sc22261-81fda3-da2e3275-d2a3f67884914ced",
         "size": 2422,
         "digest": "sha256:7945db6a20c1bc01597ca785cec9ada6819331a59feb7f061261ebdfc5b92129"
+      }
+    },
+    {
+      "stage": "upstream-reference",
+      "predecessor_campaign_id": "sc22261-81fda3-da2e3275-d2a3f67884914ced",
+      "campaign_id": "sc22261-fff98b-fc98652c-adf8f18aa1c74281",
+      "inference_revision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
+      "sceneworks_revision": "fc98652c91f27de7ee1a240bc045895fcb63d185",
+      "workflow": {
+        "repository": "SceneWorks/SceneWorks",
+        "path": ".github/workflows/server-candle-linux.yml",
+        "run_id": "34835393738",
+        "run_attempt": 1,
+        "head_sha": "fc98652c91f27de7ee1a240bc045895fcb63d185",
+        "conclusion": "failure"
+      },
+      "source_artifact": {
+        "id": "10343863628",
+        "name": "starvector-upstream-sc22261-fff98b-fc98652c-adf8f18aa1c74281",
+        "size": 39947,
+        "digest": "sha256:5e13c8f60cef66dcd7ce7a6dcb74e179fba27a72cfb13cf6878efecf428d25d4"
       }
     }
   ]
