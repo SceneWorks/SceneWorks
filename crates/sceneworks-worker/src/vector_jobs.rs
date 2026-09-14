@@ -1828,7 +1828,7 @@ fn validate_discarded_attributes(
     Ok(())
 }
 
-fn normalize_root_percent_dimensions(attrs: &mut Vec<(String, String)>) -> WorkerResult<()> {
+fn normalize_root_percent_dimensions(attrs: &mut [(String, String)]) -> WorkerResult<()> {
     let viewbox = attrs
         .iter()
         .find(|(key, _)| key == "viewBox")

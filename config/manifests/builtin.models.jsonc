@@ -26519,7 +26519,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "feeef28c14f924bfa0932523bfb8b4c3126aae68a656d09fd479651876855291",
+              "sha256": "9bd0d6bb4ce0228fd596daa82905a43296faa9a3487f84655210fcfbf6fc109f",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26603,8 +26603,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 136336,
-                  "sha256": "fee6afc3686c42a1e4a3b419a4c9c2c0ba36cea6b0a0cffa25b1b7c65873a394"
+                  "byteSize": 136333,
+                  "sha256": "936c324db21798d69ade64ef16c68e9c8c81d82f27d3d4102d7d646ea7c7d297"
                 },
                 {
                   "path": "package.json",
