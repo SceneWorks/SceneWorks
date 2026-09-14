@@ -5031,6 +5031,51 @@
       "overallAllocatorEnvelopeBytes": 10366222336
     },
     {
+      "id": "mage_flow:candle:q4:base:base:mage-flow-cuda-mage-flow-q4-shared-ladder-v3:imc-6020c7f03045f505ab63",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "provider": "mage_flow",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json",
+        "sha256": "dd31c14e81c86e8f24dd44f3ff7c6d62a9b9ab9806b0cbe8be787acd48851f5c",
+        "recordId": "imc-6020c7f03045f505ab63",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-q4-shared-ladder-v3",
+        "loaderClosureDigest": "4d6df1aabff4f36c0072f1e6905384a739b0ac34c586ebb945545b83a423db66"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5599395840,
+        "denoise": 6203375616,
+        "decode": 6205472768
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5599395840,
+        "denoise": 6203375616,
+        "decode": 6205472768
+      },
+      "overallAllocatorEnvelopeBytes": 6205472768
+    },
+    {
       "id": "mage_flow:candle:q8:base:base:mage-flow-cuda-mage-flow-q8-shared-ladder-v3:imc-b025477f1256c6b7d52b",
       "modelId": "mage_flow",
       "modelFamily": "mage-flow",
@@ -5257,6 +5302,51 @@
         "decode": 10373562368
       },
       "overallAllocatorEnvelopeBytes": 10373562368
+    },
+    {
+      "id": "mage_flow_base:candle:q4:base:base:mage-flow-cuda-mage-flow-base-q4-shared-ladder-v3:imc-0c65271a5fc4504dd8b2",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "provider": "mage_flow_base",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json",
+        "sha256": "e31e637fb03e5511ff7521abc11f3995c38e8079c86d77f53c4600a8cfc1556b",
+        "recordId": "imc-0c65271a5fc4504dd8b2",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q4-shared-ladder-v3",
+        "loaderClosureDigest": "b8f496fb345366eea1da1ebb1c823da64d3fdcae840b8219978f5745710bd526"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5599395840,
+        "denoise": 6203375616,
+        "decode": 6205472768
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5599395840,
+        "denoise": 6203375616,
+        "decode": 6205472768
+      },
+      "overallAllocatorEnvelopeBytes": 6205472768
     },
     {
       "id": "mage_flow_base:candle:q8:base:base:mage-flow-cuda-mage-flow-base-q8-shared-ladder-v3:imc-10b66c0b4f4834b6b87f",
@@ -5487,6 +5577,51 @@
       "overallAllocatorEnvelopeBytes": 13863223296
     },
     {
+      "id": "mage_flow_edit:candle:q4:base:base:mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3:imc-e583941a427e9c05eef4",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "provider": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json",
+        "sha256": "f76465e281cb8980e4e47efa9a299c646c745e8ef3ffdd2e4a12c3b1cdec9460",
+        "recordId": "imc-e583941a427e9c05eef4",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3",
+        "loaderClosureDigest": "5be81d5ac62b4fe641df7e393305064d90726aaed1140649852276b538e989d4"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5600444416,
+        "denoise": 8955887616,
+        "decode": 8385462272
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5600444416,
+        "denoise": 8955887616,
+        "decode": 8385462272
+      },
+      "overallAllocatorEnvelopeBytes": 8955887616
+    },
+    {
       "id": "mage_flow_edit:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3:imc-87979d8e4a564a1dec16",
       "modelId": "mage_flow_edit",
       "modelFamily": "mage-flow",
@@ -5713,6 +5848,51 @@
         "decode": 13863223296
       },
       "overallAllocatorEnvelopeBytes": 13863223296
+    },
+    {
+      "id": "mage_flow_edit_base:candle:q4:base:base:mage-flow-cuda-mage-flow-edit-base-q4-shared-ladder-v3:imc-a6afc1641b82b8c2d5de",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "provider": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-base-q4-candle-evidence.json",
+        "sha256": "578b3e6359413a1e03ce7ae7a048c1f9b56bc13374543f172c785419ab7b5566",
+        "recordId": "imc-a6afc1641b82b8c2d5de",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q4-shared-ladder-v3",
+        "loaderClosureDigest": "c4075046618b3d5da5cd641cbaa3de4d06977f53364cfb683ef9dc30f1a47f8e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5601492992,
+        "denoise": 8956936192,
+        "decode": 8956936192
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5601492992,
+        "denoise": 8956936192,
+        "decode": 8956936192
+      },
+      "overallAllocatorEnvelopeBytes": 8956936192
     },
     {
       "id": "mage_flow_edit_base:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-base-q8-shared-ladder-v3:imc-f95ece4cc52580655d8a",
@@ -5943,6 +6123,51 @@
       "overallAllocatorEnvelopeBytes": 13527678976
     },
     {
+      "id": "mage_flow_edit_turbo:candle:q4:base:base:mage-flow-cuda-mage-flow-edit-turbo-q4-shared-ladder-v3:imc-68e1d93fa5787ed04733",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "provider": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-candle-evidence.json",
+        "sha256": "9524a3ee8d5feb7d419d2cddc5d6dd18222a6e607a7f31b58e7c34d04f52fff7",
+        "recordId": "imc-68e1d93fa5787ed04733",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q4-shared-ladder-v3",
+        "loaderClosureDigest": "7ad5085184b4f8af6d855c662bc695859ea22692b66bb6a12016a7a9251794e0"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5602541568,
+        "denoise": 8521777152,
+        "decode": 8521777152
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5602541568,
+        "denoise": 8521777152,
+        "decode": 8521777152
+      },
+      "overallAllocatorEnvelopeBytes": 8521777152
+    },
+    {
       "id": "mage_flow_edit_turbo:candle:q8:base:base:mage-flow-cuda-mage-flow-edit-turbo-q8-shared-ladder-v3:imc-f35689a256751149ef82",
       "modelId": "mage_flow_edit_turbo",
       "modelFamily": "mage-flow",
@@ -6169,6 +6394,51 @@
         "decode": 10138681344
       },
       "overallAllocatorEnvelopeBytes": 10138681344
+    },
+    {
+      "id": "mage_flow_turbo:candle:q4:base:base:mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3:imc-06f743f0a6e52985ad15",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "provider": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json",
+        "sha256": "f497678426cd08a3cba86daa9ac913ce8be0beca889bed71fa3ab03748bb675b",
+        "recordId": "imc-06f743f0a6e52985ad15",
+        "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3",
+        "loaderClosureDigest": "e030ead287abb9adab2c26f160159668e39276c05238a0cf9cafcd24d70e7e6e"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5600444416,
+        "denoise": 5902434304,
+        "decode": 5904531456
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5600444416,
+        "denoise": 5902434304,
+        "decode": 5904531456
+      },
+      "overallAllocatorEnvelopeBytes": 5904531456
     },
     {
       "id": "mage_flow_turbo:candle:q8:base:base:mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3:imc-330b765612862a80a79b",
@@ -10223,6 +10493,144 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json",
+        "sha256": "585b68a659055a78ec970914f6fe4a0f550d016fdcc341c21743ccb597d5d0de",
+        "recordId": "imc-db5cb0e04263aef07197",
+        "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+        "loaderClosureDigest": "d470b43784d15d51491509f7a9277e9fa23c47c1e2e0dba8960b061c0be54c2c"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12029263872,
+        "denoise": 14375976960,
+        "decode": 12029263872
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12029263872,
+        "denoise": 14375976960,
+        "decode": 12029263872
+      },
+      "overallAllocatorEnvelopeBytes": 14375976960,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "wan_2_2:candle:q4:base:base:sc-19223-wan2-2-ti2v-5b-candle-q4-sequential-load-v1:imc-99d76fe136dbb43a92b8",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-q4-candle-evidence.json",
+        "sha256": "5f2352c1833393778eb7fdd4d03e1284f544722172a6c43f0859aeefd68f8698",
+        "recordId": "imc-99d76fe136dbb43a92b8",
+        "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q4-sequential-load-v1",
+        "loaderClosureDigest": "d470b43784d15d51491509f7a9277e9fa23c47c1e2e0dba8960b061c0be54c2c"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12027166720,
+        "denoise": 12027166720,
+        "decode": 11593056256
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12027166720,
+        "denoise": 12027166720,
+        "decode": 11593056256
+      },
+      "overallAllocatorEnvelopeBytes": 12027166720,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "wan_2_2:candle:q8:base:base:sc-19223-wan2-2-ti2v-5b-candle-q8-sequential-load-v1:imc-d41c082acd274f261b4b",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json",
+        "sha256": "8c83e2648c307a5f43b275274b7e4e0711756811dbe808f721954f391fbb3850",
+        "recordId": "imc-d41c082acd274f261b4b",
+        "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q8-sequential-load-v1",
+        "loaderClosureDigest": "d470b43784d15d51491509f7a9277e9fa23c47c1e2e0dba8960b061c0be54c2c"
+      },
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 121,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12029263872,
+        "denoise": 12056526848,
+        "decode": 12362711040
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12029263872,
+        "denoise": 12056526848,
+        "decode": 12362711040
+      },
+      "overallAllocatorEnvelopeBytes": 12362711040,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "z_image:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-0b154783eee307ac1ad8",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -11346,7 +11754,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11367,7 +11775,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11388,7 +11796,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11442,7 +11850,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11463,7 +11871,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11484,7 +11892,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11670,7 +12078,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11691,7 +12099,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11712,7 +12120,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11776,81 +12184,26 @@
       "evidence": null
     },
     {
-      "id": "analytic:mage_flow:candle:q4",
-      "modelId": "mage_flow",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_base:candle:q4",
-      "modelId": "mage_flow_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_base",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit:candle:q4",
-      "modelId": "mage_flow_edit",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_base:candle:q4",
-      "modelId": "mage_flow_edit_base",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_base",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_edit_turbo:candle:q4",
-      "modelId": "mage_flow_edit_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_edit_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:mage_flow_turbo:candle:q4",
-      "modelId": "mage_flow_turbo",
-      "modelFamily": "mage-flow",
-      "route": "mage_flow_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:pulid_flux_dev:candle:bf16",
       "modelId": "pulid_flux_dev",
       "modelFamily": "flux",
       "route": "pulid_flux",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'pulid_flux'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json",
+        "sha256": "19220425ff588290006b9fb603a43ef3e28e1d7e7238c7e270f4b5f79339ef48",
+        "recordId": "imc-2266f169e3eb7b2431e6",
+        "envelopeBytes": 39465254912,
+        "values": {
+          "provider": "pulid_flux",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:pulid_flux_dev:candle:q4",
@@ -11859,9 +12212,20 @@
       "route": "pulid_flux",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'pulid_flux'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json",
+        "sha256": "12946ffa3cdbb4e4350dd4e011fc90723be0e0a15a0984d8187bb7d5102bfbda",
+        "recordId": "imc-a73a3c0a7d9d3dc3df24",
+        "envelopeBytes": 23117955072,
+        "values": {
+          "provider": "pulid_flux",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:pulid_flux_dev:candle:q8",
@@ -11870,9 +12234,20 @@
       "route": "pulid_flux",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "every retained render for this cell ran under the 'identity' overlay (the largest is on provider 'pulid_flux'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json",
+        "sha256": "ece93c4688cb00e582ffb5d9f9fe521b12e48ed67282af1509683f5ce05a72de",
+        "recordId": "imc-7709075e035c9bb00cdf",
+        "envelopeBytes": 30465327104,
+        "values": {
+          "provider": "pulid_flux",
+          "overlay": "identity"
+        }
+      }
     },
     {
       "id": "analytic:pulid_flux_dev:mlx:bf16",
@@ -11920,7 +12295,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11945,7 +12320,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -11970,7 +12345,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12094,7 +12469,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12191,69 +12566,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:wan_2_2:candle:bf16",
-      "modelId": "wan_2_2",
-      "modelFamily": "wan-video",
-      "route": "wan2_2_ti2v_5b",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "14.5"
-        }
-      }
-    },
-    {
-      "id": "analytic:wan_2_2:candle:q4",
-      "modelId": "wan_2_2",
-      "modelFamily": "wan-video",
-      "route": "wan2_2_ti2v_5b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "12.1"
-        }
-      }
-    },
-    {
-      "id": "analytic:wan_2_2:candle:q8",
-      "modelId": "wan_2_2",
-      "modelFamily": "wan-video",
-      "route": "wan2_2_ti2v_5b",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "12.1"
-        }
-      }
-    },
-    {
       "id": "analytic:wan_2_2:mlx:bf16",
       "modelId": "wan_2_2",
       "modelFamily": "wan-video",
@@ -12299,7 +12611,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12320,7 +12632,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12341,7 +12653,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12395,7 +12707,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12416,7 +12728,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12437,7 +12749,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "8c4cad9bdf7df6d7d8e141edcf103055179f8b5003dd47dc941b71b3a3280c2c",
+        "sha256": "8acfa7589c6c0cdaf579ef1f2f277627c8faa44e35da72c798d5ecc6c609b5b0",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
