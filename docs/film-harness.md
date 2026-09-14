@@ -251,9 +251,86 @@ the documents saying which was meant. A shot may override the run-level setting.
 is written into the timeline item and into `run.json`, so the export obeys the saved document and
 the record says what it obeyed.
 
-The fixture's clips are deterministic placeholder tones (`film-harness fixture-sound`) — one
-frequency per role, so the three buses are distinguishable by ear when checking an export. Replace
-a file with real audio and bump the pack's `version`.
+### Spoken dialogue (sc-23404)
+
+A `dialogue` pack entry may carry **`text`** instead of (or as well as) `file`, plus optional
+`voice` and `model`:
+
+```jsonc
+{ "role": "courier_line", "kind": "dialogue", "voice": "am_michael",
+  "text": "Delivery. I'll leave it on the bench." }
+```
+
+During `ensure_sound` — before any render — the run speaks each placed line through the ordinary
+`POST /api/v1/audio/jobs` route, writes the returned WAV into the pack directory, and imports it on
+the dialogue bus **exactly as it imports a pre-recorded clip**. Nothing about a `file`-only entry
+changes.
+
+- **`model`** is one of `kokoro_82m` (the default), `chatterbox_tts`, `moss_tts_realtime`,
+  `moss_ttsd_v05`. An unknown id is a finding before dispatch. **`voice`** is *not* allow-listed
+  here — the per-model voice bank belongs to the generator, and an unknown voice is a typed refusal
+  at the gen-core floor — but it is bounded to 64 characters, and `text` to 1000.
+- **Refused before dispatch, by role**: an entry with neither `text` nor `file`; `text` on an
+  `ambience` / `music` / `sfx` entry; `voice` or `model` on an entry with no `text`. A synthesized
+  entry is exempt from the "the file must exist" check, because the run is what produces it.
+- **Only what the run PLACES is spoken**, the same rule the import follows: a `--shots` selection
+  that leaves a shot out never pays for its line.
+- **No live `audio_generate` worker ⇒ a resumable stop before the job exists** (`no_audio_worker`),
+  naming the lines it was asked to speak — the same posture as the `video_generate` and `image_vqa`
+  preflights, and scoped to the lines still *owed*, so a replacement whose clips are all already
+  spoken needs no TTS worker at all. Without it the job would sit unclaimed until the per-job budget
+  ran out and report the wrong thing.
+- **Where the clip lands**: `sound/<role>.tts-<sha256(text)[..12]>.wav`, unless the entry pins a
+  `file`, in which case synthesis writes *there*. The derived name is gitignored (`*.tts-*.wav`) —
+  it is an output, reproducible from the pack. A pack that means to keep a recording pins `file`.
+- **Limits**: one synthesis is bounded by the plan's own `limits.maxShotSeconds` (the per-job budget
+  a shot attempt and the export run under) and the run by `limits.maxRunSeconds`. There is
+  deliberately no `maxSpeechSeconds`: a speech job is a job, dispatched and polled on the same seam
+  as a render, and a second knob would be one more number to get right for no bound this one does
+  not already state. A pack whose lines need longer than a shot does raises `maxShotSeconds`.
+- **Resume** adopts. The idempotency key is stamped into `advanced.filmHarness.idempotencyKey` and
+  covers model + voice + the trimmed text + the attempt, so a controller that died after the POST
+  finds its own job and a retry after a failure is a new job rather than a re-read of the same
+  failure.
+- **Re-casting a line is a NEW RUN, not a resume.** `resume` and `replace-take` hash the pack's
+  bytes and refuse a document that no longer matches what the run started from ("a changed reference
+  pack is a new run, not a resume"), so a rewritten line or a swapped voice never reaches a running
+  record — start a fresh `run`, which speaks it. The content half of the key still earns its place
+  *inside* one run: a record whose text or voice does not match the pack is a new attempt rather
+  than an adoption, and the stale `sound[]` entry is dropped with it, so the dialogue bus cannot
+  re-adopt the asset made from the old line — including where the pack **pins `file`** and the
+  clip's name never changed.
+- **The clip comes over the transport.** The synthesized WAV is fetched with
+  `GET /api/v1/projects/{projectId}/files/{mediaPath}` like every other media hop, because `--api`
+  may name an API on another machine (see below) whose project directory this process cannot read.
+  A project directory that *is* on this filesystem is read directly, as a fast path.
+- **A synthesis that fails, is refused, is cancelled or overruns its limit stops the run with a
+  resumable stop** (`dialogue_synthesis_failed` / `dialogue_synthesis_refused`) *before the first
+  render*. The lines already spoken and the clips already imported stay in the record;
+  `film-harness resume` speaks the missing one and continues.
+- **`run.json` records it**: `synthesizedSound[]` carries the role, text, `textSha256`, model,
+  voice, idempotency key, job id, status, the `type: audio` asset the job produced, and the pack
+  file it was written to. That asset is *not* the one the dialogue bus plays — the bus plays the
+  imported copy in `sound[]`, whose asset carries `extra.filmHarness.synthesized: true`.
+- The clips the worker writes are canonical PCM-16 WAVs, so the import copies them through **without
+  ffmpeg** (`media_convert::is_canonical_pcm16_wav`) exactly as it does the fixture's beds.
+
+A **replacement** re-hydrates the run's clips (`ensure_sound`, sc-22715's fix for the evaluation's
+finding #2) before it re-assembles the timeline; for a spoken line that adopts the clip the record
+already names and dispatches nothing. If a clip cannot be re-hydrated at all — its file gone from
+the pack, a re-synthesis that failed, no live TTS worker — the replacement records its take and
+leaves the saved timeline alone rather than re-assembling from a short clip map, which is the
+deletion `ensure_sound` is there to prevent. `--export` is **skipped** on that path for the same
+reason: the timeline it would render from is the stale one, still carrying the take the human just
+replaced, and a re-export would record a fresh MP4 of old material as current. The existing MP4 is
+left where it is and `export.stale` stays `true`.
+
+The fixture's two **beds** are deterministic placeholder tones (`film-harness fixture-sound`) — one
+frequency per role, so the bed buses are distinguishable by ear when checking an export. Its three
+**dialogue** roles carry `text` and are spoken by the run: `courier_line` (SH020),
+`recipient_line` (SH050) and `recipient_reveal_line` (SH060), each speaking the line that shot's own
+`dialogue` intent already states. Replace a `text` with a `file` pointing at a real recording and
+bump the pack's `version`.
 
 A clip that already IS the one encoding the product reads back — a PCM-16 RIFF/WAVE with a plain
 `fmt ` chunk and a `data` chunk — is stored without an ffmpeg transcode (sc-22715,
@@ -1056,7 +1133,8 @@ target/debug/film-harness fixture-sound  --out DIR
 ```
 
 `plan` and `compile` need a SceneWorks API with a worker advertising `prompt_refine`; `run`
-additionally needs `video_generate` and, unless `--no-export`, `timeline_export`. Default API
+additionally needs `video_generate`, `audio_generate` when the pack carries a `dialogue` entry with
+`text` (sc-23404), and, unless `--no-export`, `timeline_export`. Default API
 `http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from `$SCENEWORKS_ACCESS_TOKEN`. `compile`
 looks for `brief.json`/`brief.jsonc` beside the plan when `--brief` is not given, and re-checks beat
 coverage by the `beatId` each generated shot carries. `resume`, `replace-take`, `cancel` and
@@ -1109,10 +1187,13 @@ first exercise of those menus (sc-22715).
 
 `scripts/film-harness-smoke.sh` builds this checkout, starts the API and the native GPU worker
 against a scratch data dir, waits for both to register, renders `SH010,SH020` of the fixture on
-MiniMax-H3 q4 (MLX), and tears both down. The fixture's placeholder plates and clips are
+MiniMax-H3 q4 (MLX), and tears both down. The fixture's placeholder plates and BED clips are
 deterministic (`fixture-images`, `fixture-sound`), so the checked-in PNGs and WAVs are reproducible
-byte for byte — the clips are integer triangle waves with no floating point anywhere, because a
-sine's last ULP differs between platforms and that is enough to break a byte-for-byte check.
+byte for byte — the beds are integer triangle waves with no floating point anywhere, because a
+sine's last ULP differs between platforms and that is enough to break a byte-for-byte check. The
+fixture's three dialogue lines are not checked in at all: they carry `text` and the run speaks them
+through Kokoro (sc-23404), which is why the run also needs an `audio_generate` worker — the same one
+it already starts.
 
 It builds the **release** profile, so export the release prebuilt libmlx before running it on
 macOS — the fetch script defaults to Debug, and a Debug directory is the wrong key for a release
@@ -1182,6 +1263,48 @@ The script sets `SCENEWORKS_GPU_ID` for the render worker (`mlx` on macOS): the 
 defaults that to `cpu`, and a cpu worker spawns the utility pool and advertises no
 `video_generate`, so the harness would refuse for want of a GPU worker that is in fact running.
 Override it (`SCENEWORKS_GPU_ID=0`) to smoke a CUDA host.
+
+### Speech export smoke (sc-23404)
+
+The same smoke, run for the SPOKEN lines rather than the tones. It renders `SH010,SH020` on
+MiniMax-H3 q4 (MLX) and synthesizes `courier_line` with **Kokoro** on the way — the macOS worker
+builds the candle audio lane unconditionally (`audio-metal`), so the one `SCENEWORKS_GPU_ID=mlx`
+worker the script starts advertises `video_generate` **and** `audio_generate` and no second process
+is needed.
+
+```sh
+eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
+export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
+SCENEWORKS_SMOKE_DIR=~/SceneWorks/film-harness-evidence/sc-23404/speech-export \
+  scripts/film-harness-smoke.sh
+```
+
+The script **copies the pack** (document, `references/`, `sound/`) into `$SCENEWORKS_SMOKE_DIR` and
+points `--references` there, so the clips the run speaks land in the smoke directory rather than in
+the checked-in `config/film-harness/courier-workshop/sound/`, and two concurrent smokes do not race
+on one `sound/<role>.tts-<sha>.wav`. The document is copied byte-for-byte, so the run record's
+`referencePack.sha256` is unchanged; only the directory moves. An explicit `REFERENCES=` is taken as
+given and not copied — a caller pointing at their own pack has already chosen where it lives, and
+that directory is written to.
+
+`SHOTS=SH010,SH020,SH030,SH040,SH050,SH060` renders the whole film and speaks all three lines, at
+six times the GPU cost. Then probe the export for the lines, which is what says they are *in the
+file* rather than merely in the record:
+
+```sh
+EV=~/SceneWorks/film-harness-evidence/sc-23404/speech-export
+scripts/film-harness-speech-probe.py --run "$EV/run/run.json" --out "$EV/speech-probe.json"
+```
+
+`--export` is optional — the probe resolves the MP4 from the record's `projectPath` plus
+`export.renderPath`, which is project-**relative**.
+
+A tone probe cannot answer this one: a synthesized line has no known frequency. The probe compares
+the decoded mix's RMS **inside** each placed dialogue window against a control window of the same
+length beside it — the beds run continuously and so are in both numbers, and only the line is in
+one. It exits 0 when every placed line clears the ratio and 1 when one does not, which is the exact
+shape of the failure (`hand-film-FINAL-30s.mp4`, phase 1) where the export came back with no lines
+at all.
 
 ### Sound export smoke (sc-22715)
 
