@@ -1341,7 +1341,7 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut output = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-    let mut stack = Vec::new();
+    let mut stack: Vec<RawSvgElement> = Vec::new();
     let mut elements = 0usize;
     let mut budget = SanitizerBudget::default();
     let mut dimensions = None;
@@ -1349,12 +1349,12 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => {
-                let (name, mut attrs) = canonical_element(&reader, &event, &mut budget)?;
-                if stack.is_empty() && (root_seen || name != "svg") {
-                    return Err(WorkerError::InvalidPayload(
-                        "provider output root must be <svg>".to_owned(),
-                    ));
-                }
+                let event_name = event.name();
+                let raw_name = std::str::from_utf8(event_name.as_ref())
+                    .map_err(|_| {
+                        WorkerError::InvalidPayload("provider SVG tag is not UTF-8".to_owned())
+                    })?
+                    .to_owned();
                 if stack.len() >= MAX_SVG_DEPTH {
                     return Err(WorkerError::InvalidPayload(
                         "provider SVG exceeds the element nesting budget".to_owned(),
@@ -1366,25 +1366,53 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         "provider SVG exceeds the element budget".to_owned(),
                     ));
                 }
-                if stack.is_empty() {
-                    root_seen = true;
-                    if !attrs
-                        .iter()
-                        .any(|(key, value)| key == "xmlns" && value == SVG_NAMESPACE)
-                    {
-                        attrs.push(("xmlns".to_owned(), SVG_NAMESPACE.to_owned()));
-                        attrs.sort_unstable();
+                let is_root = stack.is_empty();
+                let source_attrs = source_attributes(
+                    &reader,
+                    &event,
+                    source_attribute_limit(&raw_name, is_root),
+                    &mut budget,
+                )?;
+                let kind = classify_element(&raw_name, stack.last(), false, root_seen)?;
+                if kind == RawSvgElementKind::Retained {
+                    let (name, mut attrs) =
+                        canonical_element(&raw_name, source_attrs, is_root, &mut budget)?;
+                    if is_root {
+                        root_seen = true;
+                        if !attrs
+                            .iter()
+                            .any(|(key, value)| key == "xmlns" && value == SVG_NAMESPACE)
+                        {
+                            attrs.push(("xmlns".to_owned(), SVG_NAMESPACE.to_owned()));
+                            attrs.sort_unstable();
+                        }
+                        if attrs.len() > MAX_SVG_ATTRIBUTES_PER_ELEMENT {
+                            return Err(WorkerError::InvalidPayload(
+                                "provider SVG element <svg> exceeds the per-element attribute budget"
+                                    .to_owned(),
+                            ));
+                        }
+                        dimensions = Some(svg_dimensions(&attrs)?);
                     }
-                    dimensions = Some(svg_dimensions(&attrs)?);
+                    write_start(&mut output, &name, &attrs, false);
+                } else {
+                    validate_discarded_attributes(kind, &source_attrs)?;
                 }
-                write_start(&mut output, &name, &attrs, false);
-                stack.push(name);
+                stack.push(RawSvgElement {
+                    name: raw_name,
+                    kind,
+                });
             }
             Ok(Event::Empty(event)) => {
-                let (name, attrs) = canonical_element(&reader, &event, &mut budget)?;
-                if stack.is_empty() || name == "svg" {
+                let event_name = event.name();
+                let raw_name = std::str::from_utf8(event_name.as_ref())
+                    .map_err(|_| {
+                        WorkerError::InvalidPayload("provider SVG tag is not UTF-8".to_owned())
+                    })?
+                    .to_owned();
+                if stack.len() >= MAX_SVG_DEPTH {
                     return Err(WorkerError::InvalidPayload(
-                        "provider SVG has an invalid empty root".to_owned(),
+                        "provider SVG exceeds the element nesting budget".to_owned(),
                     ));
                 }
                 elements += 1;
@@ -1393,7 +1421,20 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         "provider SVG exceeds the element budget".to_owned(),
                     ));
                 }
-                write_start(&mut output, &name, &attrs, true);
+                let source_attrs = source_attributes(
+                    &reader,
+                    &event,
+                    source_attribute_limit(&raw_name, false),
+                    &mut budget,
+                )?;
+                let kind = classify_element(&raw_name, stack.last(), true, root_seen)?;
+                if kind == RawSvgElementKind::Retained {
+                    let (name, attrs) =
+                        canonical_element(&raw_name, source_attrs, false, &mut budget)?;
+                    write_start(&mut output, &name, &attrs, true);
+                } else {
+                    validate_discarded_attributes(kind, &source_attrs)?;
+                }
             }
             Ok(Event::End(event)) => {
                 let name = std::str::from_utf8(event.name().as_ref())
@@ -1401,18 +1442,34 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         WorkerError::InvalidPayload("provider SVG tag is not UTF-8".to_owned())
                     })?
                     .to_owned();
-                if stack.pop().as_deref() != Some(name.as_str()) {
+                let Some(open) = stack.pop() else {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG has mismatched tags".to_owned(),
+                    ));
+                };
+                if open.name != name {
                     return Err(WorkerError::InvalidPayload(
                         "provider SVG has mismatched tags".to_owned(),
                     ));
                 }
-                output.push_str("</");
-                output.push_str(&name);
-                output.push('>');
+                if open.kind == RawSvgElementKind::Retained {
+                    output.push_str("</");
+                    output.push_str(&name);
+                    output.push('>');
+                }
             }
             Ok(Event::Text(text)) => {
                 let bytes: &[u8] = text.as_ref();
-                if !bytes.iter().all(u8::is_ascii_whitespace) {
+                let dc_format = stack
+                    .last()
+                    .is_some_and(|element| element.kind == RawSvgElementKind::DcFormat);
+                if dc_format {
+                    if bytes != b"image/svg+xml" {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG dc:format metadata is not recognized".to_owned(),
+                        ));
+                    }
+                } else if !bytes.iter().all(u8::is_ascii_whitespace) {
                     return Err(WorkerError::InvalidPayload(
                         "provider SVG text nodes are not supported".to_owned(),
                     ));
@@ -1454,22 +1511,42 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     })
 }
 
-fn canonical_element(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawSvgElementKind {
+    Retained,
+    Defs,
+    NamedView,
+    Grid,
+    Metadata,
+    RdfLower,
+    RdfUpper,
+    CcLower,
+    CcUpper,
+    DcFormat,
+    DcType,
+    DcTitle,
+}
+
+#[derive(Debug)]
+struct RawSvgElement {
+    name: String,
+    kind: RawSvgElementKind,
+}
+
+fn source_attribute_limit(name: &str, is_root: bool) -> usize {
+    if (is_root && name == "svg") || name == "sodipodi:namedview" {
+        24
+    } else {
+        MAX_SVG_ATTRIBUTES_PER_ELEMENT
+    }
+}
+
+fn source_attributes(
     reader: &Reader<&[u8]>,
     event: &quick_xml::events::BytesStart<'_>,
+    per_element_limit: usize,
     budget: &mut SanitizerBudget,
-) -> WorkerResult<(String, Vec<(String, String)>)> {
-    let name = std::str::from_utf8(event.name().as_ref())
-        .map_err(|_| WorkerError::InvalidPayload("provider SVG tag is not UTF-8".to_owned()))?
-        .to_owned();
-    if !matches!(
-        name.as_str(),
-        "svg" | "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
-    ) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "provider SVG element <{name}> is not allowed"
-        )));
-    }
+) -> WorkerResult<Vec<(String, String)>> {
     let mut attrs = Vec::new();
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute.map_err(|error| {
@@ -1510,10 +1587,60 @@ fn canonical_element(
                 "provider SVG exceeds the total attribute-value byte budget".to_owned(),
             ));
         }
-        // The root namespace is the one URL-looking value admitted by this inert subset; it names
-        // SVG syntax and is never dereferenced. Every actual resource-bearing URL is rejected.
-        let namespace_ok = key == "xmlns" && value == SVG_NAMESPACE;
-        if !allowed_attribute(&name, &key)
+        if attrs.iter().any(|(existing, _)| existing == &key) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG attribute {key} is duplicated"
+            )));
+        }
+        attrs.push((key, value));
+    }
+    if attrs.len() > per_element_limit {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG element exceeds the per-element attribute budget".to_owned(),
+        ));
+    }
+    Ok(attrs)
+}
+
+fn canonical_element(
+    name: &str,
+    mut source_attrs: Vec<(String, String)>,
+    is_root: bool,
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<(String, Vec<(String, String)>)> {
+    if !matches!(
+        name,
+        "svg" | "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
+    ) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG element <{name}> is not allowed"
+        )));
+    }
+    if is_root {
+        normalize_root_percent_dimensions(&mut source_attrs)?;
+    }
+    let mut attrs = Vec::new();
+    for (key, value) in source_attrs {
+        if stripped_retained_attribute(name, &key, &value, is_root)? {
+            continue;
+        }
+        if key == "style" {
+            let style_attrs = canonical_presentation_style(name, &value, budget)?;
+            if style_attrs
+                .iter()
+                .any(|(key, _)| attrs.iter().any(|(existing, _)| existing == key))
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG style duplicates an attribute".to_owned(),
+                ));
+            }
+            attrs.extend(style_attrs);
+            continue;
+        }
+        // The default namespace changes the meaning of unprefixed elements, so retain only SVG's
+        // namespace on the root. It is syntax, never a dereferenced resource.
+        let namespace_ok = key == "xmlns" && is_root && name == "svg" && value == SVG_NAMESPACE;
+        if !allowed_attribute(name, &key)
             || (key == "xmlns" && !namespace_ok)
             || (!namespace_ok && unsafe_attribute_value(&value))
         {
@@ -1521,7 +1648,12 @@ fn canonical_element(
                 "provider SVG attribute {key} is not allowed"
             )));
         }
-        validate_attribute_resource_budget(&name, &key, &value, budget)?;
+        validate_attribute_resource_budget(name, &key, &value, budget)?;
+        if attrs.iter().any(|(existing, _)| existing == &key) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG attribute {key} is duplicated"
+            )));
+        }
         attrs.push((key, value));
     }
     if attrs.len() > MAX_SVG_ATTRIBUTES_PER_ELEMENT {
@@ -1530,7 +1662,284 @@ fn canonical_element(
         )));
     }
     attrs.sort_unstable();
-    Ok((name, attrs))
+    Ok((name.to_owned(), attrs))
+}
+
+fn classify_element(
+    name: &str,
+    parent: Option<&RawSvgElement>,
+    empty: bool,
+    root_seen: bool,
+) -> WorkerResult<RawSvgElementKind> {
+    let invalid = || {
+        WorkerError::InvalidPayload(format!(
+            "provider SVG element <{name}> is not allowed in this context"
+        ))
+    };
+    let Some(parent) = parent else {
+        return if !root_seen && !empty && name == "svg" {
+            Ok(RawSvgElementKind::Retained)
+        } else {
+            Err(WorkerError::InvalidPayload(
+                "provider output root must be a non-empty <svg> element".to_owned(),
+            ))
+        };
+    };
+    if parent.kind == RawSvgElementKind::Retained
+        && matches!(
+            name,
+            "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
+        )
+    {
+        return Ok(RawSvgElementKind::Retained);
+    }
+    match (parent.kind, parent.name.as_str(), name, empty) {
+        (RawSvgElementKind::Retained, "svg", "defs", true) => Ok(RawSvgElementKind::Defs),
+        (RawSvgElementKind::Retained, "svg", "sodipodi:namedview", false) => {
+            Ok(RawSvgElementKind::NamedView)
+        }
+        (RawSvgElementKind::NamedView, _, "inkscape:grid", true) => Ok(RawSvgElementKind::Grid),
+        (RawSvgElementKind::Retained, "svg", "metadata", false) => Ok(RawSvgElementKind::Metadata),
+        (RawSvgElementKind::Metadata, _, "rdf:rdf", false) => Ok(RawSvgElementKind::RdfLower),
+        (RawSvgElementKind::Metadata, _, "rdf:RDF", false) => Ok(RawSvgElementKind::RdfUpper),
+        (RawSvgElementKind::RdfLower, _, "cc:work", false) => Ok(RawSvgElementKind::CcLower),
+        (RawSvgElementKind::RdfUpper, _, "cc:Work", false) => Ok(RawSvgElementKind::CcUpper),
+        (RawSvgElementKind::CcLower | RawSvgElementKind::CcUpper, _, "dc:format", false) => {
+            Ok(RawSvgElementKind::DcFormat)
+        }
+        (RawSvgElementKind::CcLower | RawSvgElementKind::CcUpper, _, "dc:type", true) => {
+            Ok(RawSvgElementKind::DcType)
+        }
+        (RawSvgElementKind::CcLower | RawSvgElementKind::CcUpper, _, "dc:title", true) => {
+            Ok(RawSvgElementKind::DcTitle)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn stripped_retained_attribute(
+    element: &str,
+    key: &str,
+    value: &str,
+    is_root: bool,
+) -> WorkerResult<bool> {
+    let known_namespace = match key {
+        "xmlns:dc" => Some("http://purl.org/dc/elements/1.1/"),
+        "xmlns:cc" => Some("http://creativecommons.org/ns#"),
+        "xmlns:rdf" => Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+        "xmlns:svg" => Some(SVG_NAMESPACE),
+        "xmlns:sodipodi" => Some("http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"),
+        "xmlns:inkscape" => Some("http://www.inkscape.org/namespaces/inkscape"),
+        _ => None,
+    };
+    if let Some(expected) = known_namespace {
+        if !is_root || element != "svg" || value != expected {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG attribute {key} is not allowed"
+            )));
+        }
+        return Ok(true);
+    }
+    let stripped = match element {
+        "svg" if is_root => matches!(
+            key,
+            "id" | "version"
+                | "inkscape:version"
+                | "sodipodi:docname"
+                | "class"
+                | "data-z"
+                | "data-slots"
+                | "data-tags"
+        ),
+        "g" => matches!(
+            key,
+            "inkscape:label" | "inkscape:groupmode" | "id" | "class"
+        ),
+        "path" => matches!(key, "id" | "inkscape:connector-curvature"),
+        _ => false,
+    };
+    if stripped && unsafe_attribute_value(value) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG attribute {key} is not allowed"
+        )));
+    }
+    Ok(stripped)
+}
+
+fn validate_discarded_attributes(
+    kind: RawSvgElementKind,
+    attrs: &[(String, String)],
+) -> WorkerResult<()> {
+    for (key, value) in attrs {
+        let allowed = match kind {
+            RawSvgElementKind::Defs => key == "id",
+            RawSvgElementKind::NamedView => matches!(
+                key.as_str(),
+                "id" | "pagecolor"
+                    | "bordercolor"
+                    | "borderopacity"
+                    | "inkscape:pageopacity"
+                    | "inkscape:pageshadow"
+                    | "inkscape:zoom"
+                    | "inkscape:cx"
+                    | "inkscape:cy"
+                    | "inkscape:document-units"
+                    | "inkscape:current-layer"
+                    | "showgrid"
+                    | "units"
+                    | "inkscape:window-width"
+                    | "inkscape:window-height"
+                    | "inkscape:window-x"
+                    | "inkscape:window-y"
+                    | "inkscape:window-maximized"
+            ),
+            RawSvgElementKind::Grid => matches!(
+                key.as_str(),
+                "type"
+                    | "id"
+                    | "empspacing"
+                    | "visible"
+                    | "enabled"
+                    | "snapvisiblegridlinesonly"
+                    | "units"
+                    | "spacingx"
+                    | "spacingy"
+                    | "originx"
+                    | "originy"
+            ),
+            RawSvgElementKind::Metadata => key == "id",
+            RawSvgElementKind::RdfLower | RawSvgElementKind::RdfUpper => false,
+            RawSvgElementKind::CcLower | RawSvgElementKind::CcUpper => {
+                key == "rdf:about" && value.is_empty()
+            }
+            RawSvgElementKind::DcFormat | RawSvgElementKind::DcTitle => false,
+            RawSvgElementKind::DcType => {
+                key == "rdf:resource" && value == "http://purl.org/dc/dcmitype/StillImage"
+            }
+            RawSvgElementKind::Retained => unreachable!("retained attributes are canonicalized"),
+        };
+        let known_metadata_uri = kind == RawSvgElementKind::DcType && allowed;
+        if !allowed || (!known_metadata_uri && unsafe_attribute_value(value)) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG discarded attribute {key} is not allowed"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_root_percent_dimensions(attrs: &mut Vec<(String, String)>) -> WorkerResult<()> {
+    let viewbox = attrs
+        .iter()
+        .find(|(key, _)| key == "viewBox")
+        .map(|(_, value)| parse_viewbox_values(value))
+        .transpose()?;
+    for (key, value) in attrs
+        .iter_mut()
+        .filter(|(key, _)| matches!(key.as_str(), "width" | "height"))
+    {
+        if value.contains('%') {
+            if value != "100%" {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "provider SVG {key} percentage must be exactly 100%"
+                )));
+            }
+            let values = viewbox.ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "provider SVG percentage dimensions require viewBox".to_owned(),
+                )
+            })?;
+            *value = if key == "width" {
+                values[2].to_string()
+            } else {
+                values[3].to_string()
+            };
+        }
+    }
+    Ok(())
+}
+
+fn canonical_presentation_style(
+    element: &str,
+    style: &str,
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<Vec<(String, String)>> {
+    let lower = style.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>();
+    if style.trim().is_empty()
+        || style
+            .chars()
+            .any(|character| matches!(character, '\\' | '{' | '}' | '@'))
+        || compact.contains("/*")
+        || compact.contains("*/")
+        || compact.contains("url(")
+        || compact.contains("expression(")
+    {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG style is not allowed".to_owned(),
+        ));
+    }
+    let mut attrs = Vec::new();
+    let mut seen_properties = Vec::new();
+    let declarations = style.split(';').collect::<Vec<_>>();
+    for (index, declaration) in declarations.iter().enumerate() {
+        if declaration.trim().is_empty() {
+            if index + 1 == declarations.len() && style.ends_with(';') {
+                continue;
+            }
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG style declaration is malformed".to_owned(),
+            ));
+        }
+        let (key, value) = declaration.split_once(':').ok_or_else(|| {
+            WorkerError::InvalidPayload("provider SVG style declaration is malformed".to_owned())
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty()
+            || value.contains(':')
+            || seen_properties.iter().any(|existing| existing == &key)
+        {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG style declaration is malformed".to_owned(),
+            ));
+        }
+        seen_properties.push(key);
+        if matches!(
+            (key, value),
+            ("display", "inline") | ("stroke-miterlimit", "4") | ("stroke-dasharray", "none")
+        ) {
+            continue;
+        }
+        if !allowed_presentation_property(key) || value.is_empty() || unsafe_attribute_value(value)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG style property {key} is not allowed"
+            )));
+        }
+        validate_attribute_resource_budget(element, key, value, budget)?;
+        attrs.push((key.to_owned(), value.to_owned()));
+    }
+    Ok(attrs)
+}
+
+fn allowed_presentation_property(key: &str) -> bool {
+    matches!(
+        key,
+        "fill"
+            | "fill-rule"
+            | "clip-rule"
+            | "fill-opacity"
+            | "stroke"
+            | "stroke-opacity"
+            | "stroke-width"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+            | "opacity"
+    )
 }
 
 fn allowed_attribute(element: &str, attribute: &str) -> bool {
@@ -1644,6 +2053,23 @@ fn validate_attribute_resource_budget(
         }
         "viewBox" => {
             parse_viewbox_values(value)?;
+        }
+        "stroke-miterlimit" => {
+            let values = parse_number_list(value, true, key, true)?;
+            if values.len() != 1 || values[0] <= 0.0 {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG stroke-miterlimit must be one positive finite number".to_owned(),
+                ));
+            }
+        }
+        "stroke-dasharray" if value != "none" => {
+            let values = parse_number_list(value, true, key, true)?;
+            if values.is_empty() || values.iter().any(|value| *value < 0.0) {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG stroke-dasharray must be none or non-negative finite numbers"
+                        .to_owned(),
+                ));
+            }
         }
         _ if coordinate_attribute(element, key) => {
             let values = parse_number_list(value, true, key, true)?;
@@ -1891,6 +2317,7 @@ fn unsafe_attribute_value(value: &str) -> bool {
         .filter(|character| !character.is_ascii_whitespace())
         .collect::<String>();
     compact.contains("url(")
+        || compact.contains("expression(")
         || lower.contains('\\')
         || compact.contains("/*")
         || compact.contains("*/")
@@ -2533,6 +2960,264 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inert_root_namespace_declarations_are_dropped_without_broadening_svg_policy() {
+        let declarations = concat!(
+            r#"xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+            r#"xmlns:cc="http://creativecommons.org/ns#" "#,
+            r#"xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" "#,
+            r#"xmlns:svg="http://www.w3.org/2000/svg" "#,
+            r#"xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" "#,
+            r#"xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape""#,
+        );
+        let input =
+            format!(r#"<svg {declarations} viewBox="0 0 2 2"><path d="M0 0H2V2H0Z"/></svg>"#);
+        let canonical = sanitize_svg(&input).expect("inert namespace declarations");
+        assert!(canonical
+            .svg
+            .contains(&format!("xmlns=\"{SVG_NAMESPACE}\"")));
+        assert!(
+            !canonical.svg.contains("xmlns:"),
+            "declarations are not retained"
+        );
+
+        for input in [
+            r#"<svg xmlns="https://example.invalid/svg"><path d="M0 0H1V1Z"/></svg>"#,
+            r#"<svg xmlns:evil="https://example.invalid"><evil:path/></svg>"#,
+            r#"<svg xmlns:dc="https://example.invalid"><path dc:href="https://example.invalid/a" d="M0 0H1V1Z"/></svg>"#,
+            r#"<svg><path xmlns:evil="https://example.invalid" d="M0 0H1V1Z"/></svg>"#,
+            r#"<svg xmlns:xml="http://www.w3.org/XML/1998/namespace"><path d="M0 0H1V1Z"/></svg>"#,
+            r#"<svg xmlns:bad:prefix="https://example.invalid"><path d="M0 0H1V1Z"/></svg>"#,
+        ] {
+            assert!(sanitize_svg(input).is_err(), "accepted {input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn archived_upstream_case_strips_editor_metadata_and_keeps_visible_geometry() {
+        let raw = include_bytes!("../tests/fixtures/starvector/upstream-34835393738-case-02.svg");
+        let canonical = terminal_sanitize_svg_bytes(raw).expect("actual archived upstream case");
+        assert_eq!((canonical.width, canonical.height), (90, 90));
+        for retained in [
+            "fill=\"#ffffff\"",
+            "fill-opacity=\"1\"",
+            "stroke=\"#000000\"",
+            "stroke-opacity=\"1\"",
+            "stroke-width=\"1.25\"",
+            "stroke-linecap=\"butt\"",
+            "stroke-linejoin=\"miter\"",
+            "transform=\"translate(0,-962.35975)\"",
+        ] {
+            assert!(
+                canonical.canonical_svg.contains(retained),
+                "missing {retained}"
+            );
+        }
+        for removed in [
+            "xmlns:",
+            "<metadata",
+            "<defs",
+            "sodipodi:",
+            "inkscape:",
+            "style=",
+            "stroke-miterlimit=",
+            "stroke-dasharray=",
+        ] {
+            assert!(
+                !canonical.canonical_svg.contains(removed),
+                "retained {removed}"
+            );
+        }
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (_, preview) = terminal_write_sanitized_pair_with_preview_size(
+            &canonical,
+            &temp.path().join("actual-upstream-case-02"),
+            Some(512),
+        )
+        .await
+        .expect("actual fixture renders through the canonical CLI seam");
+        let pixels = image::open(preview).expect("preview PNG").to_rgba8();
+        assert_eq!(pixels.dimensions(), (512, 512));
+        assert!(
+            pixels.pixels().any(|pixel| pixel[3] > 0),
+            "actual visible geometry renders"
+        );
+    }
+
+    #[test]
+    fn editor_and_rdf_discarding_is_exact_and_contextual() {
+        let valid = concat!(
+            "<svg>",
+            "<defs id=\"defs4\"/>",
+            "<sodipodi:namedview id=\"base\"><inkscape:grid id=\"grid2994\"/></sodipodi:namedview>",
+            "<metadata id=\"metadata7\"><rdf:rdf><cc:work rdf:about=\"\">",
+            "<dc:format>image/svg+xml</dc:format>",
+            "<dc:type rdf:resource=\"http://purl.org/dc/dcmitype/StillImage\"/>",
+            "<dc:title/>",
+            "</cc:work></rdf:rdf></metadata>",
+            "<path d=\"M0 0H1V1Z\"/>",
+            "</svg>",
+        );
+        let canonical = sanitize_svg(valid).expect("exact inert editor and RDF metadata");
+        assert!(canonical.svg.contains("<path"));
+        for discarded in ["<defs", "namedview", "metadata", "rdf:", "cc:", "dc:"] {
+            assert!(!canonical.svg.contains(discarded));
+        }
+
+        for malicious in [
+            "<svg><metadata><script/></metadata></svg>",
+            "<svg><metadata><foreignObject/></metadata></svg>",
+            "<svg><metadata><rdf:rdf><cc:work rdf:about=\"\"><dc:creator/></cc:work></rdf:rdf></metadata></svg>",
+            "<svg><g><metadata><rdf:rdf></rdf:rdf></metadata></g></svg>",
+            "<svg><g><sodipodi:namedview></sodipodi:namedview></g></svg>",
+            "<svg><inkscape:grid/></svg>",
+            "<svg><metadata onclick=\"alert(1)\"><rdf:rdf></rdf:rdf></metadata></svg>",
+            "<svg><sodipodi:namedview pagecolor=\"url(https://example.invalid/a)\"></sodipodi:namedview></svg>",
+            "<svg><metadata><rdf:rdf></metadata></rdf:rdf></svg>",
+            "<svg><path dc:format=\"image/svg+xml\" d=\"M0 0H1V1Z\"/></svg>",
+            "<svg><g inkscape:unknown=\"1\"/></svg>",
+            "<svg><rect id=\"not-stripped-here\"/></svg>",
+        ] {
+            assert!(sanitize_svg(malicious).is_err(), "accepted {malicious}");
+        }
+    }
+
+    #[test]
+    fn inline_presentation_style_is_strict_and_omits_only_exact_defaults() {
+        let canonical = sanitize_svg(concat!(
+            "<svg><path ",
+            "style=\"fill:#ffffff;fill-opacity:1;stroke:#000000;stroke-opacity:1;",
+            "stroke-width:1.25;stroke-linecap:butt;stroke-linejoin:miter;",
+            "display:inline;stroke-miterlimit:4;stroke-dasharray:none\" ",
+            "d=\"M0 0H1V1Z\"/></svg>",
+        ))
+        .expect("strict presentation style");
+        for retained in [
+            "fill=\"#ffffff\"",
+            "fill-opacity=\"1\"",
+            "stroke=\"#000000\"",
+            "stroke-opacity=\"1\"",
+            "stroke-width=\"1.25\"",
+            "stroke-linecap=\"butt\"",
+            "stroke-linejoin=\"miter\"",
+        ] {
+            assert!(canonical.svg.contains(retained), "missing {retained}");
+        }
+        for omitted in [
+            "style=",
+            "display=",
+            "stroke-miterlimit=",
+            "stroke-dasharray=",
+        ] {
+            assert!(!canonical.svg.contains(omitted), "retained {omitted}");
+        }
+        let default_only = sanitize_svg(
+            "<svg><g style=\"display:inline;stroke-miterlimit:4;stroke-dasharray:none\"></g></svg>",
+        )
+        .expect("default-only style is safely omitted");
+        assert!(!default_only.svg.contains("style="));
+
+        for malicious in [
+            "<svg><rect style=\"fill:url(https://example.invalid/a)\"/></svg>",
+            "<svg><rect style=\"@import 'https://example.invalid/a'\"/></svg>",
+            "<svg><rect style=\"fill:expression(alert(1))\"/></svg>",
+            "<svg><rect style=\"--paint:red\"/></svg>",
+            "<svg><rect style=\"fill\"/></svg>",
+            "<svg><rect style=\"fill:red;;stroke:black\"/></svg>",
+            "<svg><rect style=\"fill:red;fill:blue\"/></svg>",
+            "<svg><rect style=\"display:inline;display:inline\"/></svg>",
+            "<svg><rect style=\"stroke-miterlimit:4;stroke-miterlimit:4\"/></svg>",
+            "<svg><rect fill=\"red\" style=\"fill:blue\"/></svg>",
+            "<svg><rect style=\"fill:blue\" fill=\"red\"/></svg>",
+            "<svg><rect style=\"fill:r\\65 d\"/></svg>",
+            "<svg><rect style=\"fill:red/*comment*/\"/></svg>",
+            "<svg><rect stroke-miterlimit=\"4\"/></svg>",
+            "<svg><rect stroke-dasharray=\"none\"/></svg>",
+            "<svg><rect style=\"stroke-miterlimit:5\"/></svg>",
+            "<svg><rect style=\"stroke-dasharray:1 2\"/></svg>",
+        ] {
+            assert!(sanitize_svg(malicious).is_err(), "accepted {malicious}");
+        }
+    }
+
+    #[test]
+    fn root_percent_dimensions_use_exact_validated_viewbox_spans() {
+        let canonical = sanitize_svg(
+            "<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 1.25 2.5\"><rect width=\"1.25\" height=\"2.5\"/></svg>",
+        )
+        .expect("exact root percentages");
+        assert_eq!((canonical.width, canonical.height), (2, 3));
+        assert!(canonical.svg.contains("width=\"1.25\""));
+        assert!(canonical.svg.contains("height=\"2.5\""));
+        let numeric = sanitize_svg("<svg width=\"12.50px\" height=\"8.00\"></svg>")
+            .expect("numeric dimensions remain unchanged");
+        assert!(numeric.svg.contains("width=\"12.50px\""));
+        assert!(numeric.svg.contains("height=\"8.00\""));
+
+        for invalid in [
+            "<svg width=\"99%\" viewBox=\"0 0 10 10\"></svg>",
+            "<svg width=\"100.0%\" viewBox=\"0 0 10 10\"></svg>",
+            "<svg width=\"100%\"></svg>",
+            "<svg width=\"100%\" viewBox=\"0 0 0 10\"></svg>",
+            "<svg height=\"100%\" viewBox=\"0 0 10 2049\"></svg>",
+            "<svg><rect width=\"100%\" height=\"1\"/></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn discarded_content_obeys_all_attribute_and_element_budgets() {
+        let attributes = |count: usize| {
+            (0..count)
+                .map(|index| format!(" x{index}=\"v\""))
+                .collect::<String>()
+        };
+        for input in [
+            format!("<svg{}></svg>", attributes(25)),
+            format!(
+                "<svg><sodipodi:namedview{}></sodipodi:namedview></svg>",
+                attributes(25)
+            ),
+            format!("<svg><g{}/></svg>", attributes(13)),
+        ] {
+            assert!(
+                invalid_detail(sanitize_svg(&input)).contains("per-element attribute budget"),
+                "wrong refusal for capped element"
+            );
+        }
+
+        let namedview = concat!(
+            "<sodipodi:namedview id=\"x\" pagecolor=\"x\" bordercolor=\"x\" borderopacity=\"1\" ",
+            "inkscape:pageopacity=\"0\" inkscape:pageshadow=\"2\" inkscape:zoom=\"1\" ",
+            "inkscape:cx=\"1\" inkscape:cy=\"1\" inkscape:document-units=\"in\" ",
+            "inkscape:current-layer=\"x\" showgrid=\"false\" units=\"in\" ",
+            "inkscape:window-width=\"1\" inkscape:window-height=\"1\" inkscape:window-x=\"1\" ",
+            "inkscape:window-y=\"1\" inkscape:window-maximized=\"1\"></sodipodi:namedview>",
+        );
+        let global = format!(
+            "<svg>{}</svg>",
+            namedview.repeat(MAX_SVG_ATTRIBUTES / 18 + 1)
+        );
+        assert!(invalid_detail(sanitize_svg(&global)).contains("total attribute budget"));
+
+        let oversized = "x".repeat(MAX_SVG_ATTRIBUTE_VALUE_BYTES + 1);
+        assert!(invalid_detail(sanitize_svg(&format!(
+            "<svg><metadata id=\"{oversized}\"><rdf:rdf></rdf:rdf></metadata></svg>"
+        )))
+        .contains("per-value byte budget"));
+
+        let value = "x".repeat(50_000);
+        let total = format!(
+            "<svg>{}</svg>",
+            format!("<metadata id=\"{value}\"><rdf:rdf></rdf:rdf></metadata>").repeat(4)
+        );
+        assert!(invalid_detail(sanitize_svg(&total)).contains("total attribute-value byte budget"));
+
+        let elements = format!("<svg>{}</svg>", "<defs id=\"x\"/>".repeat(MAX_SVG_ELEMENTS));
+        assert!(invalid_detail(sanitize_svg(&elements)).contains("element budget"));
+    }
+
     #[tokio::test]
     async fn fill_rules_preserve_holes_and_inherited_geometry() {
         for rule in ["nonzero", "evenodd"] {
@@ -2673,7 +3358,6 @@ mod tests {
             "<svg><rect fill=\"file:///tmp/payload\"/></svg>",
             "<svg><rect fill=\"http://example.invalid/a\"/></svg>",
             "<svg><style>rect { fill: red }</style></svg>",
-            "<svg><rect style=\"fill: red\"/></svg>",
             "<svg><use href=\"#shape\"/></svg>",
             "<svg><rect/>not inert</svg>",
             "<svg><rect onclick=\"alert(1)\"/></svg>",
