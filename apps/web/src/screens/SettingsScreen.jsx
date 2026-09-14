@@ -17,6 +17,19 @@ import {
   writeDefaultGenerationQuality,
 } from "../generationQuality.js";
 import { writeClipboardText } from "../clipboard.js";
+import { appConfirm } from "../appConfirm.jsx";
+import { formatBytes } from "../formatting.js";
+import {
+  bytesToGib,
+  daysToSeconds,
+  describeDisableConsequence,
+  describeLimitConsequence,
+  fetchModelCache,
+  gibToBytes,
+  policyNeedsRestart,
+  secondsToDays,
+} from "../modelCache.js";
+import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModeTabs } from "../components/generationStudio.jsx";
@@ -49,10 +62,70 @@ function fractionToPercent(fraction) {
   return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
 }
 
-// GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts; the readout is in GB.
-function bytesToGb(bytes) {
-  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return 0;
+// GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts;
+// preserve a reported zero while distinguishing an absent reading from zero.
+function telemetryBytesToGib(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return null;
   return bytes / (1024 * 1024 * 1024);
+}
+
+function telemetryGibLabel(bytes, digits = 1) {
+  const gib = telemetryBytesToGib(bytes);
+  return gib === null ? "Unavailable" : `${gib.toFixed(digits)} GiB`;
+}
+
+const REMOTE_PASSWORD_POLICY_V1 = "unicode-white-space-scalar-count-v1";
+
+// Exact Unicode White_Space code-point set named by the native V1 policy. Do
+// not use JavaScript trim(): it excludes U+0085 and includes U+FEFF, unlike this
+// contract and Rust's corresponding explicit predicate.
+function isRemotePasswordBoundaryWhitespaceV1(character) {
+  const value = character.codePointAt(0);
+  return (
+    (value >= 0x0009 && value <= 0x000d) ||
+    value === 0x0020 ||
+    value === 0x0085 ||
+    value === 0x00a0 ||
+    value === 0x1680 ||
+    (value >= 0x2000 && value <= 0x200a) ||
+    (value >= 0x2028 && value <= 0x2029) ||
+    value === 0x202f ||
+    value === 0x205f ||
+    value === 0x3000
+  );
+}
+
+function normalizeRemotePassword(password, policy) {
+  if (policy !== REMOTE_PASSWORD_POLICY_V1) return null;
+  const scalars = Array.from(password);
+  // Array.from combines valid surrogate pairs, but preserves an unpaired UTF-16
+  // surrogate as one element. Rust strings cannot contain those non-scalars, so
+  // fail closed instead of counting a value native validation cannot receive.
+  if (scalars.some((character) => {
+    const value = character.codePointAt(0);
+    return value >= 0xd800 && value <= 0xdfff;
+  })) return null;
+  let start = 0;
+  let end = scalars.length;
+  while (start < end && isRemotePasswordBoundaryWhitespaceV1(scalars[start])) start += 1;
+  while (end > start && isRemotePasswordBoundaryWhitespaceV1(scalars[end - 1])) end -= 1;
+  return scalars.slice(start, end).join("");
+}
+
+function remotePasswordCandidate(password, remoteAccessStatus) {
+  const normalized = normalizeRemotePassword(password, remoteAccessStatus?.passwordPolicy);
+  const minimumPasswordLength = remoteAccessStatus?.minimumPasswordLength;
+  if (
+    normalized === null ||
+    !Number.isSafeInteger(minimumPasswordLength) ||
+    minimumPasswordLength < 1
+  ) {
+    return null;
+  }
+  return {
+    normalized,
+    meetsMinimum: Array.from(normalized).length >= minimumPasswordLength,
+  };
 }
 
 const SCHEME_OPTIONS = [
@@ -68,6 +141,11 @@ export function SettingsScreen({
   lockedToSimple = false,
   embedWorkflow = true,
   onEmbedWorkflowChange,
+  // Settings → Storage → Model library → Change…. Owned by App.jsx (it shares the relocation
+  // sequence and the restart disclosure with the unavailable-library prompt, sc-19709): runs the
+  // native picker, validates + persists + re-binds, and opens the restart dialog. Resolves to the
+  // adopted target, `null` when the picker was dismissed; rejects with the message to show.
+  onChangeModelLibrary,
   sharingFocusRequest = 0,
 }) {
   // theme/changeTheme and the worker registry come from the app context (the same values the
@@ -75,6 +153,10 @@ export function SettingsScreen({
   // App.jsx, which owns them alongside the sidebar's mode switch.
   const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const [settings, setSettings] = useState(null);
+  // The first-run storage snapshot, read only for `hfHomeDefault`: the model library row shows the
+  // folder the app is ACTUALLY reading from when no override is set, not "Default location" — the
+  // whole point of the row is telling a user whose cache moved where SceneWorks still thinks it is.
+  const [storageSetup, setStorageSetup] = useState(null);
   const [gpu, setGpu] = useState(null);
   const [credentials, setCredentials] = useState([]);
   const [newHost, setNewHost] = useState("");
@@ -114,17 +196,31 @@ export function SettingsScreen({
   // q8 by default.
   const [defaultQuality, setDefaultQuality] = useState(readDefaultGenerationQuality);
   const defaultQualityRequest = useRef(0);
+  // Resolved-model hot cache (epic 19703, sc-19711). `cache` is the API's authoritative snapshot:
+  // the policy the RUNNING sidecars captured at spawn, plus the store's own usage accounting.
+  // Fetched on mount, re-fetched after any action that could have changed it, and re-read on a
+  // bounded cadence ONLY while the store still has an entry in flight — so the storage totals
+  // converge while a promotion runs, and a settled cache is still read exactly once. A timer that
+  // ran unconditionally would put back the per-row read cost sc-19708 removed from the catalog.
+  const [cache, setCache] = useState(null);
+  const [cacheError, setCacheError] = useState("");
+  // Draft limit/interval so typing doesn't fire a save per keystroke; committed on blur / Apply.
+  const [cacheLimitGb, setCacheLimitGb] = useState("");
+  const [cacheDays, setCacheDays] = useState("");
 
   const refresh = useCallback(async () => {
     try {
       if (isDesktop) {
-        const [loadedSettings, gpuInfo, storedCredentials, remoteAccess] = await Promise.all([
-          invoke("get_app_settings"),
-          invoke("get_gpu_info"),
-          invoke("list_credentials"),
-          invoke("get_remote_access"),
-        ]);
+        const [loadedSettings, gpuInfo, storedCredentials, remoteAccess, storage] =
+          await Promise.all([
+            invoke("get_app_settings"),
+            invoke("get_gpu_info"),
+            invoke("list_credentials"),
+            invoke("get_remote_access"),
+            invoke("get_storage_setup"),
+          ]);
         setSettings(loadedSettings);
+        setStorageSetup(storage);
         setGpu(gpuInfo);
         setCredentials(storedCredentials ?? []);
         if (remoteAccess) {
@@ -147,6 +243,44 @@ export function SettingsScreen({
   useEffect(() => {
     if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
   }, [settings]);
+
+  const refreshCache = useCallback(async () => {
+    try {
+      const snapshot = await fetchModelCache();
+      setCache(snapshot);
+      setCacheError("");
+      return snapshot;
+    } catch (error) {
+      // Report the failure rather than rendering a reassuring empty cache.
+      setCache(null);
+      setCacheError(String(error?.message ?? error));
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCache();
+  }, [refreshCache]);
+
+  // Bounded convergence refresh — the same one the Model Manager runs, so the two surfaces cannot
+  // disagree about when the app stops polling. It re-reads only while an entry is still moving.
+  useCacheConvergence(cache, refreshCache);
+
+  // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
+  // there is no shell to ask, so the running policy is both what is persisted and what applies.
+  const persistedPolicy = isDesktop ? (settings?.resolvedCache ?? null) : (cache?.policy ?? null);
+  // Re-seed only when the persisted VALUES change, never on the containing object's identity:
+  // `settings` is a fresh object after every `get_app_settings`, so depending on the policy object
+  // would clobber whatever the user is mid-way through typing on each refresh. The primitives are
+  // lifted into their own bindings so that intent survives `react-hooks/exhaustive-deps` instead
+  // of being expressed as a dependency list the rule can't verify.
+  const persistedMaxBytes = persistedPolicy?.maxBytes;
+  const persistedInactivitySeconds = persistedPolicy?.inactivitySeconds;
+  useEffect(() => {
+    if (persistedMaxBytes === undefined || persistedInactivitySeconds === undefined) return;
+    setCacheLimitGb(String(Math.round(bytesToGib(persistedMaxBytes))));
+    setCacheDays(String(Math.round(secondsToDays(persistedInactivitySeconds))));
+  }, [persistedMaxBytes, persistedInactivitySeconds]);
 
   // Poll live MLX memory telemetry while the GPU card is visible (epic 7819, sc-7825). macOS-only —
   // the worker only publishes the snapshot on the MLX path; elsewhere the command returns null.
@@ -197,6 +331,49 @@ export function SettingsScreen({
   async function revealDataDir() {
     if (settings?.dataDir) {
       await invoke("reveal_in_os", { path: settings.dataDir });
+    }
+  }
+
+  // The Hugging Face cache home SceneWorks is ACTUALLY reading models from, as the shell resolves
+  // it for the sidecar spawn (ambient `HF_HOME` first, then the persisted override, then the
+  // platform default). The persisted override alone would lie whenever an ambient `HF_HOME` wins —
+  // which is exactly when it matters, so the row shows the resolved path and, in that case, says
+  // the environment owns it instead of offering a change that would not take effect.
+  const modelLibraryFromEnvironment = storageSetup?.hfHomeFromEnvironment === true;
+  const modelLibraryPath =
+    storageSetup?.hfHomeActive ?? settings?.hfHome ?? storageSetup?.hfHomeDefault ?? null;
+  // Outcome of the last Change…/Reveal, rendered INLINE at the row. The screen's shared status
+  // line sits at the top of the panel — off-screen when the user is scrolled down at the Storage
+  // group — so a relocation refusal there reads as a silent no-op (the sc-21389 field failure:
+  // the API refused with a typed 409 and the user saw "nothing happened").
+  const [modelLibraryNotice, setModelLibraryNotice] = useState("");
+
+  async function changeModelLibrary() {
+    setModelLibraryNotice("");
+    try {
+      const adopted = await onChangeModelLibrary?.();
+      if (adopted?.hfHome) {
+        // The shell persisted the override inside the relocation; re-read it rather than guessing.
+        const [reloaded, storage] = await Promise.all([
+          invoke("get_app_settings"),
+          invoke("get_storage_setup"),
+        ]);
+        setSettings(reloaded);
+        setStorageSetup(storage);
+        setModelLibraryNotice("Model library updated — restart SceneWorks to apply.");
+      }
+    } catch (error) {
+      setModelLibraryNotice(error?.message || String(error));
+    }
+  }
+
+  async function revealModelLibrary() {
+    if (!modelLibraryPath) return;
+    try {
+      await invoke("reveal_in_os", { path: modelLibraryPath });
+    } catch (error) {
+      // Most likely: the default cache home was never created because nothing was downloaded yet.
+      setModelLibraryNotice(error?.message || String(error));
     }
   }
 
@@ -290,6 +467,85 @@ export function SettingsScreen({
     }
   }
 
+  // Persist a resolved-cache policy through the shell (the durable copy the sidecars read at
+  // spawn). Every caller passes a COMPLETE policy so a partial write can never leave the store
+  // running under a half-applied rule. The status line says "after a restart" because that is
+  // literally when it takes effect — the three sidecar processes captured their policy at spawn.
+  async function commitCachePolicy(policy, message) {
+    try {
+      const updated = await invoke("set_resolved_cache_policy", { policy });
+      setSettings(updated);
+      await refreshCache();
+      setStatus(message);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  // Turning the cache OFF is not destructive and does not sweep. Say what actually happens to the
+  // copies already on disk before committing, so nobody discovers it afterwards.
+  async function changeCacheEnabled(enabled) {
+    if (!persistedPolicy) return;
+    if (!enabled) {
+      const proceed = await appConfirm({
+        title: "Stop keeping local copies?",
+        message: describeDisableConsequence(cache),
+        confirmLabel: "Turn off",
+      });
+      if (!proceed) return;
+    }
+    await commitCachePolicy(
+      { ...persistedPolicy, enabled },
+      enabled
+        ? "Local model copies enabled — takes effect after a restart."
+        : "Local model copies disabled — takes effect after a restart. Existing copies stay on disk.",
+    );
+  }
+
+  // Lowering the limit below current usage schedules future cleanup; it never sweeps here. The
+  // confirm spells out how much can actually be reclaimed and how much is kept.
+  async function commitCacheLimit() {
+    if (!persistedPolicy) return;
+    const nextMaxBytes = gibToBytes(cacheLimitGb);
+    if (nextMaxBytes <= 0) {
+      setStatus("The size limit must be at least 1 GiB.");
+      setCacheLimitGb(String(Math.round(bytesToGib(persistedPolicy.maxBytes))));
+      return;
+    }
+    if (nextMaxBytes === Number(persistedPolicy.maxBytes)) return;
+    const consequence = describeLimitConsequence(cache, nextMaxBytes);
+    if (consequence) {
+      const proceed = await appConfirm({
+        title: "Lower the local copy limit?",
+        message: consequence,
+        confirmLabel: "Set limit",
+      });
+      if (!proceed) {
+        setCacheLimitGb(String(Math.round(bytesToGib(persistedPolicy.maxBytes))));
+        return;
+      }
+    }
+    await commitCachePolicy(
+      { ...persistedPolicy, maxBytes: nextMaxBytes },
+      `Local copy limit set to ${formatBytes(nextMaxBytes)} — takes effect after a restart.`,
+    );
+  }
+
+  async function commitCacheInterval() {
+    if (!persistedPolicy) return;
+    const nextSeconds = daysToSeconds(cacheDays);
+    if (nextSeconds <= 0) {
+      setStatus("The unused-for interval must be at least one day.");
+      setCacheDays(String(Math.round(secondsToDays(persistedPolicy.inactivitySeconds))));
+      return;
+    }
+    if (nextSeconds === Number(persistedPolicy.inactivitySeconds)) return;
+    await commitCachePolicy(
+      { ...persistedPolicy, inactivitySeconds: nextSeconds },
+      `Local copies are removed after ${Math.round(secondsToDays(nextSeconds))} unused days — takes effect after a restart.`,
+    );
+  }
+
   async function rerunSetupWizard() {
     try {
       await invoke("reset_setup");
@@ -301,8 +557,21 @@ export function SettingsScreen({
 
   // --- Remote access (LAN) handlers (epic 4484 story 4) ---
   async function saveRemotePassword() {
+    const candidate = remotePasswordCandidate(remotePassword, remote);
+    if (!candidate) {
+      setStatus("Remote-access password policy is unavailable. Restart SceneWorks and try again.");
+      return;
+    }
+    if (!candidate.meetsMinimum) {
+      setStatus(
+        `Use a remote-access password with at least ${remote.minimumPasswordLength} characters after normalizing surrounding whitespace.`,
+      );
+      return;
+    }
     try {
-      const updated = await invoke("set_remote_access_password", { password: remotePassword });
+      const updated = await invoke("set_remote_access_password", {
+        password: candidate.normalized,
+      });
       setRemote(updated);
       setRemotePassword("");
       setStatus("Remote access password saved.");
@@ -378,7 +647,7 @@ export function SettingsScreen({
   const gpuTargetLabel =
     gpuLimitPercent >= 100
       ? "Use all available"
-      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GB of ${unifiedGb} GB (${gpuLimitPercent}%)`;
+      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GiB of ${unifiedGb} GiB (${gpuLimitPercent}%)`;
 
   return (
     <section className="page-frame settings-screen">
@@ -392,8 +661,14 @@ export function SettingsScreen({
           />
         </div>
 
-        {/* One status line under the tab row — the old full-width band above the panel is gone. */}
-        {status ? <p className="settings-status">{status}</p> : null}
+        {/* One status line under the tab row — the old full-width band above the panel is gone.
+            It is a live region so a change committed by keyboard is announced, not just painted
+            (sc-19711 accessibility parity). */}
+        {status ? (
+          <p aria-live="polite" className="settings-status" role="status">
+            {status}
+          </p>
+        ) : null}
 
         {activeTab === "appearance" ? (
           <div className="settings-tab-body">
@@ -553,9 +828,182 @@ export function SettingsScreen({
                     </button>
                   </div>
                 </div>
+                {/* The Hugging Face cache home (`HF_HOME`) — where downloaded model weights live.
+                    Changing it runs the sc-19709 relocation: the folder is checked first (with
+                    models installed it must hold every one this install recorded, so nothing is
+                    orphaned; before anything is installed any folder is acceptable), then the
+                    override is persisted and the library re-bound. Like the data directory, the
+                    sidecars pick it up at their next spawn, so it needs a restart. */}
+                <div>
+                  <div className="settings-row-title">Model library (Hugging Face cache)</div>
+                  <div className="settings-row-sub">
+                    Downloaded model weights. Choose the Hugging Face cache folder (the one
+                    containing <code>hub</code>) — if you moved your cache to another drive, point
+                    SceneWorks at it here. Needs a restart.
+                  </div>
+                  <div className="settings-path">{modelLibraryPath ?? "…"}</div>
+                  {modelLibraryFromEnvironment ? (
+                    <div className="settings-row-sub">
+                      Set by the <code>HF_HOME</code> environment variable, which overrides
+                      anything chosen here. Unset it to change the location from Settings.
+                    </div>
+                  ) : null}
+                  {modelLibraryNotice ? (
+                    <p aria-live="polite" className="settings-status" role="status">
+                      {modelLibraryNotice}
+                    </p>
+                  ) : null}
+                  <div className="settings-button-row">
+                    <button
+                      className="settings-btn"
+                      type="button"
+                      onClick={changeModelLibrary}
+                      disabled={!onChangeModelLibrary || modelLibraryFromEnvironment}
+                    >
+                      Change…
+                    </button>
+                    <button
+                      className="settings-btn"
+                      type="button"
+                      onClick={revealModelLibrary}
+                      disabled={!modelLibraryPath}
+                    >
+                      Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
+                    </button>
+                  </div>
+                </div>
                 <div className="work-panel-divider" />
               </>
             ) : null}
+
+            {/* Resolved-model hot cache (epic 19703, sc-19711). The controls are shell-backed and
+                therefore desktop-only, exactly like the data directory above; the usage readout
+                comes from the API and renders in every deployment, because a remote admin still
+                needs to see what the host is holding. */}
+            <div className="settings-group-title">Local model copies</div>
+            <div className="settings-row settings-row--top">
+              <div>
+                <div className="settings-row-title">
+                  Keep a working copy of models from external libraries
+                </div>
+                <div className="settings-row-sub">
+                  Copies models loaded from an attached or network model library into SceneWorks’
+                  own storage, so they keep working when that library is disconnected. Off by
+                  default. Takes effect after a restart.
+                </div>
+              </div>
+              <button
+                aria-checked={Boolean(persistedPolicy?.enabled)}
+                aria-label="Keep a working copy of models from external libraries"
+                className={persistedPolicy?.enabled ? "settings-toggle on" : "settings-toggle"}
+                disabled={!isDesktop || !persistedPolicy}
+                onClick={() => changeCacheEnabled(!persistedPolicy?.enabled)}
+                role="switch"
+                type="button"
+              >
+                <span />
+              </button>
+            </div>
+            {isDesktop && persistedPolicy ? (
+              <div className="settings-field-row">
+                <label className="settings-note" htmlFor="model-cache-limit">
+                  Use at most
+                </label>
+                <input
+                  aria-label="Maximum size for local model copies, in GiB"
+                  className="settings-port"
+                  id="model-cache-limit"
+                  min="1"
+                  onBlur={commitCacheLimit}
+                  onChange={(event) => setCacheLimitGb(event.target.value)}
+                  type="number"
+                  value={cacheLimitGb}
+                />
+                <span className="settings-note">GiB, and remove copies unused for</span>
+                <input
+                  aria-label="Remove local model copies unused for this many days"
+                  className="settings-port"
+                  id="model-cache-days"
+                  min="1"
+                  onBlur={commitCacheInterval}
+                  onChange={(event) => setCacheDays(event.target.value)}
+                  type="number"
+                  value={cacheDays}
+                />
+                <span className="settings-note settings-grow">days.</span>
+              </div>
+            ) : null}
+            {!isDesktop ? (
+              <p className="settings-note">
+                These settings are configured on the machine running SceneWorks.
+              </p>
+            ) : null}
+            {policyNeedsRestart(persistedPolicy, cache?.policy) ? (
+              <p className="settings-note">
+                Saved. SceneWorks is still running under the previous setting — restart to apply
+                it.
+              </p>
+            ) : null}
+            {cacheError ? (
+              <p className="inline-warning">Couldn’t read local copy storage: {cacheError}</p>
+            ) : cache?.error ? (
+              <p className="inline-warning">Couldn’t read local copy storage: {cache.error}</p>
+            ) : cache?.policy ? (
+              <div className="settings-inset settings-inset--spaced">
+                <div className="settings-inset-title">Storage</div>
+                <div className="settings-kv">
+                  <span>Used</span>
+                  <span className="settings-mono">
+                    {formatBytes(cache.usedBytes)} of {formatBytes(cache.policy.maxBytes)}
+                  </span>
+                </div>
+                <div className="settings-kv">
+                  <span>Copies</span>
+                  <span className="settings-mono">{cache.entryCount}</span>
+                </div>
+                <div className="settings-kv">
+                  <span>Can be reclaimed</span>
+                  <span className="settings-mono">{formatBytes(cache.reclaimableBytes)}</span>
+                </div>
+                <div className="settings-kv">
+                  <span>Kept</span>
+                  <span className="settings-mono">{formatBytes(cache.pinnedBytes)}</span>
+                </div>
+                {/* The external library these copies are made FROM. It is the location every other
+                    line here is relative to — and the one the same-volume warning below is about —
+                    so a user who has to act on that warning can see what is actually configured
+                    instead of hunting for "the model library". Reported by the API rather than
+                    re-derived here: the status read compares against this exact path, so showing
+                    anything else could name a location the comparison never used. */}
+                {cache.sourceLibraryPath ? (
+                  <div className="settings-kv">
+                    <span>Library</span>
+                    <span className="settings-mono" title={cache.sourceLibraryPath}>
+                      {cache.sourceLibraryPath}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {/* Same-volume is not an error, but it silently removes the whole point of the
+                feature, so it is stated plainly rather than left for the user to infer — and it
+                names the configured location, because "point the model library elsewhere" is not
+                an actionable instruction to someone who cannot see where it currently points. */}
+            {cache?.sourceVolumeRelation === "same" ? (
+              <div className="settings-notice">
+                <Icon.Warning size={16} />
+                <span>
+                  Local copies are on the same disk as the model library
+                  {cache.sourceLibraryPath ? ` (${cache.sourceLibraryPath})` : ""}, so they protect
+                  against neither a disconnect nor a slow drive — they only use extra space. Point
+                  the model library at a different volume to get the benefit.
+                </span>
+              </div>
+            ) : null}
+            <p className="settings-note">
+              Remove individual copies, or mark one to keep, from a model’s card in Model Manager.
+            </p>
+            <div className="work-panel-divider" />
 
             <div className="settings-group-title">Service credentials</div>
             <p className="settings-note">
@@ -675,9 +1123,9 @@ export function SettingsScreen({
                 <div className="settings-kv">
                   <span>Unified memory</span>
                   <span>
-                    {unifiedGb} GB
+                    {unifiedGb} GiB
                     {typeof gpu.wiredLimitMb === "number"
-                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GB`
+                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GiB`
                       : ""}
                   </span>
                 </div>
@@ -723,20 +1171,20 @@ export function SettingsScreen({
                       <div className="settings-kv">
                         <span>Active</span>
                         <span className="settings-mono">
-                          {bytesToGb(gpuTelemetry.activeBytes).toFixed(1)} GB
+                          {telemetryGibLabel(gpuTelemetry.activeBytes)}
                         </span>
                       </div>
                       <div className="settings-kv">
                         <span>Peak</span>
                         <span className="settings-mono">
-                          {bytesToGb(gpuTelemetry.peakBytes).toFixed(1)} GB
+                          {telemetryGibLabel(gpuTelemetry.peakBytes)}
                         </span>
                       </div>
-                      {gpuTelemetry.limitBytes ? (
+                      {gpuTelemetry.limitBytes !== null && gpuTelemetry.limitBytes !== undefined ? (
                         <div className="settings-kv">
                           <span>Limit</span>
                           <span className="settings-mono">
-                            {Math.round(bytesToGb(gpuTelemetry.limitBytes))} GB
+                            {telemetryGibLabel(gpuTelemetry.limitBytes, 0)}
                           </span>
                         </div>
                       ) : null}
@@ -848,7 +1296,7 @@ export function SettingsScreen({
                   className="settings-btn"
                   type="button"
                   onClick={saveRemotePassword}
-                  disabled={!remotePassword.trim()}
+                  disabled={!remotePasswordCandidate(remotePassword, remote)?.meetsMinimum}
                 >
                   Save
                 </button>
@@ -864,6 +1312,7 @@ export function SettingsScreen({
               </div>
               <div className="settings-field-row">
                 <span className="settings-note settings-grow">
+                  Use at least {remote.minimumPasswordLength} characters.{" "}
                   {remote.passwordSet
                     ? "A password is set — remote browsers must enter it."
                     : "Set a password before enabling remote access."}

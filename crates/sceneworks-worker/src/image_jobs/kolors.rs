@@ -397,7 +397,32 @@ async fn generate_kolors_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = kolors_control_spec(weights_dir, control_dir, ip_dir, quant, adapters);
+    let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+    let resolved_artifact = if crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
+        &request.model_manifest_entry,
+    ) {
+        resolved_mlx_artifact_provenance(
+            request,
+            settings,
+            &repo,
+            &weights_dir,
+            effective_tier,
+        )?
+    } else {
+        None
+    };
+    let decode_quality_binding = crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
+        &request.model_manifest_entry,
+        &request.model,
+        resolved_artifact.as_ref(),
+    )?;
+    let spec = kolors_control_spec(weights_dir, control_dir, ip_dir, quant, adapters)
+        .with_resolved_route(request.model.clone());
+    let spec = crate::mlx_fit_gate::attach_decode_quality_binding(
+        spec,
+        decode_quality_binding,
+        &request.model,
+    );
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         "kolors",

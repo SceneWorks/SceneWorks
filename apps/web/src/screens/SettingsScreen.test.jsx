@@ -59,6 +59,161 @@ async function openTab(container, label) {
 const buttonByText = (container, label) =>
   [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === label);
 
+// Settings → Storage → Model library (the Hugging Face cache home). The row tells the user where
+// SceneWorks is ACTUALLY reading models from (override, else the platform default — never a bare
+// "Default location"), and Change… hands off to App's relocation sequence (sc-19709), which is
+// injected as `onChangeModelLibrary` so the screen never re-implements the two-write ordering.
+describe("SettingsScreen model library location", () => {
+  let container;
+  let root;
+  let invoke;
+  let SettingsScreen;
+  let appSettings;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    appSettings = {};
+    invoke = vi.fn(async (command) => {
+      switch (command) {
+        case "get_app_settings":
+          return appSettings;
+        case "get_storage_setup":
+          return {
+            dataDirDefault: "/Users/me/Library/Application Support/SceneWorks",
+            hfHome: appSettings.hfHome ?? null,
+            hfHomeDefault: "/Users/me/.cache/huggingface",
+            // The shell resolves what the sidecars will actually receive: ambient env, then the
+            // persisted override, then the default. The mock mirrors that (no ambient here).
+            hfHomeActive: appSettings.hfHome ?? "/Users/me/.cache/huggingface",
+            hfHomeFromEnvironment: false,
+            storageConfigured: true,
+            setupCompleted: true,
+          };
+        case "get_gpu_info":
+          return { platform: "macos", devices: [] };
+        case "list_credentials":
+          return [];
+        default:
+          return null;
+      }
+    });
+    window.__TAURI__ = { core: { invoke } };
+    vi.resetModules();
+    SettingsScreen = await loadScreen();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(props) {
+    await renderScreen(root, SettingsScreen, props);
+    await openTab(container, "Settings");
+  }
+
+  it("shows the platform default cache home when no override is set", async () => {
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("Model library (Hugging Face cache)");
+    expect(container.textContent).toContain("/Users/me/.cache/huggingface");
+    expect(container.textContent).not.toContain("Default location/Users/me/.cache");
+  });
+
+  it("shows the persisted override and reveals it", async () => {
+    appSettings = { hfHome: "/Volumes/Models/huggingface" };
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("/Volumes/Models/huggingface");
+    const reveal = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Reveal in Finder",
+    );
+    // Data directory (disabled: no override) then the model library.
+    expect(reveal).toHaveLength(2);
+    await click(reveal[1]);
+    expect(invoke).toHaveBeenCalledWith("reveal_in_os", { path: "/Volumes/Models/huggingface" });
+  });
+
+  it("relocates through the injected sequence, re-reads settings and asks for a restart", async () => {
+    const onChangeModelLibrary = vi.fn(async () => {
+      appSettings = { hfHome: "/Volumes/Models/huggingface" };
+      return { hfHome: "/Volumes/Models/huggingface", libraryRoot: "/Volumes/Models/huggingface/hub" };
+    });
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    expect(change).toHaveLength(2);
+    await click(change[1]);
+    expect(onChangeModelLibrary).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("/Volumes/Models/huggingface");
+    expect(container.textContent).toContain("Model library updated — restart SceneWorks to apply.");
+  });
+
+  it("shows the refusal inline and keeps the current location when the folder is rejected", async () => {
+    const onChangeModelLibrary = vi.fn(async () => {
+      throw new Error("That folder does not contain a SceneWorks model library.");
+    });
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    await click(change[1]);
+    // The refusal renders INSIDE the model library row — the top-of-panel status line can be
+    // scrolled out of view, which made a refusal look like a silent no-op.
+    const row = [...container.querySelectorAll(".settings-row-title")]
+      .find((title) => title.textContent.includes("Model library"))
+      .closest("div").parentElement;
+    expect(row.querySelector('[role="status"]').textContent).toContain(
+      "That folder does not contain a SceneWorks model library.",
+    );
+    expect(container.textContent).toContain("/Users/me/.cache/huggingface");
+    expect(container.textContent).not.toContain("restart SceneWorks to apply");
+  });
+
+  // `tauri dev` / a shell-profile export: an ambient `HF_HOME` beats the persisted override at
+  // spawn, so the row must show the path actually in use and must not offer a change that would
+  // silently never take effect.
+  it("shows the environment-owned location and disables Change…", async () => {
+    appSettings = { hfHome: "/Volumes/Models/huggingface" };
+    const fromEnv = invoke.getMockImplementation();
+    invoke.mockImplementation(async (command) => {
+      if (command === "get_storage_setup") {
+        return {
+          ...(await fromEnv(command)),
+          hfHomeActive: "/tmp/dev-hf-home",
+          hfHomeFromEnvironment: true,
+        };
+      }
+      return fromEnv(command);
+    });
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("/tmp/dev-hf-home");
+    expect(container.textContent).toContain("HF_HOME");
+    expect(container.textContent).toContain("environment variable");
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    expect(change[1].disabled).toBe(true);
+  });
+
+  it("does nothing when the picker is dismissed", async () => {
+    const onChangeModelLibrary = vi.fn(async () => null);
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    await click(change[1]);
+    expect(onChangeModelLibrary).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("restart SceneWorks to apply");
+  });
+});
+
 describe("SettingsScreen service credentials", () => {
   let container;
   let root;
@@ -295,6 +450,8 @@ describe("SettingsScreen remote access (desktop)", () => {
       lanCandidates: ["192.168.1.50"],
       url: "http://192.168.1.50:8787",
       defaultPort: 8787,
+      minimumPasswordLength: 12,
+      passwordPolicy: "unicode-white-space-scalar-count-v1",
       platform: "macos",
     };
     invoke = vi.fn(async (command, args) => {
@@ -355,10 +512,12 @@ describe("SettingsScreen remote access (desktop)", () => {
     await render();
     await changeField(
       container.querySelector('[aria-label="Remote access password"]'),
-      "lan-pass",
+      "  lan-password  ",
     );
     await click(buttonByText(container, "Save"));
-    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password: "lan-pass" });
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", {
+      password: "lan-password",
+    });
     // Re-rendered with passwordSet → the toggle is now allowed.
     expect(remoteToggle().disabled).toBe(false);
     await click(remoteToggle());
@@ -366,6 +525,61 @@ describe("SettingsScreen remote access (desktop)", () => {
     // …and flipping it back disables it.
     await click(remoteToggle());
     expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: false, port: 8787 });
+  });
+
+  it("uses the native minimum and rejects a short trimmed password before invoking Tauri", async () => {
+    await render();
+    expect(container.textContent).toContain("Use at least 12 characters.");
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      "  short-pass  ",
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
+      .toHaveLength(0);
+  });
+
+  it("treats U+0085 as boundary whitespace exactly like the native policy", async () => {
+    await render();
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${"1".repeat(11)}`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
+      .toHaveLength(0);
+  });
+
+  it("does not trim U+FEFF and submits the exact native-compliant value", async () => {
+    await render();
+    const password = `\uFEFF${"1".repeat(11)}`;
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      password,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password });
+  });
+
+  it("counts Unicode scalars and submits the same explicitly normalized password", async () => {
+    await render();
+    const normalized = "🔐".repeat(12);
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${normalized}\u3000`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", {
+      password: normalized,
+    });
   });
 });
 
@@ -377,9 +591,11 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
   let invoke;
   let SettingsScreen;
   const GIB = 1024 * 1024 * 1024;
+  let telemetry;
 
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    telemetry = { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
     invoke = vi.fn(async (command) => {
       switch (command) {
         case "get_app_settings":
@@ -391,7 +607,7 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
         case "get_remote_access":
           return null;
         case "get_gpu_telemetry":
-          return { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
+          return telemetry;
         case "set_gpu_memory_limit":
           return { gpuMemoryLimitFraction: 0.5 };
         default:
@@ -430,16 +646,27 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     await render();
     expect(invoke).toHaveBeenCalledWith("get_gpu_telemetry", undefined);
     expect(container.textContent).toContain("Live MLX memory");
-    expect(container.textContent).toContain("20.0 GB");
-    expect(container.textContent).toContain("40.0 GB");
-    expect(container.textContent).toContain("64 GB");
+    expect(container.textContent).toContain("20.0 GiB");
+    expect(container.textContent).toContain("40.0 GiB");
+    expect(container.textContent).toContain("64 GiB");
+  });
+
+  it("marks missing telemetry fields unavailable while preserving a reported zero", async () => {
+    telemetry = { activeBytes: 0, limitBytes: 0 };
+    await render();
+    expect(container.textContent).toContain("0.0 GiB");
+    expect(container.textContent).toContain("0 GiB");
+    expect(container.textContent).toContain("Unavailable");
+    const rows = [...container.querySelectorAll(".settings-kv")];
+    expect(rows.find((row) => row.textContent.includes("Active"))?.textContent).toContain("0.0 GiB");
+    expect(rows.find((row) => row.textContent.includes("Peak"))?.textContent).toContain("Unavailable");
   });
 
   it("summarises this machine from the detected GPU and the worker registry", async () => {
     await render();
     expect(container.textContent).toContain("Engine");
     expect(container.textContent).toContain("Unified memory");
-    expect(container.textContent).toContain("128 GB");
+    expect(container.textContent).toContain("128 GiB");
   });
 
   it("applies the GPU memory target live, without restarting the worker", async () => {

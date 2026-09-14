@@ -1,0 +1,289 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/bernini-mlx",
+        "resolvedRevision": "533d688f16c8f33dc832890c1e16c11921a2019a",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "bernini-image-q4-mlx-dual-expert-ladder-v1",
+      "capturedAt": "2026-09-07T06:59:19Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:bernini-dual-expert",
+        "blockers": [
+          "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them. Additionally: reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision Additionally: the pinned mlx-gen-bernini pipeline emits only `Progress::Step` (one folded bar) and a single `Progress::Decoding` (bernini.rs:868, :1052, :1077) — it never emits `Progress::Loading(_)`, so no boundary exists at the conditioning/denoise edge. This record therefore attributes the pre-decode window and the decode window, the two phases the engine does bound, and reports the conditioning phase as UNATTRIBUTED rather than as a zero peak. The pre-decode window strictly contains the conditioning phase, so the overall ceiling this record prices is unaffected and remains conservative."
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preGenerateActivePeak",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 21634285896
+          },
+          {
+            "name": "denoiseCloseActive",
+            "unit": "bytes",
+            "value": 22004856
+          },
+          {
+            "name": "denoiseCloseCache",
+            "unit": "bytes",
+            "value": 22255042034
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 7312055956
+          },
+          {
+            "name": "decodeCloseActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "decodeCloseCache",
+            "unit": "bytes",
+            "value": 54391402202
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 76025688098
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 79859548160
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 21634304328
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 432686086
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 21634287944
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 12
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 75
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 82
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "stagedTierBytes",
+            "unit": "bytes",
+            "value": 37787347482
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "requestedFrames",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "conditioningPhaseUnattributed",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "preDecodeWindowActivePeak",
+            "unit": "bytes",
+            "value": 21634285896
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "bernini-image-mlx-q4-848x480-f1-fps16-seed22737",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-bebeae55db5afd83f558",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/bernini-mlx@533d688f16c8f33dc832890c1e16c11921a2019a:q4+route:image",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-8680b678771723eefcf6",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 21634285896
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 79859548160
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.03,
+        "meanError": 0,
+        "meanErrorThreshold": 0.003,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.003
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "72f9dfc2f351367de90fd1bd36080879808f2badd90222405e7aa222381f7a7c",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1cc05168a4681900b5e5e06cd7c03901945d9067f32b88ecf48ac15552e2b03e",
+          "revision": "bbf98cc0449abab0359c2c8e08bc4e85c2bcadd4"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them. Additionally: reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision Additionally: the pinned mlx-gen-bernini pipeline emits only `Progress::Step` (one folded bar) and a single `Progress::Decoding` (bernini.rs:868, :1052, :1077) — it never emits `Progress::Loading(_)`, so no boundary exists at the conditioning/denoise edge. This record therefore attributes the pre-decode window and the decode window, the two phases the engine does bound, and reports the conditioning phase as UNATTRIBUTED rather than as a zero peak. The pre-decode window strictly contains the conditioning phase, so the overall ceiling this record prices is unaffected and remains conservative.",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "this arm executes the measured render plus two unscoped warm repeats on the loaded provider; it opens no memory-strategy request scope and injects no calibration fault, so the scoped cancellation and authorized-error scenarios and their recovery renders are unexecuted. The pinned provider does register begin_request, so they are implementable — they are not run here, and this record claims nothing about them. Additionally: reference-free Bernini has NO admission surface in production: `video_admission.rs#bernini_memory_attempt` answers false for a reference-free text_to_video request and the MLX still lane passes no memory context at all, so the worker builds no MemoryRunContext and never calls the provider's safety check — and `mlx-gen-bernini`'s route gate admits only the reference-carrying video routes. This arm therefore asks the admission gate nothing, exactly as the worker asks it nothing: the exact-fit, unknown-budget and stale-evidence scenarios are unexecuted rather than answered on a surface production never presents. This anchor prices the RESIDENT load of the plain reference-free ladder and claims nothing about any optimized rung or admission decision Additionally: the pinned mlx-gen-bernini pipeline emits only `Progress::Step` (one folded bar) and a single `Progress::Decoding` (bernini.rs:868, :1052, :1077) — it never emits `Progress::Loading(_)`, so no boundary exists at the conditioning/denoise edge. This record therefore attributes the pre-decode window and the decode window, the two phases the engine does bound, and reports the conditioning phase as UNATTRIBUTED rather than as a zero peak. The pre-decode window strictly contains the conditioning phase, so the overall ceiling this record prices is unaffected and remains conservative.",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Bernini still text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 480,
+          "width": 848
+        },
+        "mode": "text_to_image",
+        "modelId": "bernini_image",
+        "overlay": "none",
+        "provider": "bernini",
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

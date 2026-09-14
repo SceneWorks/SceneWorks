@@ -492,6 +492,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_medium_lora_target(),
             anima_base_lora_target(),
             ltx_video_lora_target(),
+            ltx_2_5_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
             wan_i2v_14b_lora_target(),
@@ -1977,17 +1978,124 @@ fn sd3_medium_lora_target() -> TrainingTarget {
 /// `ui.datasetModality`. The output registers as an `ltx-video` family LoRA the
 /// MLX LTX video adapter loads at inference.
 fn ltx_video_lora_target() -> TrainingTarget {
+    ltx_lora_target(
+        "ltx_video_lora",
+        "LTX-2.3 Video LoRA",
+        "ltx_2_3",
+        "SceneWorks/ltx-2.3-mlx",
+        "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
+    )
+}
+
+/// Native Rust LoRA training for LTX-2.5. This is intentionally a distinct target and recorded
+/// base model: 2.5 removes the 2.3 feed-forward bias targets and its engine loader requires explicit
+/// rank/alpha metadata, so family equality alone is not an adapter compatibility claim.
+fn ltx_2_5_video_lora_target() -> TrainingTarget {
+    ltx_lora_target(
+        "ltx_2_5_video_lora",
+        "LTX-2.5 Video LoRA",
+        "ltx_2_5",
+        "SceneWorks/ltx-2.5-mlx",
+        "Train the full LTX-2.5 video/audio LoRA workflow surface from native preprocessed datasets. Apple Silicon uses MLX; Windows/Linux NVIDIA uses candle/CUDA.",
+    )
+}
+
+fn ltx_lora_target(
+    id: &str,
+    name: &str,
+    base_model: &str,
+    base_model_repo: &str,
+    description: &str,
+) -> TrainingTarget {
+    let is_ltx_2_5 = base_model == "ltx_2_5";
+    let sample_steps = if is_ltx_2_5 { 30 } else { 20 };
+    let mut advanced = object(json!({
+        "mixedPrecision": if is_ltx_2_5 { "f32" } else { "bf16" },
+        "cacheLatents": true,
+        "networkType": "lora",
+        "lrScheduler": "constant",
+        "numFrames": 1,
+        "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+        "sampleEvery": 250,
+        "sampleSteps": sample_steps,
+        "qualityPreset": "balanced",
+        "outputScope": "project",
+        "requestedGpu": "auto"
+    }));
+    if is_ltx_2_5 {
+        advanced.insert("ltxWorkflow".to_owned(), json!("t2v_lora"));
+        advanced.insert(
+            "ltxVideo".to_owned(),
+            json!({ "isGenerated": true, "conditions": [] }),
+        );
+        advanced.insert(
+            "ltxAudio".to_owned(),
+            json!({ "isGenerated": true, "conditions": [] }),
+        );
+        advanced.insert(
+            "ltxValidation".to_owned(),
+            json!({
+                "width": 960,
+                "height": 544,
+                "frames": 89,
+                "fps": 24,
+                "steps": 30,
+                "videoCfgScale": 3.0,
+                "audioCfgScale": 7.0,
+                "videoStgScale": 1.0,
+                "audioStgScale": 1.0,
+                "stgBlocks": [28],
+                "guidanceRescale": 0.7,
+                "videoModalityGuidanceScale": 3.0,
+                "audioModalityGuidanceScale": 3.0,
+                "generateAudio": true
+            }),
+        );
+    }
+    let mut limits = object(json!({
+        "rank": [4, 128],
+        "alpha": [1, 128],
+        "steps": [200, 4000],
+        "resolutions": [512, 768, 1024],
+        "batchSize": [1, 2],
+        "networkTypes": ["lora"],
+        "lrSchedulers": ["constant", "linear", "cosine"],
+        "outputScopes": ["project", "global"]
+    }));
+    if is_ltx_2_5 {
+        limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
+        limits.insert(
+            "ltxWorkflows".to_owned(),
+            json!([
+                "i2v_lora",
+                "t2v_lora",
+                "v2a_lora",
+                "a2v_lora",
+                "t2a_lora",
+                "video_extend_lora",
+                "video_inpainting_lora",
+                "video_outpainting_lora",
+                "video_suffix_lora",
+                "audio_extend_lora",
+                "audio_inpainting_lora",
+                "audio_suffix_lora",
+                "av2av_ic_lora",
+                "v2v_ic_lora",
+                "a2a_ic_lora"
+            ]),
+        );
+    }
     TrainingTarget {
-        id: "ltx_video_lora".to_owned(),
-        name: "LTX-2.3 Video LoRA".to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
         modality: TrainingModality::Video,
         output_kind: TrainingOutputKind::Lora,
         family: "ltx-video".to_owned(),
-        base_model: "ltx_2_3".to_owned(),
-        // Mirrors the generation load path (sc-5608): the turnkey SceneWorks LTX-2.3 bundle,
-        // replacing the third-party mirror. Both native kernels load its packed q4 tier from
-        // `base_model_path` and its sibling Gemma encoder.
-        base_model_repo: Some("SceneWorks/ltx-2.3-mlx".to_owned()),
+        base_model: base_model.to_owned(),
+        // Mirrors the generation load paths: each SceneWorks turnkey provides the packed q4
+        // training identity. 2.3 resolves its sibling Gemma-3 encoder; 2.5's dev tier self-contains
+        // Gemma-4.
+        base_model_repo: Some(base_model_repo.to_owned()),
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
@@ -2002,40 +2110,15 @@ fn ltx_video_lora_target() -> TrainingTarget {
             // Both native engines implement AdamW directly; bitsandbytes never applies here.
             optimizer: "adamw".to_owned(),
             trigger_word: None,
-            advanced: object(json!({
-                "mixedPrecision": "bf16",
-                "cacheLatents": true,
-                "networkType": "lora",
-                // Learning-rate scheduler (see the Z-Image target). Both engines honor the same
-                // `constant`/`linear`/`cosine` set.
-                "lrScheduler": "constant",
-                // Still-image training: each item encodes to a single latent frame.
-                "numFrames": 1,
-                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-                "sampleEvery": 250,
-                "qualityPreset": "balanced",
-                "outputScope": "project",
-                "requestedGpu": "auto"
-            })),
+            advanced,
             extra: ExtraFields::new(),
         },
-        limits: object(json!({
-            "rank": [4, 128],
-            "alpha": [1, 128],
-            "steps": [200, 4000],
-            "resolutions": [512, 768, 1024],
-            "batchSize": [1, 2],
-            // MLX backend: the LoKr inference path (Kronecker merge) is out of
-            // scope for epic 2193 v1, so this target stays `lora`-only.
-            "networkTypes": ["lora"],
-            "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
-        })),
+        limits,
         ui: object(json!({
-            "label": "LTX-2.3 Video LoRA",
-            "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
+            "label": name,
+            "description": description,
             "recommendedFor": ["character", "style"],
-            "datasetModality": "image"
+            "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
         })),
         extra: ExtraFields::new(),
     }
@@ -2629,6 +2712,97 @@ pub enum TrainingPlanError {
     EmptyDataset,
     /// A hyperparameter is out of range; carries a human-facing reason.
     InvalidConfig(String),
+    /// A value falls outside the target capability that was advertised to the
+    /// client. Kept structured so the API can return a field-specific error
+    /// without scraping a human-facing sentence.
+    TargetLimit(TrainingTargetLimitError),
+}
+
+/// A target-advertised limit rejected while normalizing a training request.
+///
+/// These errors deliberately name the request field and the advertised bound.
+/// A target catalog is a capability contract, not presentation-only metadata:
+/// an unknown numeric entry fails closed rather than becoming an unenforced UI
+/// hint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrainingTargetLimitError {
+    BelowMinimum {
+        field: String,
+        value: u64,
+        minimum: u64,
+    },
+    AboveMaximum {
+        field: String,
+        value: u64,
+        maximum: u64,
+    },
+    UnsupportedValue {
+        field: String,
+        value: String,
+        allowed: Vec<String>,
+    },
+    UnsupportedNumericValue {
+        field: String,
+        value: u64,
+        allowed: Vec<u64>,
+    },
+    InvalidAdvertisedLimit {
+        field: String,
+        detail: String,
+    },
+    UnsupportedNumericLimit {
+        field: String,
+    },
+}
+
+impl std::fmt::Display for TrainingTargetLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BelowMinimum {
+                field,
+                value,
+                minimum,
+            } => write!(formatter, "{field} ({value}) must be at least {minimum}."),
+            Self::AboveMaximum {
+                field,
+                value,
+                maximum,
+            } => write!(formatter, "{field} ({value}) must be at most {maximum}."),
+            Self::UnsupportedValue {
+                field,
+                value,
+                allowed,
+            } => write!(
+                formatter,
+                "Unsupported {field} '{value}'. Allowed values: {}.",
+                allowed.join(", ")
+            ),
+            Self::UnsupportedNumericValue {
+                field,
+                value,
+                allowed,
+            } => write!(
+                formatter,
+                "Unsupported {field} {value}. Allowed values: {}.",
+                allowed
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::InvalidAdvertisedLimit { field, detail } => {
+                write!(
+                    formatter,
+                    "Training target limit '{field}' is invalid: {detail}."
+                )
+            }
+            Self::UnsupportedNumericLimit { field } => write!(
+                formatter,
+                "Training target advertises unsupported numeric limit '{field}'."
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for TrainingPlanError {
@@ -2638,6 +2812,7 @@ impl std::fmt::Display for TrainingPlanError {
                 formatter.write_str("Training dataset has no items. Add at least one image.")
             }
             Self::InvalidConfig(detail) => formatter.write_str(detail),
+            Self::TargetLimit(error) => error.fmt(formatter),
         }
     }
 }
@@ -2673,7 +2848,11 @@ pub fn build_training_plan(
                 ),
                 width: item.width,
                 height: item.height,
-                extra: ExtraFields::new(),
+                // Preserve model-specific per-example inputs. The worker forwards non-path
+                // metadata losslessly and resolves any path-bearing fields under the dataset root
+                // before handing the request to the native trainer. LTX-2.5 uses
+                // `ltxPreparedBundlePath` for preprocessed video/audio latents and conditioning.
+                extra: item.extra.clone(),
                 // ControlNet training: resolve the per-item control-conditioning sidecar the same
                 // way as the target image (relative → absolute under the dataset root). `None` for
                 // a LoRA item; a control-branch kernel's validate rejects a plan item missing it.
@@ -2805,10 +2984,12 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
-fn validate_training_config_for_target(
+pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
+    validate_advertised_numeric_limits(target, config)?;
+    validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -2877,6 +3058,174 @@ fn validate_training_config_for_target(
                 target.name
             )));
         }
+    }
+    Ok(())
+}
+
+/// Enforce every numeric capability currently advertised in a target's `limits`
+/// bag. Adding a new numeric limit without adding its request-field mapping is
+/// intentionally rejected: otherwise a provider could publish a bound that the
+/// shared request boundary silently ignores.
+fn validate_advertised_numeric_limits(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    for (field, advertised) in &target.limits {
+        if !contains_json_number(advertised) {
+            continue;
+        }
+        let values = advertised.as_array().ok_or_else(|| {
+            invalid_advertised_limit(field, "numeric limits must be an array of integer bounds")
+        })?;
+
+        match field.as_str() {
+            "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
+            "alpha" => validate_advertised_numeric_range(field, values, u64::from(config.alpha))?,
+            "steps" => validate_advertised_numeric_range(field, values, u64::from(config.steps))?,
+            "batchSize" => {
+                validate_advertised_numeric_range(field, values, u64::from(config.batch_size))?
+            }
+            "resolutions" => validate_advertised_numeric_choices(
+                field,
+                "resolution",
+                values,
+                u64::from(config.resolution),
+            )?,
+            _ => {
+                return Err(TrainingPlanError::TargetLimit(
+                    TrainingTargetLimitError::UnsupportedNumericLimit {
+                        field: field.clone(),
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn contains_json_number(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Array(values) => values.iter().any(contains_json_number),
+        Value::Object(values) => values.values().any(contains_json_number),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
+}
+
+fn validate_advertised_numeric_range(
+    field: &str,
+    values: &[Value],
+    value: u64,
+) -> Result<(), TrainingPlanError> {
+    let bounds = numeric_limit_values(field, values)?;
+    let [minimum, maximum] = bounds.as_slice() else {
+        return Err(invalid_advertised_limit(
+            field,
+            "a numeric range must contain exactly two integer bounds",
+        ));
+    };
+    if minimum > maximum {
+        return Err(invalid_advertised_limit(
+            field,
+            "the minimum must not exceed the maximum",
+        ));
+    }
+    if value < *minimum {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::BelowMinimum {
+                field: field.to_owned(),
+                value,
+                minimum: *minimum,
+            },
+        ));
+    }
+    if value > *maximum {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::AboveMaximum {
+                field: field.to_owned(),
+                value,
+                maximum: *maximum,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_advertised_numeric_choices(
+    advertised_field: &str,
+    request_field: &str,
+    values: &[Value],
+    value: u64,
+) -> Result<(), TrainingPlanError> {
+    let allowed = numeric_limit_values(advertised_field, values)?;
+    if allowed.is_empty() {
+        return Err(invalid_advertised_limit(
+            advertised_field,
+            "a numeric choice list must not be empty",
+        ));
+    }
+    if !allowed.contains(&value) {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::UnsupportedNumericValue {
+                field: request_field.to_owned(),
+                value,
+                allowed,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn numeric_limit_values(field: &str, values: &[Value]) -> Result<Vec<u64>, TrainingPlanError> {
+    values
+        .iter()
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                invalid_advertised_limit(field, "numeric bounds must be non-negative integers")
+            })
+        })
+        .collect()
+}
+
+fn invalid_advertised_limit(field: &str, detail: &str) -> TrainingPlanError {
+    TrainingPlanError::TargetLimit(TrainingTargetLimitError::InvalidAdvertisedLimit {
+        field: field.to_owned(),
+        detail: detail.to_owned(),
+    })
+}
+
+fn validate_advertised_optimizer_limit(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let Some(values) = target.limits.get("optimizers") else {
+        return Ok(());
+    };
+    let values = values.as_array().ok_or_else(|| {
+        invalid_advertised_limit("optimizers", "an optimizer choice list must be an array")
+    })?;
+    let allowed = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                invalid_advertised_limit("optimizers", "optimizer choices must be strings")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if allowed.is_empty() {
+        return Err(invalid_advertised_limit(
+            "optimizers",
+            "an optimizer choice list must not be empty",
+        ));
+    }
+    if !allowed.iter().any(|value| value == &config.optimizer) {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::UnsupportedValue {
+                field: "optimizer".to_owned(),
+                value: config.optimizer.clone(),
+                allowed,
+            },
+        ));
     }
     Ok(())
 }

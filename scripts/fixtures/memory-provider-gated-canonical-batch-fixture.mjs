@@ -58,8 +58,6 @@ if (stateFile) {
 const phase = (value) => ({
   activeBytes: value,
   allocatorBytes: value,
-  deviceBytes: value,
-  wiredBytes: value,
   reclaimableBytes: 0,
 });
 const fragment = (planned) => {

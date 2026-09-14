@@ -21,7 +21,7 @@ pub(crate) async fn list_jobs(
     .await?;
     handle_stale_sweep(&state, &sweep);
     let jobs = jobs?;
-    Ok(Json(jobs))
+    Ok(Json(public_job_snapshots(jobs)))
 }
 
 /// Worker → API write of a job's structured generation metrics (epic 10402).
@@ -97,8 +97,14 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
+    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &payload.job_type,
+        &mut payload.payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -115,7 +121,7 @@ pub(crate) async fn create_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn claim_job(
@@ -126,6 +132,7 @@ pub(crate) async fn claim_job(
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
+    let host_os = state.settings.host_os.clone();
     let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
         let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
         let claim_result = (|| {
@@ -143,6 +150,15 @@ pub(crate) async fn claim_job(
             let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
+            // Platform reachability (sc-19570): fail any queued video job whose mode no lane on
+            // THIS host can ever claim. Unlike the four sweeps above it takes no flag and no grace
+            // window — the gap is structural, not transient, and every one of those four declines
+            // to touch this job (the stranded sweeps bail the moment a live worker of their own
+            // kind exists; both unsupported sweeps default to warn), which is why it hung.
+            // `POST /api/v1/video/jobs` runs the same sweep inline so the hang closes even where no
+            // worker ever polls; this arm covers the raw `POST /api/v1/jobs`, retry and duplicate
+            // paths that never pass through that route.
+            let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
             let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
             Ok::<_, JobsStoreError>((
                 job,
@@ -151,14 +167,22 @@ pub(crate) async fn claim_job(
                 unsupported,
                 candle_stranded,
                 candle_unsupported,
+                platform_unreachable,
             ))
         })();
         Ok((stale_sweep, claim_result))
     })
     .await?;
     handle_stale_sweep(&state, &stale_sweep);
-    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
-        claim_result?;
+    let (
+        response,
+        decision,
+        stranded,
+        unsupported,
+        candle_stranded,
+        candle_unsupported,
+        platform_unreachable,
+    ) = claim_result?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -173,6 +197,10 @@ pub(crate) async fn claim_job(
     }
     for (job, reason) in &candle_unsupported {
         emit_candle_unsupported(job, reason, "enforce");
+        publish(&state, "job.updated", job);
+    }
+    for job in &platform_unreachable {
+        emit_platform_unreachable(job);
         publish(&state, "job.updated", job);
     }
     if let Some(decision) = &decision {
@@ -204,6 +232,7 @@ pub(crate) async fn claim_job(
         || !unsupported.is_empty()
         || !candle_stranded.is_empty()
         || !candle_unsupported.is_empty()
+        || !platform_unreachable.is_empty()
     {
         // claim_job already ran mark_stale_workers_interrupted above (its own
         // transaction), so refresh the queue WITHOUT sweeping a second time
@@ -302,6 +331,33 @@ fn emit_candle_unavailable(job: &JobSnapshot) {
     );
 }
 
+/// Emit the `platform_unreachable` terminal-routing event (sc-19570) — the System → Logs surface
+/// for a video job whose mode has no lane on this host at all.
+///
+/// A SEPARATE event from `mlx_unavailable` / `candle_unavailable` on purpose, not a fifth `mode` on
+/// one of them: those two say a worker of the right kind failed to check in, which is transient and
+/// operational ("confirm the worker is running"). This one says no such worker can exist here, and
+/// the only remedy is a different model or a different mode. Collapsing them would send an operator
+/// looking for a process that is not missing.
+///
+/// `pub(crate)` because the video enqueue route emits it too — `POST /api/v1/video/jobs` runs the
+/// same sweep inline so the terminal state does not wait on a worker poll.
+pub(crate) fn emit_platform_unreachable(job: &JobSnapshot) {
+    let model = job.payload.get("model").and_then(Value::as_str);
+    let mode = job.payload.get("mode").and_then(Value::as_str);
+    sceneworks_core::observability::emit_event(
+        tracing::Level::INFO,
+        json!({
+            "event": "platform_unreachable",
+            "jobId": job.id,
+            "jobType": job.job_type.as_str(),
+            "model": model,
+            "mode": mode,
+            "reason": job.error,
+        }),
+    );
+}
+
 /// Emit the GPU routing decision as a structured JSON line on the API's stdout
 /// (sc-3449). The desktop wrapper captures this into `api.log` + the in-app Logs buffer,
 /// so *which backend ran a job* is explained at claim time rather than inferred from
@@ -325,9 +381,9 @@ pub(crate) async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobSnapshot>, ApiError> {
-    Ok(Json(
+    Ok(Json(public_job_snapshot(
         store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
-    ))
+    )))
 }
 
 pub(crate) async fn cancel_job(
@@ -340,7 +396,7 @@ pub(crate) async fn cancel_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn retry_job(
@@ -366,7 +422,7 @@ pub(crate) async fn retry_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
@@ -405,7 +461,163 @@ pub(crate) async fn duplicate_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// The character-route inline LoRA links a job's PERSISTED payload already carried — the ONLY
+/// adapters a retry/duplicate of that job may re-validate as inline. Empty for every other job.
+///
+/// `characters.rs`'s test-job route is the one image-generation boundary that validates with inline
+/// LoRAs allowed. A character's attached adapters are inline links, not catalog rows:
+/// `character_store::attach_lora` mints `id: "character_lora_<hex>"` with `category: "character"` and
+/// a `sourcePath`/`projectPath`, copies the file into the project, and registers it in NO LoRA
+/// catalog. Re-validating that set as catalog-backed refuses it with "LoRA not found" — which broke
+/// even a no-op retry of a character test job when this boundary's gate was first mirrored.
+///
+/// ## Why the link SHAPE and not the `characterId` / `mode` markers
+///
+/// Both of those look server-stamped but are caller-settable: `ImageJobRequest` exposes
+/// `character_id` and `mode`, so `POST /api/v1/image/jobs { mode: "character_image", loras: [] }` is
+/// an ordinary image job that create admits (the LoRA gate no-ops on an empty set) while bearing
+/// both markers. Deriving permission from them would let that job's retry attach an arbitrary
+/// path-bearing adapter and have it accepted as "inline".
+///
+/// The link shape cannot be forged the same way, because it can only have been PERSISTED by a
+/// boundary that already allowed inline LoRAs:
+/// - `create_image_job` / `create_video_job` validate with `allow_inline_loras = false`, so a
+///   non-catalog adapter is refused before any job row exists.
+/// - `POST /api/v1/jobs` refuses image/video generation job types outright (`typed_generation_route`).
+/// - retry/duplicate reach this function, which is where the permission is being decided.
+///
+/// So the only way a persisted `image_generate` payload holds a character link is the character
+/// route. Requiring a non-empty `characterId` as well costs nothing (that route stamps it onto the
+/// same payload it writes the links into) and keeps the predicate honest about what it identifies.
+///
+/// An empty persisted set deliberately yields an empty permit: the gate no-ops on it anyway, and a
+/// character job whose character had no adapters must not become a hole through which a retry can add
+/// inline ones — attaching them to the character is the supported path.
+fn persisted_character_inline_loras(persisted_payload: &JsonObject) -> Vec<Value> {
+    let has_character = persisted_payload
+        .get("characterId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    if !has_character {
+        return Vec::new();
+    }
+    persisted_payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|lora| {
+            lora.get("category").and_then(Value::as_str) == Some("character")
+                || lora
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("character_lora_"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether `candidate` IS one of the persisted character links in `permitted`, and therefore may be
+/// hydrated inline.
+///
+/// Identity is the link id AND agreement on every path field the candidate carries. Matching on the
+/// id alone would leave the narrowing hollow: `normalize_inline_job_lora` passes a caller's object
+/// through almost verbatim, so replaying a persisted link id with a swapped `sourcePath` would carry
+/// an arbitrary file into the enqueued payload. A candidate that omits a path field is still a match
+/// — it is asking for the persisted link, not redirecting it.
+fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool {
+    let Some(candidate_id) = job_lora_id(candidate) else {
+        return false;
+    };
+    permitted.iter().any(|link| {
+        if job_lora_id(link) != Some(candidate_id) {
+            return false;
+        }
+        ["sourcePath", "projectPath"].iter().all(|field| {
+            match (
+                candidate.get(*field).and_then(Value::as_str),
+                link.get(*field).and_then(Value::as_str),
+            ) {
+                (Some(requested), Some(persisted)) => requested == persisted,
+                // The candidate names no path for this field, so it cannot redirect it.
+                (None, _) => true,
+                // The candidate names a path the persisted link does not have at all.
+                (Some(_), None) => false,
+            }
+        })
+    })
+}
+
+/// Re-validate a merged retry/duplicate payload's `loras`, granting inline hydration ONLY to the
+/// adapters the persisted payload already carried (`permitted_inline`) and requiring catalog backing
+/// for everything else — including any ADDITION to a genuine character job's set.
+///
+/// A single `allow_inline_loras = true` would have covered the whole merged array, so a retry of a
+/// real character job could swap in arbitrary inline path-bearing adapters. Splitting the array is
+/// verdict-preserving: `validate_lora_specs_for_model` decides each attached adapter independently
+/// (no cross-adapter state), so validating two sub-arrays yields exactly the per-adapter verdicts one
+/// pass over the whole array would, and the original order is restored afterwards.
+async fn validate_merged_job_loras(
+    state: &AppState,
+    project_id: Option<&str>,
+    merged: &mut JsonObject,
+    permitted_inline: &[Value],
+) -> Result<(), ApiError> {
+    // No inline permit (every job but a character test job's replay): one catalog-only pass, which
+    // is the create path's own posture.
+    if permitted_inline.is_empty() {
+        return validate_job_lora_compatibility(state, project_id, merged, false).await;
+    }
+    let Some(loras) = merged
+        .get("loras")
+        .and_then(Value::as_array)
+        .filter(|loras| !loras.is_empty())
+        .cloned()
+    else {
+        return Ok(());
+    };
+
+    // Partition, remembering each adapter's slot so the normalized array keeps the caller's order.
+    let mut inline_slots = Vec::new();
+    let mut catalog_slots = Vec::new();
+    for (slot, lora) in loras.iter().enumerate() {
+        if matches_permitted_inline_lora(lora, permitted_inline) {
+            inline_slots.push((slot, lora.clone()));
+        } else {
+            catalog_slots.push((slot, lora.clone()));
+        }
+    }
+
+    let mut normalized = vec![Value::Null; loras.len()];
+    for (allow_inline, slots) in [(true, inline_slots), (false, catalog_slots)] {
+        if slots.is_empty() {
+            continue;
+        }
+        let mut probe = merged.clone();
+        probe.insert(
+            "loras".to_owned(),
+            Value::Array(slots.iter().map(|(_, lora)| lora.clone()).collect()),
+        );
+        validate_job_lora_compatibility(state, project_id, &mut probe, allow_inline).await?;
+        let validated = probe
+            .get("loras")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ApiError::internal("LoRA validation dropped the adapter array"))?;
+        // `validate_lora_specs_for_model` may legitimately SKIP an entry (an unusable spec that
+        // `hydrate_lora_spec` returns `None` for), so pair by position over what came back rather
+        // than assuming a 1:1 mapping.
+        for ((slot, _), value) in slots.iter().zip(validated) {
+            normalized[*slot] = value.clone();
+        }
+    }
+    merged.insert(
+        "loras".to_owned(),
+        Value::Array(normalized.into_iter().filter(|v| !v.is_null()).collect()),
+    );
+    Ok(())
 }
 
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
@@ -423,17 +635,57 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
     let mut merged = job.payload;
+    // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
+    // a property of how the job was originally created and `payload_changes` must not be able to
+    // mint it. Carries the specific adapters permitted, not a blanket flag — see
+    // [`persisted_character_inline_loras`] and [`validate_merged_job_loras`].
+    let permitted_inline_loras = persisted_character_inline_loras(&merged);
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
     } else {
-        validate_raw_job_payload(state, &job_type, &merged)?;
+        validate_raw_job_payload(state, &job_type, &merged).await?;
     }
-    canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    let canonical_model_entry =
+        canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        let model_id = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
+        // A retry/duplicate can replace `model`, so re-resolve the authoritative entry instead of
+        // trusting the original job's modelManifestEntry. This is the replay counterpart to the
+        // typed `/video/jobs` pre-enqueue platform gate.
+        let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        // Retry/duplicate are video creation boundaries too. Validate the exact shallow-merged
+        // reference array against the CURRENT server-owned entry before stamping it: malformed
+        // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
+        // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
+        validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
+        crate::generation::ensure_video_model_available_on_platform(
+            model_id,
+            &model_manifest_entry,
+            crate::generation::video_job_platform(state),
+        )?;
+        merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
             validate_image_pose_count(advanced)?;
         }
+        // PRECEDENCE DIVERGENCE, deliberate: `create_image_job` resolves the control overlay AFTER
+        // its LoRA gate, this boundary resolves it BEFORE. Acceptance is equivalent — the two read
+        // disjoint fields (`advanced.controlWeights.overlayId` vs the top-level `loras` array) and
+        // neither can change the other's verdict — so no payload is admitted here that create would
+        // refuse, or vice versa. Only the FIRST error reported for a payload that is invalid on both
+        // axes differs. Left as-is rather than reordered: this call predates the gate mirror and the
+        // existing ordering is pinned by the sc-13639 control-weights reauthorization tests.
         crate::control_overlays::resolve_control_overlay_selection(
             state,
             project_id.as_deref(),
@@ -441,6 +693,89 @@ async fn validate_and_canonicalize_merged_generation_payload(
         )
         .await?;
         validate_prompt_enhancement_payload(&merged)?;
+
+        // Retry and duplicate are image-job creation boundaries too. The canonicalizer above
+        // already discarded any persisted or caller-supplied path-bearing resolution and rebuilt
+        // `modelManifestEntry` from the current catalog plus the authored opaque id; re-resolve
+        // the authored text-encoder selection against that rebuilt entry so a removed/retargeted
+        // choice fails before the queue transaction.
+        if let Some(mut manifest_entry) = canonical_model_entry {
+            let model_id = merged
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+                .to_owned();
+            resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry)
+                .await?;
+            // The `create_image_job` capability gates this boundary did not run, applied to the
+            // SAME merged object the queue transaction will persist (sc-18420). `payload_changes`
+            // is a SHALLOW merge, so both `advanced` and the top-level `loras` array arrive
+            // REPLACED WHOLESALE: without these, a retry/duplicate could enqueue a decoder+`usePid`
+            // pair, an uninstalled or wrong-backend decoder, a family-incompatible or uninstalled
+            // LoRA set, or an imported request shape — every one of which the create path 400s, and
+            // all of them exactly the combinations this boundary's own doc comment claims it
+            // re-validates.
+            //
+            // Order mirrors `create_image_job`: the decoder gate reads the rebuilt entry directly,
+            // the entry is then stamped, the LoRA gate runs (it also NORMALIZES `loras` in place,
+            // and the canonical object returned from here is what gets persisted), and the imported
+            // gate runs last so it sees the server-owned row and the normalized adapter list rather
+            // than anything the caller sent.
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &manifest_entry,
+            )?;
+            merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            validate_merged_job_loras(
+                state,
+                project_id.as_deref(),
+                &mut merged,
+                &permitted_inline_loras,
+            )
+            .await?;
+            crate::generation::validate_imported_submission(state, &model_id, &merged)?;
+        }
+    } else if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        // The video half of the same bypass — `create_video_job` runs both of these too.
+        // `canonicalize_image_model_payload` is image-only, so there is no rebuilt entry to gate
+        // against here; resolve the catalog row for the merged model exactly as `create_video_job`
+        // does and gate on that. Read-only on purpose — this closes the bypass without taking on
+        // video's separate entry-canonicalization question.
+        //
+        // The decoder gate is keyed off an actually-present `advanced.decoder`, which is precisely
+        // when it stops being a no-op, so the overwhelmingly common decoder-less replay costs no
+        // extra catalog resolution. The LoRA gate needs no such guard: it returns before touching a
+        // catalog when `loras` is absent or empty.
+        let selects_decoder = merged
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| advanced.contains_key("decoder"));
+        if let Some(model_id) = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|_| selects_decoder)
+        {
+            let entry = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &entry,
+            )?;
+        }
+        validate_merged_job_loras(
+            state,
+            project_id.as_deref(),
+            &mut merged,
+            &permitted_inline_loras,
+        )
+        .await?;
     }
     Ok(merged)
 }
@@ -480,15 +815,39 @@ pub(crate) async fn canonicalize_image_model_payload(
             return Err(ApiError::bad_request("model is required"));
         }
         reject_image_detail_packed_tier(payload)?;
-        // Never forward metadata that cannot be tied to an explicit catalog id. Removing a forged
-        // entry is the only safe no-model behavior and leaves the established `{}` contract exact.
+        // Never forward CATALOG metadata that cannot be tied to an explicit catalog id — a forged
+        // entry is the thing this drop exists to destroy, and the established `{}` contract stays
+        // exact.
+        //
+        // The server-resolved text encoder is the one exception, and it is not an exception to the
+        // rule so much as a different kind of value: `resolvedTextEncoder` is written by the API
+        // itself when it resolves the client's opaque option id, it is worker-private rather than
+        // client-authored, and the worker claim is required to retain it (sc-18314). Dropping it
+        // here would silently strip a resolution the client never supplied and could not forge,
+        // and would leave the public projection with nothing to key its path redaction on — so the
+        // private path would then survive in any sibling payload field instead of being scrubbed.
+        // Keep only that sub-object; everything else in the entry still goes.
+        let resolved_text_encoder = payload
+            .get_mut("modelManifestEntry")
+            .and_then(Value::as_object_mut)
+            .and_then(|entry| entry.remove("resolvedTextEncoder"));
         payload.remove("modelManifestEntry");
+        if let Some(resolution) = resolved_text_encoder {
+            payload.insert(
+                "modelManifestEntry".to_owned(),
+                Value::Object(serde_json::Map::from_iter([(
+                    "resolvedTextEncoder".to_owned(),
+                    resolution,
+                )])),
+            );
+        }
         return Ok(None);
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry =
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    let model_manifest_entry = project_image_manifest_for_worker(
+        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+    );
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -510,6 +869,29 @@ pub(crate) async fn canonicalize_image_model_payload(
         canonicalize_image_detail_dense_tier(payload)?;
     }
     Ok(Some(model_manifest_entry))
+}
+
+/// Project catalog-only, request-scoped components out of the generic image worker payload.
+///
+/// The shared SDXL OpenPose checkpoint is a soft install companion so Model Manager can provision
+/// and repair it alongside each supported backbone. It is not a descriptor-required component and
+/// must never be staged by ordinary txt2img, edit, or Batch Detail jobs. The dedicated
+/// `sdxl_control` pose route owns its strict authority tuple and resolves that exact component
+/// synchronously from the pinned cache before load, so forwarding this catalog row to unrelated
+/// jobs only broadens their worker-visible artifact set without helping the pose route.
+///
+/// Keep every other soft component: selected decoders and other request-specific features resolve
+/// their own authored component ids from this worker-private entry.
+fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+    if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+        downloads.retain(|download| {
+            !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download.get("componentId").and_then(Value::as_str)
+                    == Some("controlnet_openpose"))
+        });
+    }
+    entry
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -600,7 +982,10 @@ fn dense_image_detail_error() -> ApiError {
 /// consume `modelId`, and `model_convert.outputDir` selects its final install location. Other raw
 /// job payloads may contain descriptive model metadata, but are deliberately absent unless that
 /// field selects a filesystem path.
-fn validate_raw_job_payload(
+///
+/// `async` since sc-17227: the licence-acknowledgment check on the fetching job types awaits the
+/// catalog. Both call sites (`create_job`, and the retry/duplicate path) must `.await` it.
+async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &JsonObject,
@@ -616,6 +1001,49 @@ fn validate_raw_job_payload(
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
+    // `repo`/`sourceUrl` rather than on a model id.
+    //
+    // This route enqueues `job_type` + payload VERBATIM: `run_model_download_job` reads `repo` /
+    // `files` / `revision` straight out of the payload with no catalog lookup anywhere in between,
+    // and `validate_payload_model_id` above only FORMAT-checks `modelId` — which the payload need
+    // not carry at all. So a `model_download` posted here fetched `MiniMaxAI/MiniMax-H3` and was
+    // answered 201 while the typed `POST /api/v1/models/:id/download` answered 403 for the same
+    // bytes. Rejecting the whole job type instead would break retry/duplicate, which re-validate a
+    // stored `model_download` payload through this same function; the repo-keyed check lets an
+    // already-authorized download retry (the typed route stamps `licenseAcknowledged` onto the job)
+    // while still refusing a fresh unacknowledged one.
+    //
+    // The LoRA download/import types are in the list because they take the same `repo` + `files`
+    // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
+    // different `job_type`. `/loras/import` applies the SAME predicate on its own typed route
+    // (`queue_lora_import_job`) — it fetches whatever repo the caller names and never consults the
+    // LoRA catalog for it, so what the catalog happens to declare has no bearing on what that route
+    // can reach. `/loras/:id/download` now applies the SAME predicate on its own typed route too
+    // (`create_lora_download_job`, `apps/rust-api/src/loras.rs`). The reasoning previously recorded
+    // here for exempting it — that it resolves the repo FROM the catalog entry named by the path id
+    // and 404s an unknown id, so "a caller cannot point it at a repo" — answered a different
+    // question, and sc-17227 overturned it: who CHOOSES the repo is not who is bound by its licence.
+    // A catalog LoRA whose `source.repo` names a repo a `requiresLicenseAcknowledgment` model
+    // declares was fetched there with no acknowledgment, while the identical `lora_download` job
+    // posted to THIS route was answered 403 — the asymmetry, not the reachability, was the defect.
+    //
+    // `model_convert` is here because it is a fetching job type too, and less obviously so: it
+    // names no `repo`, but `resolve_convert_plan`'s LTX arm hands the payload's `baseRepo` to
+    // `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`, and `upscalerFile` is a GLOB — so
+    // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
+    // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
+    // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
+    if matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    ) {
+        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload
@@ -721,6 +1149,50 @@ pub(crate) async fn cancel_pending_jobs(
     publish_queue(&state).await?;
     Ok(Json(CancelPendingJobsResponse {
         canceled: jobs.len(),
+        jobs: public_job_snapshots(jobs),
+        extra: Default::default(),
+    }))
+}
+
+/// Move selected not-yet-started jobs to the front of the worker queue. The store applies the
+/// change under the same immediate transaction used for claims, so a worker either claims a job
+/// first (and it is ignored here) or observes its new rank — there is no preemption race. Prompt
+/// refinement uses the same rank mechanism automatically when it is created.
+pub(crate) async fn prioritize_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<PrioritizeJobsRequest>,
+) -> Result<Json<PrioritizeJobsResponse>, ApiError> {
+    const MAX_PRIORITY_SELECTION: usize = 500;
+    if payload.job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+    if payload.job_ids.len() > MAX_PRIORITY_SELECTION {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_PRIORITY_SELECTION} jobs can be prioritized at once"
+        )));
+    }
+
+    let job_ids = payload
+        .job_ids
+        .into_iter()
+        .filter(|job_id| !job_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+
+    let jobs = store_call(state.clone(), move |store, _timeout| {
+        store.prioritize_jobs(&job_ids)
+    })
+    .await?;
+    for job in &jobs {
+        publish(&state, "job.updated", job);
+    }
+    if !jobs.is_empty() {
+        publish_queue(&state).await?;
+    }
+    Ok(Json(PrioritizeJobsResponse {
+        prioritized: jobs.len(),
         jobs,
         extra: Default::default(),
     }))
@@ -741,7 +1213,7 @@ pub(crate) async fn clear_job(
     .await?;
     publish(&state, "jobs.cleared", &json!({ "ids": [job.id.clone()] }));
     publish_queue(&state).await?;
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) async fn update_job_progress(
@@ -868,7 +1340,7 @@ pub(crate) async fn update_job_progress(
     if status_changed {
         publish_queue(&state).await?;
     }
-    Ok(Json(job))
+    Ok(Json(public_job_snapshot(job)))
 }
 
 pub(crate) fn terminal_model_job_changes_catalog(job_type: &JobType, status: &JobStatus) -> bool {
@@ -1502,6 +1974,10 @@ pub(crate) async fn register_trained_base_checkpoint(
         "paths".to_owned(),
         json!({ "model": output_dir.display().to_string() }),
     );
+    entry.insert(
+        "importSourceShape".to_owned(),
+        Value::String("transformer_directory".to_owned()),
+    );
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
     sceneworks_core::lora_family::apply_model_manifest_defaults(
         &mut entry,
@@ -1696,4 +2172,57 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod image_manifest_projection_tests {
+    use super::*;
+
+    #[test]
+    fn worker_projection_removes_only_the_exact_soft_openpose_component() {
+        let primary = json!({
+            "provider": "huggingface",
+            "repo": "SceneWorks/sdxl-base-mlx",
+            "files": ["q4/*"]
+        });
+        let hard = json!({
+            "coRequisite": true,
+            "componentId": "vae_fp16_fix",
+            "repo": "madebyollin/sdxl-vae-fp16-fix"
+        });
+        let selected_vae = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "vae",
+            "repo": "operator/selected-vae",
+            "files": ["vae.safetensors"]
+        });
+        let openpose = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "controlnet_openpose",
+            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+            "files": ["diffusion_pytorch_model.safetensors"]
+        });
+        let entry = json!({
+            "id": "projection-probe",
+            "downloads": [
+                primary.clone(),
+                hard.clone(),
+                selected_vae.clone(),
+                openpose
+            ],
+            "ui": { "description": "preserved metadata" }
+        });
+
+        assert_eq!(
+            project_image_manifest_for_worker(entry),
+            json!({
+                "id": "projection-probe",
+                "downloads": [primary, hard, selected_vae],
+                "ui": { "description": "preserved metadata" }
+            }),
+            "projection must remove only required:soft/controlnet_openpose and preserve every other Value exactly"
+        );
+    }
 }

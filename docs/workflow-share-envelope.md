@@ -392,6 +392,7 @@ smuggled under a scalar key.
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
 | `enhancePrompt` | `Scalar` | Caption-upsampling opt-in — it changes the prompt the model sees. |
 | `usePid` | `Scalar` | PiD decoder opt-in. Changes the produced image, and is its non-commercial marker. |
+| `decoder` | `Scalar` | Experimental alternate terminal decoder id. Native is omitted. |
 | `pidTarget` | `Scalar` | PiD output tier (2k / 4k). |
 | `ipAdapterScale` | `Scalar` | Reference strength. |
 | `controlnetConditioningScale` | `Scalar` | Identity-structure strength (InstantID). |
@@ -413,6 +414,12 @@ smuggled under a scalar key.
 | `motion` | `Scalar` | **Video.** Camera-motion preset off a closed menu (`static`, `slow push-in`, `handheld`). It conditions the generation. |
 | `ltxPipeline` | `Scalar` | **Video.** LTX pipeline selector. It picks which denoise path runs, so two values give two different clips from one prompt. |
 | `distilledVariant` | `Scalar` | **Video.** LTX distilled-checkpoint variant. A different checkpoint is a different model for replay purposes. |
+| `transformerVariant` | `Scalar` | **Video.** LTX 2.5 transformer choice (`distilled` / `dev`). It changes the checkpoint, schedule, guidance and refinement recipe. |
+| `vaeDecoder` | `Scalar` | **Video.** LTX 2.5 Conv-versus-DiffVAE decoder choice. It changes the reconstruction path and rendered detail. |
+| `autoDuration` | `Scalar` | **Video.** LTX 2.5 duration-head opt-in. It decides whether the prompt or an explicit duration supplies the frame count. |
+| `autoDurationMinSeconds` | `Scalar` | **Video.** Authored lower bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `autoDurationMaxSeconds` | `Scalar` | **Video.** Authored upper bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `temporalUpsampleRounds` | `Scalar` | **Video.** LTX 2.5 temporal-refinement count. Each round changes the output frame count and motion. |
 | `textEncoderModel` | `Scalar` | **Video.** The text-encoder pick — it changes what the model *sees* of the prompt. A catalog-global slug, not a local id. |
 | `lightning` | `Scalar` | **Video.** Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the step count. |
 | `videoCfgGuidanceScale` | `Scalar` | **Video.** LTX native CFG scale — the video lane's `guidanceScale`. |
@@ -522,6 +529,7 @@ times larger.
 | `control` | A pre-made control map, with the conditioning it feeds in `controlMode`. |
 | `sourceClip` | **Video.** A clip the run continues, re-times or bridges from. Separate from `source` because "needs a still to start from" and "needs a clip to continue" are different asks of whoever replays it. |
 | `referenceClip` | **Video.** A reference clip the run conditions on — the moving counterpart of `reference`. |
+| `referenceAudio` | **Video.** A reference audio clip the run conditions on — the audible counterpart of `reference`. |
 
 <!-- END PINNED: input-kinds -->
 
@@ -580,7 +588,7 @@ measurement found a new way to spend what they left.
 | `PROSE_MAX_BYTES` | 16,384 | Each authored prose field, in bytes. | Truncated at a whole character. Prose still means what it said after its tail is cut. |
 | `LABEL_MAX_CHARS` | 200 | Each non-prose label (model slug, style id, LoRA name, producer block), in characters. | **Dropped**, not truncated — a slug's spelling is its identity. |
 | `MAX_SHARE_LORAS` | 5 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
-| `MAX_SHARE_INPUTS` | 6 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
+| `MAX_SHARE_INPUTS` | 7 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
 | `MAX_SHARE_PHASES` | 8 | Entries in `advanced.phases`. | The key is dropped and `omitted` gains `advanced.phases`. |
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_SHARE_POSE_SLOTS` | 6,144 | Coordinate slots across the whole `advanced.poses` array — a number, or a `null` standing in for one. | The key is dropped and `omitted` gains `advanced.poses`. |
@@ -724,7 +732,7 @@ key with no row is treated as not restored — rendered and marked, never silent
 either direction.
 
 That guardrail exists because the first cut of the panel displayed ten knobs — `enhancePrompt`,
-`usePid`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
+`usePid`, `decoder`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
 `poses`, `phases` — as ordinary settings rows while none of them reached a control. Being told a
 recipe replayed faithfully when it did not is the failure this whole contract exists to prevent.
 

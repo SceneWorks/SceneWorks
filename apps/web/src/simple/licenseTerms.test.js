@@ -70,6 +70,42 @@ describe("modelLicenseRows", () => {
     expect(fluxDev.badge.label).toBe("Non-commercial");
   });
 
+  it("surfaces the alternate decoder terms for every compatible catalog product", () => {
+    const decoder = bundledLicenses.find((component) => component.id === "wan2_1_t2v_14b_diffusers");
+    expect(decoder?.models).toEqual([]);
+    expect(decoder?.appliesToModels).toEqual([
+      "krea_2_turbo",
+      "krea_2_raw",
+      "qwen_image",
+      "qwen_image_edit_2511",
+      "qwen_image_edit_2511_lightning",
+    ]);
+
+    const decoderRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "wan2_1_t2v_14b_diffusers",
+    );
+    expect(decoderRow?.license).toBe("Apache-2.0");
+  });
+
+  it("keeps Tile primary while composing OpenPose terms with the exact five accepted backbones", () => {
+    const controlnet = bundledLicenses.find(
+      (component) => component.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnet?.models).toEqual(["controlnet_tile_sdxl"]);
+    expect(controlnet?.appliesToModels).toEqual([
+      "sdxl",
+      "realvisxl",
+      "realvisxl_lightning",
+      "illustrious_xl_v1",
+      "illustrious_xl_v2",
+    ]);
+
+    const controlnetRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnetRow?.license).toBe("Apache-2.0");
+  });
+
   it("tolerates an empty or absent corpus", () => {
     expect(modelLicenseRows([])).toEqual([]);
     expect(modelLicenseRows(undefined)).toEqual([]);

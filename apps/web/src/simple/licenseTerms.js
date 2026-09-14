@@ -43,15 +43,21 @@ export function licenseBadge(license) {
 
 /**
  * The model-licence rows the Simple Licenses screen lists: the bundled components that
- * actually ship MODEL WEIGHTS (`models[]` non-empty), which is what the design's
- * "MODEL LICENSES" group means. The binary components (FFmpeg, ONNX Runtime, the CUDA
- * runtime) are tooling, not model terms, and stay out — they remain in the advanced
- * Licenses screen, which lists the whole corpus with full text.
+ * actually ship MODEL WEIGHTS (`models[]` non-empty), plus optional model components
+ * whose terms compose with named products (`appliesToModels[]` non-empty). The latter
+ * stays separate from `models[]` because license coverage treats that field as exclusive
+ * primary attribution. Binary components (FFmpeg, ONNX Runtime, the CUDA runtime) have
+ * neither relation and stay out — they remain in the advanced Licenses screen, which
+ * lists the whole corpus with full text.
  * @param {Array<object>} components - `bundledLicenses`.
  */
 export function modelLicenseRows(components) {
   return (components ?? [])
-    .filter((component) => Array.isArray(component?.models) && component.models.length > 0)
+    .filter(
+      (component) =>
+        (Array.isArray(component?.models) && component.models.length > 0) ||
+        (Array.isArray(component?.appliesToModels) && component.appliesToModels.length > 0),
+    )
     .map((component) => ({
       id: component.id,
       name: component.name,

@@ -292,6 +292,29 @@ impl AttachedCatalogParquetScanDriver {
                 &mut self.before_durable_flush,
             )
         })();
+        // A real error can race shutdown: an fd-limit/IO/SQLite failure surfacing while
+        // cancellation is already pending would publish the terminal "inspect the worker logs"
+        // message, stranding a catalog that the restarted process could simply resume. Reclassify
+        // it as an interruption — restart converges to the true terminal state anyway, because a
+        // persistent error re-fails the resumed scan with no cancellation pending. Bounded
+        // contention stays retryable in the scheduler and is never published either way.
+        let result = result.map_err(|error| {
+            if !error.is_retryable_contention()
+                && !matches!(error, CatalogParquetScanError::Interrupted(_))
+                && should_cancel()
+            {
+                tracing::warn!(
+                    event = "catalog_parquet_scan_error_during_shutdown",
+                    error = %error,
+                    "catalog Parquet scan error raced shutdown; published as restartable interruption"
+                );
+                return CatalogParquetScanError::Interrupted(
+                    "Catalog scan interrupted by server shutdown; restart it to continue."
+                        .to_owned(),
+                );
+            }
+            error
+        });
         if let Err(error) = &result {
             publish_scan_failure(&self.catalog, error, Some(&progress_before));
         }
@@ -3185,6 +3208,62 @@ mod tests {
                 .record_count,
             0,
             "replacement cannot commit mixed rows"
+        );
+    }
+
+    /// A real (non-retryable, non-interruption) pass error that surfaces AFTER cancellation is
+    /// already pending must publish the restartable interruption, not the terminal "inspect the
+    /// worker logs" message: the restarted process can simply resume, and a persistent error
+    /// re-fails the resumed scan with no cancellation pending. The hook models the race — the
+    /// shard vanishes (a real IO-class failure) in the same window that shutdown lands.
+    #[test]
+    fn a_real_pass_error_racing_shutdown_publishes_the_restartable_interruption() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        write_rows(
+            &source,
+            &[vec![row("https://example.com/original.jpg", "one person")]],
+        );
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Shutdown race")
+            .expect("catalog creates");
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let mut driver =
+            AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id).expect("driver");
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_flag = std::sync::Arc::clone(&cancelled);
+        driver.before_shard_open_once(move |path| {
+            cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::fs::remove_file(path).expect("shard removal");
+        });
+
+        let error = driver
+            .scan_pass_with_cancel(&source, &CatalogParquetScanOptions::default(), || {
+                cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .expect_err("the vanished shard fails the pass");
+        assert!(
+            matches!(error, CatalogParquetScanError::Interrupted(_)),
+            "an error racing shutdown is reclassified as an interruption: {error:?}"
+        );
+        drop(driver);
+        let reopened = registry
+            .open_attached(&catalog_id)
+            .expect("catalog reopens");
+        let processing = reopened
+            .contract_state()
+            .expect("contract reads")
+            .processing;
+        assert_eq!(processing.state, CatalogProcessingState::Failed);
+        assert!(
+            processing
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("restart")),
+            "the shutdown-window failure must stay restartable: {:?}",
+            processing.message
         );
     }
 

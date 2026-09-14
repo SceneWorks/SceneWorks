@@ -161,6 +161,73 @@ pub fn indexed_files_are_structurally_valid(dir: &Path, index_file: &Path) -> bo
         })
 }
 
+/// The suffix that identifies a sharded-safetensors index (`model.safetensors.index.json`,
+/// `diffusion_pytorch_model.safetensors.index.json`, …).
+pub const SAFETENSORS_INDEX_SUFFIX: &str = ".safetensors.index.json";
+
+/// Whether `path` names a sharded-safetensors index by filename.
+pub fn is_safetensors_index_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(SAFETENSORS_INDEX_SUFFIX))
+}
+
+/// Shards a `*.safetensors.index.json` names in `weight_map` that are NOT on disk beside it.
+///
+/// **Existence only.** This stats each distinct shard and never opens one — no header parse, no
+/// tensor read — because it runs on the install/availability lanes where a hashing or header-reading
+/// check would be a measurable per-model cost (sc-20526). Structural validity of the shards
+/// themselves stays with [`indexed_files_are_structurally_valid`], which the bespoke
+/// family-completeness predicates use.
+///
+/// An index that cannot be read, does not parse, or carries no usable `weight_map` is itself
+/// reported missing: a `*.safetensors.index.json` that is not a usable index is a torn install, not
+/// an unrelated file. Callers must therefore only pass paths that pass
+/// [`is_safetensors_index_path`].
+///
+/// Index entries are constrained to safe relative paths before joining them to `dir`, so an absolute,
+/// drive-qualified, backslash-qualified, or `..`-traversing entry can never be satisfied by a file
+/// outside the snapshot.
+pub fn missing_indexed_shards(dir: &Path, index_file: &Path) -> Vec<String> {
+    let unusable = || {
+        vec![index_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(SAFETENSORS_INDEX_SUFFIX)
+            .to_owned()]
+    };
+    let Ok(index_raw) = std::fs::read_to_string(index_file) else {
+        return unusable();
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&index_raw) else {
+        return unusable();
+    };
+    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
+        return unusable();
+    };
+    let Some(shards) = weight_map
+        .values()
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect::<Option<BTreeSet<String>>>()
+    else {
+        return unusable();
+    };
+    if shards.is_empty() {
+        return unusable();
+    }
+    shards
+        .into_iter()
+        .filter(|shard| !safe_relative_shard_path(shard) || !dir.join(Path::new(shard)).is_file())
+        .collect()
+}
+
+/// Whether every distinct shard a `*.safetensors.index.json` names exists beside it.
+///
+/// See [`missing_indexed_shards`] for the cost contract (stat only).
+pub fn indexed_shards_are_present(dir: &Path, index_file: &Path) -> bool {
+    missing_indexed_shards(dir, index_file).is_empty()
+}
+
 fn non_empty_json_object(
     path: &Path,
     predicate: impl FnOnce(&serde_json::Map<String, Value>) -> bool,
@@ -265,6 +332,135 @@ mod tests {
         assert!(
             !gemma_text_encoder_dir_is_complete(&gemma),
             "every indexed shard must be structurally valid"
+        );
+    }
+
+    /// sc-20526: the lens_turbo bf16 shape — an index naming three shards with only the LAST one on
+    /// disk. `model.embed_tokens.weight` lives in shard 1, so the load dies with "cannot find tensor"
+    /// even though the component directory holds a real `.safetensors`.
+    #[test]
+    fn missing_indexed_shards_names_every_absent_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("text_encoder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            serde_json::json!({"weight_map":{
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.mlp.down_proj.weight": "model-00002-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        write_tiny_safetensors(&dir.join("model-00003-of-00003.safetensors"));
+
+        assert_eq!(
+            missing_indexed_shards(&dir, &index),
+            vec![
+                "model-00001-of-00003.safetensors".to_owned(),
+                "model-00002-of-00003.safetensors".to_owned(),
+            ],
+            "the two undownloaded shards must be reported"
+        );
+        assert!(!indexed_shards_are_present(&dir, &index));
+
+        write_tiny_safetensors(&dir.join("model-00001-of-00003.safetensors"));
+        write_tiny_safetensors(&dir.join("model-00002-of-00003.safetensors"));
+        assert!(
+            indexed_shards_are_present(&dir, &index),
+            "a genuinely complete shard set must pass"
+        );
+    }
+
+    /// Existence only: a shard that exists but is a truncated placeholder still satisfies this check.
+    /// The whole point is that the install/availability lanes never open a shard (sc-20526).
+    #[test]
+    fn indexed_shard_presence_never_opens_a_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let index = dir.join("diffusion_pytorch_model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            r#"{"weight_map":{"a":"diffusion_pytorch_model-00001-of-00001.safetensors"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("diffusion_pytorch_model-00001-of-00001.safetensors"),
+            b"x",
+        )
+        .unwrap();
+        assert!(indexed_shards_are_present(dir, &index));
+        assert!(
+            !indexed_files_are_structurally_valid(dir, &index),
+            "the structural check is the separate, costlier contract"
+        );
+    }
+
+    /// An unreadable/garbage/weight_map-less `*.safetensors.index.json` is a torn install, not an
+    /// unrelated file — it must report missing rather than pass.
+    #[test]
+    fn unusable_index_reports_itself_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let index = dir.join("model.safetensors.index.json");
+
+        assert_eq!(
+            missing_indexed_shards(dir, &index),
+            vec!["model.safetensors.index.json".to_owned()],
+            "absent index"
+        );
+        std::fs::write(&index, b"{not json").unwrap();
+        assert_eq!(
+            missing_indexed_shards(dir, &index).len(),
+            1,
+            "garbage index"
+        );
+        std::fs::write(&index, br#"{"metadata":{}}"#).unwrap();
+        assert_eq!(
+            missing_indexed_shards(dir, &index).len(),
+            1,
+            "no weight_map"
+        );
+        std::fs::write(&index, br#"{"weight_map":{}}"#).unwrap();
+        assert_eq!(
+            missing_indexed_shards(dir, &index).len(),
+            1,
+            "empty weight_map"
+        );
+    }
+
+    #[test]
+    fn index_paths_are_recognised_by_suffix() {
+        assert!(is_safetensors_index_path(Path::new(
+            "bf16/text_encoder/model.safetensors.index.json"
+        )));
+        assert!(is_safetensors_index_path(Path::new(
+            "diffusion_pytorch_model.safetensors.index.json"
+        )));
+        assert!(!is_safetensors_index_path(Path::new("model_index.json")));
+        assert!(!is_safetensors_index_path(Path::new(
+            "model-00001-of-00003.safetensors"
+        )));
+    }
+
+    /// A traversal entry can never be satisfied by a file that really exists outside the snapshot.
+    #[test]
+    fn unsafe_shard_entries_are_reported_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        write_tiny_safetensors(&temp.path().join("outside.safetensors"));
+        let dir = temp.path().join("component");
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            r#"{"weight_map":{"weight":"../outside.safetensors"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            missing_indexed_shards(&dir, &index),
+            vec!["../outside.safetensors".to_owned()]
         );
     }
 }

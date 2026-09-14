@@ -12,7 +12,9 @@ import {
   schedulerOptionsFromModel,
   schedulerShiftDefaultFromModel,
   stepsDefaultFromModel,
+  stepsMenuFromModel,
 } from "./samplerOptions.js";
+import { fallbackModels } from "./constants.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
@@ -86,6 +88,54 @@ describe("samplerOptions", () => {
     expect(schedulerShiftDefaultFromModel({ defaults: { schedulerShift: -1 } })).toBe(3.0);
     expect(stepsDefaultFromModel({ defaults: { steps: 0 } })).toBeNull();
     expect(guidanceDefaultFromModel({ defaults: { guidanceScale: "n/a" } })).toBeNull();
+  });
+
+  // sc-19502 — `limits.steps` is the EXACT set of renderable step counts. The studio pins the Steps
+  // control when there is exactly one, so this reader must agree with the backend gate
+  // (`allowed_steps` in crates/sceneworks-core/src/video_request.rs) about what counts as a menu.
+  it("reads limits.steps as an exact menu and treats an unusable one as no menu", () => {
+    expect(stepsMenuFromModel({ limits: { steps: [8] } })).toEqual([8]);
+    expect(stepsMenuFromModel({ limits: { steps: [4, 8] } })).toEqual([4, 8]);
+
+    // No menu declared — the overwhelmingly common case, and it must stay unpinned.
+    expect(stepsMenuFromModel(undefined)).toBeNull();
+    expect(stepsMenuFromModel({})).toBeNull();
+    expect(stepsMenuFromModel({ limits: {} })).toBeNull();
+
+    // Unusable declarations fall back to NO menu rather than pinning the control to nothing — the
+    // same tolerance the Rust reader has, because a stricter UI would block legal requests.
+    expect(stepsMenuFromModel({ limits: { steps: [] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [0] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [8.5] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: ["8"] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: [null] } })).toBeNull();
+    expect(stepsMenuFromModel({ limits: { steps: 8 } })).toBeNull();
+
+    // A partially-unusable menu keeps its usable entries, matching the Rust reader.
+    expect(stepsMenuFromModel({ limits: { steps: [8, 0, "12"] } })).toEqual([8]);
+  });
+
+  // sc-19502 — the fallback catalog is a MIRROR of builtin.models.jsonc, and the Steps control reads
+  // it when the live catalog is unavailable. If the mirror drifted, the offline studio would offer a
+  // free-text Steps box for a model whose backend refuses every value but 8.
+  it("the fallback catalog pins LTX to its single baked step count", () => {
+    for (const id of ["ltx_2_3", "ltx_2_3_eros"]) {
+      const model = fallbackModels.find((entry) => entry.id === id);
+      expect(model, `${id} present in the fallback catalog`).toBeTruthy();
+      expect(stepsMenuFromModel(model), `${id} step menu`).toEqual([8]);
+      // …and the studio's own default is that one legal value, so the common path never trips the
+      // enqueue gate.
+      expect(stepsDefaultFromModel(model), `${id} default steps`).toBe(8);
+    }
+
+    // The other video models must stay UNPINNED — a blanket pin would remove a working control.
+    const unpinned = fallbackModels.filter(
+      (model) => model.type === "video" && !String(model.id).startsWith("ltx_2_3"),
+    );
+    expect(unpinned.length).toBeGreaterThan(0);
+    for (const model of unpinned) {
+      expect(stepsMenuFromModel(model), `${model.id} must keep a free Steps control`).toBeNull();
+    }
   });
 
   it("guidance methods fall back to cfg-only and order canonically (epic 7434)", () => {

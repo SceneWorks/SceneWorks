@@ -16,7 +16,9 @@ second, platform-dependent copy without replacing the in-app notices.
 wired into the web build. It also checks
 `config/inference-third-party-source.json`, the audited inventory of ported or
 compile-time-embedded source/data in the separately versioned inference
-repository. The inventory revision must match SceneWorks' Cargo pins. When
+repository. The inventory revision is compared against SceneWorks' Cargo pins and a mismatch is
+REPORTED, not enforced (sc-19751) — a pin bump no longer blocks CI on a licensing
+audit. The audit is still owed before release; when
 bumping inference, audit its `NOTICE`, `LICENSE-*`, and production
 `include_str!`/`include_bytes!` sites, update the inventory, and add every real
 case to this corpus. `artifacts` and `includeSites` describe only the exact

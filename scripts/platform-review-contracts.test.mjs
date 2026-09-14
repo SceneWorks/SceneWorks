@@ -2,11 +2,124 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
-import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
+
+// sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
+// capture plans, so the inventory below reads them directly.
+const LTX_CAMPAIGN_PLANS = [
+  "ltx-mlx-single-pass-sweep.json",
+  "ltx-mlx-rung2-sweep.json",
+  "ltx-mlx-host-risk-probes.json",
+];
 
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
+
+function workflowJob(workflow, name) {
+  const marker = `  ${name}:\n`;
+  const at = workflow.indexOf(marker);
+  assert.ok(at >= 0, `workflow must keep a ${name} job`);
+  const remainder = workflow.slice(at + marker.length);
+  const next = remainder.search(/^  [A-Za-z0-9_-]+:\s*$/m);
+  return workflow.slice(at, next === -1 ? undefined : at + marker.length + next);
+}
+
+function workflowStep(job, name) {
+  const marker = `      - name: ${name}\n`;
+  const at = job.indexOf(marker);
+  assert.ok(at >= 0, `job must keep a step named ${name}`);
+  const next = job.indexOf("\n      - ", at + marker.length);
+  return job.slice(at, next === -1 ? undefined : next);
+}
+
+function pullRequestTrigger(workflow) {
+  const onStart = workflow.indexOf("on:\n");
+  const jobsStart = workflow.indexOf("\njobs:\n", onStart);
+  assert.ok(onStart >= 0 && jobsStart > onStart, "workflow must keep top-level on and jobs blocks");
+  const triggers = workflow.slice(onStart, jobsStart);
+  const marker = "  pull_request:\n";
+  const at = triggers.indexOf(marker);
+  assert.ok(at >= 0, "workflow must run on pull_request");
+  const remainder = triggers.slice(at + marker.length);
+  const next = remainder.search(/^  [A-Za-z0-9_-]+:\s*$/m);
+  return triggers.slice(at, next === -1 ? undefined : at + marker.length + next);
+}
+
+function assertAdvisoryGate(workflow) {
+  const pullRequest = pullRequestTrigger(workflow);
+  assert.deepEqual(
+    pullRequest
+      .split("\n")
+      .slice(1)
+      .filter((line) => /^ {4}\S/.test(line) && !/^\s*#/.test(line)),
+    [],
+    "pull_request must remain unfiltered so advisory checks cannot be path- or type-skipped",
+  );
+
+  const gate = workflowJob(workflow, "supply-chain");
+  assert.doesNotMatch(gate, /^    (?:if|needs|continue-on-error):/m);
+  assert.match(gate, /cargo install cargo-deny --locked --version 0\.19\.9/);
+
+  const governance = workflowStep(gate, "Validate advisory exception governance");
+  const audit = workflowStep(gate, "Audit Rust dependency advisories");
+  assert.doesNotMatch(governance, /^        (?:if|continue-on-error):/m);
+  assert.doesNotMatch(audit, /^        (?:if|continue-on-error):/m);
+  assert.match(governance, /^        run: python3 scripts\/ci\/check_advisory_policy\.py$/m);
+  assert.match(audit, /^        run: cargo deny --locked check advisories$/m);
+  assert.equal((gate.match(/python3 scripts\/ci\/check_advisory_policy\.py/g) ?? []).length, 1);
+  assert.equal((gate.match(/cargo deny --locked check advisories/g) ?? []).length, 1);
+  assert.ok(
+    gate.indexOf("python3 scripts/ci/check_advisory_policy.py") <
+      gate.indexOf("cargo deny --locked check advisories"),
+    "governance must be validated before cargo-deny consumes the ignore list",
+  );
+
+  const parity = workflowJob(workflow, "parity");
+  assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
+  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+}
+
+test("required parity fails closed over an unconditional advisory gate", async () => {
+  assertAdvisoryGate(await source(".github/workflows/check.yml"));
+});
+
+test("advisory gate contracts reject skip paths and parity detachment", async () => {
+  const workflow = await source(".github/workflows/check.yml");
+  for (const filter of ["branches", "branches-ignore", "paths", "paths-ignore", "types"]) {
+    assert.throws(
+      () =>
+        assertAdvisoryGate(
+          workflow.replace("  pull_request:\n", `  pull_request:\n    ${filter}:\n      - main\n`),
+        ),
+      undefined,
+      `${filter} must not be able to narrow pull_request coverage`,
+    );
+  }
+
+  for (const mutation of [
+    workflow.replace("  supply-chain:\n", "  supply-chain:\n    if: github.actor != 'nobody'\n"),
+    workflow.replace(
+      "      - name: Validate advisory exception governance\n",
+      "      - name: Validate advisory exception governance\n        if: success()\n",
+    ),
+    workflow.replace(
+      "      - name: Audit Rust dependency advisories\n",
+      "      - name: Audit Rust dependency advisories\n        continue-on-error: true\n",
+    ),
+    workflow.replace(", supply-chain]", "]"),
+    workflow.replace(
+      "      - name: Audit Rust dependency advisories\n        run: cargo deny --locked check advisories\n",
+      "",
+    ),
+    workflow.replace(
+      "        run: cargo deny --locked check advisories\n",
+      "        run: cargo deny --locked check advisories || true\n",
+    ),
+  ]) {
+    assert.throws(() => assertAdvisoryGate(mutation));
+  }
+});
 
 // GitHub filter-pattern syntax: `*` matches any run of characters except `/`, `**` matches any
 // run including `/`. `**/` is treated as "zero or more directories", matching the convention
@@ -131,6 +244,134 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
   );
 });
 
+// sc-22738 (run 34490358777). The memory-catalog campaign's candle job builds the SAME dependency
+// graph on the SAME shared box as the lane above -- candle-core, candle-transformers, the vendored
+// inference tree, the CUDA kernels -- and it had simply never been given that lane's treatment. It
+// died four minutes into "Build the candle memory adapter" with no rustc diagnostic at all:
+//
+//   sccache: caused by: An existing connection was forcibly closed by the remote host. (os error 10054)
+//   error: could not compile `candle-transformers`
+//
+// The two lanes must read as ONE decision, so this pins the campaign's step to the sibling's
+// spelling AND to the sibling's position: after the toolchain is resolved (the prep action is what
+// clears a MISSING wrapper) and before the first cargo invocation, so both the `bash` fetch step and
+// the `shell: cmd` vcvars build inherit the cleared variable.
+const CAMPAIGN_WORKFLOW = ".github/workflows/memory-catalog-campaign.yml";
+const CAMPAIGN_WRAPPER_STEP = [
+  "      - name: Disable unstable sccache wrapper for the heavy Candle lane",
+  "        shell: powershell",
+  "        run: |",
+  "          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='",
+  "          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue",
+  "",
+].join("\n");
+
+function assertCampaignCandleWrapperDisabled(workflow) {
+  const candle = workflowJob(workflow, "candle");
+  const mlx = workflowJob(workflow, "mlx");
+
+  const prepare = candle.indexOf("uses: ./.github/actions/prepare-rust-runner");
+  const disableWrapper = candle.indexOf(
+    "name: Disable unstable sccache wrapper for the heavy Candle lane",
+  );
+  const fetch = candle.indexOf("run: cargo fetch --locked");
+  const build = candle.indexOf("--features candle --bin memory-candle-adapter");
+  assert.ok(prepare >= 0, "the campaign's candle job resolves the toolchain with the shared action");
+  assert.ok(disableWrapper >= 0, "and disables the unstable sccache wrapper");
+  assert.ok(fetch >= 0 && build >= 0, "and then fetches and builds the adapter");
+  assert.ok(prepare < disableWrapper, "the wrapper is cleared AFTER the toolchain is resolved");
+  assert.ok(disableWrapper < fetch && fetch < build, "and BEFORE any cargo invocation");
+
+  // Both halves, individually: GITHUB_ENV clears it for every LATER step (including the
+  // `shell: cmd` build), Remove-Item clears it for this step's own process.
+  const step = workflowStep(candle, "Disable unstable sccache wrapper for the heavy Candle lane");
+  assert.match(step, /^ {8}shell: powershell$/m);
+  assert.match(step, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
+  assert.match(step, /Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/);
+
+  // The mlx lane is deliberately NOT given this: os error 10054 is a Windows socket reset, and no
+  // macOS runner service exports the wrapper -- docs/rust-mlx-build.md offers sccache to a
+  // developer, and scripts/setup-nax-runner.sh only points at that note.
+  assert.doesNotMatch(mlx, /RUSTC_WRAPPER/, "the mlx lane keeps whatever wrapper its Mac has");
+
+  // And NO job-local CARGO_HOME, which is the other half of windows-candle.yml's block and the half
+  // this lane deliberately does not take: each runner service already pins its own dependency cache
+  // (D:\cargo-home-N, sc-17614) and runs one job at a time, while a $RUNNER_TEMP CARGO_HOME is
+  // re-downloaded every run on the box whose slow link this campaign's whole fetch design exists to
+  // work around. Delete this assertion only alongside the rationale in the workflow.
+  assert.doesNotMatch(
+    candle,
+    /CARGO_HOME=/,
+    "the campaign lane relies on the per-runner CARGO_HOME rather than a re-downloaded job-local one",
+  );
+}
+
+test("the campaign's candle build gets the heavy-Candle-lane sccache treatment", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  assertCampaignCandleWrapperDisabled(workflow);
+  assert.ok(
+    workflow.includes(CAMPAIGN_WRAPPER_STEP),
+    "the campaign step is spelled exactly as windows-candle.yml's, so the two read as one decision",
+  );
+});
+
+test("the campaign sccache contract rejects removal, reordering and half-measures", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  for (const [why, mutation] of [
+    ["the step is deleted outright", workflow.replace(CAMPAIGN_WRAPPER_STEP, "")],
+    [
+      "only the process-local half survives",
+      workflow.replace(
+        "          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='\n",
+        "",
+      ),
+    ],
+    [
+      "only the GITHUB_ENV half survives",
+      workflow.replace(
+        "          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue\n",
+        "",
+      ),
+    ],
+    [
+      "it slips after the first cargo invocation",
+      workflow
+        .replace(CAMPAIGN_WRAPPER_STEP, "")
+        .replace(
+          "      - name: Build the candle memory adapter\n",
+          `${CAMPAIGN_WRAPPER_STEP}      - name: Build the candle memory adapter\n`,
+        ),
+    ],
+    [
+      "it lands before the toolchain is resolved",
+      workflow
+        .replace(CAMPAIGN_WRAPPER_STEP, "")
+        .replace(
+          "      - name: Prepare the Rust toolchain\n",
+          `${CAMPAIGN_WRAPPER_STEP}      - name: Prepare the Rust toolchain\n`,
+        ),
+    ],
+    [
+      "the mlx lane picks it up too",
+      workflow.replace(
+        "      - name: Fetch prebuilt MLX (sc-21382)\n",
+        `${CAMPAIGN_WRAPPER_STEP}      - name: Fetch prebuilt MLX (sc-21382)\n`,
+      ),
+    ],
+    [
+      "a redundant job-local CARGO_HOME is added back",
+      workflow.replace(
+        "      - name: Census the profiled GPU\n",
+        "      - name: Isolate Cargo dependency checkout\n        shell: powershell\n        run: |\n"
+          + '          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"\n'
+          + "      - name: Census the profiled GPU\n",
+      ),
+    ],
+  ]) {
+    assert.throws(() => assertCampaignCandleWrapperDisabled(mutation), undefined, why);
+  }
+});
+
 test("Windows Krea provisioning accepts supported newer Python 3 runtimes", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(workflow, /Python 3\.12 or newer/);
@@ -142,14 +383,841 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
   );
 });
 
-test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
+// sc-18677 generalized windows-candle.yml's provisioning from "the Krea q4 snapshot" to "the
+// snapshot named by the provision_* inputs", so epic 17137 can land MiniMax-H3 weights on the
+// CUDA box for sc-17153/sc-17156's per-tier VRAM measurement. The story's acceptance criterion
+// is that a Krea dispatch "still behaves identically -- proven, not assumed". These tests are
+// that proof, and they are structural rather than prose-matching: they pin the input DEFAULTS
+// and the path-construction EXPRESSIONS, which together determine the resolved snapshot path.
+//
+// The path the old hardcoded step produced, verbatim:
+//   %USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4
+// Every fragment below is a factor of that string. Change any one and a Krea five-rung capture
+// silently reads another directory -- or, if it is lucky, throws.
+// Assertions about a step must be scoped TO that step. A bare `assert.match(workflow, ...)` is
+// satisfied by an identical string anywhere in the file, which is not hypothetical: dropping
+// `inputs.provision_snapshot` from the Provision step's `if:` left the suite green because the
+// neighbouring "Validate runner Python" step carries the byte-identical condition. Slice first.
+function stepBody(workflow, name) {
+  const at = workflow.indexOf(`      - name: ${name}\n`);
+  assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+  const next = workflow.indexOf("\n      - ", at + 1);
+  return workflow.slice(at, next === -1 ? undefined : next);
+}
+
+function dispatchInputs(workflow) {
+  const start = workflow.indexOf("  workflow_dispatch:\n    inputs:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a workflow_dispatch inputs block");
+  const end = workflow.indexOf("\nconcurrency:", start);
+  assert.ok(end > start, "could not find the end of the workflow_dispatch block");
+  const names = [];
+  const defaults = {};
+  let current = null;
+  for (const line of workflow.slice(start, end).split("\n")) {
+    // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
+    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
+    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
+    if (header) {
+      current = header[1];
+      names.push(current);
+      defaults[current] = undefined;
+      continue;
+    }
+    const def = current && line.match(/^ {8}default: (.*)$/);
+    if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
+  }
+  return { names, defaults };
+}
+
+test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+
+  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
+  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
+  // a future story that adds an input needs the headroom this preserves.
+  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+
+  for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
+    assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
+  }
+  for (const required of [
+    "provision_snapshot",
+    "provision_repository",
+    "provision_revision",
+    "provision_patterns",
+    "provision_subdir",
+    "provision_cache_dir",
+  ]) {
+    assert.ok(names.includes(required), `missing generalized input ${required}`);
+  }
+
+  // The defaults ARE the Krea dispatch. With these values and no other input set, the
+  // generalized steps must reconstruct the old hardcoded path exactly.
+  assert.equal(defaults.provision_repository, "SceneWorks/krea-2-turbo-mlx");
+  assert.equal(defaults.provision_patterns, "q4/**");
+  assert.equal(defaults.provision_subdir, "q4");
+  assert.equal(defaults.provision_cache_dir, undefined, "an empty cache dir must mean the historical location");
+});
+
+test("windows-candle rebuilds the exact Krea snapshot path from the generalized inputs", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // cache dir: %USERPROFILE%\.cache\huggingface\hub when provision_cache_dir is empty. This box
+  // sets HF_HOME=E:\huggingface, and honoring it here would relocate Krea's cache -- so the
+  // default deliberately ignores HF_HOME. A caller that wants another cache passes it in.
+  assert.match(workflow, /\$cache = Join-Path \$env:USERPROFILE '\.cache\\huggingface\\hub'/);
+  assert.doesNotMatch(
+    workflow,
+    /^\s*\$cache = .*HF_HOME/m,
+    "the default cache dir must not be derived from HF_HOME",
+  );
+
+  // models--<owner>--<name>\snapshots\<revision>[\<subdir>]
+  assert.match(workflow, /\$folder = 'models--' \+ \$env:PROVISION_REPOSITORY\.Replace\('\/', '--'\)/);
+  assert.match(workflow, /\$subdirTail = '\\' \+ \$env:PROVISION_SUBDIR\.Replace\('\/', '\\'\)/);
+  assert.match(
+    workflow,
+    /\$suffix = '\\' \+ \$folder \+ '\\snapshots\\' \+ \$env:PROVISION_REVISION \+ \$subdirTail/,
+  );
+
+  // The resolve step still asserts existence AND that the canonical path ends with that exact
+  // suffix, so a stale cache entry or a lookalike repo cannot satisfy it.
+  assert.match(workflow, /Test-Path -LiteralPath \$root -PathType Container/);
+  assert.match(
+    workflow,
+    /\$root\.EndsWith\(\$env:PROVISION_SNAPSHOT_SUFFIX, \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+
+  // The PYTHON half of the cache binding, not just the PowerShell half. Centralizing the cache
+  // path exists because it was previously spelled twice in two languages with nothing tying
+  // them; pinning only the PowerShell side leaves a re-hardcoded `os.path.join(USERPROFILE...)`
+  // green, which downloads the whole component set to C: before the resolve step throws.
+  assert.match(workflow, /cache_dir=os\.environ\["PROVISION_CACHE_DIR"\],/);
+  assert.doesNotMatch(
+    workflow,
+    /cache_dir=os\.path\.join\(os\.environ\["USERPROFILE"\]/,
+    "the provisioning cache dir must come from the shared resolved value, not a second hardcoding",
+  );
+
+  // The memory-adapter binaries read these env names via required_env; renaming the dispatch
+  // inputs must not rename the runtime contract (bin/candle.rs, bin/mlx.rs).
+  assert.match(workflow, /"SCENEWORKS_KREA_ROOT=\$root" \| Out-File/);
+  assert.match(workflow, /SCENEWORKS_KREA_REPOSITORY: \$\{\{ inputs\.provision_repository \}\}/);
+  assert.match(workflow, /SCENEWORKS_KREA_REVISION: \$\{\{ inputs\.provision_revision \}\}/);
+  // ...and SCENEWORKS_KREA_ROOT stays scoped to Krea, so an H3 dispatch cannot hand the
+  // five-rung adapter a MiniMax root under a Krea-shaped name.
+  assert.match(workflow, /\$isKrea = \$env:PROVISION_REPOSITORY -eq 'SceneWorks\/krea-2-turbo-mlx'/);
+  assert.match(workflow, /if \(\$isKrea\) \{\n\s*"SCENEWORKS_KREA_ROOT=\$root"/);
+  // The CONSUMPTION side too, not just the export side. `secrets.SCENEWORKS_KREA_ROOT` is a
+  // Krea-specific override; dropping the `$isKrea -and` would let it redirect an H3 resolve.
+  assert.match(workflow, /if \(\$isKrea -and \$env:KREA_ROOT_OVERRIDE\) \{/);
+});
+
+// sc-18677/sc-20974/sc-21707: every timeout arm is load-bearing. Pin the whole expression the way
+// the macOS twin above pins its lane's -- otherwise either a revert to the ordinary 45m cap or the
+// terminal campaign's observed 360m cutoff passes every other test here.
+test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung timeout budgets", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const runbook = await source("docs/epic-20738-terminal-cuda.md");
+  const timeoutContract =
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 60 \}\}/;
+  assert.match(
+    workflow,
+    // The LTX Eros arm (SC-18902, from main) keeps six hours, while the strictly serial
+    // 19-cell terminal campaign gets twelve. Provisioning, five-rung, and the 60m default stay fixed.
+    timeoutContract,
+  );
+  assert.match(
+    runbook,
+    /one strictly serial job a 720-minute hard timeout[\s\S]*no step is\s+assigned a timeout above 360 minutes/,
+    "the runbook must bind the job-level 720-minute budget without widening a step",
+  );
+
+  const terminalArm =
+    "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
+  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 60";
+  for (const [name, mutated] of [
+    ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
+    ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
+    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("60", "45"))],
+  ]) {
+    assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
+    assert.throws(
+      () => assert.match(mutated, timeoutContract),
+      undefined,
+      `${name} must fail the exact timeout contract`,
+    );
+  }
+});
+
+test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // Provisioning is now a first-class outcome: sc-17153/sc-17156 need H3 weights resident and
+  // there is no H3 five-rung fixture. The old coupling throw must be gone...
+  assert.doesNotMatch(workflow, /requires run_five_rung_reference=true/);
+  // Scoped to the Provision step itself: the identical `if:` string also appears on the
+  // "Validate runner Python" step, so a file-wide match would stay green if this step's gate were
+  // dropped -- and an ungated Provision step re-downloads the snapshot on every five-rung run.
+  assert.match(
+    stepBody(workflow, "Provision exact snapshot"),
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot \}\}/,
+  );
+  // ...but every five-rung guard it used to sit beside must survive, keyed on the new names.
+  assert.match(workflow, /throw 'inference_revision must be an exact lowercase 40-hex commit'/);
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REVISION -notmatch '\^\[0-9a-f\]\{40\}\$'/,
+  );
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REPOSITORY -ne 'SceneWorks\/krea-2-turbo-mlx'/,
+    "a five-rung capture is still only valid against the fixed Krea reference artifact",
+  );
+  assert.match(workflow, /does not match the adapter's compiled INFERENCE_PIN/);
+
+  // The resolve step must still run for a five-rung dispatch that does NOT provision, and the
+  // params step that FEEDS it (PROVISION_CACHE_DIR / _SNAPSHOT_SUFFIX / _SUBDIR_TAIL) must run on
+  // the same wider condition. Scoped per step for the reason at the top of this block: the two
+  // `if:` strings are byte-identical, so one file-wide match is satisfied by EITHER step and three
+  // mutations stayed green -- narrowing the resolve step to five-rung-only (a provision-only
+  // dispatch then exports no snapshot root at all, skipping AC1's whole proof step), narrowing it
+  // to provision-only (a five-rung-without-provisioning dispatch loses it), and narrowing the
+  // params step (the resolve step then joins two empty env vars and throws, or worse, matches).
+  const resolveGate =
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/;
+  assert.match(stepBody(workflow, "Resolve exact snapshot"), resolveGate);
+  assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
+});
+
+test("macos-mlx fetches the Release prebuilt before its release-built calibration adapters", async () => {
+  // sc-22667: the Debug prebuilt fetched for `cargo build` fails a `--release` adapter build
+  // ("build_type: prebuilt=Debug this build=Release"), so both capture steps must be preceded by
+  // a Release fetch on the same dispatch gate, and must still build the adapter in release.
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const fetchName = "Fetch prebuilt MLX (Release) for the release-built calibration adapter";
+  const fetch = stepBody(workflow, fetchName);
+  assert.match(fetch, /scripts\/fetch-prebuilt-mlx\.sh --build-type Release --github-env/);
+  assert.match(
+    fetch,
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\) \}\}/,
+  );
+  // No Release asset falls back to the source build by CLEARING the Debug cell's variables, never
+  // by leaving them pointing at the mismatched cell.
+  assert.match(fetch, /echo "PMETAL_MLX_PREBUILT_DIR=" >> "\$GITHUB_ENV"/);
+  assert.match(fetch, /echo "PMETAL_METALLIB_PATH=" >> "\$GITHUB_ENV"/);
+  const fetchAt = workflow.indexOf(`- name: ${fetchName}`);
+  assert.ok(fetchAt >= 0);
+  for (const capture of [
+    "Build and capture the authoritative Qwen MLX anchor",
+    "Build and capture the authoritative Z-Image MLX anchor",
+  ]) {
+    const at = workflow.indexOf(`- name: ${capture}`);
+    assert.ok(at > fetchAt, `${capture} must follow the Release fetch`);
+    assert.match(
+      stepBody(workflow, capture),
+      /cargo build --release --locked -p sceneworks-memory-adapter/,
+    );
+  }
+});
+
+test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const capture = stepBody(
+    workflow,
+    "Build and run the Candle Krea anchor capture",
+  );
+  assert.match(capture, /CUDA_VISIBLE_DEVICES: "1"/);
+  // sc-22514: ONE anchor, not a fixture ladder plus a batched reuse comparison.
+  assert.match(capture, /--anchor krea_2_turbo:q4:candle/);
+  assert.match(capture, /--output "%RUNNER_TEMP%\\sc-21714-candle-anchor\.json"/);
+  assert.match(
+    capture,
+    /memory-calibration-harness\.mjs check --input "%RUNNER_TEMP%\\sc-21714-candle-anchor\.json"/,
+  );
+  const upload = stepBody(workflow, "Upload the raw schema-checked Candle Krea anchor");
+  assert.match(upload, /name: sc-21714-krea-anchor-\$\{\{ github\.run_id \}\}/);
+  assert.match(upload, /\$\{\{ runner\.temp \}\}\/sc-21714-candle-anchor\.json/);
+
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
+  assertEveryVramProbeIsCertifying(adapter);
+  // Every `vram` binding the adapter builds, keyed by the ARM (the enclosing `fn`) that builds it,
+  // against an explicit allowlist (sc-22726 review, sc-22733 review): a set-of-distinct-spellings
+  // claim let a probe be deleted, a raw `VramProbe::new()` be added alongside, and the one known
+  // non-certifying probe hide, all green; a frozen per-spelling tally then let one arm lose its
+  // probe while another gained a second, still green. Naming the owner closes both. The only probe
+  // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
+  // idleness on its own rendered baseline instead because that arm renders first.
+  const owners = [];
+  let owner = null;
+  for (const line of adapter.split("\n")) {
+    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
+    if (fn) owner = fn[1];
+    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
+    if (probe) owners.push([owner, probe[1].trim()]);
+  }
+  assert.deepEqual(
+    owners.sort(([a], [b]) => a.localeCompare(b)),
+    [
+      // Krea five-rung reference (and the registry-loaded providers that ride it).
+      ["load_five_rung_generator", "certifying_vram_probe()"],
+      // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
+      ["load_mage_generator", "certifying_vram_probe()"],
+      // The inline Krea arm.
+      ["run", "certifying_vram_probe()"],
+      // The InstantID bespoke arm (sc-22729).
+      ["run_instantid_candle", "certifying_vram_probe()"],
+      // LTX-2.5: renders first, then proves idle on the rendered baseline.
+      ["run_ltx25_capture", "VramProbe::start_rendered().assert_idle(1.0)"],
+      // PuLID-FLUX bespoke.
+      ["run_pulid_flux_capture", "certifying_vram_probe()"],
+      // The Qwen edit bespoke arm (sc-22728).
+      ["run_qwen_edit", "certifying_vram_probe()"],
+      // The sc-22737 video block: Bernini's video entry, LTX-2.3 and both MiniMax-H3 entries share
+      // ONE capture, so one probe owner covers all four. It certifies an idle GPU BEFORE it samples
+      // — unlike LTX-2.5 above, which cannot because that arm renders first.
+      ["run_sc22737_video_capture", "certifying_vram_probe()"],
+      // The SenseNova family arm (sc-22734).
+      ["run_sensenova_capture", "certifying_vram_probe()"],
+    ],
+    "every Candle VRAM probe must be an allowlisted certifying spelling, built once by its named arm",
+  );
+});
+
+/**
+ * Every VRAM probe the Candle adapter constructs, mapped to the function that constructs it.
+ *
+ * sc-22729 review replaced a frozen occurrence count (`… === 3`) with this. The count did not
+ * discriminate: it was equally satisfied by three certifying probes in the right arms and by two
+ * plus one in a helper nothing captures through, and it had to be hand-renewed 2 → 3 for a new arm,
+ * which is exactly the moment the guard should have been asking a question instead.
+ */
+const NON_CERTIFYING_PROBE_SITES = new Map([
+  // The LTX-2.5 arm is the ONE documented exception. It asserts a plain 1.0 GB idle ceiling rather
+  // than the WDDM stable-idle proof: `certifying_wddm_idle_config` is calibrated against GPU 1's
+  // 1.6 GB idle graphics residency on the Windows capture host, and the LTX-2.5 capture runs the
+  // ladder the harness pins itself. Widening it here would change what that anchor certifies, so
+  // the exception is named rather than quietly folded in.
+  ["run_ltx25_capture", /VramProbe::start_rendered\(\)\.assert_idle\(1\.0\)/],
+]);
+
+function enclosingFunctions(source) {
+  const starts = [...source.matchAll(/^(?:pub )?fn ([a-z_][a-z0-9_]*)/gm)]
+    .map((match) => ({ name: match[1], at: match.index }));
+  return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
+}
+
+function assertEveryVramProbeIsCertifying(adapter) {
+  const nameAt = enclosingFunctions(adapter);
+  // Every probe CONSTRUCTION in the file, whichever spelling it uses.
+  const constructions = [...adapter.matchAll(/VramProbe::start_rendered\(\)[^;]*|certifying_vram_probe\(\)/g)]
+    .map((match) => ({ text: match[0], fn: nameAt(match.index) }));
+  assert.ok(constructions.length > 0, "the adapter constructs no VRAM probe at all");
+
+  const certifying = new Set();
+  for (const site of constructions) {
+    // The certifying constructor's own definition is the one place `start_rendered` may appear
+    // without being a capture arm's ad-hoc probe.
+    if (site.fn === "certifying_vram_probe") continue;
+    if (site.text.startsWith("certifying_vram_probe")) {
+      certifying.add(site.fn);
+      continue;
+    }
+    const allowed = NON_CERTIFYING_PROBE_SITES.get(site.fn);
+    assert.ok(
+      allowed,
+      `${site.fn} constructs a VRAM probe directly (${site.text.trim()}) instead of calling ` +
+        "certifying_vram_probe(); a capture arm must not mint its own idle policy",
+    );
+    assert.match(site.text, allowed, `${site.fn}'s documented non-certifying probe changed shape`);
+  }
+
+  // …and every function that SAMPLES a phase either OWNS a probe or is HANDED one it did not mint,
+  // so a new capture arm cannot appear sampling a probe with no policy behind it.
+  const samplers = new Set(
+    [...adapter.matchAll(/vram\.phase\(\)/g)].map((match) => nameAt(match.index)),
+  );
+  const owners = new Set([...certifying, ...NON_CERTIFYING_PROBE_SITES.keys()]);
+  for (const sampler of samplers) {
+    if (owners.has(sampler)) continue;
+    const signature = new RegExp(`fn ${sampler}\\(([\\s\\S]*?)\\) -> `).exec(adapter)?.[1] ?? "";
+    assert.match(
+      signature,
+      /vram: &mut VramProbe/,
+      `${sampler} samples vram.phase() without constructing a probe or being handed one`,
+    );
+  }
+  // No owner may be a function that never samples: a probe minted and dropped certifies nothing.
+  assert.deepEqual(
+    [...owners].filter((owner) => !samplers.has(owner)),
+    [],
+    "a function constructing a VRAM probe must sample a phase with it",
+  );
+  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729), the Mage-Flow
+  // loader (sc-22733), the SenseNova arm (sc-22734) and the sc-22737 video block are all among them.
+  assert.deepEqual(
+    [...certifying].sort(),
+    [
+      "load_five_rung_generator",
+      "load_mage_generator",
+      "run",
+      "run_instantid_candle",
+      "run_pulid_flux_capture",
+      "run_qwen_edit",
+      "run_sc22737_video_capture",
+      "run_sensenova_capture",
+    ],
+  );
+  // The exception list is not allowed to quietly grow: exactly one site, and it is the LTX-2.5 arm.
+  assert.deepEqual([...NON_CERTIFYING_PROBE_SITES.keys()], ["run_ltx25_capture"]);
+}
+
+test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  const candleWorker = candle.slice(
+    candle.indexOf("  candle-worker:"),
+    candle.indexOf("  imported-nvfp4-worker-smoke:"),
+  );
+
+  // The MLX lane is the template: base labels for ordinary runs, plus a weights label for a
+  // dispatch that needs real weights on disk. Assert the template still looks like that, so this
+  // guard cannot outlive the convention it mirrors.
+  assert.match(mlx, /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","macOS","ARM64","nax","weights"\]'\)/);
+
+  // The `cuda` pool spans two registration levels and only the org-level half carries
+  // `real-weights`; a provisioning job on the other half finds no snapshot.
+  assert.match(
+    candle,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+  );
+  // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
+  // available pool for this ~24m lane in half for no coverage.
+  assert.doesNotMatch(
+    candleWorker,
+    /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
+  );
+  assert.ok(
+    candleWorker.includes(
+      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
+    ),
+    "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
+  );
+  assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
+});
+
+test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
+  assert.ok(at >= 0, "windows-candle.yml must keep the imported NVFP4 smoke job");
+  const job = workflow.slice(at);
+
+  assert.match(job, /^ {4}needs: candle-worker$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {6}cancel-in-progress: false$/m);
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+  assert.match(job, /github\.event_name == 'push'/);
+  assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+  assert.doesNotMatch(job, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
+  assert.match(
+    job,
+    /^ {6}SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'$/m,
+  );
+  assert.match(
+    job,
+    /cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1/,
+  );
+  assert.doesNotMatch(job, /continue-on-error:/);
+});
+
+test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;
+  // the set sc-18677 provisions is 144.051 GB. snapshot_download treats allow_patterns=[] as
+  // "everything", so an empty list is a 354.424 GB accident on a box that shares its disk with
+  // CI -- FL2VA/ and Ref2VA/ alone are 288.102 GB of it. Both the
+  // validation step and the Python body must refuse it.
+  assert.match(
+    workflow,
+    /throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'/,
+  );
+  assert.match(workflow, /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/);
+  assert.match(workflow, /allow_patterns=patterns,/);
+
+  // A non-zero pip/python exit must fail the step: `@'...'@ | python -` does not propagate.
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw "snapshot provisioning failed with exit code \$LASTEXITCODE" \}/);
+
+  assert.match(
+    workflow,
+    /if \(\$LASTEXITCODE -ne 0\) \{ throw "installing huggingface_hub failed with exit code \$LASTEXITCODE" \}/,
+  );
+
+  // With provision_subdir empty the snapshot directory exists as soon as ANY file lands, so
+  // existence alone is not proof. Every declared component's literal prefix must be present.
+  //
+  // Pin the LOOP BODY, not just the throw string: replacing the `if (-not $head) { continue }`
+  // guard with an unconditional `continue` makes the assertion vacuous while leaving the error
+  // message -- and every other assertion in this file -- untouched.
+  const resolve = stepBody(workflow, "Resolve exact snapshot");
+  // Pin the THROW, not the message. Every other assertion here survives `throw` ->
+  // `Write-Warning`: the head computation, the guard, the Join-Path, the Test-Path and the string
+  // all still match, while "fails loudly if absent" quietly becomes a log line.
+  //
+  // All THREE of the resolve step's assertions need that treatment, not just the component one.
+  // The existence check and the canonical-suffix check are pinned elsewhere in this file as
+  // EXPRESSIONS (`Test-Path -LiteralPath $root -PathType Container`, `$root.EndsWith(...)`), which
+  // a `throw` -> `Write-Warning` downgrade leaves untouched. The suffix one is the dangerous case:
+  // downgraded, a snapshot whose canonical path does not match the requested repo+revision is
+  // accepted and exported as SCENEWORKS_PROVISIONED_ROOT / SCENEWORKS_KREA_ROOT, so a five-rung
+  // capture or a per-tier VRAM measurement silently runs against the WRONG weights.
+  assert.match(resolve, /throw "the exact snapshot is not available on this runner/);
+  assert.match(resolve, /throw "the resolved root does not match the requested repository/);
+  assert.match(resolve, /throw "provisioned snapshot is missing declared components under/);
+  assert.match(resolve, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
+  assert.match(resolve, /if \(-not \$head\) \{ continue \}/);
+  assert.match(resolve, /foreach \(\$pattern in \(\$env:PROVISION_PATTERNS -split/);
+  assert.match(resolve, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
+  assert.match(resolve, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+  // Without Resolve-Path the EndsWith below compares the raw Join-Path output against the suffix
+  // it was just built from -- a tautology -- and nothing normalizes a traversal before it.
+  assert.match(resolve, /\$root = \(Resolve-Path -LiteralPath \$root\)\.Path/);
+});
+
+// sc-18677: provisioning must stay anonymous. This box sets HF_HOME=E:\huggingface, which can hold
+// a credential; with an implicit token a gated repo turns a "not entitled" failure into a silent
+// success on whoever's token the runner happens to carry. macos-mlx.yml pins both of these for its
+// own provisioning block and this lane pinned neither.
+test("windows-candle provisioning stays anonymous", async () => {
+  const provision = stepBody(await source(".github/workflows/windows-candle.yml"), "Provision exact snapshot");
+  assert.match(provision, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+  assert.match(provision, /^\s+token=False,$/m);
+});
+
+// sc-18677 section 8.1, generalized. GitHub substitutes an input's `default` for any empty dispatch
+// value, so a non-empty default makes "the absence of this thing" INEXPRESSIBLE unless the step
+// body understands a sentinel. That cost run 31509409586. Any future provision_* input with a
+// non-empty default has to make the same decision consciously.
+test("every OPTIONAL provision_* input with a non-empty default has a sentinel", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  const params = stepBody(workflow, "Resolve snapshot provisioning parameters");
+
+  let checked = 0;
+  for (const name of names.filter((n) => n.startsWith("provision_"))) {
+    const def = defaults[name];
+    if (def === undefined || def === "" || def === "false") continue;
+    // "Optional" is derived, not listed: the validation step wraps an optional input's checks in
+    // `if ($env:NAME)`. A required input (provision_repository, provision_patterns) is checked
+    // unconditionally, and "unset" is not a state it can meaningfully have.
+    const env = name.toUpperCase();
+    const optional = new RegExp(`if \\(\\$env:${env}(_INPUT)?\\) \\{`).test(validate);
+    if (!optional) continue;
+    checked += 1;
+    assert.match(
+      params,
+      new RegExp(`\\$env:${env}(_INPUT)? -ne '\\.'`),
+      `${name} is optional and defaults to ${JSON.stringify(def)}, so an empty dispatch value ` +
+        "cannot unset it; the params step must honor a '.' sentinel or the default must be empty",
+    );
+  }
+  assert.ok(checked > 0, "this guard must actually examine an input, or it is vacuous");
+});
+
+// sc-18677: the containment checks around the two operator inputs that reach the filesystem.
+// `provision_subdir` is joined onto the cache path; each `provision_patterns` entry's literal
+// head is joined onto the snapshot root by the component-presence assertion above. Both are
+// validated on the SAME condition as the steps that consume them, not on provision_snapshot
+// alone -- a five-rung-only dispatch consumes both just the same.
+test("windows-candle validates every provisioning input that reaches a path", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
     workflow,
-    /cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter/,
+    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true'\) \{/,
+    "provisioning-input validation must cover the five-rung-only path that also consumes them",
   );
-  assert.match(workflow, /console\.log\(JSON\.stringify\(a,null,2\)\)/);
-  assert.match(workflow, /'amortizable','unable_to_amortize'/);
+  assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
+  // The root sentinel. GitHub substitutes an input's `default` for any empty dispatch value, so
+  // `-f provision_subdir=` resolves to `q4`, not to "no subdir" (proved by run 31509409586).
+  // The default must stay `q4` to keep a Krea dispatch identical, so without '.' a
+  // root-resolved model like MiniMax-H3 cannot be expressed at all.
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SUBDIR -and \$env:PROVISION_SUBDIR -ne '\.'\) \{/,
+    "'.' must mean the snapshot root; an empty input cannot override a non-empty default",
+  );
+  assert.match(
+    workflow,
+    /description: "Tier\/subdirectory under the snapshot the resolve step must prove\. Use '\.' for a model whose components sit at the snapshot ROOT/,
+    "the sentinel must be documented on the input the operator actually reads",
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/,
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must be relative to the snapshot root: \$pattern"/,
+  );
+  // Containment is decided by CANONICALIZING, not by matching path segments against '..'.
+  // Segment-equality was bypassable two ways: `..*` yields head `..` while the pattern contains
+  // no `..` segment, and `.. ` survives -contains yet Win32 strips the trailing space. The
+  // GetFullPath probe kills the first class; the TrimEnd(' ', '.') segment check kills the
+  // second, which GetFullPath does NOT normalize.
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  assert.match(validate, /\$head = \(\(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]\)\.TrimEnd\('\/'\)/);
+  assert.match(validate, /if \(-not \$segment\.TrimEnd\(' ', '\.'\)\) \{/);
+  // The validate step has its own loop and its own head guard, distinct from the resolve step's.
+  // Pin BOTH, scoped: `foreach ($pattern in @($patterns[0]))` checks only the first of thirteen
+  // H3 patterns, and `if ($true) { continue }` skips every one, while every other assertion in
+  // this file keeps matching because the resolve step still spells them correctly.
+  assert.match(validate, /foreach \(\$pattern in \$patterns\) \{/);
+  assert.match(validate, /if \(-not \$head\) \{ continue \}/);
+  // Both containment guards must stay FATAL. There are two throws with this message -- the
+  // segment check and the canonical probe -- and turning either into a Write-Host leaves the
+  // string present, so presence alone is not the property worth asserting.
+  assert.equal(
+    (validate.match(/throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/g) || []).length,
+    2,
+    "both the segment check and the canonical-containment probe must throw",
+  );
+  assert.match(
+    validate,
+    /\$full\.StartsWith\(\$probe \+ '\\', \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+  // ...and the resolve step canonicalizes independently, so the proof does not rest on
+  // validation having run.
+  assert.match(
+    stepBody(workflow, "Resolve exact snapshot"),
+    /throw "declared component escapes the snapshot root: \$pattern"/,
+  );
+  // provision_cache_dir is written verbatim into $GITHUB_ENV.
+  assert.match(workflow, /throw 'provision_cache_dir must be a single line'/);
+  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path with a drive letter'/);
+  // IsPathRooted accepts `\foo` and `C:foo` -- rooted, but not absolute -- so the check would not
+  // mean what its message says. PowerShell 5.1's .NET has no IsPathFullyQualified.
+  assert.match(workflow, /\$env:PROVISION_CACHE_DIR_INPUT -notmatch '\^\[A-Za-z\]:\\\\'/);
+});
+
+// sc-18691: provisioning must be INDEPENDENT of the compile chain. It used to sit BELOW
+// `cargo test -p sceneworks-worker --features backend-candle` with no guard, so an unrelated build
+// break made landing weights on the CUDA box impossible rather than merely slow -- the fetch was
+// never reached. Epic 17137 hits that concretely at sc-17149, which must land `transformer_ref`
+// (+66.28 GB) onto a box whose resident set is already 144.051 GB.
+//
+// TWO properties, pinned by two separate tests because either alone is insufficient. ORDER without
+// SKIP still drags a weights-only run red on an unrelated break and still burns the lane's ~24m of
+// box time; SKIP without ORDER leaves a five-rung dispatch's provisioning downstream of the compile
+// chain. Both are DERIVED from the workflow's own cargo invocations rather than from a hand-written
+// step order, so a NEW compile step added above provisioning, or added unguarded, goes red.
+
+const PROVISIONING_STEPS = [
+  "Validate dispatch inputs",
+  "Resolve snapshot provisioning parameters",
+  "Validate runner Python for snapshot provisioning",
+  "Provision exact snapshot",
+  "Resolve exact snapshot",
+];
+
+const COMPILE_CHAIN_STEPS = [
+  "Fetch the pinned inference release",
+  "Test the candle GPU worker (backend-candle)",
+  "Check the candle sidecar builds (rust-api, backend-candle)",
+  "Check and test the candle memory adapter (lib + memory-candle-adapter)",
+  "Clippy (candle worker)",
+  "Verify capabilities.candle.json content against a fresh dump",
+];
+
+// The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
+// position, and keeps the `uses:`-only steps (checkout, prepare-rust-runner) that have no name at
+// all and so are invisible to `stepBody`.
+function jobSteps(workflow) {
+  const start = workflow.indexOf("\n    steps:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a steps: block");
+  const body = workflow.slice(start);
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    const named = chunk.match(/^\n      - name: (.*)$/m);
+    const used = chunk.match(/^\n      - uses: (.*)$/m);
+    steps.push({
+      name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`,
+      body: chunk,
+      // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
+      // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
+      cargo: chunk.split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+    });
+    at = next;
+  }
+  return steps;
+}
+
+// A step's body with comment lines removed. Both YAML and PowerShell comment with a leading `#`,
+// and the counts below must not be movable by editing prose -- in either direction. This file's own
+// header comments narrate `throw` and `continue-on-error` as history.
+function stepCode(workflow, name) {
+  return stepBody(workflow, name)
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("windows-candle provisions before it compiles anything", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const steps = jobSteps(workflow);
+  const indexOf = (name) => {
+    const at = steps.findIndex((step) => step.name === name);
+    assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+    return at;
+  };
+
+  const compiling = steps.map((step, at) => (step.cargo ? at : -1)).filter((at) => at >= 0);
+  // Anti-vacuity. If the derivation stops recognising cargo steps, "provisioning comes first" is
+  // trivially true and this whole test means nothing -- which is precisely how the sibling audit at
+  // the bottom of this file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    compiling.length >= COMPILE_CHAIN_STEPS.length,
+    `expected at least ${COMPILE_CHAIN_STEPS.length} cargo steps, derived ${compiling.length}`,
+  );
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.ok(steps[indexOf(name)].cargo, `${name} must still be a cargo invocation`);
+  }
+
+  const firstCompile = Math.min(...compiling);
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < firstCompile,
+      `${name} must run before the first cargo step (${steps[firstCompile].name}); a build ` +
+        "break must not be able to starve a weights dispatch",
+    );
+  }
+  // Stronger than "ahead of the compile chain": ahead of the Rust setup too. prepare-rust-runner
+  // fails loudly on a broken rustup, and a weights fetch has no business depending on toolchain
+  // discovery -- it needs the checkout and the box's Python, nothing else.
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < indexOf("uses:./.github/actions/prepare-rust-runner"),
+      `${name} must not depend on toolchain discovery either`,
+    );
+  }
+  // ...but still after the checkout, which every one of them reads (INFERENCE_PIN lives in the
+  // worktree, and an unchecked-out repo has no workflow to run).
+  assert.ok(
+    steps[0].name.startsWith("uses:actions/checkout@"),
+    "the checkout must remain the job's first step",
+  );
+});
+
+test("a weights-only dispatch skips the entire compile chain, pinned per step", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const candleWorker = workflow.slice(
+    workflow.indexOf("  candle-worker:"),
+    workflow.indexOf("  imported-nvfp4-worker-smoke:"),
+  );
+
+  // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
+  // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
+  // weaker version of it -- dropping `&& !inputs.run_five_rung_reference` would strip the compile
+  // chain off Krea's five-rung capture too, which this story's scope guard forbids, and dropping
+  // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
+  const skip =
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+
+  // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
+  // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
+  // stays green. That is not hypothetical -- it is trap 1 from sc-18677's third review round, which
+  // found three such mutations green against this same file.
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.match(stepBody(workflow, name), skip, `${name} must carry the weights-only skip guard`);
+  }
+
+  // Derived backstop, so a NEW compile step cannot appear without a decision: every cargo step is
+  // either skipped for a weights-only dispatch, or gated on the five-rung capture or the LTX Eros
+  // acceptance capture (SC-18902) -- neither of which is a weights-only dispatch, so both
+  // legitimately compile what they run.
+  for (const step of jobSteps(candleWorker).filter((candidate) => candidate.cargo)) {
+    assert.ok(
+      skip.test(step.body) ||
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
+      `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
+    );
+  }
+});
+
+// sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
+// the compile chain skipped, these five steps ARE the entire verdict of a weights-only dispatch, so
+// every failure mode they carry has to stay fatal.
+//
+// PIN THE THROW, NOT THE MESSAGE -- trap 2 from sc-18677's third review round, and it is live in
+// this file right now: "Windows Krea provisioning accepts supported newer Python 3 runtimes" above
+// asserts the string `Python 3.12 or newer`, which survives a `throw` -> `Write-Warning` downgrade
+// completely intact. Counting `throw`s is what makes a downgrade red, and the count is taken PER
+// STEP because a file-wide count is satisfied by adding a throw anywhere else.
+test("every failure mode a weights-only dispatch can hit is still fatal", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  const throwCounts = {
+    // repo-id shape, revision shape, empty allow-list, rooted pattern, the two containment guards
+    // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
+    // cache-dir absoluteness, and the three five-rung guards (inference_revision shape, the fixed
+    // Krea repository, INFERENCE_PIN agreement).
+    "Validate dispatch inputs": 13,
+    // Pure derivation: it writes GITHUB_ENV and throws nothing.
+    "Resolve snapshot provisioning parameters": 0,
+    // A non-zero `python --version`, and a minor version below 12.
+    "Validate runner Python for snapshot provisioning": 2,
+    // pip install, and the heredoc'd snapshot_download -- `@'...'@ | python -` does not propagate
+    // its exit code, so the explicit $LASTEXITCODE check is the only thing that fails the step.
+    "Provision exact snapshot": 2,
+    // Absent snapshot, canonical-suffix mismatch, escaping component, missing components. The
+    // suffix one is the dangerous downgrade: warned rather than thrown, a snapshot that does NOT
+    // match the requested repo+revision is exported as SCENEWORKS_PROVISIONED_ROOT and a per-tier
+    // VRAM measurement silently runs against the wrong weights.
+    "Resolve exact snapshot": 4,
+  };
+  for (const [name, expected] of Object.entries(throwCounts)) {
+    assert.equal(
+      (stepCode(workflow, name).match(/\bthrow /g) || []).length,
+      expected,
+      `${name} must keep exactly ${expected} fatal throw(s); a throw -> Write-Warning downgrade ` +
+        "leaves every message assertion in this file green",
+    );
+  }
+  // The Python body guards itself with a `raise`, which the count above cannot see.
+  assert.match(
+    stepCode(workflow, "Provision exact snapshot"),
+    /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/,
+  );
+
+  // Decoupling by SKIPPING is safe; decoupling by SWALLOWING is not. `continue-on-error` on any of
+  // these would let a weights-only dispatch report success with no weights on the box -- strictly
+  // worse than the coupling this story removed, because the coupling at least failed visibly.
+  for (const name of [...PROVISIONING_STEPS, ...COMPILE_CHAIN_STEPS]) {
+    assert.doesNotMatch(
+      stepCode(workflow, name),
+      /continue-on-error|always\(\)/,
+      `${name} must not degrade a failure into a warning`,
+    );
+  }
+});
+
+test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
+  // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
+  // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
+  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle$/m);
+  assert.doesNotMatch(
+    workflow,
+    /cargo test -p sceneworks-memory-adapter --features candle --bin/,
+    "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
+  );
 });
 
 // The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
@@ -163,10 +1231,53 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   assert.ok(hostedStart >= 0, "macos-checks job not found");
   assert.ok(hostedEnd > hostedStart, "nax-worker must follow macos-checks");
   const hosted = workflow.slice(hostedStart, hostedEnd);
+  // Same no-`--bin` rule as the Candle twin above (sc-18808 review). `--bin memory-mlx-adapter`
+  // silently drops the crate's lib test target; `memory-candle-adapter` still stays out on its own
+  // `required-features = ["candle"]`, so omitting the selector widens coverage without widening the
+  // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
+  assert.doesNotMatch(
+    hosted,
+    /cargo test -p sceneworks-memory-adapter --features mlx --bin/,
+    "a --bin selector drops the lib target, where the shared protocol guards live",
+  );
+});
+
+test("prebuilt MLX publishes the exact metallib path to GitHub env", async () => {
+  const script = await source("scripts/fetch-prebuilt-mlx.sh");
+  assert.match(script, /metallib_path="\$dest\/mlx\.metallib"/);
+  assert.match(script, /^  echo "PMETAL_METALLIB_PATH=\$metallib_path"$/m);
+  assert.match(script, /echo "PMETAL_METALLIB_PATH=\$metallib_path" >> "\$GITHUB_ENV"/);
+  assert.match(
+    script,
+    /\[ -f "\$metallib_path" \] \|\| \{ echo "fetch-prebuilt-mlx: \$asset did not contain mlx\.metallib at \$metallib_path"/,
+  );
+});
+
+// The third `--bin` guard (sc-18808 review), and the one that actually runs on a feature-targeted
+// PR. The two above pin CI workflows that do NOT: windows-candle.yml has no `pull_request` trigger
+// for these branches, so `check.yml`'s hosted `candle` job — which is just
+// `scripts/check-candle-build.mjs` — is the ONLY candle-configured compiler a PR here reaches.
+// `cargo check --bin` does not compile `#[cfg(test)]`, so under the narrow selector the crate's
+// candle test module was not typechecked in any PR-reachable lane at all: a test that failed to
+// compile merged green and first broke on the self-hosted `cuda` pool ~24m later.
+test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not just its bin", async () => {
+  const script = await source("scripts/check-candle-build.mjs");
+  assert.match(
+    script,
+    /\["check", "-p", "sceneworks-memory-adapter", "--features", "candle", "--all-targets"\]/,
+  );
+  assert.doesNotMatch(
+    script,
+    /"--bin",\s*\n?\s*"memory-candle-adapter"/,
+    "`cargo check --bin` skips #[cfg(test)] — the candle test module would go untypechecked on PRs",
+  );
+  // And this script is genuinely the lane that runs: check.yml must still call it.
+  assert.match(await source(".github/workflows/check.yml"), /run: npm run rust:check:candle$/m);
+  assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
@@ -234,6 +1345,62 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("Rust Docker builders copy every production generated embed from sceneworks-core", async () => {
+  const coreSources = await Promise.all(
+    ["memory_calibration.rs", "video_memory_curves.rs", "memory_anchor.rs"].map(
+      (file) => source(`crates/sceneworks-core/src/${file}`),
+    ),
+  );
+  const generatedEmbeds = new Set(
+    [
+      ...coreSources
+        .join("\n")
+        // sc-22738: `\s*` around the literal, because rustfmt wraps the argument onto its own line
+        // once the path pushes the call past `max_width`. Anchored to `("` this test went blind to
+        // exactly the long-named campaign corpora, and stopped requiring their Docker COPY lines.
+        .matchAll(
+          /include_str!\(\s*"\.\.\/\.\.\/\.\.\/(docs\/(?:generated|calibration)\/[^"\n]+)"\s*\)/g,
+        ),
+    ].map((match) => match[1]),
+  );
+  assert(generatedEmbeds.has("docs/generated/memory-calibration-evidence.json"));
+  assert(generatedEmbeds.has("docs/generated/video-memory-curves.json"));
+  assert(
+    [...generatedEmbeds].some((path) => path.startsWith("docs/generated/ltx-mlx-")),
+    "the promoted video-memory curve must compile at least one immutable LTX evidence source",
+  );
+  assert(
+    generatedEmbeds.has("docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
+    "the memory-anchor store must compile its retained LTX-2.5 evidence source (sc-22507)",
+  );
+  assert(
+    generatedEmbeds.has(
+      "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
+    ),
+    "an embed whose argument rustfmt wrapped onto its own line must still be seen (sc-22738)",
+  );
+
+  const dockerfile = await source("docker/rust.Dockerfile");
+  for (const path of generatedEmbeds) {
+    const directory = path.slice(0, path.lastIndexOf("/") + 1);
+    // sc-22738: a calibration campaign is carried as ONE directory COPY per stage, not one line per
+    // corpus. The per-corpus form grew a layer per ingested anchor and took the `builder` stage to
+    // 141 instructions — past Docker's overlay limit, so `parity-docker` died with `max depth
+    // exceeded` while preparing the build. `docs/generated/` stays per-file: that directory also
+    // holds the churning `memory-matrix.json`, which would invalidate the layer on unrelated edits.
+    const copy = path.startsWith("docs/generated/ltx-mlx-")
+      ? "COPY docs/generated/ltx-mlx-*.json ./docs/generated/"
+      : path.startsWith("docs/calibration/")
+        ? `COPY ${directory} ./${directory}`
+        : `COPY ${path} ./${directory}`;
+    assert.equal(
+      dockerfile.split(copy).length - 1,
+      2,
+      `${path} must be present in both the ordinary and Candle Rust builder contexts`,
+    );
+  }
+});
+
 test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
   const matrix = await source(
@@ -287,6 +1454,48 @@ test("all three manifest scripts import the shared JSONC parser", async () => {
     const script = await source(scriptPath);
     assert.match(script, /import \{ stripJsoncComments \} from "\.\/lib\/jsonc\.mjs";/);
     assert.doesNotMatch(script, /function stripJsoncComments/);
+  }
+});
+
+// sc-18854. The download-pattern gate is split into a networked RECORDER (`--write`, writes
+// config/download-pattern-evidence.json) and a hermetic GATE (`--check`, grades the committed
+// listings offline). The offline gate remains available by name after the sc-19758 gate teardown;
+// wiring the live/recording mode into any workflow would put huggingface.co on a required context,
+// which is exactly what the split exists to prevent. Two GitHub-runner TLS flakes on outbound
+// downloads were observed the day this landed.
+//
+// The negative assertion is the load-bearing half: nothing stops a future change from
+// "simplifying" the offline gate back into the live one.
+test("the offline download-pattern gate remains callable and its networked modes stay out of every workflow", async () => {
+  const pkg = JSON.parse(await source("package.json"));
+  assert.match(pkg.scripts["check:download-patterns:offline"], /check-download-patterns\.mjs --self-test/);
+  assert.match(pkg.scripts["check:download-patterns:offline"], /check-download-patterns\.mjs --check/);
+  // The gate is only as good as its evidence, so the recorder must stay reachable by name.
+  assert.match(pkg.scripts["record:download-patterns"], /check-download-patterns\.mjs --write/);
+
+  const dir = new URL("../.github/workflows/", import.meta.url);
+  const workflows = (await readdir(dir)).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(workflows.length >= 10, `expected the workflow dir to be populated, got ${workflows.length}`);
+  for (const name of workflows) {
+    const text = await source(`.github/workflows/${name}`);
+    // A bare script invocation not immediately followed by --check/--self-test would be the
+    // live (networked) mode.
+    assert.doesNotMatch(
+      text,
+      /check-download-patterns\.mjs(?!\s+--(?:check|self-test))/,
+      `${name} must not invoke the live download-pattern check`,
+    );
+    // ...and the same via the npm aliases. `check:download-patterns:offline` is permitted.
+    assert.doesNotMatch(
+      text,
+      /check:download-patterns(?!:offline)/,
+      `${name} must not run the live check:download-patterns alias`,
+    );
+    assert.doesNotMatch(
+      text,
+      /record:download-patterns/,
+      `${name} must not run the download-pattern recorder`,
+    );
   }
 });
 
@@ -409,11 +1618,9 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   // keeps its `|| github.token` fallback.
   assert.doesNotMatch(workflow, /x-access-token:/);
   assert.doesNotMatch(workflow, /GIT_CONFIG_(?:COUNT|KEY_0|VALUE_0)/);
-  assert.match(workflow, /--backend mlx/);
-  assert.match(workflow, /QWEN_SEED=15511/);
-  assert.match(workflow, /QWEN_SEED=16353/);
-  assert.match(workflow, /--fixture "qwen-image-\$\{QWEN_TIER\}-seed\$\{QWEN_SEED\}-step2"/);
-  assert.match(workflow, /--fresh-per-case/);
+  // sc-22514: the anchor key carries the backend and the tier; there is no fixture or seed to
+  // template, and no per-case scheduling flag, because a capture is one anchor.
+  assert.match(workflow, /--anchor "qwen_image:\$\{QWEN_TIER\}:mlx"/);
   assert.match(workflow, /hash-artifact-inventory\.mjs/);
   assert.match(workflow, /--raw-log-dir "\$SCENEWORKS_MEMORY_CAPTURE_DIR"/);
   assert.match(workflow, /--source-path-prefix "\$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX"/);
@@ -427,10 +1634,11 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /memory-calibration-harness\.mjs check/,
   );
-  assert.match(
-    workflow,
-    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
-  );
+  // Pinned to the SHAPE, not to a review-time SHA. scripts/lib/action-pins.mjs is the authority on
+  // this and says so outright: the control is that the reference resolves to an immutable 40-hex
+  // commit, and Dependabot rewrites the SHA in place, so freezing the value here only means every
+  // automated bump reddens a test that has nothing to do with what it is checking.
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(
     workflow,
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration \}\}/,
@@ -449,10 +1657,15 @@ test("MLX calibration probe derives the production wired ceiling without guessin
     /u64::try_from\(mlx_default_memory_limit\)[\s\S]*?\/ 3[\s\S]*?\* 2/,
   );
   assert.match(adapter, /source: "mlx_default_memory_limit\/1\.5"/);
-  const probe = adapter.slice(
-    adapter.indexOf("fn probe()"),
-    adapter.indexOf("#[cfg(test)]"),
-  );
+  // Bind the window to the production `fn probe()` body: from its signature to the FIRST
+  // `#[cfg(test)]` that FOLLOWS it. Anchoring the end at the file's first `#[cfg(test)]` was wrong
+  // — sc-22735 put a test-only const above `probe`, which made the end index precede the start and
+  // silently produced an EMPTY window (an empty window fails this count, it does not pass it).
+  const probeStart = adapter.indexOf("fn probe()");
+  assert.notEqual(probeStart, -1, "mlx.rs must still declare `fn probe()`");
+  const probeEnd = adapter.indexOf("#[cfg(test)]", probeStart);
+  assert.notEqual(probeEnd, -1);
+  const probe = adapter.slice(probeStart, probeEnd);
   assert.equal(probe.match(/get_memory_limit\(\)/g)?.length, 1);
   assert.match(
     probe,
@@ -477,6 +1690,10 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   const candleReference = candle.slice(
     candle.indexOf("fn run_five_rung_reference("),
     candle.indexOf("fn run(request:"),
+  );
+  const candleLtx25 = candle.slice(
+    candle.indexOf("fn run_ltx25_capture("),
+    candle.indexOf("const FIVE_RUNG_FIXTURE_PREFIX"),
   );
 
   assert.match(
@@ -510,7 +1727,102 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  // Every gated fragment the Candle adapter emits must come from a protocol builder that settles the
+  // overlay scenario against the DECLARED target — `plain_gated_fragment` for an overlay-free path,
+  // `overlay_gated_fragment` for one that actually loaded an overlay (sc-22728's Qwen edit Lightning
+  // distill). A whole-file COUNT is the wrong claim in both directions: a frozen `3` breaks on every
+  // new arm, and a `>= 1` per builder stops noticing one specific arm's builder call being dropped.
+  // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
+  // builder in its OWN body.
+  const candleFunctions = new Map();
+  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
+    const start = match.index;
+    const next = candle.indexOf("\nfn ", start + 1);
+    candleFunctions.set(
+      match[1],
+      candle.slice(start, next === -1 ? candle.length : next),
+    );
+  }
+  const gatedEmitters = [...candleFunctions].filter(([, body]) =>
+    body.includes("protocol::PlainGatedFragment {"),
+  );
+  assert.ok(
+    gatedEmitters.length >= 4,
+    `expected every gated-fragment arm to be discovered, found ${gatedEmitters.length}`,
+  );
+  for (const [name, body] of gatedEmitters) {
+    assert.ok(
+      /protocol::(plain|overlay)_gated_fragment\(/.test(body),
+      `${name} assembles a gated fragment but never reaches an overlay-settling builder`,
+    );
+  }
+  // sc-22728's Qwen edit arm is the only one that emits BOTH shapes — the plain member and the
+  // Lightning member — so each of its two builder calls is named rather than counted.
+  const qwenEdit = candleFunctions.get("run_qwen_edit");
+  assert.ok(qwenEdit, "run_qwen_edit must exist on the Candle adapter");
+  assert.match(qwenEdit, /protocol::overlay_gated_fragment\(/);
+  assert.match(qwenEdit, /protocol::plain_gated_fragment\(/);
+  // And the Lightning branch is selected from the stack the LOAD carried, never from the arm flag,
+  // so a record can never claim an overlay the load did not fold in.
+  assert.match(qwenEdit, /let loaded_adapters = adapters\.len\(\);/);
+  assert.match(
+    qwenEdit,
+    /let mut fragment = if loaded_adapters > 0 \{\s*protocol::overlay_gated_fragment\(/,
+  );
+  assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
+  // The MLX twin publishes the same claims off its own loaded stack.
+  const mlxQwenEdit = mlx.slice(
+    mlx.indexOf("fn run_qwen_edit_provider("),
+    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
+  );
+  assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
+  assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
+  assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
+  // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
+  // `not_run`. Bespoke arms build their fragment by hand for a real reason — InstantID's measured
+  // identity ladder, sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
+  // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
+  // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
+  // is checked, not the spelling: PuLID writes the verdict into the object it builds, SenseNova
+  // hands the finished fragment to `settle_plain_overlay_scenario`. An arm that does neither leaves
+  // `overlay` at `not_run`, which is the failure this gate exists for.
+  const handRolled = [...candleFunctions]
+    .filter(([, body]) => /"status":\s*"gated"/.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(
+    handRolled.sort(),
+    ["instantid_measured_fragment", "run_pulid_flux_capture", "run_sensenova_capture"],
+    "a hand-rolled gated fragment bypasses the overlay-settling builders",
+  );
+  for (const name of handRolled) {
+    const body = candleFunctions.get(name);
+    assert.ok(
+      /\{ "name": "overlay", "result": "(passed|failed)"/.test(body) ||
+        /protocol::settle_plain_overlay_scenario\(/.test(body),
+      `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
+    );
+  }
+  assert.match(candleFunctions.get("validate_instantid_candle_target"),
+    /validate_exact_overlay_target\(request, "identity", INSTANTID_EXECUTION_PATH\)/);
+  const instantid = candleFunctions.get("run_instantid_candle");
+  assert.ok(instantid.indexOf("validate_instantid_candle_target(request)?") <
+    instantid.indexOf("instantid_candle_binding(tier)?"));
+  assert.match(
+    candle,
+    /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,
+  );
+  assert.match(
+    candleLtx25,
+    /validate_plain_overlay_target\(request, LTX25_EXECUTION_PATH\)\?/,
+  );
+  assert.ok(
+    candleLtx25.indexOf("validate_plain_overlay_target") <
+      candleLtx25.indexOf("runtime_cuda::catalog()"),
+    "LTX-2.5 must reject a mismatched overlay before provider work",
+  );
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
 });
 
@@ -585,46 +1897,46 @@ test("Z-Image cleanup attestation bounds retained bytes and recovery peaks again
   }
 });
 
-test("the Rust gate verifies the generated docs derived from Rust sources", async () => {
-  // sc-16268: `check:memory-matrix` and `check:tier-integrity` both read Rust sources, but lived
-  // only in `npm run check` — so a Rust-only change passed the gate contributors are told to run and
-  // failed `parity` in CI. The fix is one string in `rust:check`, which is exactly the kind of
-  // wiring a later edit silently undoes; this pins it. (sc-18100 removed the third member,
-  // `check:calibration-cost-model`, along with its generator and artifacts.)
+test("the Rust gate verifies tier integrity without gating the epic-end memory matrix", async () => {
+  // `check:memory-matrix` remains an explicit command for epic-end measurement reconciliation. It
+  // must not ride `rust:check`: an inference pin bump otherwise invalidates historical provenance
+  // and fails every ordinary PR until somebody performs a provenance-only artifact restamp.
   const scripts = JSON.parse(await source("package.json")).scripts;
-  for (const sub of [
-    "check:memory-matrix",
-    "check:tier-integrity",
-  ]) {
-    assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
-  }
+  assert.equal(scripts["check:rust-derived-docs"], "npm run check:tier-integrity");
+  assert.doesNotMatch(scripts["check:rust-derived-docs"], /check:memory-matrix/);
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
-  // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
 
-test("the pre-push derived-docs trigger covers every non-Rust source the matrix is hashed from", async () => {
-  // sc-18098. `check:rust-derived-docs` catches a stale matrix in under a second; the pre-push hook
-  // only runs it when the pushed diff LOOKS like it touched an input. Its Rust/Cargo arm covers the
-  // `.rs` and `Cargo.toml` entries of `generate-memory-matrix.mjs#SOURCE_PATHS`; this arm has to
-  // cover the rest, and two of them — the closure table and the rung-4 survey — were missing, so a
-  // pin bump that re-derived one lane's closure digest pushed clean and heard about the stale matrix
-  // from `parity` fifteen minutes later.
-  //
-  // Derived from SOURCE_PATHS rather than restated, so a NEW hashed source is covered or this reds
-  // (the epic-18093 slices are actively adding and removing them).
+test("the pre-push derived-docs trigger is scoped to tier integrity, not memory evidence", async () => {
   const hook = await source("scripts/git-hooks/pre-push");
   const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
   assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
   const trigger = new RegExp(pattern);
-  const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
-  for (const relative of Object.values(SOURCE_PATHS)) {
-    if (rustArm.test(relative)) continue;
-    assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
+  for (const relative of [
+    "config/manifests/builtin.models.jsonc",
+    "config/tier-integrity.jsonc",
+    "packages/schemas/tier-integrity.schema.json",
+    "scripts/check-tier-integrity.mjs",
+    "scripts/tier-integrity-measurement-receipts.mjs",
+    "scripts/lib/jsonc.mjs",
+    "docs/generated/tier-integrity.json",
+    "docs/generated/tier-integrity.md",
+  ]) {
+    assert.ok(trigger.test(relative), `${relative} must trigger the tier-integrity check`);
   }
-  // The pattern is anchored, not a substring sweep: a same-named file elsewhere must not fire it.
-  assert.equal(trigger.test("vendor/config/inference-provider-closures.json"), false);
+  for (const epicEndArtifact of [
+    "config/inference-provider-closures.json",
+    "config/rung4-contract-prerequisites.json",
+    "docs/generated/memory-matrix.json",
+    "docs/generated/memory-calibration-evidence.json",
+  ]) {
+    assert.equal(
+      trigger.test(epicEndArtifact),
+      false,
+      `${epicEndArtifact} must not wire the memory-matrix freshness gate back into pre-push`,
+    );
+  }
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
@@ -741,7 +2053,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their complete capability dump, then publish only its evidence", async () => {
+test("both stage-1 lanes verify native capability content last among coverage, reachably, and publish only its evidence", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -755,7 +2067,7 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
   ];
   for (const [path, file] of lanes) {
     const lane = await source(path);
-    const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
+    const verifyAt = lane.indexOf(`- name: Verify ${file} content against a fresh dump`);
     assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
     if (path.endsWith("macos-mlx.yml")) {
       const hostedAt = lane.indexOf("\n  macos-checks:");
@@ -770,15 +2082,16 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
         "the NAX-only job must not duplicate the hosted MLX facts producer",
       );
     }
-    // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
-    // comparison vacuous and mutate the tree on a red run.
+    // Re-dump to a SCRATCH dir and compare all capability content while deliberately allowing the
+    // two valid inference revision labels to differ. Pin-only label drift is not capability drift
+    // (e14171984); every other field remains part of the native comparison.
     assert.match(lane, /bin dump-engine-capabilities/, path);
+    assert.match(lane, /node scripts[\\/]compare-engine-capability-facts\.mjs/, path);
 
-    // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
-    // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
-    // each lane uniquely carries (macOS: the hosted full workspace suite; Windows: the only PR run of
-    // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
-    // unrelated verdicts.
+    // LAST on the PR path. A step failure aborts the job, so a real native capability mismatch placed
+    // earlier would cancel the coverage each lane uniquely carries (macOS: the hosted full workspace
+    // suite; Windows: the only PR run of `cargo test -p sceneworks-worker --features backend-candle`).
+    // A missing dump must not suppress unrelated verdicts.
     //
     // "Last" means last among steps that RUN in the same job on a pull request. The Mac workflow has
     // a later, separate NAX job; bounding this scan at the next job key keeps its M5-only steps out.
@@ -788,7 +2101,18 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
     const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
     for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
-      if (/^name: Upload fresh (?:MLX|Candle) capability facts/m.test(block)) {
+      // The Candle lane publishes its fresh dump ONLY when verification failed, so the upload is
+      // diagnostic evidence for a red run rather than a per-PR measurement publication.
+      const candleFailureArtifact =
+        path === ".github/workflows/windows-candle.yml" &&
+        block.startsWith(
+          "name: Upload fresh Candle capability facts after a verification failure",
+        ) &&
+        /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
+          block,
+        );
+      if (candleFailureArtifact) continue;
+      if (/^name: Upload fresh MLX capability facts/m.test(block)) {
         assert.match(block, /if: \$\{\{ always\(\) \}\}/);
         assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
         assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
@@ -804,13 +2128,13 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     }
 
     // The rich runtime descriptor artifact is part of the same native evidence contract. It must
-    // be generated by the one matching-platform producer and byte-diffed beside the legacy preview
-    // projection; hashing a narrow supportsPreview file is not descriptor drift protection.
+    // be generated by the one matching-platform producer and content-compared beside the legacy
+    // preview projection; hashing a narrow supportsPreview file is not descriptor drift protection.
     assert.match(lane, /runtime[\\/]capabilities\.(?:mlx|candle)\.json/);
     assert.match(lane, /backend-capability-facts-(?:mlx|candle)/);
 
-    // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
-    // not run at all on the one PR the step exists to catch — declared but unreachable, the same
+    // Reachability. A facts edit can touch ONLY the facts file, so without this path entry the lane
+    // does not run at all on the PR the step exists to catch — declared but unreachable, the same
     // trap sc-17026 was about.
     //
     // Pinned to THIS lane's own file, not `config/engine-capabilities/**` (sc-17665). The directory
@@ -864,7 +2188,7 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     const own = `config/engine-capabilities/${file}`;
     assert.ok(
       declared.some((glob) => matches(glob, own)),
-      `${path} must watch ${own}, or a restamp of it — which touches nothing else — never ` +
+      `${path} must watch ${own}, or a content edit to it — which touches nothing else — never ` +
         "triggers the lane and the verification step is declared but unreachable.",
     );
     for (const [, otherFile] of lanes) {
@@ -880,6 +2204,50 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
       );
     }
   }
+});
+
+// Kept as its own test rather than folded into the `candleFailureArtifact` carve-out above, which was
+// raised as possible duplication. It is not: that carve-out is a `continue` GUARD, so it can only ever
+// weaken the ordering rule, never assert anything. Three claims below have nowhere else to live —
+//
+//   * the upload step EXISTS. Delete it and the guard simply stops matching, the ordering loop finds no
+//     such block, and every assertion up there still passes. The failure-only upload would be gone with
+//     nothing red.
+//   * the VERIFY step declares `id: verify_candle_capabilities`. Without the id,
+//     `steps.verify_candle_capabilities.outcome` resolves to nothing, the condition is false on every
+//     run, and the upload never fires — while the guard's literal text match keeps passing.
+//   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
+//     enumerated two-file spelling that silently produced an unusable artifact.
+//
+// The `if:` expression is deliberately spelled in both places: up there it is the condition under which
+// the carve-out is legitimate, here it is the failure-only guarantee itself.
+test("Windows preserves fresh capability facts when content verification fails", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const verifyAt = workflow.indexOf(
+    "- name: Verify capabilities.candle.json content against a fresh dump",
+  );
+  const uploadAt = workflow.indexOf(
+    "- name: Upload fresh Candle capability facts after a verification failure",
+  );
+  assert.ok(verifyAt > 0 && uploadAt > verifyAt);
+  const tail = workflow.slice(verifyAt, uploadAt + 1000);
+  assert.match(tail, /id: verify_candle_capabilities/);
+  assert.match(
+    tail,
+    /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
+  );
+  // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
+  assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
+  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
+  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
+  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
+  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
+  // enumerated two-file spelling this used to assert predates that third file, so an artifact
+  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // the artifact name the repair instructions actually tell you to download.
+  assert.match(tail, /name: backend-capability-facts-candle/);
+  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
+  assert.match(tail, /if-no-files-found: warn/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {
@@ -958,13 +2326,14 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       // sibling lane" is never the reason (rule 2; sc-17592 is the scar).
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
-        "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
-        "config/engine-capabilities/runtime/capabilities.candle.json", // same step diffs rich descriptor + worker facts
+        "config/engine-capabilities/capabilities.candle.json", // the native verification step compares it
+        "config/engine-capabilities/runtime/capabilities.candle.json", // same step compares rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
+        "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
@@ -977,13 +2346,15 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       path: ".github/workflows/macos-mlx.yml",
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
-        "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
-        "config/engine-capabilities/runtime/capabilities.mlx.json", // same step diffs rich descriptor + worker facts
+        "config/engine-capabilities/capabilities.mlx.json", // the native verification step compares it
+        "config/engine-capabilities/runtime/capabilities.mlx.json", // same step compares rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
+        "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "scripts/fetch-prebuilt-mlx.sh", // both jobs run it to fetch the prebuilt libmlx (sc-21382)
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
         "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
@@ -998,12 +2369,23 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
     // dispatch-only calibration build that reaches a member is not PR coverage of it, so
     // drop every step block gated on workflow_dispatch before scanning (same step-splitting
     // idiom as the capability-dump ordering check above).
-    const prSteps = lane
-      .split(/\n {6}- (?=name: |uses: )/)
-      .filter(
-        (block) => !/if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/.test(block),
-      )
-      .join("\n");
+    //
+    // POLARITY MATTERS, and it did not used to (sc-18691). This filter was a bare substring test
+    // for `github.event_name == 'workflow_dispatch'` inside the step's `if:`. sc-18691 added the
+    // opposite polarity to windows-candle.yml -- `!(github.event_name == 'workflow_dispatch' &&
+    // inputs.provision_snapshot && !inputs.run_five_rung_reference)`, which skips the compile chain
+    // for a weights-only dispatch and therefore RUNS on every PR and push. The substring test read
+    // those two forms as identical, dropped all six compile steps, and left this audit with zero
+    // cargo invocations to reason about -- it survived only because of the `invocations.length > 0`
+    // assertion below, which is exactly the vacuity backstop that case is for. Strip negated groups
+    // before looking for the positive requirement, so "requires a dispatch" means what it says.
+    const requiresDispatch = (block) => {
+      const gate = block.match(/^\s*if: ([^\n]*)$/m);
+      if (!gate) return false;
+      return /github\.event_name == 'workflow_dispatch'/.test(gate[1].replace(/!\([^)]*\)/g, ""));
+    };
+    const blocks = lane.split(/\n {6}- (?=name: |uses: )/);
+    const prSteps = blocks.filter((block) => !requiresDispatch(block)).join("\n");
     // Strip comment lines, then re-join backslash line continuations so a `-p <pkg>` split
     // across lines cannot degrade into a "package-less" invocation (which the rule below
     // would over-widen into the whole default-member set).
@@ -1433,6 +2815,26 @@ function assertFeaturePullRequestCoverage(workflow, context) {
   );
 }
 
+function assertWindowsResolvedCacheRuntimeCoverage(workflow, context) {
+  const lines = workflow.split("\n");
+  const buildStart = lines.findIndex((line) => line === "  build-windows:");
+  assert.ok(buildStart >= 0, `${context}: build-windows job must be present`);
+  const nextJob = lines
+    .slice(buildStart + 1)
+    .findIndex((line) => /^  [A-Za-z0-9_-]+:\s*$/.test(line));
+  assert.ok(nextJob >= 0, `${context}: build-windows job must have a following job boundary`);
+  const requiredBuild = lines
+    .slice(buildStart, buildStart + 1 + nextJob)
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assert.match(
+    requiredBuild,
+    /^ {8}run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"$/m,
+    `${context}: required build-windows must execute both the durable-store and native ` +
+      "materialization safety suites, not only compile or select one half",
+  );
+}
+
 test("every required workflow reports on feature-target pull requests", async () => {
   for (const path of REQUIRED_WORKFLOWS) {
     assertFeaturePullRequestCoverage(await source(path), path);
@@ -1616,6 +3018,37 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
     "build-windows is the required check; it must actually run on the speculative merge rather " +
       "than skip into a free Success.",
   );
+  assertWindowsResolvedCacheRuntimeCoverage(desktop, ".github/workflows/desktop-windows.yml");
+});
+
+test("Windows resolved-cache coverage rejects either narrowed test module", async () => {
+  const workflow = await source(".github/workflows/desktop-windows.yml");
+  for (const narrowed of [
+    "model_artifacts::resolved_cache::tests::",
+    "model_artifacts::resolved_cache::materialization::tests::",
+  ]) {
+    const mutated = workflow.replace("model_artifacts::resolved_cache:: --", `${narrowed} --`);
+    assert.notEqual(mutated, workflow, "the workflow mutation must replace the widened filter");
+    assert.throws(
+      () => assertWindowsResolvedCacheRuntimeCoverage(mutated, `${narrowed} mutation`),
+      /execute both the durable-store and native materialization safety suites/,
+    );
+  }
+
+  const decoy = workflow
+    .replace(
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache::tests:: -- --test-threads=1"\n' +
+        '        # run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+    )
+    .replace(
+      "\n  package-windows:",
+      '\n  decoy-resolved-cache:\n    steps:\n      - run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"\n\n  package-windows:',
+    );
+  assert.throws(
+    () => assertWindowsResolvedCacheRuntimeCoverage(decoy, "comment and sibling decoy mutation"),
+    /execute both the durable-store and native materialization safety suites/,
+  );
 });
 
 test("windows-candle stays out of the queue and out of the required set", async () => {
@@ -1762,26 +3195,1691 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
   );
 });
 
-test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
+// sc-18808 review. The MLX LTX arm hand-copies four `limits.*` values out of
+// config/manifests/builtin.models.jsonc — LTX_RESOLUTIONS, LTX_DURATIONS_SECONDS, LTX_FPS and
+// LTX_DIMENSION_MULTIPLE — and DERIVES its accepted frame envelope `[97, 449]` from the durations x
+// fps cross product. The derivation was the point: the envelope is not written down. But nothing
+// bound the four inputs, so a limits edit in the manifest would leave the derived envelope stale and
+// silently change what a real-weight video capture admits, with no test anywhere going red.
+//
+// The adapter crate deliberately carries two dependencies (serde_json + sha2) and cannot take
+// sceneworks-core's bundled SQLite / image codecs just to reach `strip_jsonc_comments`, so the
+// binding lives here, where the manifest reader already exists and `npm run check` runs it on every
+// PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
+// not silently pass with nothing to check.
+// sc-22727 review: the Candle FLUX.2 arm decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize`. The worker takes that decision from the manifest —
+// `is_dense_te_tier` is `mlx.denseTextEncoderTier: true`, and `candle_quant_for_resolved_tier`
+// then returns `(None, resolved_bits)` — so the flag must be that declaration's negation for every
+// member. The Rust binding of the arm table to the manifest lives in a `#[test]` inside
+// `candle.rs`, which cannot RUN on a Mac (the binary is `compile_error!` on macOS and
+// `rust:check:candle` only typechecks), so the same binding is parsed out of the source text here,
+// where it runs and can be mutation-killed on the host that writes the arm.
+test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's denseTextEncoderTier", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const arms = [...adapter.matchAll(/const FLUX2_[A-Z_]+_ARM: Flux2Arm = Flux2Arm \{([\s\S]*?)\n\};/g)]
+    .map(([, body]) => ({
+      modelId: /\bmodel_id: "([^"]+)"/.exec(body)?.[1],
+      quantReachesLoader: /\btier_quant_reaches_the_loader: (true|false)/.exec(body)?.[1],
+    }));
+  assert.deepEqual(
+    arms.map((arm) => arm.modelId),
+    ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"],
+    "the three FLUX.2 members, in table order",
+  );
+  for (const arm of arms) {
+    assert.ok(arm.quantReachesLoader, `${arm.modelId} must declare tier_quant_reaches_the_loader`);
+    const entry = manifest.models.find((model) => model.id === arm.modelId);
+    assert.ok(entry, `${arm.modelId} must be a shipped model`);
+    const denseTe = entry.mlx?.denseTextEncoderTier === true;
+    assert.equal(
+      arm.quantReachesLoader === "true",
+      !denseTe,
+      `${arm.modelId}: the worker loads a dense-TE tier with Quant::None, so the fold must be off`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(arms.map((arm) => arm.quantReachesLoader), ["true", "false", "false"]);
+});
+
+// sc-22732: the Candle turnkey still family decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize` (`TURNKEY_CANDLE_MEMBERS`). Three members mirror the worker's
+// `candle_quant_for_resolved_tier` — they are not carved out and declare no
+// `mlx.denseTextEncoderTier`, so the worker forwards `Some(Q4)`/`Some(Q8)`; the two Ideogram routes
+// are the exception for an ENGINE reason, not a manifest one: `candle-gen-ideogram`'s exact directory
+// route refuses `quantize: Some(_)` and proves the tier off the packed safetensors headers. The Rust
+// binding lives in a `#[test]` inside `candle.rs`, which cannot RUN on a Mac, so the same table is
+// parsed out of the source text here, where it runs and can be mutation-killed on the host that
+// writes the arm.
+//
+// sc-22732 review item 6: the two sides DISAGREED. The adapter table said the Ideogram quant must
+// not reach the loader, while `candle_quant_for_resolved_tier` did not carve the two routes out —
+// their descriptor advertises `supported_quants: [Q4, Q8]`, so production sent `Some(Q4)` into
+// `validate_load_shape` and every candle Ideogram q4/q8 load failed at the loader. The worker now
+// carves them out beside the Chroma/SD3.5/FLUX.1 turnkeys, and the two copies are read against each
+// other below, because that is the seam that let them drift.
+test("the Candle turnkey member table folds the tier quant per member, and never for Ideogram", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 5\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
+  const consts = new Map(
+    [...adapter.matchAll(/\bconst ([A-Z_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
+  );
+  const members = [...table[1].matchAll(/provider_id: ([A-Z_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
+    .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
+  assert.deepEqual(
+    members.map((member) => member.providerId),
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"],
+    "the five turnkey members, in table order",
+  );
+  for (const member of members) {
+    const entry = manifest.models.find((model) => model.id === member.providerId);
+    assert.ok(entry, `${member.providerId} must be a shipped model`);
+    assert.notEqual(
+      entry.mlx?.denseTextEncoderTier,
+      true,
+      `${member.providerId}: a dense-TE declaration would change the worker's fold; none is declared`,
+    );
+    const ideogram = member.providerId.startsWith("ideogram_4");
+    assert.equal(
+      member.flag === "true",
+      !ideogram,
+      `${member.providerId}: only the Ideogram routes keep the quant off the loader`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
+
+  // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
+  // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
+  // every assertion above green while each Ideogram capture died inside the engine's
+  // `validate_load_shape`. `candle.rs#the_turnkey_candle_spec_binds_the_tier_quant_per_member` now
+  // builds the spec and reads `quantize` back, but that binary is `compile_error!` on macOS and its
+  // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
+  // where it runs on the host that writes the arm and the mutation is killable before a push.
+  const foldArm =
+    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, Some\(quant\)\) => \{([\s\S]*?)\n        \}/
+      .exec(adapter);
+  assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
+  assert.match(
+    foldArm[1],
+    /turnkey_candle_member\(provider_id\)[\s\S]*\.tier_quant_reaches_the_loader[\s\S]*spec\.with_quant\(quant\)[\s\S]*else[\s\S]*spec/,
+    "the turnkey fold must be GATED on the member's tier_quant_reaches_the_loader, not unconditional",
+  );
+  // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
+  assert.match(
+    adapter,
+    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, None\) => spec,/,
+    "the dense turnkey tier must bind no quant",
+  );
+  // The spec builder must be the pure function the Rust test can call — if the fold moves back
+  // inside the loader, that test stops covering the shipped path and this says so.
+  assert.match(
+    adapter,
+    /fn five_rung_load_spec\(\n\s+request: &Value,\n\s+provider_id: &str,\n\s+tier: &str,\n\s+root: PathBuf,\n\) -> Result<LoadSpec, String> \{/,
+    "the five-rung LoadSpec must stay a pure function so its shape is directly assertable",
+  );
+  assert.match(
+    adapter,
+    /let spec = five_rung_load_spec\(request, provider_id, tier, root\)\?;/,
+    "load_five_rung_generator must hand the loader exactly that spec",
+  );
+
+  // sc-22732 review item 6. The adapter's per-member flag claims what PRODUCTION does; the worker is
+  // where production actually decides. Read the worker's carve-out and require it to answer the same
+  // way for every one of the five members, so neither copy can be edited alone. The Rust guard
+  // (`packed_turnkeys_keep_load_quantization_none_for_every_public_route`) is cfg'd to a non-macOS
+  // candle build and cannot run on the host that writes either file.
+  const worker = await source("crates/sceneworks-worker/src/image_jobs/base.rs");
+  const carveOut =
+    /\/\/ Keep the load instruction empty while retaining the resolved artifact bits for the recipe\n[\s\S]*?if matches!\(\n\s+request\.model\.as_str\(\),\n([\s\S]*?)\n\s+\) \{\n\s+return \(None, resolved_bits\);/
+      .exec(worker);
+  assert.ok(carveOut, "image_jobs/base.rs must still carve packed turnkeys out of the quant fold");
+  const carved = new Set([...carveOut[1].matchAll(/"([a-z0-9_]+)"/g)].map(([, id]) => id));
+  assert.ok(carved.has("chroma1_hd"), "the parsed carve-out is the packed-turnkey list");
+  for (const member of members) {
+    assert.equal(
+      carved.has(member.providerId),
+      member.flag === "false",
+      `${member.providerId}: the worker carve-out and TURNKEY_CANDLE_MEMBERS.tier_quant_reaches_the_loader disagree about whether LoadSpec::quantize reaches the loader`,
+    );
+  }
+});
+
+// sc-22732 review item 5: both identity tables bind `tier` as a FREE VARIABLE inside their
+// per-member arms, so before these guards `("kolors", "q2")` minted
+// `kolors-candle-kolors-q2-staged-chatglm-unet-f32-vae-v1` — a well-formed identity no engine
+// publishes — and the plan check then compared a row against it instead of refusing the coordinate.
+// The Rust tests that exercise the functions cannot run here (`candle.rs` is `compile_error!` on
+// macOS; `mlx.rs` needs the Metal runtime), so the guard is read as source text on the host that
+// writes both arms.
+test("the turnkey identity tables refuse a tier the family does not ship", async () => {
+  for (const [file, signature] of [
+    [
+      "crates/sceneworks-memory-adapter/src/bin/candle.rs",
+      /fn turnkey_calibration_fingerprint\(provider_id: &str, tier: &str\) -> Option<String> \{\n(\s+if !matches!\(tier, "bf16" \| "q4" \| "q8"\) \{\n\s+return None;\n\s+\}\n)/,
+    ],
+    [
+      "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+      /fn turnkey_calibration_fingerprint\(arm: TurnkeyArm, tier: &str\) -> Option<String> \{\n(\s+if !matches!\(tier, "bf16" \| "q4" \| "q8"\) \{\n\s+return None;\n\s+\}\n)/,
+    ],
+  ]) {
+    const text = await source(file);
+    assert.match(
+      text,
+      signature,
+      `${file}: turnkey_calibration_fingerprint must return Option and refuse an unshipped tier BEFORE the per-member arms`,
+    );
+    // No arm may fall through to a synthesized identity for an unknown provider either.
+    assert.ok(
+      !/no turnkey member \{provider\} at tier \{tier\}"\)/.test(text)
+        || /_ => return None,/.test(text),
+      `${file}: an unknown turnkey provider must refuse rather than panic past the table`,
+    );
+  }
+  // The MLX caller must consume the Option as a refusal, not unwrap it into the old String.
+  const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  assert.match(
+    mlx,
+    /let expected_fingerprint = turnkey_calibration_fingerprint\(arm, tier\)\.ok_or_else\(\|\| \{/,
+    "the MLX plan check must turn a refused coordinate into an error before any weight work",
+  );
+});
+
+test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+
+  const rustConst = (name) => {
+    const start = adapter.indexOf(`const ${name}`);
+    assert.ok(start >= 0, `${name} must still exist in the MLX adapter`);
+    const equals = adapter.indexOf("=", start);
+    const end = adapter.indexOf(";", equals);
+    assert.ok(equals > start && end > equals, `${name} must be a simple const initializer`);
+    return adapter.slice(equals + 1, end).trim();
+  };
+  // `[(768, 512), ...]` is a Rust tuple array; `(`/`)` -> `[`/`]` makes it JSON.
+  const rustTuples = (name) => JSON.parse(rustConst(name).replaceAll("(", "[").replaceAll(")", "]"));
+
+  const providerId = JSON.parse(rustConst("LTX_PROVIDER"));
+  assert.equal(providerId, "ltx_2_3");
+  const model = manifest.models.find((entry) => entry.id === providerId);
+  assert.ok(model, `builtin.models.jsonc must still declare ${providerId}`);
+  const limits = model.limits;
+  assert.ok(limits, `${providerId} must still declare a limits block`);
+
+  assert.deepEqual(
+    rustTuples("LTX_RESOLUTIONS"),
+    limits.resolutions.map((size) => size.split("x").map(Number)),
+    "LTX_RESOLUTIONS is a verbatim copy of limits.resolutions",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_DURATIONS_SECONDS")),
+    limits.durations,
+    "LTX_DURATIONS_SECONDS is a verbatim copy of limits.durations",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_FPS")),
+    limits.fps,
+    "LTX_FPS is a verbatim copy of limits.fps",
+  );
+  assert.equal(
+    Number(rustConst("LTX_DIMENSION_MULTIPLE")),
+    limits.requiresDimensionsMultipleOf,
+    "LTX_DIMENSION_MULTIPLE is limits.requiresDimensionsMultipleOf",
+  );
+
+  // ... and the envelope those four inputs feed. Recomputed here from the MANIFEST through the same
+  // nearest-8k+1 ladder `sceneworks_core::video_request::ltx_frame_count` implements, so a limits
+  // edit is caught as a changed ENVELOPE — what the arm actually admits — and not merely as a
+  // changed constant.
+  const snap = (raw) => {
+    const frames = Math.max(raw, 9);
+    const lower = frames - ((frames - 1) % 8);
+    const upper = lower + 8;
+    if (lower < 9) return upper;
+    return frames - lower <= upper - frames ? lower : upper;
+  };
+  const reachable = limits.durations.flatMap((duration) =>
+    limits.fps.map((fps) => snap(duration * fps)),
+  );
+  const productWidth = Number(rustConst("LTX_PRODUCT_CANARY_WIDTH"));
+  const productHeight = Number(rustConst("LTX_PRODUCT_CANARY_HEIGHT"));
+  const productFrames = Number(rustConst("LTX_PRODUCT_CANARY_FRAMES"));
+  const productFps = Number(rustConst("LTX_PRODUCT_CANARY_FPS"));
+  const productResolution = `${productWidth}x${productHeight}`;
+  assert.equal(
+    model.defaults.resolution,
+    productResolution,
+    "the product-envelope canary must use the shipped default resolution",
+  );
+  assert.ok(
+    limits.resolutions.includes(productResolution),
+    "the product-envelope resolution must remain inside the shipped envelope",
+  );
+  const defaultDownloads = model.downloads.filter((download) => download.default === true);
+  assert.equal(defaultDownloads.length, 1, "LTX must retain exactly one default artifact variant");
+  assert.equal(
+    defaultDownloads[0].variant,
+    "q4",
+    "the product-envelope canary must measure the default product artifact variant",
+  );
+  const productDuration = (productFrames - 1) / productFps;
+  assert.ok(Number.isInteger(productDuration), "the product tuple must span an exact duration");
+  assert.ok(limits.durations.includes(productDuration), "the product duration must remain shipped");
+  assert.ok(limits.fps.includes(productFps), "the product FPS must remain shipped");
+  assert.equal(
+    snap(productDuration * productFps),
+    productFrames,
+    "the shipped duration/FPS snap must resolve to the exact product frame count",
+  );
+  assert.match(
+    adapter,
+    /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
+    "the frame envelope must stay DERIVED from the declared arrays, not written down",
+  );
+  const envelopeTestAt = adapter.indexOf(
+    "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
+  );
+  assert.ok(envelopeTestAt >= 0, "the envelope derivation test must still exist");
+  assert.match(
+    adapter.slice(envelopeTestAt, envelopeTestAt + 600),
+    new RegExp(
+      `assert_eq!\\(LTX_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
+    ),
+    "the pinned envelope must equal the one the shipped limits actually reach",
+  );
+});
+
+test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
+  const [adapter, runner] = await Promise.all([
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+    source("scripts/run-ltx-safety-canary.mjs"),
+  ]);
+  const historical = JSON.parse(await source("docs/generated/ltx-mlx-video-sc-18808.json"));
+  const costaged = historical.records[0].diagnostics.measurements.find(
+    (entry) => entry.name === "costagedGiantsBytes",
+  )?.value;
+  assert.equal(costaged, 53_347_146_863, "SC-18808 historical co-staged bound changed");
+  assert.match(
+    adapter,
+    /const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;/,
+    "the conservative canary stop must remain byte-bound to SC-18808 co-staged arithmetic",
+  );
+
+  const campaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_with_admission("),
+    adapter.indexOf("fn campaign_entry_diagnostic("),
+  );
+  const ordinary = adapter.slice(
+    adapter.indexOf("fn run_ltx(request:"),
+    adapter.indexOf("fn run(request:"),
+  );
+  assert.match(
+    ordinary,
+    /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
+  );
+  // sc-22738: the ordinary path no longer carries an arm-local refusal (SC-19642's unconditional
+  // `refuse_unsafe_ltx_capture` had no success path). What stands before the load now is the
+  // PRODUCTION admission — the worker's projection against the probed host budget, decided by
+  // gen-core's shared predicate — and the frozen canary profiles keep their own validators.
+  assert.equal(adapter.includes(["fn", "refuse_unsafe_ltx_capture("].join(" ")), false);
+  assert.ok(
+    campaign.indexOf("ltx_ordinary_admission(") >= 0
+      && campaign.indexOf("ltx_ordinary_admission(") < campaign.indexOf(".load(LTX_PROVIDER, &spec)"),
+    "the production admission must decide before provider/weights load",
+  );
+  assert.match(campaign, /LtxRunAdmission::Ordinary => \{\}/, "the ordinary admission arm is empty");
+  assert.ok(
+    campaign.indexOf("validate_ltx_campaign_entry(") < campaign.indexOf("ltx_load_spec("),
+    "the supervised entries must still validate before model-path/provider/weights access",
+  );
+  const campaignRows = (await Promise.all(LTX_CAMPAIGN_PLANS.map(async (name) =>
+    JSON.parse(await source(`docs/calibration/sc-18946/${name}`)).providers))).flat();
+  assert.equal(campaignRows.length, 73, "SC-20430 must explicitly inventory 73 rows");
+  const ratified = campaignRows.filter((row) => row._role === "bounded_carrier_entry");
+  assert.equal(ratified.length, 3, "exactly one matched bounded carrier per tier may be ratified");
+  assert.deepEqual(ratified.map((row) => row.target.tier), ["q4", "q8", "bf16"]);
+  const crossLayer = {
+    q8: {
+      logicalCaseId: "implan-d47640caa0c469f2ee13",
+      identity: "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247",
+    },
+    bf16: {
+      logicalCaseId: "implan-b3926164bf6bfbee98e1",
+      identity: "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8",
+    },
+  };
+  for (const row of ratified.filter(({ target }) => target.tier !== "q4")) {
+    const exact = crossLayer[row.target.tier];
+    for (const [label, value] of [
+      ["provider", row.name], ["fixture", row.fixture],
+      ["logical case", exact.logicalCaseId], ["private identity", exact.identity],
+      ["inventory SHA", exact.inventorySha256],
+    ]) {
+      assert.ok(runner.includes(value), `${row.target.tier} runner ${label} changed`);
+      if (label !== "provider") {
+        assert.ok(adapter.includes(value), `${row.target.tier} adapter ${label} changed`);
+      }
+    }
+  }
+  assert.match(runner,
+    /process\.argv\[2\] === "--bounded-selector-report"[\s\S]*boundedSelectorReportController/,
+    "SC-20430 matched phase anchors must remain executable as a CPU-only report path");
+  const originalRows = campaignRows.filter((row) => row._role !== "bounded_carrier_entry");
+  assert.equal(originalRows.length, 70, "all original campaign rows must remain present");
+  for (const row of originalRows) {
+    assert.ok(
+      ["incident_forbidden", "arithmetic_unmeasurable", "safety_refused_open"]
+        .includes(row._measurementSafety.disposition),
+      `${row.name} must retain an explicit refusal disposition`,
+    );
+  }
+  assert.doesNotMatch(
+    ordinary,
+    /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
+  );
+  const campaignEntry = adapter.slice(
+    adapter.indexOf("fn run_ltx_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
+    "LtxCanaryLimits::install()?",
+    "LtxRunAdmission::CampaignEntry",
+    "validate_ltx_campaign_entry_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_campaignEntry"',
+    "watchdog_lease.complete()?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
+  ]) assert.ok(campaignEntry.includes(required), `campaign entry must retain ${required}`);
+  for (const phase of [
+    "primary_conditioning", "primary_denoise", "primary_decode",
+  ]) assert.ok(campaign.includes(`phase_sink.mark("${phase}")`),
+    `campaign execution must report ${phase}`);
+  for (const phase of [
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery",
+  ]) assert.ok(adapter.includes(`phase_sink.mark("${phase}")`),
+    `campaign lifecycle must report ${phase}`);
+  assert.ok(
+    campaignEntry.indexOf("prevalidate_ltx_campaign_entry(request)?")
+      < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
+    "the exact campaign row must be validated before the watchdog releases model allocation",
+  );
+  const boundedCarrier = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_carrier_proof("),
+    adapter.indexOf("fn run_ltx_campaign_entry("),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_carrier_proof(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("primary_conditioning")?',
+    'watchdog_lease.mark("primary_denoise")',
+    'watchdog_lease.mark("primary_decode")',
+    'watchdog_lease.mark("cleanup")?',
+    "validate_ltx_bounded_carrier_generation_request(&generation_request)?",
+    "scoped_generate(",
+    "spatial_decode_tile_count != 24",
+    "validate_ltx_canary_cleanup(",
+    '"diagnosticOnly": true',
+    '"promotable": false',
+    '"ingestible": false',
+    '"seed": LTX_SEED',
+  ]) assert.ok(boundedCarrier.includes(required), `bounded carrier must retain ${required}`);
+  assert.doesNotMatch(boundedCarrier, /verify_ltx_lifecycle|LtxRunAdmission::CampaignEntry/,
+    "SC-20254 must execute one provider request scope, not the multi-render campaign lifecycle");
+  assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
+    "SC-20254 must contain exactly one full-A/V render call");
+  assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
+  const boundedCampaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    "LtxRunAdmission::BoundedCampaignEntry",
+    "validate_ltx_bounded_campaign_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_boundedCampaignEntry"',
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
+  ]) assert.ok(boundedCampaign.includes(required), `bounded campaign must retain ${required}`);
+  assert.match(adapter,
+    /LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry\(&request\)/);
+  const attestationIndex = boundedCampaign.indexOf(
+    "consume_ltx_canary_watchdog_attestation(request)?",
+  );
+  const limitsIndex = boundedCampaign.indexOf("LtxCanaryLimits::install()?");
+  const modelResolutionIndex = boundedCampaign.indexOf("run_ltx_with_admission(");
+  assert.ok(attestationIndex >= 0 && limitsIndex >= 0 && modelResolutionIndex >= 0,
+    "SC-20318 safety ordering anchors must all remain present");
+  assert.ok(
+    attestationIndex < limitsIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before allocator/model work",
+  );
+  assert.ok(
+    attestationIndex < modelResolutionIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before model resolution",
+  );
+
+  const canary = adapter.slice(
+    adapter.indexOf("fn validate_ltx_canary_plan_for("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  for (const required of [
+    "_diagnosticOnly",
+    'Some("fixture")',
+    "profile.width()",
+    "profile.height()",
+    "profile.frames()",
+    "LTX_CANARY_TILE_EDGE",
+    "LTX_CANARY_OVERLAP",
+    "profile.video_mode_identity()",
+    '"status": profile.completion_status()',
+    '"canaryIdentity": profile.identity()',
+    '"promotable": false',
+    '"ingestible": false',
+    'strategy["spatialDecodeTiles"]',
+    '"preProviderActiveBytes": pre_provider.active',
+    '"preProviderCacheBytes": pre_provider.cache',
+    '"identity": LTX_CANARY_ONES_CACHE_IDENTITY',
+    '"bytes": expected_persistent_active',
+  ]) assert.ok(canary.includes(required), `canary must retain ${required}`);
+  const limitsInstalled = canary.indexOf("let limits = LtxCanaryLimits::install()?");
+  const baselineCaptured = canary.indexOf("let pre_provider = AllocatorState::capture_current()");
+  const providerLoadSpec = canary.indexOf("ltx_load_spec(request, \"q4\", &selection)?");
+  assert.ok(limitsInstalled >= 0 && limitsInstalled < baselineCaptured,
+    "the allocator baseline must be captured after canary limits are installed");
+  assert.ok(baselineCaptured < providerLoadSpec,
+    "the allocator baseline must be captured before provider/model resolution");
+  assert.match(canary, /clear_cache\(\);\n\s*let pre_provider = AllocatorState::capture_current\(\);/,
+    "the pre-provider baseline must exclude reclaimable allocator cache");
+  assert.match(canary, /validate_ltx_canary_pre_provider\(pre_provider\)\?;/);
+  assert.match(
+    canary,
+    /validate_ltx_canary_cleanup\(pre_provider, cleanup, expected_persistent_active\)\?;/,
+    "successful canary output must require the exact named persistent allocation",
+  );
+  assert.doesNotMatch(campaign, /validate_ltx_canary_(?:pre_provider|cleanup)/,
+    "production generation must not use the diagnostic canary residue exception");
+
+  const profiles = adapter.slice(
+    adapter.indexOf("enum LtxCanaryProfile"),
+    adapter.indexOf("/// LTX's video VAE"),
+  );
+  for (const required of [
+    'Self::Safety => Some("no_audio")',
+    "Self::ProductEnvelope => None",
+    'Self::Safety => "diagnostic_canary_complete"',
+    'Self::ProductEnvelope => "diagnostic_product_envelope_canary_complete"',
+    'Self::Safety => "a sunlit pine branch, static camera"',
+    'Self::ProductEnvelope => "sc-20169-product-envelope"',
+  ]) assert.ok(profiles.includes(required), `diagnostic profiles must retain ${required}`);
+  const generationRequest = adapter.slice(
+    adapter.indexOf("fn ltx_canary_generation_request_for("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(
+    generationRequest,
+    /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
+    "the canary must skip the downstream audio decoder and vocoder",
+  );
+  const admissionBridge = adapter.slice(
+    adapter.indexOf("fn ltx_canary_request_for_provider_admission("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(admissionBridge, /request\.video_mode = None;/);
+  assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
+  assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
+  const genericScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed("),
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+  );
+  assert.match(genericScope, /None,/,
+    "ordinary production generation must not gain the canary-only post-configure override");
+  const configuredScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+    adapter.indexOf("/// Combine the generator and request-scope terminals"),
+  );
+  assert.ok(
+    configuredScope.indexOf(".configure_request(&mut request)")
+      < configuredScope.indexOf("after_configuration(&mut request)"),
+    "the canary restores no_audio only after ordinary provider configuration",
+  );
+  assert.ok(
+    configuredScope.indexOf("after_configuration(&mut request)")
+      < configuredScope.indexOf("generator.generate(&request"),
+    "the exact no_audio override must be restored before generation",
+  );
+  for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
+    assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
+  }
+  const diagnosticRun = adapter.slice(
+    adapter.indexOf("fn run_ltx_canary_for("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  assert.match(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate\(/,
+    "the product-envelope canary must use the ordinary provider request-scope lifecycle",
+  );
+  assert.doesNotMatch(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate_ltx_no_audio_canary/,
+  );
+  for (const required of [
+    "LTX_PRODUCT_CANARY_WIDTH",
+    "LTX_PRODUCT_CANARY_HEIGHT",
+    "LTX_PRODUCT_CANARY_FRAMES",
+    "spatial_tile_count",
+    "validate_diagnostic_audio",
+  ]) assert.ok(adapter.includes(required), `product-envelope canary must retain ${required}`);
+
+  const limitsLifecycle = adapter.slice(
+    adapter.indexOf("impl LtxCanaryLimits"),
+    adapter.indexOf("impl LtxDecodePlan"),
+  );
+  assert.match(limitsLifecycle, /set_wired_limit\(self\.previous_wired\);/);
+  assert.match(limitsLifecycle, /set_memory_limit\(self\.previous_memory\);/);
+  assert.match(limitsLifecycle, /impl Drop for LtxCanaryLimits[\s\S]*self\.restore\(\);/);
+});
+
+test("the SC-20318 provider phase profile is exact across runner, watchdog and adapter", async () => {
+  const [runner, watchdog, adapter] = await Promise.all([
+    source("scripts/run-ltx-safety-canary.mjs"),
+    source("scripts/memory-calibration-watchdog.py"),
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+  ]);
+  const campaignPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode",
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery", "cleanup",
+  ];
+  const boundedPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  const quotedValues = (sourceText, expression, label) => {
+    const match = sourceText.match(expression);
+    assert.ok(match, `${label} must remain a literal exact contract`);
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  };
+
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CARRIER_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-carrier phases",
+  ), boundedPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-campaign-entry phases",
+  ), boundedPhases);
+  const pythonProfiles = watchdog.slice(
+    watchdog.indexOf("PROVIDER_PHASE_PROFILES = {"),
+    watchdog.indexOf("\n}\n", watchdog.indexOf("PROVIDER_PHASE_PROFILES = {")) + 2,
+  );
+  assert.match(pythonProfiles,
+    /"campaign-entry": CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-carrier": BOUNDED_CARRIER_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-campaign-entry": BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const PROVIDER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const BOUNDED_CARRIER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner bounded phases",
+  ), boundedPhases);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";/);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_Q8_PROFILE = "bounded-campaign-entry-q8";/);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_BF16_PROFILE = "bounded-campaign-entry-bf16";/);
+  assert.match(runner,
+    /phaseProfile: "bounded-campaign-entry",\n\s*childName: `\$\{boundedSpec\.story\}-\$\{boundedSpec\.tier\}-bounded-campaign-entry`/);
+
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_PROVIDER_PHASE_NAMES: \[&str; 10\] = \[([\s\S]*?)\];/,
+    "Rust campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_BOUNDED_CARRIER_PHASE_NAMES: \[&str; 5\] = \[([\s\S]*?)\];/,
+    "Rust bounded phases",
+  ), boundedPhases);
+  assert.match(adapter,
+    /const LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE: &str = "bounded-campaign-entry";/);
+  assert.match(adapter,
+    /Some\(LTX_BOUNDED_CAMPAIGN_ACTION\) => Some\(\(\n\s*LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,\n\s*&LTX_BOUNDED_CARRIER_PHASE_NAMES,/);
+});
+
+test("the MLX FLUX.2 calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const context = adapter.slice(
     adapter.indexOf("fn flux2_admission_context("),
     adapter.indexOf("fn flux2_complete_sweep("),
   );
+  // sc-22727 generalized `run_flux2_dev` to the whole family (`run_flux2`), resolved from the
+  // plan's `(provider, modelId)`; the reference-free T2I claim below is unchanged and now covers
+  // every member.
   const arm = adapter.slice(
-    adapter.indexOf("fn run_flux2_dev("),
+    adapter.indexOf("fn run_flux2("),
     adapter.indexOf("fn validate_z_image_batch("),
   );
+  const table = adapter.slice(
+    adapter.indexOf("struct Flux2Arm {"),
+    adapter.indexOf("fn validate_flux2_target("),
+  );
 
-  assert.ok(context.length > 0 && arm.length > 0, "FLUX.2-dev adapter seams must exist");
+  assert.ok(context.length > 0 && arm.length > 0 && table.length > 0, "FLUX.2 adapter seams must exist");
   assert.match(context, /mode: MemoryMode::TextToImage/);
   assert.match(context, /has_reference: false/);
   assert.match(context, /reference_count: 0/);
   assert.doesNotMatch(context, /MemoryMode::Edit|reference_count: 2/);
 
-  assert.match(arm, /memory_strategy_contract\(FLUX2_PROVIDER, &spec\)/);
+  // The contract, the load and the admission scenarios are all keyed on the RESOLVED member, never
+  // on a hardcoded provider id: that is what keeps a KV plan off the base klein artifact.
+  assert.match(arm, /memory_strategy_contract\(arm\.provider, &spec\)/);
+  assert.match(arm, /registry\s*\.load\(arm\.provider, &spec\)/);
   assert.match(arm, /registered_dev_t2i_safety_check\(/);
-  assert.match(arm, /generator\s*\.memory_strategy_contract\(\)/);
+  assert.match(arm, /generator\.memory_strategy_safety_check\(&admission_context\(/);
+  assert.match(arm, /generator\.memory_strategy_contract\(\)/);
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
+
+  // E4: the load goes through the production catalog the worker composes, not a crate-local
+  // replica registry.
+  assert.match(arm, /runtime_macos::catalog\(\)/);
+  assert.doesNotMatch(arm, /mlx_gen_flux2::provider_registry\(\)/);
+
+  // Exactly three members, each binding its own artifact family. Two share the klein provider id,
+  // so `model_id` — which reaches the engine as `resolved_route` — is the discriminator.
+  for (const constant of ["FLUX2_DEV_ARM", "FLUX2_KLEIN_ARM", "FLUX2_KLEIN_KV_ARM"]) {
+    assert.match(adapter, new RegExp(`const ${constant}: Flux2Arm = Flux2Arm \\{`));
+  }
+  assert.match(table, /model_id: &'static str/);
+  assert.match(adapter, /\.with_resolved_route\(arm\.model_id\)/);
+  for (const env of [
+    "SCENEWORKS_FLUX2_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+  ]) {
+    assert.ok(adapter.includes(`"${env}"`), `${env} must bind exactly one member's artifact`);
+  }
+});
+
+// =====================================================================================
+// sc-18921 — macos-mlx.yml's fatal guards, pinned as fatal.
+//
+// sc-18691 closed this on the CANDLE lane by counting PowerShell `throw`s per step
+// ("every failure mode a weights-only dispatch can hit is still fatal", above). The MLX
+// lane had the identical exposure in bash form and nothing closed it: macos-mlx.yml
+// carried 18 `exit 1` guards and this file contained zero occurrences of `exit 1`, so
+// downgrading ANY of them to a bare `echo` left the whole suite green. That lane is the
+// sole producer of config/engine-capabilities/capabilities.mlx.json and of every MLX
+// five-rung / memory-calibration capture, so a silently non-fatal guard there does not
+// merely miss a break — it publishes a wrong measurement as evidence.
+//
+// WHY THIS IS NOT A HAND-COUNTED COPY OF THE CANDLE TEST. That one carries per-step
+// literals (13, 0, 2, 2, 4) beside the predicate they describe, which is the sc-18932
+// defect shape: a literal next to a changed predicate is a new false green. Here NOTHING
+// is counted by hand. The lane's own text supplies both sides:
+//
+//   * fatality  — `exit 1` as a whole statement;
+//   * the guard — a FAILURE DIAGNOSTIC: an `echo` that writes to stderr or emits
+//                 `::error::`. A downgrade removes the exit and LEAVES the diagnostic,
+//                 so "every diagnostic is immediately followed by `exit 1`" goes red on
+//                 the downgrade without any number being maintained anywhere.
+//
+// The enumeration below is therefore not a count. It is the answer to "WHICH failure",
+// one row per guard, and it is cross-checked against the file scan in both directions:
+// a guard deleted outright (diagnostic AND exit together, which the equality above
+// cannot see) drops out of the table lookup, and a guard added anywhere on the lane
+// leaves an `exit 1` no row claims.
+// =====================================================================================
+
+const MLX_LANE = ".github/workflows/macos-mlx.yml";
+
+// THE lane-wide fatality predicate. A whole statement, so `exit 1` inside a quoted
+// message or a comment cannot satisfy it.
+const MLX_FATAL_EXIT = "exit 1";
+
+// THE lane-wide guard predicate, and the one that makes a downgrade visible: a downgrade
+// deletes the exit and keeps the message. Deliberately narrow — `::warning::` and
+// `::notice::` are NOT diagnostics, so a step that genuinely wants to report without
+// failing has a spelling available that this contract does not claim.
+function isMlxFailureDiagnostic(statement) {
+  return /^echo\b/.test(statement) && (/>&2$/.test(statement) || /::error::/.test(statement));
+}
+
+// A job's steps, each reduced to LOGICAL statements: comment lines dropped (both YAML and
+// bash comment with `#`, and this lane's prose quotes its own guards), backslash
+// continuations joined (the two `::error::` messages span four and five lines), blanks
+// dropped, indentation normalised.
+//
+// Scoped to ONE JOB rather than reusing the file-wide `stepBody()` above, because
+// macos-mlx.yml has two jobs and "Fetch the pinned inference release" appears in both —
+// a file-wide lookup by name silently resolves to whichever comes first.
+function mlxJobSteps(workflow, job) {
+  const start = workflow.indexOf(`\n  ${job}:\n`);
+  assert.ok(start >= 0, `${MLX_LANE} must keep a ${job} job`);
+  const rest = workflow.slice(start + 1);
+  // Job keys are the only two-space keys in the file; everything inside a job is deeper.
+  const end = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const body = end === -1 ? rest : rest.slice(0, end + 1);
+
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    at = next;
+    const named = chunk.match(/^\n {6}- name: (.*)$/m);
+    const used = chunk.match(/^\n {6}- uses: (.*)$/m);
+    const statements = [];
+    let joined = "";
+    for (const line of chunk.split("\n")) {
+      if (/^\s*#/.test(line)) continue;
+      const text = line.trim();
+      if (text === "") continue;
+      if (text.endsWith("\\")) {
+        joined += (joined ? " " : "") + text.slice(0, -1).trim();
+        continue;
+      }
+      statements.push(joined ? `${joined} ${text}` : text);
+      joined = "";
+    }
+    if (joined) statements.push(joined);
+    steps.push({ name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`, statements });
+  }
+  return steps;
+}
+
+// The jobs that carry fatal guards, scanned as ONE set. Both, not just `nax-worker`: main
+// moved "Verify capabilities.mlx.json content against a fresh dump" onto the hosted
+// `macos-checks` job, because it is a weights-free registry walk that has no business on the
+// scarce M5/NAX pool. The guard was not weakened — it still ends every branch in `exit 1` —
+// it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
+// caught it: that assertion exists precisely so a guard living outside the scanned job cannot
+// ship unpinned, and the fix it asks for is to enumerate that job, which is this.
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+
+function mlxGuardSteps(workflow) {
+  return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
+}
+
+// ONE ROW PER FATAL GUARD, saying which failure it detects — not merely that the step
+// fails somehow. `branch` is the statement chain that reaches the diagnostic, matched
+// exactly and in order, which is what distinguishes guards whose MESSAGE is identical:
+// "Resolve exact Qwen calibration snapshot" emits the same "not available on this runner"
+// string from an `else` fallthrough and from a following `-d` re-check, and the two
+// "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
+const MLX_FATAL_GUARDS = [
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
+    ],
+    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json differs in capability"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects:
+      "the checked-in RUNTIME facts file differs in capability content from inference's fresh snapshot",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/runtime\/capabilities\.mlx\.json does not"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in AUDIO facts file differs in capability content — the one dump BOTH lanes write",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/audio\/capabilities\.candle\.json does not"/,
+  },
+  {
+    step: "Validate Qwen provisioning mode",
+    detects: "a ~57 GiB Qwen download requested by a dispatch that will not calibrate",
+    branch: [
+      'if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_MEMORY_CALIBRATION" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_qwen_snapshot requires run_memory_calibration=true" >&2$/,
+  },
+  {
+    step: "Validate Z-Image provisioning mode",
+    detects: "a Z-Image download requested by a dispatch that will not capture the reference",
+    branch: [
+      'if [[ "$PROVISION_Z_IMAGE_SNAPSHOT" == "true" && "$RUN_FIVE_RUNG_REFERENCE" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_z_image_snapshot requires run_five_rung_reference=true" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose qwen_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$QWEN_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "qwen_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "calibration pointed at some repository other than the fixed Qwen artifact",
+    branch: ['if [[ "$QWEN_REPOSITORY" != "SceneWorks/qwen-image-mlx" ]]; then'],
+    diagnostic:
+      /^echo "qwen_repository must be the fixed SceneWorks\/qwen-image-mlx calibration artifact" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a qwen_tier outside the three declared quantization tiers",
+    branch: [
+      'if [[ "$QWEN_TIER" != "bf16" && "$QWEN_TIER" != "q4" && "$QWEN_TIER" != "q8" ]]; then',
+    ],
+    diagnostic: /^echo "qwen_tier must be one of bf16, q4, or q8" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects:
+      "calibration evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects:
+      "a five-rung dispatch whose z_image_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$Z_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung capture pointed at some repository other than the fixed Z-Image artifact",
+    branch: ['if [[ "$Z_IMAGE_REPOSITORY" != "SceneWorks/z-image-turbo-mlx" ]]; then'],
+    diagnostic:
+      /^echo "z_image_repository must be the fixed SceneWorks\/z-image-turbo-mlx reference artifact" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "five-rung evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the Qwen snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$QWEN_HF_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_HF_ROOT"',
+      'elif [[ -d "$QWEN_APP_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the resolved Qwen root — override included — is not a directory",
+    branch: ['if [[ ! -d "$QWEN_ROOT" ]]; then'],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects:
+      "a real directory that is NOT the requested repository+revision+tier — the dangerous one: " +
+      "downgraded, a per-tier measurement runs against the wrong weights and is published as evidence",
+    branch: ['if [[ "$QWEN_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Qwen calibration root does not match the fixed repository and exact revision" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "the Z-Image snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$Z_IMAGE_HF_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_HF_ROOT"',
+      'elif [[ -d "$Z_IMAGE_APP_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Z-Image reference snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "a real directory that is NOT the requested Z-Image repository+revision+tier",
+    branch: ['if [[ "$Z_IMAGE_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Z-Image reference root does not match the fixed repository and exact revision" >&2$/,
+  },
+];
+
+// Reachability is the sibling of fatality: a guard whose step never runs is exactly as
+// silent as one that never fails. The dispatch-only guards are dispatch-only BY DESIGN, so
+// the contract is the exact expression, not its presence. `null` means the step is
+// unconditional and must stay that way.
+//
+// The content-verify step reads `if: ${{ always() }}` since main moved it to `macos-checks`, and
+// that is MORE reachable than unconditional, not less: `always()` on a step's `if:` makes it
+// run even when an earlier step in the job already failed. It does not swallow this step's own
+// failures — only `continue-on-error` and `|| true` do that, and both remain banned below. The
+// reason main wants it is stated in the workflow: a pin bump deliberately makes descriptor-
+// backed tests fail closed, and `always()` lets the producer and its paired upload still run so
+// the fresh facts can be committed, instead of deadlocking the bootstrap.
+const MLX_GUARD_STEP_REACHABILITY = {
+  "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
+  "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate memory-strategy calibration identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Validate five-rung reference identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+  "Resolve exact Qwen calibration snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Resolve exact Z-Image reference snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+};
+
+test("every failure diagnostic on the MLX lane is fatal, derived from the lane's own text", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+
+  // ANTI-VACUITY. If the splitter stops recognising steps, every loop below is trivially
+  // satisfied and this test means nothing — which is exactly how the sibling audit in this
+  // file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    steps.length >= 20,
+    `expected ${MLX_GUARD_JOBS.join(" + ")} to still split into steps, derived ${steps.length}`,
+  );
+  // Per-job anti-vacuity too: the union above stays over the floor even if one job's splitter
+  // silently returns nothing, which would hide every guard that job carries.
+  for (const job of MLX_GUARD_JOBS) {
+    assert.ok(
+      mlxJobSteps(workflow, job).length > 0,
+      `expected the ${job} job to still split into steps`,
+    );
+  }
+
+  const diagnostics = [];
+  const exits = [];
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (isMlxFailureDiagnostic(statement)) diagnostics.push({ step, statement, at });
+      if (statement === MLX_FATAL_EXIT) exits.push({ step, at });
+    });
+  }
+
+  // The one number in this test, and it is derived on BOTH sides: the enumeration below is
+  // one row per guard, and the scan above is the lane's own text. A guard added without a
+  // row, or a row without a guard, breaks this before any message is compared.
+  assert.equal(
+    diagnostics.length,
+    MLX_FATAL_GUARDS.length,
+    `${MLX_LANE} carries ${diagnostics.length} failure diagnostics but MLX_FATAL_GUARDS ` +
+      `enumerates ${MLX_FATAL_GUARDS.length}. Add or remove the row that says which failure ` +
+      "the guard detects — an unenumerated guard is one nothing pins as fatal.",
+  );
+
+  // THE DOWNGRADE DETECTOR. `exit 1` -> `echo`, `::warning::`, `exit 0` or deletion all
+  // leave the diagnostic standing and remove the exit after it. No count is maintained by
+  // hand anywhere in this assertion; both operands come out of the file.
+  for (const { step, statement, at } of diagnostics) {
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${step.name}": the diagnostic\n    ${statement}\nmust be followed ` +
+        `immediately by \`${MLX_FATAL_EXIT}\`, found ${JSON.stringify(step.statements[at + 1])}. ` +
+        "A reported-but-not-fatal failure on this lane publishes a wrong capability dump or a " +
+        "wrong memory measurement as evidence. To report without failing, use ::warning::.",
+    );
+  }
+
+  // The mirror direction, so a fatal exit cannot appear with no diagnostic saying WHY, and
+  // so the equality above cannot be satisfied by moving an exit between steps.
+  for (const step of steps) {
+    const stepDiagnostics = step.statements.filter(isMlxFailureDiagnostic).length;
+    const stepExits = step.statements.filter((s) => s === MLX_FATAL_EXIT).length;
+    assert.equal(
+      stepExits,
+      stepDiagnostics,
+      `${MLX_LANE} / "${step.name}": ${stepExits} fatal exit(s) against ${stepDiagnostics} ` +
+        "failure diagnostic(s). Every fatal exit needs a diagnostic saying which failure it is.",
+    );
+  }
+
+  // WHOLE FILE, not just the scanned jobs. A guard added anywhere else in the lane would be
+  // invisible to the job-scoped scan above and would ship unpinned. This is the assertion that
+  // caught main moving the restamp guard into `macos-checks`; the answer it demands is to
+  // enumerate that job (see MLX_GUARD_JOBS), never to relax the count. Comment lines stripped
+  // so prose cannot move the number either way.
+  const laneExits = workflow
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .filter((line) => line.trim() === MLX_FATAL_EXIT).length;
+  assert.equal(
+    laneExits,
+    exits.length,
+    `${MLX_LANE} has ${laneExits} fatal exits but only ${exits.length} are inside ` +
+      `${MLX_GUARD_JOBS.join(" + ")}. A guard outside those jobs is pinned by nothing here; ` +
+      "enumerate its job.",
+  );
+});
+
+test("each MLX-lane fatal guard is pinned individually, by which failure it detects", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+  const byName = new Map(steps.map((step) => [step.name, step]));
+  const claimed = new Set();
+
+  for (const guard of MLX_FATAL_GUARDS) {
+    const step = byName.get(guard.step);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${guard.step}"`);
+
+    // Located by the branch chain AND the message together. Either alone is ambiguous on
+    // this lane: two guards share the "not available on this runner" message, and two share
+    // both the INFERENCE_PIN condition and its message across sibling steps.
+    const found = [];
+    step.statements.forEach((statement, at) => {
+      if (!guard.diagnostic.test(statement)) return;
+      const chain = step.statements.slice(at - guard.branch.length, at);
+      if (chain.length !== guard.branch.length) return;
+      if (chain.every((line, i) => line === guard.branch[i])) found.push(at);
+    });
+    assert.equal(
+      found.length,
+      1,
+      `${MLX_LANE} / "${guard.step}": expected exactly one guard against ${guard.detects}, ` +
+        `matched ${found.length}. Its branch chain is\n    ${guard.branch.join("\n    ")}`,
+    );
+
+    const at = found[0];
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${guard.step}": the guard against ${guard.detects} must stay FATAL. ` +
+        `Found ${JSON.stringify(step.statements[at + 1])} where \`${MLX_FATAL_EXIT}\` belongs.`,
+    );
+    claimed.add(`${guard.step}#${at + 1}`);
+  }
+
+  // Every fatal exit on the lane is claimed by exactly one row. Without this, deleting a
+  // guard outright and adding an unrelated one elsewhere keeps the totals equal.
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (statement !== MLX_FATAL_EXIT) return;
+      assert.ok(
+        claimed.has(`${step.name}#${at}`),
+        `${MLX_LANE} / "${step.name}": a fatal guard at statement ${at} is claimed by no row ` +
+          "in MLX_FATAL_GUARDS. Say which failure it detects, so a downgrade names it.",
+      );
+    });
+  }
+});
+
+test("MLX-lane guard steps stay reachable and cannot be degraded into warnings", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+  const byName = new Map(steps.map((step) => [step.name, step]));
+
+  // Derived from the guards, not hand-listed beside them: every step that carries a row is
+  // a step this contract must hold for.
+  const guardSteps = [...new Set(MLX_FATAL_GUARDS.map((guard) => guard.step))];
+  assert.deepEqual(
+    guardSteps.slice().sort(),
+    Object.keys(MLX_GUARD_STEP_REACHABILITY).sort(),
+    "every step carrying a fatal guard needs a reachability pin, and vice versa",
+  );
+
+  for (const name of guardSteps) {
+    const step = byName.get(name);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${name}"`);
+    const conditions = step.statements.filter((statement) => statement.startsWith("if: "));
+    const expected = MLX_GUARD_STEP_REACHABILITY[name];
+    if (expected === null) {
+      assert.deepEqual(
+        conditions,
+        [],
+        `${MLX_LANE} / "${name}" must stay unconditional — it is the lane's only check that ` +
+          "the checked-in capability dump is real, and it has to run on every PR.",
+      );
+    } else {
+      assert.deepEqual(
+        conditions,
+        [expected],
+        `${MLX_LANE} / "${name}": a guard that never runs is as silent as one that never ` +
+          "fails. Pin the exact condition here when the step's reachability changes.",
+      );
+    }
+
+    // Degrading by SWALLOWING: `continue-on-error` makes every `exit 1` in the step
+    // advisory without touching one of them, and `|| true` does it per command. Neither is
+    // ever allowed, on any statement.
+    for (const statement of step.statements) {
+      assert.doesNotMatch(
+        statement,
+        /continue-on-error|\|\| true/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+
+    // `always()` is banned everywhere EXCEPT as the step's own pinned `if:` condition, which
+    // the `deepEqual` above already fixes to an exact string. The distinction is real:
+    // `always()` in a step `if:` makes the step run even after an earlier step in the job
+    // failed — strictly more reachable, and it does not touch this step's own exit status.
+    // Anywhere else (inside a `run:` body, on a nested expression) it is a swallow. Comparing
+    // against `expected` rather than allowing the substring means a step can only carry
+    // `always()` if a reachability row deliberately says so.
+    for (const statement of step.statements) {
+      if (expected !== null && statement === expected) continue;
+      assert.doesNotMatch(
+        statement,
+        /always\(\)/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+  }
+
+  // The content-verify step is the one guard step that runs several commands and a `trap`, and it
+  // opts into strictness explicitly. `pipefail` and `-u` are NOT GitHub's defaults (the
+  // default shell is `bash -e {0}`), so this is a real declaration, not a restatement of
+  // one: without it a failing `cargo run` inside a pipeline, or an unset `$scratch`, reaches
+  // the comparison and the guard compares against nothing.
+  assert.ok(
+    byName
+      .get("Verify capabilities.mlx.json content against a fresh dump")
+      .statements.includes("set -euo pipefail"),
+    `${MLX_LANE}: the content-verify step must keep \`set -euo pipefail\``,
+  );
+});
+
+// SC-18902 historical acceptance evidence. The real Windows/CUDA baseline proved the former Eros
+// Candle route unusable. The published cond_safe LoRA was not a valid candidate for Candle's adapter
+// surface (3,320 source keys versus 768 accepted keys), so the retained harness pins the exact
+// rejected baseline rather than pretending a partial adapter is usable. The mutation loop is load-bearing:
+// each historically plausible drift is injected into an in-memory copy and must make this same
+// validator fail, proving the positive assertions are sensitive rather than decorative.
+test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines distinct", async () => {
+  const documents = {
+    manifestText: await source("config/manifests/builtin.models.jsonc"),
+    workflow: await source(".github/workflows/windows-candle.yml"),
+    harness: await source("crates/sceneworks-worker/src/ltx_eros_gpu_smoke.rs"),
+    workerLib: await source("crates/sceneworks-worker/src/lib.rs"),
+  };
+
+  const validate = ({ manifestText, workflow, harness, workerLib }) => {
+    const manifest = JSON.parse(stripJsoncComments(manifestText));
+    const base = manifest.models.find((entry) => entry.id === "ltx_2_3");
+    const eros = manifest.models.find((entry) => entry.id === "ltx_2_3_eros");
+    assert.ok(base, "the base ltx_2_3 manifest route must remain present");
+    assert.ok(eros, "the ltx_2_3_eros manifest route must remain present");
+    const shippedDefaults = {
+      duration: 6,
+      fps: 25,
+      resolution: "768x512",
+      quality: "balanced",
+      steps: 8,
+    };
+    assert.deepEqual(eros.defaults, shippedDefaults, "Eros manifest defaults must stay fixed");
+    assert.deepEqual(base.defaults, shippedDefaults, "base LTX manifest defaults must stay untouched");
+    assert.equal(
+      base.mlx?.autoDistillLora,
+      undefined,
+      "the evidence harness must not add the Eros distill recipe to base ltx_2_3",
+    );
+    assert.deepEqual(
+      eros.mlx?.autoDistillLora,
+      { stage1Strength: 1, stage2Strength: 0.4 },
+      "the existing MLX-only two-pass recipe is context, not a Candle recipe to copy",
+    );
+
+    assert.match(
+      workflow,
+      /run_ltx_eros_acceptance:\s+description:[^\n]+\s+required: false\s+type: boolean\s+default: false/,
+      "the expensive real-weight capture must be explicit and off by default",
+    );
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /AdapterKind|AdapterSpec|LTX_EROS_RECIPE|LTX_EROS_DISTILL_LORA|ltx_eros_recipe|single-pass-distill|DISTILL_(?:REPOSITORY|REVISION|FILE)/,
+      "the baseline harness must not expose or construct an unsupported filtered-LoRA candidate",
+    );
+    assert.match(
+      workflow,
+      /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\|/,
+      "the real-weight render needs the guarded six-hour ceiling",
+    );
+    for (const [repository, revision] of [
+      ["TenStrip/LTX2.3-10Eros", "84a05a13610d78dbe4340d1be23fd8185e10f697"],
+      ["SceneWorks/ltx-2.3-mlx", "01df27d308466533aa09d251e3aebdcc627d07eb"],
+    ]) {
+      assert.ok(workflow.includes(`repo_id="${repository}"`), `${repository} must be exact`);
+      assert.ok(workflow.includes(revision), `${repository} must use its exact revision`);
+    }
+    const provisioning = workflow.slice(
+      workflow.indexOf("- name: Provision exact public LTX Eros acceptance artifacts"),
+      workflow.indexOf("- name: Render the fixed LTX Eros CUDA acceptance artifact"),
+    );
+    assert.equal(
+      provisioning.match(/token=False/g)?.length,
+      2,
+      "both HF downloads must explicitly refuse implicit credentials",
+    );
+    assert.match(provisioning, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+    assert.doesNotMatch(
+      provisioning,
+      /secrets\.|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|google\/gemma/,
+      "the harness must not use a secret or a gated Gemma source",
+    );
+    assert.match(
+      workflow,
+      /cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1/,
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-framerate 25[^\n]*-c:v libx264[^\n]*-r 25 \$videoOnly/,
+      "the source frames must first be encoded as the product's H.264 video stream",
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-i \$videoOnly -i \$audio[^\n]*-c:v copy[^\n]*-c:a aac[^\n]*-shortest[^\n]*-map_metadata 0[^\n]*\$mp4/,
+      "the evidence MP4 must use the product's copy-video/AAC/-shortest mux contract",
+    );
+    assert.match(
+      workflow,
+      /\$videoOnly = Join-Path \$out 'ltx_eros\.rendered-frames\.mp4'/,
+      "the complete 153-frame renderer output must survive beside the product-faithful MP4",
+    );
+    assert.match(workflow, /stream=index,codec_name,codec_type[^'\n]+duration:format=duration/);
+    assert.match(
+      workflow,
+      /\$video\.codec_name -ne 'h264'/,
+      "the MP4 verifier must require the production H.264 video codec",
+    );
+    assert.match(
+      workflow,
+      /\$sound\.codec_name -ne 'aac'/,
+      "the MP4 verifier must require the production AAC audio codec",
+    );
+    assert.match(
+      workflow,
+      /\$wavAudio\.codec_name -ne 'pcm_s16le'/,
+      "the source audio verifier must require the worker's PCM16 WAV codec",
+    );
+    assert.match(
+      workflow,
+      /\$renderedVideo\.r_frame_rate -ne '25\/1' -or \[int\]\$renderedVideo\.nb_read_frames -ne 153/,
+      "the complete renderer output must still prove all 153 frames",
+    );
+    assert.match(
+      workflow,
+      /\$productFrames -lt 150 -or \$productFrames -gt 151/,
+      "the product-faithful mux must end at the six-second audio boundary",
+    );
+    assert.match(workflow, /\$renderedDurationSeconds = 153\.0 \/ 25\.0/);
+    assert.match(workflow, /\$requestedProductDurationSeconds = 6\.0/);
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds = \[Convert\]::ToDouble\(\$metadata\.result\.audio\.durationSeconds, \[Globalization\.CultureInfo\]::InvariantCulture\)/,
+      "the synchronized audio timeline must come from renderer metadata",
+    );
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds -lt \$requestedProductDurationSeconds -or \$audioDurationSeconds -gt \$renderedDurationSeconds/,
+      "renderer audio must remain bounded by the request and rendered-frame timelines",
+    );
+    assert.match(workflow, /\$productBoundarySeconds = \[Math\]::Min\(\$renderedDurationSeconds, \$audioDurationSeconds\)/);
+    assert.match(workflow, /\$productVideoDurationSeconds = \$productFrames \/ 25\.0/);
+    assert.match(
+      workflow,
+      /\$durationToleranceSeconds = 1\.0 \/ 25\.0/,
+      "duration tolerance must remain exactly one output frame",
+    );
+    for (const invocation of [
+      "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'source WAV stream' $wavAudio.duration $audioDurationSeconds",
+      "Assert-DurationNear 'source WAV container' $wavProbe.format.duration $audioDurationSeconds",
+      "Assert-DurationNear 'product MP4 video stream' $video.duration $productVideoDurationSeconds",
+      "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
+      "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
+    ]) {
+      assert.ok(workflow.includes(invocation), `${invocation} must remain exact`);
+    }
+    assert.match(workflow, /ffprobe-mp4\.json/);
+    assert.match(workflow, /ffprobe-rendered-frames\.json/);
+    assert.match(workflow, /ffprobe-wav\.json/);
+    assert.match(
+      workflow,
+      /sc-18902-ltx-eros-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/ltx_eros\.rendered-frames\.mp4/,
+      "the inspected artifact must include the untrimmed renderer output",
+    );
+    assert.match(
+      workflow,
+      /"\$productHash  ltx_eros\.mp4"\s+"\$renderedHash  ltx_eros\.rendered-frames\.mp4"/,
+      "the checksum manifest must bind both inspectable MP4s",
+    );
+    assert.match(
+      workflow,
+      /\$productHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$mp4\)\.Hash\.ToLowerInvariant\(\)/,
+      "the product checksum must hash the product-faithful MP4",
+    );
+    assert.match(
+      workflow,
+      /\$renderedHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$videoOnly\)\.Hash\.ToLowerInvariant\(\)/,
+      "the renderer checksum must hash the complete rendered-frame MP4",
+    );
+    assert.match(
+      workflow,
+      /\$metadata\.captureKind -ne 'current-candle-route-baseline'/,
+      "uploaded metadata must identify the product-neutral current-route baseline",
+    );
+    assert.match(
+      workflow,
+      /\$ffmpegVersionLines = @\(& ffmpeg -version\)\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'ffmpeg version probe failed' \}\s+\$ffmpegVersion = \(\$ffmpegVersionLines \| Select-Object -First 1\)\.Trim\(\)/,
+      "the runner probe must consume ffmpeg output before selecting its version line",
+    );
+    assert.doesNotMatch(
+      workflow,
+      /ffmpeg -version \| Select-Object -First 1/,
+      "an early-closing native pipeline must not leak exit code 1 into the Actions wrapper",
+    );
+    assert.match(workflow, /ffmpeg = \$ffmpegVersion/);
+    assert.match(
+      workflow,
+      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+      "only a verified capture may publish the MP4/stills/metadata bundle",
+    );
+
+    for (const declaration of [
+      "const WIDTH: u32 = 768;",
+      "const HEIGHT: u32 = 512;",
+      "const DURATION_SECONDS: u32 = 6;",
+      "const FPS: u32 = 25;",
+      "const STEPS: u32 = 8;",
+      "const RENDERED_FRAMES: u32 = 153;",
+      "const SEED: u64 = 18_902;",
+      "assert_eq!(request.sampler, None);",
+      'const CAPTURE_KIND: &str = "current-candle-route-baseline";',
+    ]) {
+      assert.ok(harness.includes(declaration), `fixed harness contract missing: ${declaration}`);
+    }
+    assert.doesNotMatch(
+      harness,
+      /sampler:\s*Some\(/,
+      "the current-route baseline must preserve the manifest-default absent sampler",
+    );
+    assert.match(
+      harness,
+      /"sampler": null/,
+      "capture metadata must record the manifest-default absent sampler",
+    );
+    assert.match(harness, /const PROMPT: &str = "A wide locked camera shot of a red fox/);
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /LTX_EROS_(?:PROMPT|SEED|WIDTH|HEIGHT|DURATION|FPS|STEPS)/,
+      "evidence-defining request fields must not be environment-overridable",
+    );
+    assert.match(harness, /fn load_spec\(eros_dir: PathBuf, gemma_dir: PathBuf\) -> LoadSpec/);
+    assert.doesNotMatch(harness, /\.with_adapters\(/);
+    assert.match(harness, /assert!\(spec\.adapters\.is_empty\(\)\)/);
+    assert.match(harness, /"captureKind": CAPTURE_KIND/);
+    assert.match(harness, /adapter_reports\.is_empty\(\)/);
+    assert.match(harness, /"pairDeltas": pair_deltas/);
+    assert.match(harness, /"frameStats": frame_stats/);
+    assert.match(harness, /"renderedFramesDurationSeconds": RENDERED_FRAMES as f64 \/ FPS as f64/);
+    assert.match(harness, /"productDurationSeconds": DURATION_SECONDS/);
+    assert.doesNotMatch(harness, /"encodedDurationSeconds"/);
+    assert.match(harness, /audio\.expect\("Candle LTX Eros must return its synchronized audio track"\)/);
+    assert.match(
+      workerLib,
+      /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod ltx_eros_gpu_smoke;/,
+      "the ignored real-weight test must compile on the actual Windows Candle lane",
+    );
+  };
+
+  assert.doesNotThrow(() => validate(documents));
+
+  const manifestObject = JSON.parse(stripJsoncComments(documents.manifestText));
+  const manifestMutation = (mutate) => {
+    const copy = structuredClone(manifestObject);
+    mutate(copy);
+    return JSON.stringify(copy);
+  };
+  const mutations = [
+    {
+      name: "manifest duration drift",
+      expected: /Eros manifest defaults must stay fixed/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3_eros").defaults.duration = 5;
+        }),
+      },
+    },
+    {
+      name: "base route contamination",
+      expected: /must not add the Eros distill recipe to base/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3").mlx.autoDistillLora = {
+            stage1Strength: 1,
+            stage2Strength: 0.4,
+          };
+        }),
+      },
+    },
+    {
+      name: "auto-dispatch regression",
+      expected: /must be explicit and off by default/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(run_ltx_eros_acceptance:[\s\S]*?default:) false/,
+          "$1 true",
+        ),
+      },
+    },
+    {
+      name: "credentialed HF regression",
+      expected: /both HF downloads must explicitly refuse implicit credentials/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(repo_id="TenStrip\/LTX2\.3-10Eros"[\s\S]*?)token=False/,
+          "$1token=True",
+        ),
+      },
+    },
+    {
+      name: "unsupported candidate mode introduced",
+      expected: /must not expose or construct an unsupported filtered-LoRA candidate/,
+      documents: {
+        ...documents,
+        workflow: `${documents.workflow}\nltx_eros_recipe: single-pass-distill`,
+      },
+    },
+    {
+      name: "production shortest mux removed",
+      expected: /copy-video\/AAC\/-shortest mux contract/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "-b:a 192k -shortest -map_metadata",
+          "-b:a 192k -map_metadata",
+        ),
+      },
+    },
+    {
+      name: "H.264 verification weakened",
+      expected: /must require the production H\.264 video codec/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$video.codec_name -ne 'h264'",
+          "$video.codec_name -ne 'hevc'",
+        ),
+      },
+    },
+    {
+      name: "duration tolerance widened",
+      expected: /duration tolerance must remain exactly one output frame/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$durationToleranceSeconds = 1.0 / 25.0",
+          "$durationToleranceSeconds = 2.0 / 25.0",
+        ),
+      },
+    },
+    {
+      name: "product MP4 audio duration verification removed",
+      expected: /product MP4 audio stream.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
+          "",
+        ),
+      },
+    },
+    {
+      name: "renderer duration wired to the product timeline",
+      expected: /complete rendered-frame video stream.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $productBoundarySeconds",
+        ),
+      },
+    },
+    {
+      name: "product duration wired to the renderer timeline",
+      expected: /product MP4 container.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $renderedDurationSeconds",
+        ),
+      },
+    },
+    {
+      name: "early-closing ffmpeg version pipeline restored",
+      expected: /must consume ffmpeg output before selecting its version line|must not leak exit code 1/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow
+          .replace("$ffmpegVersionLines = @(& ffmpeg -version)", "$ffmpegVersionLines = & ffmpeg -version | Select-Object -First 1")
+          .replace("$ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1).Trim()", "$ffmpegVersion = $ffmpegVersionLines.Trim()"),
+      },
+    },
+    {
+      name: "renderer checksum omitted",
+      expected: /checksum manifest must bind both inspectable MP4s/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          '            "$renderedHash  ltx_eros.rendered-frames.mp4"\n',
+          "",
+        ),
+      },
+    },
+    {
+      name: "renderer checksum hashes the product MP4",
+      expected: /renderer checksum must hash the complete rendered-frame MP4/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $videoOnly)",
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4)",
+        ),
+      },
+    },
+    {
+      name: "complete renderer frame assertion weakened",
+      expected: /must still prove all 153 frames/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "[int]$renderedVideo.nb_read_frames -ne 153",
+          "[int]$renderedVideo.nb_read_frames -lt 150",
+        ),
+      },
+    },
+    {
+      name: "product mux accepts the untrimmed lattice",
+      expected: /must end at the six-second audio boundary/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$productFrames -gt 151",
+          "$productFrames -gt 153",
+        ),
+      },
+    },
+    {
+      name: "explicit sampler alias reintroduced",
+      expected: /manifest-default absent sampler/,
+      documents: {
+        ...documents,
+        harness: documents.harness.replace(
+          "steps: Some(STEPS),",
+          'steps: Some(STEPS),\n        sampler: Some("rectified-flow".to_owned()),',
+        ),
+      },
+    },
+  ];
+  for (const mutation of mutations) {
+    assert.throws(
+      () => validate(mutation.documents),
+      mutation.expected,
+      `${mutation.name} must be killed by the acceptance contract`,
+    );
+  }
 });

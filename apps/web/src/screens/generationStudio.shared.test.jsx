@@ -35,6 +35,7 @@ function TierHarness({
   reseedOnModelChange = false,
   useGenerationQuality = false,
   autoTier = null,
+  preferencesHydrated = true,
 }) {
   const state = useQuantTierPicker({
     screen,
@@ -45,6 +46,7 @@ function TierHarness({
     reseedOnModelChange,
     useGenerationQuality,
     autoTier,
+    preferencesHydrated,
   });
   return (
     <div>
@@ -140,6 +142,37 @@ describe("shared generation-studio controls", () => {
       <TierHarness model="video" availableTiers={["q4", "q8", "bf16"]} screen="video" />,
     ));
     expect(container.querySelector("output").textContent).toBe("q4|");
+  });
+
+  it("waits for durable preferences before seeding instead of locking in a catalog-race default", async () => {
+    vi.mocked(readLastTier).mockReturnValue(null);
+    await act(async () => root.render(
+      <TierHarness
+        model="imported-int8"
+        availableTiers={["q4", "q8", "bf16"]}
+        screen="image"
+        useGenerationQuality
+        autoTier="q8"
+        preferencesHydrated={false}
+      />,
+    ));
+    expect(container.querySelector("output").textContent).toBe("|");
+    expect(readLastTier).not.toHaveBeenCalled();
+
+    // App seeds the server's per-model map into lastTierStore before flipping this flag.
+    vi.mocked(readLastTier).mockReturnValue("bf16");
+    await act(async () => root.render(
+      <TierHarness
+        model="imported-int8"
+        availableTiers={["q4", "q8", "bf16"]}
+        screen="image"
+        useGenerationQuality
+        autoTier="q8"
+        preferencesHydrated
+      />,
+    ));
+    expect(container.querySelector("output").textContent).toBe("bf16|");
+    expect(readLastTier).toHaveBeenCalledWith("image", "imported-int8");
   });
 
   it("persists only valid manual selections and rejects unavailable tiers", async () => {

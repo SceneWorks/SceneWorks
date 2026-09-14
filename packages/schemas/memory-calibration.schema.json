@@ -5,11 +5,99 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
-    "schemaVersion": { "const": 4 },
+    "schemaVersion": { "const": 6 },
     "harnessVersion": { "const": "sceneworks-memory-v5" },
     "sourceSessions": { "type": "array", "items": { "$ref": "#/$defs/sourceSession" } },
-    "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
+    "records": { "type": "array", "items": { "$ref": "#/$defs/record" } },
+    "exceededBounds": { "type": "array", "items": { "$ref": "#/$defs/exceededBound" } }
   },
+  "allOf": [
+    {
+      "$comment": "JSON Schema cannot correlate sourceSessionIds with array members, and a source session carries no modelId, so an LTX derivation bundle fail-closes by requiring that at least one carried source session has a complete typed LTX target. It deliberately does NOT impose that shape on every session: a bundle mixes LTX sessions with non-LTX ones that can never carry transformerVariant/decoder. The JS and Rust validators then enforce that every session an LTX derivation actually references is present and exactly matches.",
+      "if": {
+        "properties": {
+          "records": {
+            "contains": {
+              "properties": {
+                "target": {
+                  "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
+                  "required": ["modelId"]
+                },
+                "derivation": { "type": "object" }
+              },
+              "required": ["target", "derivation"]
+            }
+          }
+        },
+        "required": ["records"]
+      },
+      "then": {
+        "required": ["sourceSessions"],
+        "properties": {
+          "sourceSessions": {
+            "minItems": 1,
+            "contains": {
+              "type": "object",
+              "required": ["target"],
+              "properties": {
+                "target": { "required": ["transformerVariant", "decoder"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Any typed audio comparison must have a physical MLX source session carrying the canonical selected/reference A/V pair. JSON Schema proves that such a session exists; the JS and Rust validators bind the record's quality derivation to that exact session.",
+      "if": {
+        "properties": {
+          "records": {
+            "contains": {
+              "properties": {
+                "quality": {
+                  "required": ["audio"]
+                }
+              },
+              "required": ["quality"]
+            }
+          }
+        },
+        "required": ["records"]
+      },
+      "then": {
+        "required": ["sourceSessions"],
+        "properties": {
+          "sourceSessions": {
+            "contains": {
+              "type": "object",
+              "required": ["kind", "outputs"],
+              "properties": {
+                "kind": { "const": "physical_mlx" },
+                "outputs": {
+                  "allOf": [
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "selected_av" } }
+                      }
+                    },
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "reference_av" } }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "gitState": {
       "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
@@ -30,13 +118,22 @@
     },
     "phase": {
       "type": "object", "additionalProperties": false,
-      "required": ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"],
+      "description":
+        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 456 committed phase objects that carried them (404 across the five bundles plus 52 in the thirteen immutable v4 receipts) — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined. schemaVersion 6 adds explicit LTX transformer and decoder identity to every derived record and its source target.",
+      "required": ["activeBytes", "allocatorBytes", "reclaimableBytes"],
       "properties": {
-        "activeBytes": { "type": "integer", "minimum": 0 },
-        "allocatorBytes": { "type": "integer", "minimum": 0 },
-        "deviceBytes": { "type": "integer", "minimum": 0 },
-        "wiredBytes": { "type": "integer", "minimum": 0 },
-        "reclaimableBytes": { "type": "integer", "minimum": 0 }
+        "activeBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "MLX: `mlx_rs::memory::get_peak_memory()` — the MAXIMUM live-array (\"active\") byte count over the phase window, the quantity MLX's own `get_memory_limit()` bounds. CUDA: the `nvidia-smi memory.used` device delta on the required idle single-process GPU. This is the NON-RECLAIMABLE residency and the only field a host-capacity or wired-ceiling check may be run against."
+        },
+        "allocatorBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "DERIVED, not measured: `activeBytes + reclaimableBytes`, and both validators enforce that identity. It is an UPPER BOUND on co-existence, NOT a simultaneous maximum — `activeBytes` is a peak-over-window while `reclaimableBytes` is instantaneous at the phase boundary, and MLX exposes no \"cache at the active peak\". Never compare it to a hardware ceiling: a completing LTX render co-existed 7.46 GiB above `recommendedMaxWorkingSetSize` because the allocator cache is released under pressure (sc-18810)."
+        },
+        "reclaimableBytes": {
+          "type": "integer", "minimum": 0,
+          "description": "MLX: `mlx_rs::memory::get_cache_memory()` — the allocator's free-buffer cache, read INSTANTANEOUSLY at the phase boundary. Elastic and released under memory pressure, so it is never charged as wired residency. CUDA: 0, because candle's exact backend has no caching allocator."
+        }
       }
     },
     "phaseMetrics": {
@@ -82,14 +179,21 @@
     "sourceTarget": {
       "type": "object", "additionalProperties": false,
       "required": ["tier", "mode", "overlay", "rung"],
+      "dependentRequired": {
+        "transformerVariant": ["decoder"],
+        "decoder": ["transformerVariant"]
+      },
       "properties": {
         "tier": { "type": "string", "minLength": 1 },
         "mode": { "type": "string", "minLength": 1 },
         "overlay": { "type": "string", "minLength": 1 },
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] }
       }
     },
     "sourceOutput": {
+      "description": "One typed receipt of a physical source session. `request` names the committed `<session>.request.json`. A rendered output (`selected_*` / `reference_*`) is a content-addressed receipt — digest, byte length, geometry and frames are in the filename and the fields — and is NOT part of the committed tree (sc-22738): the bytes are verified against it at capture and at ingest, then left in the capture directory.",
       "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
       "allOf": [
         {
@@ -127,10 +231,34 @@
               "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-reference_rgb-[1-9][0-9]*x[1-9][0-9]*-[0-9a-f]{64}\\.rgb$" }
             }
           }
+        },
+        {
+          "if": {
+            "properties": { "role": { "const": "selected_av" } },
+            "required": ["role"]
+          },
+          "then": {
+            "required": ["bytes"],
+            "properties": {
+              "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-selected_av-[1-9][0-9]*x[1-9][0-9]*-f[1-9][0-9]*-[0-9a-f]{64}\\.avbin$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "role": { "const": "reference_av" } },
+            "required": ["role"]
+          },
+          "then": {
+            "required": ["bytes"],
+            "properties": {
+              "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-reference_av-[1-9][0-9]*x[1-9][0-9]*-f[1-9][0-9]*-[0-9a-f]{64}\\.avbin$" }
+            }
+          }
         }
       ],
       "properties": {
-        "role": { "enum": ["request", "selected_rgb", "reference_rgb"] },
+        "role": { "enum": ["request", "selected_rgb", "reference_rgb", "selected_av", "reference_av"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "bytes": { "type": "integer", "minimum": 1 }
@@ -140,7 +268,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["role", "path", "bytes", "sha256", "repository", "resolvedRevision", "variant"],
       "properties": {
-        "role": { "enum": ["base", "control", "adapter"] },
+        "role": { "enum": ["base", "control", "adapter", "enhancer"] },
         "path": { "type": "string", "minLength": 1 },
         "bytes": { "type": "integer", "minimum": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -185,22 +313,52 @@
                     "maxContains": 1
                   },
                   {
-                    "contains": {
-                      "type": "object",
-                      "properties": { "role": { "const": "selected_rgb" } },
-                      "required": ["role"]
-                    },
-                    "minContains": 1,
-                    "maxContains": 1
-                  },
-                  {
-                    "contains": {
-                      "type": "object",
-                      "properties": { "role": { "const": "reference_rgb" } },
-                      "required": ["role"]
-                    },
-                    "minContains": 1,
-                    "maxContains": 1
+                    "oneOf": [
+                      {
+                        "allOf": [
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "selected_rgb" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          },
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "reference_rgb" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          }
+                        ]
+                      },
+                      {
+                        "allOf": [
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "selected_av" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          },
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "reference_av" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          }
+                        ]
+                      }
+                    ]
                   }
                 ]
               }
@@ -256,6 +414,125 @@
         "justification": { "type": "string", "minLength": 1 }
       }
     },
+    "repositories": {
+        "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
+        "properties": {
+          "sceneWorks": {
+            "allOf": [
+              { "$ref": "#/$defs/gitState" },
+              { "required": ["matrixSourceRevision"] }
+            ]
+          },
+          "inference": { "$ref": "#/$defs/gitState" }
+        }
+      },
+    "hardware": {
+        "oneOf": [
+          {
+            "allOf": [
+              { "$ref": "#/$defs/hardwareBase" },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["probe", "memoryBytes", "deviceId", "name", "computeCapability", "driverVersion", "runtimeVersion"],
+                "properties": {
+                  "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "deviceId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 },
+                  "computeCapability": { "type": "string", "minLength": 1 }, "driverVersion": { "type": "string", "minLength": 1 },
+                  "runtimeVersion": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              { "$ref": "#/$defs/hardwareBase" },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["probe", "memoryBytes", "model", "chip", "osVersion", "metalDevice", "mlxMemoryLimitBytes", "wiredLimitBytes"],
+                "properties": {
+                  "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "model": { "type": "string", "minLength": 1 }, "chip": { "type": "string", "minLength": 1 },
+                  "osVersion": { "type": "string", "minLength": 1 }, "metalDevice": { "type": "string", "minLength": 1 },
+                  "mlxMemoryLimitBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "wiredLimitBytes": { "type": "integer", "exclusiveMinimum": 0 }
+                }
+              }
+            ]
+          }
+        ]
+      },
+    "target": {
+        "type": "object", "additionalProperties": false,
+        "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
+        "allOf": [
+          {
+            "$comment": "SC-18783: LTX-2.5 transformer and decoder choices change both the executed pipeline and its memory profile, so neither may be inferred from provider, tier, or fixture text.",
+            "if": {
+              "properties": { "modelId": { "const": "ltx_2_5" } },
+              "required": ["modelId"]
+            },
+            "then": { "required": ["transformerVariant", "decoder"] }
+          }
+        ],
+        "properties": {
+          "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
+          "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
+          "referenceCount": { "type": "integer", "minimum": 0 },
+          "overlay": { "type": "string", "minLength": 1 },
+          "transformerVariant": { "enum": ["distilled", "dev"] },
+          "decoder": { "enum": ["conv", "diffvae"] },
+          "geometry": {
+            "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
+            "properties": {
+              "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 },
+              "batch": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      },
+    "exceededBound": {
+      "$comment": "sc-22738 (epic 22723): a MEASURED LOWER BOUND. The capture reached observedFootprintBytes of kernel physical footprint on a host of hardware.memoryBytes and was terminated by scripts/memory-calibration-watchdog.py before it completed, so the cell's peak is AT LEAST that at this geometry. It is not a record: there is no phase decomposition, no quality comparison and no admission scenario, because the render never got that far. It carries exactly the identity a record carries plus the figures the inequality is made of, so config/memory-anchors.json can bind it byte-for-byte the way it binds an anchor. Additive and OPTIONAL, which is why schemaVersion does not move: every bundle written before this def is still valid, and no consumer that partitions a bundle by record status sees a new status.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "logicalCaseId", "backend", "loadShape", "repositories", "hardware", "artifact",
+        "target", "referenceCount", "observedFootprintBytes", "ceilingBytes", "reason",
+        "calibrationFingerprint", "capturedAt", "harnessVersion"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^exc-[0-9a-f]{20}$" },
+        "logicalCaseId": { "type": "string", "pattern": "^implan-[0-9a-f]{20}$" },
+        "backend": { "enum": ["mlx", "candle"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "repositories": { "$ref": "#/$defs/repositories" },
+        "hardware": { "$ref": "#/$defs/hardware" },
+        "artifact": {
+          "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
+            "variant": { "type": "string", "minLength": 1 },
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "target": { "$ref": "#/$defs/target" },
+        "referenceCount": { "type": "integer", "minimum": 0 },
+        "observedFootprintBytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "ceilingBytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "reason": {
+          "$comment": "sc-22738: the bound's CAUSE, in one of exactly two spellings, because there are exactly two ways a run can end having measured a lower bound. `physical_footprint_at_or_above_<ceiling>:observed_<footprint>` is scripts/memory-calibration-watchdog.py's own hard-stop reason, verbatim. `metal_submissions_ignored:observed_<peak>:wired_limit_<limit>` is a PROCESS-SCOPED Metal refusal (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored) taken at the host's Metal wired limit, where the guard never fired and the witnesses are the sampler's peak and the adapter's stderr. Both figures are spelled into the string so a store row's cause survives without the bundle beside it. A free-text reason is refused: an unenumerated cause is a bound nobody can re-derive.",
+          "type": "string",
+          "pattern": "^(physical_footprint_at_or_above_[0-9]+:observed_[0-9]+|metal_submissions_ignored:observed_[0-9]+:wired_limit_[0-9]+)$"
+        },
+        "eventFileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "providerStderrSha256": {
+          "$comment": "sc-22738: the sha256 of the provider stderr the refusal was read out of. Present only on a `metal_submissions_ignored` bound, where the adapter's stderr — not the guard's event log — is what witnessed the cause.",
+          "type": "string", "pattern": "^[0-9a-f]{64}$"
+        },
+        "calibrationFingerprint": { "type": "string", "minLength": 1 },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "const": "sceneworks-memory-v5" }
+      }
+    },
     "record": {
       "type": "object",
       "additionalProperties": false,
@@ -266,6 +543,34 @@
         "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
       ],
       "allOf": [
+        {
+          "$comment": "Audio quality is admissible only as a source-derived physical A/V comparison. Bundle-level validators bind derivation.quality to the exact physical session.",
+          "if": {
+            "properties": {
+              "quality": { "required": ["audio"] }
+            },
+            "required": ["quality"]
+          },
+          "then": { "required": ["derivation"] }
+        },
+        {
+          "$comment": "Every derived LTX record carries the two pipeline axes on the record itself. The JS and Rust validators additionally bind every referenced source-session target to all six exact identity fields.",
+          "if": {
+            "properties": {
+              "target": {
+                "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
+                "required": ["modelId"]
+              },
+              "derivation": { "type": "object" }
+            },
+            "required": ["target", "derivation"]
+          },
+          "then": {
+            "properties": {
+              "target": { "required": ["transformerVariant", "decoder"] }
+            }
+          }
+        },
         {
           "$comment": "sc-17774: currency is the provider's compile-closure digest, so an AUTHORITATIVE record must carry the one it was captured under. Fixture and candidate scopes are refused by evidenceSemantics before the comparison is ever reached, so demanding a real digest there would force the harness to derive one against a synthetic repo that has no provider crate to derive from.",
           "if": {
@@ -288,53 +593,8 @@
         "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "backend": { "enum": ["mlx", "candle"] },
         "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
-        "repositories": {
-          "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
-          "properties": {
-            "sceneWorks": {
-              "allOf": [
-                { "$ref": "#/$defs/gitState" },
-                { "required": ["matrixSourceRevision"] }
-              ]
-            },
-            "inference": { "$ref": "#/$defs/gitState" }
-          }
-        },
-        "hardware": {
-          "oneOf": [
-            {
-              "allOf": [
-                { "$ref": "#/$defs/hardwareBase" },
-                {
-                  "type": "object", "additionalProperties": false,
-                  "required": ["probe", "memoryBytes", "deviceId", "name", "computeCapability", "driverVersion", "runtimeVersion"],
-                  "properties": {
-                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "deviceId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 },
-                    "computeCapability": { "type": "string", "minLength": 1 }, "driverVersion": { "type": "string", "minLength": 1 },
-                    "runtimeVersion": { "type": "string", "minLength": 1 }
-                  }
-                }
-              ]
-            },
-            {
-              "allOf": [
-                { "$ref": "#/$defs/hardwareBase" },
-                {
-                  "type": "object", "additionalProperties": false,
-                  "required": ["probe", "memoryBytes", "model", "chip", "osVersion", "metalDevice", "mlxMemoryLimitBytes", "wiredLimitBytes"],
-                  "properties": {
-                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "model": { "type": "string", "minLength": 1 }, "chip": { "type": "string", "minLength": 1 },
-                    "osVersion": { "type": "string", "minLength": 1 }, "metalDevice": { "type": "string", "minLength": 1 },
-                    "mlxMemoryLimitBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "wiredLimitBytes": { "type": "integer", "exclusiveMinimum": 0 }
-                  }
-                }
-              ]
-            }
-          ]
-        },
+        "repositories": { "$ref": "#/$defs/repositories" },
+        "hardware": { "$ref": "#/$defs/hardware" },
         "artifact": {
           "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
           "properties": {
@@ -343,22 +603,7 @@
             "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         },
-        "target": {
-          "type": "object", "additionalProperties": false,
-          "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
-          "properties": {
-            "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
-            "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
-            "overlay": { "type": "string", "minLength": 1 },
-            "geometry": {
-              "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
-              "properties": {
-                "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 },
-                "batch": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 }
-              }
-            }
-          }
-        },
+        "target": { "$ref": "#/$defs/target" },
         "fixture": { "type": "string", "minLength": 1 },
         "strategy": {
           "type": "object", "additionalProperties": false, "required": ["rung", "engagedRungs", "parameters"],
@@ -436,13 +681,42 @@
             "contract": { "type": "string", "minLength": 1 },
             "identicalInputs": { "type": "boolean" },
             "identicalLatents": { "type": "boolean" },
+            "warmPasses": {
+              "$comment": "sc-22738: how many warm passes the capture ran after its measured render. 0 is a video-lane receipt (one measured render, no clean warm control, no warm repeat): its determinism comparison was NOT run, so `result` is `not_run` and no comparison figure is carried — the thresholds it would have been judged by still travel. A runtime_complete record with warmPasses 0 is accepted in exactly that shape (see the status branch below). Absent on every record captured before the declaration existed, which keeps the previous requirements for those records.",
+              "type": "integer", "minimum": 0
+            },
             "result": { "enum": ["passed", "failed", "not_run"] },
             "maximumError": { "type": "number", "minimum": 0 },
             "meanError": { "type": "number", "minimum": 0 },
             "rootMeanSquareError": { "type": "number", "minimum": 0 },
             "maximumErrorThreshold": { "type": "number", "minimum": 0 },
             "meanErrorThreshold": { "type": "number", "minimum": 0 },
-            "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 }
+            "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 },
+            "audio": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "result", "sampleRateHz", "channels", "sampleCount",
+                "selectedPcmSha256", "referencePcmSha256",
+                "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+                "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+                "rootMeanSquareErrorThreshold"
+              ],
+              "properties": {
+                "result": { "const": "passed" },
+                "sampleRateHz": { "type": "integer", "minimum": 1 },
+                "channels": { "type": "integer", "minimum": 1 },
+                "sampleCount": { "type": "integer", "minimum": 1 },
+                "selectedPcmSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "referencePcmSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "maximumAbsoluteError": { "type": "number", "minimum": 0 },
+                "meanAbsoluteError": { "type": "number", "minimum": 0 },
+                "rootMeanSquareError": { "type": "number", "minimum": 0 },
+                "maximumAbsoluteErrorThreshold": { "type": "number", "minimum": 0 },
+                "meanAbsoluteErrorThreshold": { "type": "number", "minimum": 0 },
+                "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 }
+              }
+            }
           }
         },
         "negativeMutation": {
@@ -641,22 +915,61 @@
                   { "contains": { "properties": { "name": { "const": "exact_fit" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
                   { "contains": { "properties": { "name": { "const": "unknown_budget" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
                   { "contains": { "properties": { "name": { "const": "stale_evidence" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
-                  { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
-                  { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
-                  { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                  {
+                    "oneOf": [
+                      {
+                        "allOf": [
+                          { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } }
+                        ]
+                      },
+                      {
+                        "allOf": [
+                          { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "passed" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } }
+                        ]
+                      },
+                      {
+                        "allOf": [
+                          { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "passed" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "passed" }, "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true } }, "required": ["name", "result", "reason", "cleanupVerified", "warmFollowUpPassed"] } },
+                          { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "passed" }, "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true } }, "required": ["name", "result", "reason", "cleanupVerified", "warmFollowUpPassed"] } }
+                        ]
+                      }
+                    ]
+                  },
                   { "contains": { "properties": { "name": { "const": "loadability" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
                   { "contains": { "properties": { "name": { "const": "overlay" }, "result": { "const": "not_applicable" } }, "required": ["name", "result", "reason"] } }
                 ]
               },
               "quality": {
-                "required": [
-                  "contract", "result", "maximumError", "meanError",
-                  "rootMeanSquareError", "maximumErrorThreshold", "meanErrorThreshold",
-                  "rootMeanSquareErrorThreshold", "identicalInputs"
-                ],
-                "properties": {
-                  "identicalInputs": { "const": true },
-                  "result": { "const": "passed" }
+                "if": { "properties": { "warmPasses": { "const": 0 } }, "required": ["warmPasses"] },
+                "then": {
+                  "$comment": "sc-22738: a single-render video receipt. The comparison was not run; nothing here is a zero.",
+                  "required": [
+                    "contract", "result", "warmPasses",
+                    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold"
+                  ],
+                  "not": { "anyOf": [
+                    { "required": ["maximumError"] }, { "required": ["meanError"] },
+                    { "required": ["rootMeanSquareError"] }, { "required": ["audio"] }
+                  ] },
+                  "properties": {
+                    "result": { "const": "not_run" }
+                  }
+                },
+                "else": {
+                  "required": [
+                    "contract", "result", "maximumError", "meanError",
+                    "rootMeanSquareError", "maximumErrorThreshold", "meanErrorThreshold",
+                    "rootMeanSquareErrorThreshold", "identicalInputs"
+                  ],
+                  "properties": {
+                    "identicalInputs": { "const": true },
+                    "result": { "const": "passed" }
+                  }
                 }
               },
               "negativeMutation": { "type": "null" },

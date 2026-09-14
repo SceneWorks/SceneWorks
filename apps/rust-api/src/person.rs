@@ -67,7 +67,7 @@ pub(crate) async fn create_person_detection_job(
         payload.requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn create_person_track_job(
@@ -105,5 +105,5 @@ pub(crate) async fn create_person_track_job(
         payload.requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }

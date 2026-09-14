@@ -487,10 +487,12 @@ pub(super) async fn generate_candle_pulid_stream(
             false,
             false,
             raw_budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
             predicted_peak,
             runtime_overlay_bytes,
             gen_core::MemoryCacheState::Cold,
             pulid_contract,
+            crate::candle_memory_strategy::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
         )?
     } else {
         None

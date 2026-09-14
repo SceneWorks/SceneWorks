@@ -13,6 +13,11 @@ pub enum WorkerError {
         code: Option<String>,
     },
     InvalidPayload(String),
+    /// The configured external model library holding an installed model cannot currently be
+    /// proven present (disconnected, or a different physical volume now occupies its path).
+    /// Distinct from [`Self::InvalidPayload`]/[`Self::Engine`] so a disconnect is never surfaced
+    /// as a raw loader ENOENT and never triggers a silent re-download of installed state.
+    ExternalLibraryUnavailable(String),
     Engine(String),
     Canceled(String),
 }
@@ -33,6 +38,11 @@ impl fmt::Display for WorkerError {
                 None => write!(formatter, "API {status}: {detail}"),
             },
             Self::InvalidPayload(detail) => formatter.write_str(detail),
+            Self::ExternalLibraryUnavailable(detail) => write!(
+                formatter,
+                "[{}] {detail}",
+                sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE
+            ),
             Self::Engine(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),
         }

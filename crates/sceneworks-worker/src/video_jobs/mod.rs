@@ -6,9 +6,10 @@
 //! `video_adapters.py`). The shared encode pipeline takes the engine's video output
 //! shape — RGB8 `frames` + `fps` + an optional synchronized `audio` track — writes
 //! the frames to an mp4 (libx264), muxes a 16-bit-PCM WAV as AAC when audio is present
-//! (`-shortest`), remuxes `+faststart` (WKWebView range-seek), and extracts a poster
-//! frame. It reuses [`crate::media_jobs::run_ffmpeg`] (binary resolution + the
-//! periodic-heartbeat / cooperative-cancel loop).
+//! (bounded at the PICTURE's length — see [`audio_mux_args`]), remuxes `+faststart`
+//! (WKWebView range-seek), and extracts a poster frame. It reuses
+//! [`crate::media_jobs::run_ffmpeg`] (binary resolution + the periodic-heartbeat /
+//! cooperative-cancel loop).
 //!
 //! sc-3033 ships only the **procedural stub** generator (a moving gradient + a quiet
 //! synchronized tone for the LTX family, mirroring the engine: LTX emits audio, Wan
@@ -21,7 +22,8 @@ use std::f32::consts::PI;
 use std::path::Path;
 
 use sceneworks_core::video_request::{
-    duration_limit_error, fps_limit_error, is_ltx_model, VideoRequest,
+    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, requested_steps,
+    steps_limit_error, VideoRequest,
 };
 
 // Used only by the video generation metrics builders below, which are themselves
@@ -59,22 +61,28 @@ mod prelude {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[allow(unused_imports)]
+    pub(super) use super::scail2::scail2_segment_blocking;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, scail2_segment_blocking, video_frame_count,
-        wan_frame_count, AdapterSpec, CancelFlag, CharacterStore, Conditioning, GenerationMetrics,
-        GenerationOutput, GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy,
-        Precision, Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
+        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
+        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
+        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
     pub(super) use super::{
         backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
-        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, resolve_video_seed, run_ffmpeg,
-        safe_download_dir, shutdown_requested, task_join_error, update_job, video_progress,
-        write_poster_frame, ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo,
-        Duration, FfmpegContext, Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf,
-        ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError,
-        WorkerResult, WorkerStatus, CANCEL_MESSAGE,
+        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, picture_bound_seconds,
+        resolve_video_seed, run_ffmpeg, safe_download_dir, shutdown_requested, task_join_error,
+        update_job, video_progress, write_poster_frame, ApiClient, AudioTrack, BTreeMap,
+        CancelJoinGuard, DecodedVideo, Duration, FfmpegContext, Instant, JobSnapshot, JobStatus,
+        JsonObject, Path, PathBuf, ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value,
+        VideoRequest, WorkerError, WorkerResult, WorkerStatus, CANCEL_MESSAGE,
     };
     #[cfg(any(
         target_os = "macos",
@@ -234,6 +242,12 @@ enum VideoRoute {
     /// Mochi 1 text-to-video (epic 1788 / sc-11992). Carries the resolved engine id. t2v ONLY —
     /// [`mochi_available`] gates the mode, since `conditioning: []` means there is no other shape.
     Mochi(&'static str),
+    /// MiniMax-H3 / Hailuo 3.0 joint audio+video (epic 17137 / sc-19508). Serves t2va, fl2va (0/1/2
+    /// keyframes) and Ref2VA; mac-only. Carries the resolved engine id — ONE id for BOTH catalog
+    /// entries, because the two DiT partitions are directories of a single provider, not two
+    /// providers. [`minimax_h3_available`] folds in the registry check, the partition/shape
+    /// agreement check and weights resolution.
+    MiniMaxH3(&'static str),
     /// No native engine matched (or weights unresolved) → the procedural stub, after
     /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
     Stub,
@@ -246,6 +260,33 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    // MiniMax-H3 readiness remains the ONE ladder input that needs an injectable seam in tests:
+    // it requires the engine to be REGISTERED in the linked inference bundle. The permanent pin
+    // `28f0563baa03640ade1635356d2d54fe8a477f1a` carries that descriptor; threading readiness in
+    // keeps `resolve_video_route_with` able to distinguish the live tail arm from a deleted one.
+    //
+    // Evaluated here rather than in the ladder, but NOT eagerly: `minimax_h3_engine_id` is a pure
+    // string check, so every other model short-circuits before any filesystem touch and routing
+    // stays byte-identical. For a MiniMax-H3 id the probe simply runs earlier than it would have —
+    // no earlier predicate can match those ids, so the outcome is unchanged.
+    let minimax_h3_ready =
+        minimax_h3_engine_id(&request.model).is_some() && minimax_h3_available(request, settings);
+    resolve_video_route_with(request, settings, minimax_h3_ready)
+}
+
+/// [`resolve_video_route`] with the MiniMax-H3 readiness probe supplied by the caller — the seam
+/// that makes the family's tail arm reachable before the inference pin moves (sc-19508).
+///
+/// `resolve_video_route` is the one-line delegation that binds the real probe. Everything the
+/// ladder decides lives here.
+#[cfg(target_os = "macos")]
+fn resolve_video_route_with(
+    request: &VideoRequest,
+    settings: &Settings,
+    minimax_h3_ready: bool,
+) -> VideoRoute {
+    // Lives at the top of `_with`, not in the thin `resolve_video_route` wrapper: the wrapper is a
+    // one-line delegation and every routing decision belongs on the seam tests drive directly.
     if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
         return VideoRoute::Stub;
     }
@@ -299,20 +340,39 @@ fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRout
         // matches only `mochi_1`, and no earlier predicate can match that id, so routing for every
         // pre-existing model stays byte-identical. `mochi_available` folds in the t2v-only mode gate.
         VideoRoute::Mochi(engine_id)
+    } else if let Some(engine_id) =
+        minimax_h3_engine_id(&request.model).filter(|_| minimax_h3_ready)
+    {
+        // MiniMax-H3 (epic 17137 / sc-19508). Appended at the NEW tail: `minimax_h3_engine_id`
+        // matches only `minimax_h3` / `minimax_h3_ref`, and no earlier predicate can match either
+        // id, so routing for every pre-existing model stays byte-identical.
+        //
+        // `minimax_h3_available` folds in three gates that all have to hold before an arm may run:
+        // the engine is registered in the linked inference bundle (as it is at permanent pin
+        // `28f0563baa03640ade1635356d2d54fe8a477f1a`), the conditioning shape agrees with the
+        // entry's DiT partition, and both the tier and its shared components resolve. Any of them
+        // failing drops to `Stub`, where `ensure_video_engine_weights` re-runs the same checks and
+        // surfaces the precise reason instead of a procedural fake clip.
+        VideoRoute::MiniMaxH3(engine_id)
     } else {
         VideoRoute::Stub
     }
 }
 
 /// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
-/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). Every arm is gated on
-/// `settings.backend_candle_enabled`; when that is off (default) the resolver returns
-/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. The ladder preserves
-/// each model-native conditioned provider: LTX/Eros owns I2V, FLF, extend, bridge, and replacement;
+/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). The Eros terminal refusal precedes the
+/// backend flag so even a directly invoked legacy job cannot produce a stub. VACE-Fun is likewise
+/// refused when Candle is disabled; every other supported arm returns [`CandleVideoRoute::Stub`].
+/// The ladder preserves each accepted model-native conditioned provider: base LTX owns I2V, FLF,
+/// extend, bridge, and replacement;
 /// Wan TI2V-5B owns I2V/FLF; VACE-Fun owns its dedicated dual-expert replacement route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleVideoRoute {
+    /// `ltx_2_3_eros` is MLX-only after its undistilled Candle route failed exact-head CUDA
+    /// acceptance (sc-18902). Keep a worker-side terminal backstop for replayed/legacy jobs that
+    /// bypass the current scheduler refusal; they must never become procedural stub output.
+    UnsupportedEros,
     /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
     ReplacePersonScail2(&'static str),
     /// `replace_person` on `wan_2_2_vace_fun_14b` → the dedicated dual-expert Candle engine.
@@ -330,31 +390,100 @@ enum CandleVideoRoute {
     Bernini(&'static str),
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
+    /// MiniMax-H3's joint audio/video Candle provider. Current Candle capabilities route the base
+    /// t2va/fl2va and Ref2VA partitions through this live provider at the permanent inference pin;
+    /// direct or replayed off-Mac jobs therefore use the real provider rather than stub output.
+    MiniMaxH3(&'static str),
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
     /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
     WanComfyui,
-    /// Candle disabled, or no candle engine matched → the procedural stub.
+    /// Candle disabled (except VACE-Fun), or no candle engine matched → the procedural stub.
     Stub,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn reject_unsupported_candle_video_route(route: CandleVideoRoute) -> Result<(), WorkerError> {
+    match route {
+        CandleVideoRoute::UnsupportedEros => Err(WorkerError::InvalidPayload(
+            "LTX-2.3 10Eros is not supported on Candle/CUDA: its validated recipe requires the \
+             MLX two-pass cond_safe distill adapter, while the undistilled Candle route produced \
+             unusable noise in SC-18902 acceptance. Use an Apple Silicon MLX worker or select the \
+             base LTX-2.3 model."
+                .to_owned(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Run the candle video dispatch predicate ladder ONCE and return the [`CandleVideoRoute`]. Mirrors the
 /// historical inline ladder EXACTLY — same predicate order + `backend_candle_enabled` gating — so
-/// routing is byte-identical (sc-8828). Pure decision: no I/O, no generation.
+/// routing is byte-identical (sc-8828).
+///
+/// # Why this is fallible (sc-20644 review blocker 2)
+///
+/// The ladder's terminal arm is [`CandleVideoRoute::Stub`], which COMPLETES a job with procedural
+/// video. That is the right answer for a model this backend does not serve, and the wrong answer for
+/// a lane that had a typed refusal to give: `wan_comfyui_available` used to answer a `bool`, so
+/// every refusal the Wan plan route raises — a drifted or tampered plan, a missing snapshot tier, a
+/// missing or ambiguous expert role, an unconsumed layer — turned into `false` and the job SUCCEEDED
+/// with stub output.
+///
+/// This is the video lane's version of what `CheckpointPlanSelection::into_unclaimed_refusal` does
+/// on the image side: a lane's refusal is retained rather than discarded, and reaching the end of
+/// the ladder re-raises it instead of stubbing. Every other arm is unchanged and still infallible;
+/// only a lane that can REFUSE participates.
+/// Test-facing accessor for [`resolve_candle_video_route`], so a lane's own test module can assert
+/// that its refusal reaches the ROUTER rather than only its resolver. The distinction matters: a
+/// refusal that stops at the resolver and is swallowed on the way out is exactly the defect
+/// (review blocker 2).
+/// Returns only whether the route RESOLVED, not which route, so the accessor does not have to leak
+/// the private `CandleVideoRoute` out of this module. The distinction the caller needs is exactly
+/// "did this refuse or did it fall through", and the refusal message is the interesting half.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_video_route_for_test(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    resolve_candle_video_route(request, settings).map(|_| ())
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> CandleVideoRoute {
+fn resolve_candle_video_route(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<CandleVideoRoute> {
+    // This precedes the backend gate and every mode arm deliberately. A replayed Eros job must fail
+    // even on a disabled Candle worker, never misroute to Wan-VACE or procedural stub output.
+    if request.model == "ltx_2_3_eros" {
+        return Ok(CandleVideoRoute::UnsupportedEros);
+    }
+    // A plan-backed entry is decided HERE, ahead of the backend gate and every mode arm — each of
+    // those is wrong for it in its own way, and exactly one candle video lane loads a plan. See
+    // [`candle::plan_backed_wan_video_route`], which claims that lane or refuses by name (sc-20651).
+    if let Some(checkpoint_id) =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+    {
+        candle::plan_backed_wan_video_route(request, settings, checkpoint_id)?;
+        return Ok(CandleVideoRoute::WanComfyui);
+    }
+    // This must precede the generic backend-disabled fallback. A disabled Candle worker used to
+    // return `Stub` for VACE-Fun and complete a procedural clip, despite having no real provider.
+    // Reuse the job-entry gate so direct route probes and execution have the same capability verdict.
+    if request.model == "wan_2_2_vace_fun_14b" {
+        validate_vace_fun_capability(request, settings)?;
+        return Ok(CandleVideoRoute::ReplacePersonWanVaceFun);
+    }
     if !settings.backend_candle_enabled {
-        return CandleVideoRoute::Stub;
+        return Ok(CandleVideoRoute::Stub);
     }
-    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
-        return CandleVideoRoute::Stub;
-    }
-    if request.mode == "replace_person" {
+    Ok(if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
-            None if request.model == "wan_2_2_vace_fun_14b" => {
-                CandleVideoRoute::ReplacePersonWanVaceFun
-            }
-            None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
+            None if matches!(
+                candle::candle_video_engine_id(&request.model),
+                Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+            ) =>
+            {
                 CandleVideoRoute::CandleVideo
             }
             None => CandleVideoRoute::ReplacePersonWanVace,
@@ -363,7 +492,10 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        && candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled")
+        && matches!(
+            candle::candle_video_engine_id(&request.model),
+            Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+        )
     {
         CandleVideoRoute::CandleVideo
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
@@ -377,15 +509,20 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         // unprovisioned (sc-11003), never degrading to a stub. The per-mode source media is validated when
         // the conditioning is assembled (`resolve_candle_bernini_conditioning`), mirroring the MLX lane.
         CandleVideoRoute::Bernini(engine_id)
-    } else if wan_comfyui_available(request, settings) {
-        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
-        // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
+    } else if wan_comfyui_claims(request, settings)? {
+        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, or a plan-backed entry
+        // (sc-20644), so it matches no `is_candle_video_engine` arm below — route it off the
+        // forwarded `modelManifestEntry`. `?` rather than a bool: a refusal this lane raises must
+        // reach the job as a typed error, never fall past here into `Stub` and COMPLETE as
+        // procedural video (review blocker 2).
         CandleVideoRoute::WanComfyui
+    } else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {
+        CandleVideoRoute::MiniMaxH3(engine_id)
     } else if is_candle_video_engine(&request.model) {
         CandleVideoRoute::CandleVideo
     } else {
         CandleVideoRoute::Stub
-    }
+    })
 }
 
 /// The payload invariants every video job must satisfy before the worker does anything expensive —
@@ -442,6 +579,48 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     {
         return Err(WorkerError::InvalidPayload(message));
     }
+    // The model's declared `limits.hardMinSteps` and `limits.steps` (sc-19426, sc-19502 — one call,
+    // because `steps_limit_error` owns both). Bounds the SAMPLING axis, which neither
+    // bound above touches: `frames = duration × fps` says nothing about how many denoise steps run
+    // over those frames, so a request legal on both can still hand the engine a schedule it cannot
+    // build (LTX-2.3 bakes an 8-step sigma table and refuses anything else) or one that is legal but
+    // useless (MiniMax-H3 at 1 evaluation is a single Euler jump from pure noise — see that entry's
+    // `hardMinSteps` note for why its floor is a product judgement rather than an engine limit).
+    //
+    // The unit read here is MODEL EVALUATIONS, matching `advanced.steps`, `defaults.steps` and each
+    // turbo adapter's declared `sampling.steps`. No ±1 is applied anywhere on this side; the
+    // MiniMax-H3 engine appends its own terminal sigma grid point (sc-18726).
+    //
+    // The API gate is the one that returns a caller a 400, but it only covers what IT enqueues — a
+    // job replayed from a pre-sc-19426 row, or produced by any future non-HTTP path, reaches the
+    // engine through here. Read through `requested_steps`, the same reader `advanced_opt_u32` is,
+    // so this judges exactly the number the adapters go on to pass down.
+    if let Some(steps) = requested_steps(&request.advanced) {
+        if let Some(message) =
+            steps_limit_error(&request.model, steps, &request.model_manifest_entry)
+        {
+            return Err(WorkerError::InvalidPayload(message));
+        }
+    }
+    // The model's declared reference-media caps (sc-17160). Bounds a THIRD axis the two above do
+    // not touch: how much conditioning media the engine is handed. The API gate is the one that
+    // returns a caller a 400, but it only covers what IT enqueues — a job replayed from a
+    // pre-sc-17160 row, or produced by any future non-HTTP path, reaches the engine through here.
+    //
+    // It matters most for the audio references, whose default cap is 0: an engine handed
+    // `Conditioning::ReferenceAudio` it does not consume renders unconditioned, and an
+    // unconditioned render is invisible in the output rather than an error (epic 1788). Refusing
+    // at the funnel is what keeps "this model takes no audio references" from degrading into
+    // "this model quietly ignored them".
+    if let Some(message) = reference_limit_error(
+        &request.model,
+        request.reference_asset_ids.len(),
+        request.source_clip_asset_ids.len(),
+        request.reference_audio_asset_ids.len(),
+        &request.model_manifest_entry,
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     Ok(())
 }
 
@@ -454,9 +633,29 @@ pub(crate) async fn run_video_generate_job(
 ) -> WorkerResult<()> {
     let request = VideoRequest::from_payload(&job.payload);
     video_preflight(&request)?;
+    // VACE-Fun has one real route only: dual-expert person replacement. Refuse a replayed request
+    // that cannot reach that provider before even resolving the project or creating the output
+    // directory; a procedural clip is never an honest substitute for this capability.
+    validate_vace_fun_capability(&request, settings)?;
+    validate_video_lora_compatibility(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
+    // Prove the audio references resolve BEFORE the job is marked Running — the same posture as
+    // `resolve_voice_clone_plan`, which resolves its reference up front so a missing or
+    // undecodable clip fails in the first second rather than deep inside a render that has
+    // already cost minutes of GPU time. This runs the whole path: project-scoped asset lookup,
+    // the `safe_project_path` guard, the ffmpeg normalization onto the engine's rate, the WAV
+    // decode, and the `Conditioning::ReferenceAudio` construction.
+    //
+    // The vector is discarded here because the MiniMax-H3 arm re-resolves it inside
+    // `resolve_minimax_h3_conditioning`, which is where the value is actually consumed. For every
+    // already-shipped model the list is empty (their `limits.maxReferenceAudioAssets` defaults to
+    // 0, so `video_preflight` above has already refused a non-empty one) and this is a no-op that
+    // touches no disk and spawns no process. Only a Ref2VA payload pays for it twice, and one
+    // ffmpeg transcode of a reference clip is milliseconds against a render measured in minutes —
+    // which is the trade the early refusal is worth.
+    resolve_reference_audio_conditioning(api, settings, job, &request, &project_path).await?;
     let plan = VideoPlan::new(&request, &project_path);
     if let Some(parent) = plan.media_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -478,6 +677,12 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
 
+    // The video twin of the image dispatch seam's region heartbeat: same pre-load admission pass,
+    // same 90 s stale-worker sweep, and larger weights than any image route, so the same window is
+    // wider here. Only `wan.rs` carries a consumer interval arm today; every other video route
+    // depends on this guard for its load window. Dropped before the terminal post below.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     // sc-3033 ships the procedural stub only; the real MLX video models (Wan sc-3034,
     // LTX+audio sc-3035) decode `GenerationOutput::Video` into a `DecodedVideo` here.
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
@@ -495,20 +700,6 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
-    // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
-    // `wan2_2_vace_fun_14b`. macOS is served natively via MLX and Windows/Linux via Candle. A worker
-    // binary built without either native backend must fail honestly here — it must NEVER fall
-    // through to the Wan2.1 `generate_wan_vace` backend, which would silently render with the wrong
-    // checkpoint (the exact failure the epic forbids).
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
-    if request.model == "wan_2_2_vace_fun_14b" {
-        return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b requires the native MLX worker on macOS or a worker built with \
-             Candle backend support on Windows/Linux. This worker has neither backend, and the job \
-             will not be routed to the incompatible Wan2.1 VACE engine."
-                .to_owned(),
-        ));
-    }
     // Krea Realtime 14B (epic 8431 / sc-8443) is `mac_only` (descriptor) and has NO candle engine, so
     // an off-Mac job must fail honestly here rather than fall through to the candle stub / a different
     // backend — the same silent-degradation trap the VACE-Fun guard above closes. The full candle port
@@ -746,6 +937,31 @@ pub(crate) async fn run_video_generate_job(
                     generate_mochi(api, settings, job, &request, engine_id, backend).await?;
                 (decoded, MOCHI_ADAPTER, raw_settings, None)
             }
+            VideoRoute::MiniMaxH3(engine_id) => {
+                // MiniMax-H3 (epic 17137 / sc-19508): joint audio+video in ONE denoise pass.
+                // `generate_minimax_h3` maps the supplied media to the engine conditioning — 0/1/2
+                // keyframes for t2va/fl2va, ordered image + audio references for Ref2VA — resolves
+                // the tier's DiT partition and the upstream shared components (two different
+                // repos), and drives the shared `generate_video` funnel. The synchronized stereo
+                // soundtrack rides `DecodedVideo::audio` out of the funnel exactly as LTX's does;
+                // no bespoke audio plumbing.
+                //
+                // It returns its own `rawSettings` because the tier that actually LOADED and the
+                // task that actually DENOISED — i.e. which of the two structurally-identical
+                // 18.78 GB DiT partitions ran — are only knowable inside the arm, and a
+                // wrong-partition render is invisible in the output.
+                let (decoded, raw_settings) = generate_minimax_h3(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (decoded, MINIMAX_H3_ADAPTER, raw_settings, None)
+            }
             VideoRoute::Stub => {
                 // An MLX-routed video model whose snapshot didn't resolve must fail
                 // loudly with the resolver's precise error instead of completing with
@@ -768,8 +984,15 @@ pub(crate) async fn run_video_generate_job(
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (decoded, adapter, raw_settings, replacement_status) =
-        match resolve_candle_video_route(&request, settings) {
+    let (decoded, adapter, raw_settings, replacement_status) = {
+        let candle_route = resolve_candle_video_route(&request, settings)?;
+        reject_unsupported_candle_video_route(candle_route)?;
+        match candle_route {
+            // The rejection above is the execution backstop. Keep this arm unreachable so adding a
+            // new match site cannot accidentally turn the unsupported route into successful output.
+            CandleVideoRoute::UnsupportedEros => {
+                unreachable!("unsupported Eros route was rejected")
+            }
             // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
             // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
             // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
@@ -895,6 +1118,24 @@ pub(crate) async fn run_video_generate_job(
                         .await?;
                 (decoded, adapter, raw_settings, status)
             }
+            CandleVideoRoute::MiniMaxH3(engine_id) => {
+                let (decoded, raw_settings) = generate_candle_minimax_h3(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_MINIMAX_H3_ADAPTER,
+                    raw_settings,
+                    None::<Value>,
+                )
+            }
             CandleVideoRoute::WanComfyui => {
                 let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
                     api,
@@ -913,7 +1154,8 @@ pub(crate) async fn run_video_generate_job(
                 stub_raw_settings(&request),
                 None::<Value>,
             ),
-        };
+        }
+    };
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -973,6 +1215,8 @@ pub(crate) async fn run_video_generate_job(
 
     let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
     let result = streaming_result(&plan, &fact, adapter);
+    // Before the terminal post, so a late tick cannot re-advertise a finished worker as busy.
+    drop(preload_heartbeat);
     update_job(
         api,
         &job.id,
@@ -987,6 +1231,22 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     Ok(())
+}
+
+/// Re-run the API's model/family partition gate at the worker trust boundary before heartbeat or
+/// any media/model work. LTX-2.3 and LTX-2.5 intentionally share `ltx-video`, so family equality
+/// alone cannot make an adapter safe; `modelIds` and `baseModel` are both enforced by core.
+fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()> {
+    if !is_ltx_model(&request.model) {
+        return Ok(());
+    }
+    sceneworks_core::lora_family::validate_lora_compatibility(
+        &request.loras,
+        Some("ltx-video"),
+        "ltx_video",
+        Some(&request.model),
+    )
+    .map_err(WorkerError::InvalidPayload)
 }
 
 /// Build the sanitized workflow envelope for this clip and write it beside the media as an
@@ -1140,18 +1400,23 @@ fn resolve_video_seed(request: &VideoRequest) -> i64 {
 /// The asset's video family, from the resolved manifest entry when present, else
 /// inferred from the model id (parity with the Python `VIDEO_MODEL_TARGETS` family).
 fn resolve_family(request: &VideoRequest) -> String {
-    if let Some(family) = request
-        .model_manifest_entry
+    resolve_catalog_video_family(&request.model, &request.model_manifest_entry)
+}
+
+/// Resolve the catalog family without constructing a second [`VideoRequest`]. Both asset planning
+/// and the pre-generation admission funnel call this exact policy so a custom manifest family can
+/// neither inherit the built-in curve nor be recorded under a different family than was graded.
+fn resolve_catalog_video_family(model_id: &str, model_manifest_entry: &JsonObject) -> String {
+    if let Some(family) = model_manifest_entry
         .get("family")
         .and_then(Value::as_str)
+        .filter(|family| !family.trim().is_empty())
     {
-        if !family.trim().is_empty() {
-            return family.to_owned();
-        }
+        return family.to_owned();
     }
-    if is_ltx_model(&request.model) {
+    if is_ltx_model(model_id) {
         "ltx-video".to_owned()
-    } else if request.model.starts_with("wan") {
+    } else if model_id.starts_with("wan") {
         "wan-video".to_owned()
     } else {
         "video".to_owned()
@@ -1227,7 +1492,7 @@ fn lerp(a: u8, t: f32) -> u8 {
 }
 
 /// A quiet 220 Hz mono tone matching the clip length (`frame_count / fps` seconds) at
-/// 48 kHz — enough to exercise the WAV-write + AAC-mux + `-shortest` path end to end.
+/// 48 kHz — enough to exercise the WAV-write + AAC-mux path (see [`audio_mux_args`]) end to end.
 fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
     let sample_rate = 48_000u32;
     let duration = frame_count as f32 / fps.max(1) as f32;
@@ -1250,7 +1515,8 @@ fn stub_audio_track(frame_count: u32, fps: u32) -> AudioTrack {
 // ---------------------------------------------------------------------------
 
 /// Write `decoded` to `media_path` as an mp4: raw RGB frames streamed to libx264, an optional 16-bit
-/// PCM WAV muxed as AAC (`-shortest`), then a best-effort `+faststart` remux and
+/// PCM WAV muxed as AAC and bounded at the picture's length ([`audio_mux_args`]), then a
+/// best-effort `+faststart` remux and
 /// `.poster.jpg`. `media_path` is created (atomically renamed from a temp) only on
 /// success; all intermediates are removed regardless of outcome.
 async fn encode_media(
@@ -1321,6 +1587,10 @@ async fn encode_inner(
         }
     }
 
+    // Captured before `frames` is consumed below: step 2 bounds the file at the PICTURE's length,
+    // and that length is this count — never anything read back off the soundtrack (sc-19425).
+    let frame_count = frames.len();
+
     // 1. Stream the engine-owned RGB buffers directly into FFmpeg. This moves one existing frame
     // buffer at a time through the pipe: no per-frame PNG encode, no multi-GB scratch tree, and no
     // second whole-video concatenation.
@@ -1368,32 +1638,11 @@ async fn encode_inner(
     args.push(enc_tmp.to_string_lossy().into_owned());
     run_ffmpeg_with_stdin_chunks(args, chunks, ctx).await?;
 
-    // 2. Mux the audio track (LTX) as AAC, else the video-only mp4 is the result.
+    // 2. Mux the audio track (LTX, MiniMax-H3) as AAC, else the video-only mp4 is the result.
     let finished_tmp = if let Some(audio) = audio {
         write_wav_pcm16(&audio, wav_tmp)?;
         run_ffmpeg(
-            vec![
-                "ffmpeg".to_owned(),
-                "-nostdin".to_owned(),
-                "-y".to_owned(),
-                "-i".to_owned(),
-                enc_tmp.to_string_lossy().into_owned(),
-                "-i".to_owned(),
-                wav_tmp.to_string_lossy().into_owned(),
-                "-c:v".to_owned(),
-                "copy".to_owned(),
-                "-c:a".to_owned(),
-                "aac".to_owned(),
-                "-shortest".to_owned(),
-                // Explicit, though it is also ffmpeg's default for a multi-input command: the
-                // container metadata — including the sc-15956 workflow tag written in step 1 —
-                // comes from the VIDEO, never from the WAV. Stated because "the default happens to
-                // be right" is not a property anyone maintains, and the step below it depends on
-                // this one having carried the tag through.
-                "-map_metadata".to_owned(),
-                "0".to_owned(),
-                mux_tmp.to_string_lossy().into_owned(),
-            ],
+            audio_mux_args(enc_tmp, wav_tmp, mux_tmp, frame_count, fps),
             ctx,
         )
         .await?;
@@ -1407,6 +1656,102 @@ async fn encode_inner(
     faststart_mp4(media_path).await;
     write_poster_frame(media_path).await;
     Ok(())
+}
+
+/// **The AV mux policy's one number**: the picture's own length in seconds, `frame_count / fps`,
+/// rendered to the microsecond for ffmpeg's `-t`. The picture is the exact quantity; the soundtrack
+/// and the container are fitted to it.
+///
+/// Extracted (sc-19549) so the two muxing call sites cannot drift into two spellings of the same
+/// rule: the generation mux [`audio_mux_args`] and the SeedVR2 upscale mux
+/// `seedvr2::seedvr2_audio_mux_args` (cfg-gated to the lanes that ship it, so it is named rather
+/// than linked). Their argument vectors legitimately differ — the upscale
+/// maps a source clip's optional audio and writes `+faststart` in the same pass — but the BOUND is
+/// one policy and is computed in exactly one place. The rationale, and the measurements behind the
+/// choice of `-t` over `-shortest` and over no flag at all, live on [`audio_mux_args`].
+///
+/// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
+pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
+    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    format!("{seconds:.6}")
+}
+
+/// The step-2 mux command: copy the encoded picture, encode the WAV as AAC, and **bound the file at
+/// the picture's own length** — [`picture_bound_seconds`].
+///
+/// # Why `-t` and not `-shortest` (sc-19425)
+///
+/// `-shortest` makes the SOUNDTRACK a candidate for deciding the clip's length, and when it wins it
+/// does so by **discarding video frames** — silently, and out of proportion to the mismatch.
+/// Measured with the bundled ffmpeg 7.1 on this exact two-step command, at 24 fps, MiniMax-H3's 14
+/// legal frame counts, with a soundtrack already fitted to the picture to within a third of one
+/// sample (`round(frames / 24 · 32000)` samples per channel — the engine's own mux policy):
+///
+/// | frames | `-shortest` | no flag | `-t frames/fps` |
+/// |---|---|---|---|
+/// | 124 | **121** | 124 | 124 |
+/// | 175 | **173** | 175 | 175 |
+/// | 226 | **225** | 226 | 226 |
+/// | 277 | **275** | 277 | 277 |
+/// | 328 | **327** | 328 | 328 |
+/// | the other 9 | exact | exact | exact |
+///
+/// Five of the fourteen lost picture — up to three frames for a 10 µs audio deficit — while the
+/// container went on advertising the AUDIO's duration (5.17 s for a file holding 121 frames = 5.04 s
+/// of picture). That is precisely "the container claims a duration the file does not have", the
+/// defect sc-12371 measured `EncodedClip` for, reappearing one layer down where measuring the
+/// `DecodedVideo` cannot see it.
+///
+/// Dropping the flag outright fixes the frame loss but gives up what it was for: an audio track
+/// LONGER than the picture then extends the file (measured: a 2× track produced a 16.0 s container
+/// around 8.0 s of picture). `-t` is the only one of the three that is right in both directions, and
+/// it is the container-level spelling of the same rule the MiniMax-H3 engine applies to the
+/// waveform: **the picture is the exact quantity, so the picture is what everything else is fitted
+/// to.** It is a strict improvement for LTX too, whose vocoder output is not length-matched to the
+/// frame count at all and which today loses picture whenever that output lands short.
+///
+/// # Why `-t` cannot do to the picture what `-shortest` does
+///
+/// MEASURED: under `-c:v copy` the bound carries a consistent **two frames of slack at the tail** —
+/// `-t 4.0` on a 24 fps clip keeps 98 frames, not the 96 the arithmetic suggests, and `-t 2.5` keeps
+/// 62, not 60. (Consistent with the bound being applied to decode timestamps, which lag presentation
+/// by libx264's default B-frame reorder delay; the two-frame figure is measured, that attribution is
+/// not.) So the bound is inclusive at its own end and errs toward keeping picture, which is the
+/// direction that matters here: at
+/// `frame_count / fps` there is nothing past it to keep, and a bound short by a microsecond of
+/// `{:.6}` rounding is nowhere near a frame interval (41 667 µs at 24 fps) of the last frame's
+/// presentation time at `(frame_count - 1) / fps`. Trimming a long soundtrack is unaffected — the
+/// audio is re-encoded, not copied (measured: a 2× track lands at 5.17 s, not 10.33 s).
+fn audio_mux_args(
+    video: &Path,
+    wav: &Path,
+    out: &Path,
+    frame_count: usize,
+    fps: u32,
+) -> Vec<String> {
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        video.to_string_lossy().into_owned(),
+        "-i".to_owned(),
+        wav.to_string_lossy().into_owned(),
+        "-c:v".to_owned(),
+        "copy".to_owned(),
+        "-c:a".to_owned(),
+        "aac".to_owned(),
+        "-t".to_owned(),
+        picture_bound_seconds(frame_count, fps),
+        // Explicit, though it is also ffmpeg's default for a multi-input command: the
+        // container metadata — including the sc-15956 workflow tag written in step 1 —
+        // comes from the VIDEO, never from the WAV. Stated because "the default happens to
+        // be right" is not a property anyone maintains, and the step below it depends on
+        // this one having carried the tag through.
+        "-map_metadata".to_owned(),
+        "0".to_owned(),
+        out.to_string_lossy().into_owned(),
+    ]
 }
 
 /// Write f32 PCM to a canonical 16-bit WAV. Signals already within `[-1, 1]` retain their original
@@ -1546,6 +1891,18 @@ struct EncodedClip {
     /// The framerate the file is encoded at. `decoded.fps.max(1)` — the SAME clamp `encode_inner`
     /// applies when it hands `-framerate` to ffmpeg, so the record matches the container.
     fps: u32,
+    /// Whether the mp4 carries an AAC soundtrack (sc-19577).
+    ///
+    /// `decoded.audio.is_some()` is the ONE condition `encode_inner` branches on to run the mux, so
+    /// this is the muxer's own predicate rather than a claim about the model: a MiniMax-H3 t2va job
+    /// whose pipeline returned no audio records `false` here, and an LTX render that did record
+    /// `true`. Reading it from the model id — the obvious shortcut for the app's first joint
+    /// audio+video family — would be a per-family hardcode that is wrong for exactly the renders a
+    /// user would most want to check.
+    ///
+    /// Measured here rather than after `encode_media` because `decoded` is MOVED into the encoder;
+    /// this is the last point at which the question can be asked at all.
+    has_audio: bool,
 }
 
 impl EncodedClip {
@@ -1554,6 +1911,7 @@ impl EncodedClip {
         Self {
             frames: decoded.frames.len(),
             fps: decoded.fps.max(1),
+            has_audio: decoded.audio.is_some(),
         }
     }
 
@@ -1634,6 +1992,12 @@ fn video_asset_fact(
         "encodedFrameCount": clip.frames,
         "encodedDuration": clip.duration_seconds(),
         "encodedFps": clip.fps,
+        // sc-19577 — whether this file has a soundtrack, measured off what was actually MUXED. It
+        // lands in the asset's `file` block beside the other measurements and is the only thing any
+        // audio indicator in the UI reads. Emitted unconditionally (never omitted for `false`), so an
+        // ABSENT key means "recorded before sc-19577" and a `false` means "measured, and silent" —
+        // two different facts that a presence check alone would conflate.
+        "hasAudio": clip.has_audio,
         "quality": request.quality,
         "family": plan.family,
         "seed": seed,
@@ -1658,6 +2022,11 @@ fn video_asset_fact(
         "fitMode": request.fit_mode,
         "sourceClipAssetIds": request.source_clip_asset_ids,
         "referenceAssetIds": request.reference_asset_ids,
+        // sc-17160: the audio references join the list-valued ids for exactly the sc-12345 reason
+        // — they are a top-level payload field, so the `advanced.clone()` every `*_raw_settings`
+        // builder starts with does not carry them, and a replay that omits them re-runs a
+        // multi-modal reference job with its audio conditioning silently missing.
+        "referenceAudioAssetIds": request.reference_audio_asset_ids,
         "referenceClipAssetId": request.reference_clip_asset_id,
         "characterId": request.character_id,
         "characterLookId": request.character_look_id,
@@ -1737,6 +2106,13 @@ fn video_progress(
     }
 }
 
+// The shared standalone-audio-reference resolver (sc-17160 / sc-18650). Not an engine family: it is
+// cross-model and cross-platform. It is a module of its own so the shared parent does not re-absorb
+// a self-contained media pipeline — the property
+// `video_jobs_remains_split_into_real_engine_modules` bounds, and which sc-18650's ffmpeg
+// normalization would otherwise have pushed past its line budget.
+pub(crate) mod reference_audio;
+pub(crate) use reference_audio::resolve_reference_audio_conditioning;
 pub(crate) mod seedvr2;
 pub(crate) mod wan;
 #[cfg(target_os = "macos")]
@@ -1750,7 +2126,10 @@ pub(crate) mod bernini;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-mod candle;
+// `pub(crate)` since sc-18814: the shared video memory gate reads this lane's VRAM budget from
+// `candle_video_vram_budget` — the same figure `wan_video_fit_error` / `svd_fit_error` are handed
+// — rather than probing the card a second way.
+pub(crate) mod candle;
 #[cfg(target_os = "macos")]
 use bernini::{
     bernini_available, bernini_engine_id, bernini_raw_settings, generate_bernini, BERNINI_ADAPTER,
@@ -1763,7 +2142,7 @@ use bernini::{
 use candle::{
     generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
     generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
-    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_available,
+    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_claims,
     CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER, CANDLE_WAN_VACE_FUN_ADAPTER,
 };
 mod scail2;
@@ -1786,18 +2165,30 @@ pub use ltx::{text_encoder_options_for_adapter, TextEncoderOption};
 mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
+pub(crate) mod minimax_h3;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use minimax_h3::minimax_h3_engine_id;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
+#[cfg(target_os = "macos")]
+use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
 mod vace;
+#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+use vace::validate_vace_fun_capability;
 #[cfg(target_os = "macos")]
 use vace::{
     generate_wan_vace, generate_wan_vace_extend_bridge, generate_wan_vace_fun,
-    resolve_wan_vace_model_dir, wan_vace_extend_raw_settings, wan_vace_raw_settings,
-    WAN_VACE_ADAPTER, WAN_VACE_FUN_ADAPTER,
+    resolve_wan_vace_model_dir, validate_vace_fun_capability, wan_vace_extend_raw_settings,
+    wan_vace_raw_settings, WAN_VACE_ADAPTER, WAN_VACE_FUN_ADAPTER,
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use vace::{wan_vace_extend_raw_settings, wan_vace_raw_settings};
+use vace::{validate_vace_fun_capability, wan_vace_extend_raw_settings, wan_vace_raw_settings};
 
 /// Resolve the inference generator descriptors the production dispatch can load for one routed
 /// video model/mode. This is the matching-platform mapping source consumed by the capability-facts
@@ -1835,6 +2226,14 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
         .or_else(|| scail2_engine_id(model))
         .or_else(|| krea_realtime_engine_id(model))
         .or_else(|| mochi_engine_id(model))
+        // MiniMax-H3 (epic 17137 / sc-19508) — the same tail arm `resolve_video_route_with` carries.
+        // Unfiltered by `minimax_h3_ready` exactly as every resolver above is unfiltered by its
+        // `*_available` sibling: this function answers "which inference generator does dispatch
+        // NAME for this route", not "is it loadable on this machine right now". Omitting it made
+        // the capability-facts dumper report "worker dispatch resolves no inference engine" for a
+        // route whose dispatch arm is right there — main added this derivation while the epic added
+        // the family, and neither side's diff touched the other's lines.
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }
@@ -1843,6 +2242,12 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
 /// ladder and its `candle_video_engine_id` registry join.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    // SC-18902 withdrew Eros from Candle after its exact-head CUDA acceptance produced unusable
+    // noise. Keep capability facts on the same terminal-refusal truth as production dispatch:
+    // generic replacement/extension fallbacks must never advertise Wan-VACE for this stable id.
+    if model == "ltx_2_3_eros" {
+        return Vec::new();
+    }
     if model == "wan_2_2_vace_fun_14b" {
         return if mode == "replace_person" {
             vec!["wan2_2_vace_fun_14b"]
@@ -1853,8 +2258,9 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     if mode == "replace_person" {
         return vec![scail2_engine_id(model)
             .or_else(|| {
-                candle::candle_video_engine_id(model)
-                    .filter(|engine_id| *engine_id == "ltx_2_3_distilled")
+                candle::candle_video_engine_id(model).filter(|engine_id| {
+                    matches!(*engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled")
+                })
             })
             .unwrap_or("wan_vace")];
     }
@@ -1863,11 +2269,12 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     if matches!(mode, "extend_clip" | "video_bridge") {
         return vec![candle::candle_video_engine_id(model)
-            .filter(|id| *id == "ltx_2_3_distilled")
+            .filter(|id| matches!(*id, "ltx_2_3_distilled" | "ltx_2_5_distilled"))
             .unwrap_or("wan_vace")];
     }
     bernini_engine_id(model)
         .or_else(|| candle::candle_video_engine_id(model))
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }
@@ -1916,7 +2323,8 @@ fn lora_scale(lora: &Value) -> f32 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .unwrap_or(0.8) as f32
+        // Last resort only — see `image_jobs::lora_weight`; matches the API/web default.
+        .unwrap_or(1.0) as f32
 }
 
 /// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
@@ -2040,56 +2448,10 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
-
-/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
-/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
-/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
-/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
-/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
-/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
-/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn scail2_segment_blocking<R, F>(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
-    task_label: &'static str,
-    segment: F,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
-{
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    run_blocking_with_heartbeat(
-        api,
-        settings,
-        job_id,
-        Some(cancel),
-        SCAIL2_SEGMENT_CANCEL_MESSAGE,
-        task_label,
-        crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || segment(flag)),
-    )
-    .await
-}
-
-/// Assemble the SCAIL-2 `animate_character` conditioning (`Reference` + reference `Mask` +
-/// `ControlClip`) from an already-loaded reference image + driving frames. The two SAM3
-/// segmentation passes (reference → single painted mask, driving clip → per-frame painted masks)
-/// are supplied as closures so the backend-specific SAM3 module + paint background convention live
-/// at the call site while this orchestration (heartbeat, `ControlClip` shape) is shared (sc-8830 —
-/// collapses the ~100-line MLX/candle `resolve_scail2_conditioning` twin).
+/// Assemble SCAIL-2 `animate_character` conditioning from already-loaded character images +
+/// driving frames. Each reference is independently segmented into its paired color mask; the
+/// backend-specific SAM3 module and background convention stay at the call site while this
+/// orchestration remains shared between MLX and Candle.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2102,10 +2464,10 @@ async fn assemble_scail2_animate_conditioning<FR, FD>(
     segment_driving: FD,
 ) -> WorkerResult<Vec<Conditioning>>
 where
-    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Image, Image)> + Send + 'static,
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<(Image, Image)>> + Send + 'static,
     FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let (reference, ref_mask) = scail2_segment_blocking(
+    let reference_pairs = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2113,7 +2475,7 @@ where
         segment_reference,
     )
     .await?;
-    let (driving, driving_mask) = scail2_segment_blocking(
+    let (driving, driving_mask) = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2121,21 +2483,11 @@ where
         segment_driving,
     )
     .await?;
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    scail2::scail2_animate_conditioning(reference_pairs, driving, driving_mask)
 }
 
+// `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
+// the ONE place that turns "no ffmpeg on this lane" into an assert when the lane declared one
+// (sc-19549). A second copy of that predicate is a second way for a lane to silently skip.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

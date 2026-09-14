@@ -187,6 +187,11 @@ pub const INPUT_KIND_SOURCE_CLIP: &str = "sourceClip";
 /// A reference CLIP a video run conditions on (`referenceClipAssetId`, Bernini's ads2v) —
 /// sc-15956. The moving counterpart of [`INPUT_KIND_REFERENCE`].
 pub const INPUT_KIND_REFERENCE_CLIP: &str = "referenceClip";
+/// A reference AUDIO clip a video run conditions on (`referenceAudioAssetIds`, MiniMax-H3's
+/// Ref2VA) — sc-17160. The audible counterpart of [`INPUT_KIND_REFERENCE`], and a separate kind
+/// for the same reason [`INPUT_KIND_SOURCE_CLIP`] is: "this recipe needs a voice or a piece of
+/// music" is a different ask of whoever replays it than "this recipe needs a picture".
+pub const INPUT_KIND_REFERENCE_AUDIO: &str = "referenceAudio";
 
 /// A LoRA the run applied, reduced to what another install can act on: the display name, the
 /// weight, the Hugging Face repo id when the catalog entry resolved to one, and (only when the
@@ -1357,6 +1362,11 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          non-commercial marker. Unlike a quant tier it is not a memory accommodation.",
     ),
     allow(
+        "decoder",
+        AdvancedShape::Scalar,
+        "Authored alternate terminal decoder id. Native is omitted; replay must preserve an explicit experimental decoder choice.",
+    ),
+    allow(
         "pidTarget",
         AdvancedShape::Scalar,
         "Authored PiD output tier (2k / 4k) — output geometry, not a hardware budget.",
@@ -1536,12 +1546,55 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          changes the output rather than a memory accommodation.",
     ),
     allow_from(
-        "textEncoderModel",
+        "transformerVariant",
         AdvancedShape::Scalar,
         AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 transformer choice (`distilled` or `dev`). It changes the checkpoint, \
+         schedule, guidance, and refinement recipe, so dropping it changes the rendered clip.",
+    ),
+    allow_from(
+        "vaeDecoder",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 Conv-versus-DiffVAE decoder choice. The selected decoder changes the \
+         actual reconstruction path and its rendered detail.",
+    ),
+    allow_from(
+        "autoDuration",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 duration-head opt-in. It decides whether the prompt or an explicit \
+         duration supplies the frame count, so it is generation intent rather than budget.",
+    ),
+    allow_from(
+        "autoDurationMinSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored lower bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "autoDurationMaxSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored upper bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "temporalUpsampleRounds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 temporal-refinement count. Each round runs a real x2 DFR refinement and \
+         changes both the output frame count and motion, so it is replay-critical intent.",
+    ),
+    allow_from(
+        "textEncoderModel",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::StudioBuilder,
         "Authored text-encoder pick. It changes what the model SEES of the prompt, so a replay \
-         without it is a different run. A catalog-global model slug, not an install-local id — the \
-         same class as `styleId` and unlike `controlWeights`, which carries a resolved path.",
+         without it is a different run. Only the opaque selection id travels; the server-owned \
+         source path does not. A missing choice stays authored and fails closed on replay instead \
+         of silently substituting the bundled encoder.",
     ),
     allow_from(
         "lightning",
@@ -2299,6 +2352,18 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
             control_mode: None,
         });
     }
+    // The audio references (sc-17160), counted exactly as the still and clip references are.
+    // Without their own kind a shared multi-modal recipe would describe "9 reference images +
+    // 2 source clips" and say nothing about the audio it also needs — the recipient sees a
+    // complete-looking input list and reproduces an under-conditioned render.
+    let reference_audio = id_list_len("referenceAudioAssetIds");
+    if reference_audio > 0 {
+        inputs.push(WorkflowInput {
+            kind: INPUT_KIND_REFERENCE_AUDIO.to_owned(),
+            count: u32::try_from(reference_audio).unwrap_or(u32::MAX),
+            control_mode: None,
+        });
+    }
     let advanced = job_payload.get("advanced").and_then(Value::as_object);
     let control_image = advanced
         .and_then(|advanced| advanced.get("controlImage"))
@@ -2394,6 +2459,7 @@ pub const INPUT_KINDS: &[&str] = &[
     INPUT_KIND_CONTROL,
     INPUT_KIND_SOURCE_CLIP,
     INPUT_KIND_REFERENCE_CLIP,
+    INPUT_KIND_REFERENCE_AUDIO,
 ];
 
 // ---------------------------------------------------------------------------
@@ -4090,8 +4156,9 @@ mod tests {
         assert_eq!(MAX_SHARE_LORAS, crate::lora_family::MAX_JOB_LORAS);
         assert_eq!(MAX_SHARE_LORAS, 5);
         assert_eq!(MAX_SHARE_INPUTS, INPUT_KINDS.len());
-        // Four image kinds plus the video lane's two clip kinds (sc-15956).
-        assert_eq!(MAX_SHARE_INPUTS, 6);
+        // Four image kinds, the video lane's two clip kinds (sc-15956), and the audio reference
+        // (sc-17160).
+        assert_eq!(MAX_SHARE_INPUTS, 7);
         // The worker's `MAX_MULTIPHASE_PHASES`; pinned against its source by
         // `the_phase_cap_matches_the_multi_phase_validators` in tests/workflow_share.rs, which can
         // read the file this crate cannot import.

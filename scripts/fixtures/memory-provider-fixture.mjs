@@ -42,8 +42,7 @@ if (request.action === "probe") {
   process.exit(0);
 }
 const phase = (value) => ({
-  activeBytes: value, allocatorBytes: value + 10, deviceBytes: value + 20,
-  wiredBytes: value + 30, reclaimableBytes: 0
+  activeBytes: value, allocatorBytes: value + 10, reclaimableBytes: 10
 });
 const fragment = async (planned) => {
   const p = planned.strategy.parameters;
@@ -52,14 +51,18 @@ const fragment = async (planned) => {
     strategy: planned.strategy,
     loadShape: planned.loadShape,
     artifact: { repository: "SceneWorks/fixture", resolvedRevision: "cccccccccccccccccccccccccccccccccccccccc", variant: "q4" },
-    sweep: {
-      axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
-      cases: [
-        { parameters: { ...p, decodeTileEdge: 384 }, result: "passed" },
-        { parameters: { ...p, decodeTileEdge: 512 }, result: "passed" }
-      ],
-      rangeVerified: true
-    },
+    // sc-22514: an ANCHOR runs one unparameterized composition, so the truthful sweep is the
+    // degenerate one. A parameterized planned case still gets the two-point sweep it declares.
+    sweep: Object.keys(p).length === 0
+      ? { axes: [], cases: [{ parameters: {}, result: "passed" }], rangeVerified: true }
+      : {
+          axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
+          cases: [
+            { parameters: { ...p, decodeTileEdge: 384 }, result: "passed" },
+            { parameters: { ...p, decodeTileEdge: 512 }, result: "passed" }
+          ],
+          rangeVerified: true
+        },
     scenarios: [
       { name: "exact_fit", result: "passed", predictedBytes: 200, effectiveBudgetBytes: 200 },
       { name: "unknown_budget", result: "passed" },

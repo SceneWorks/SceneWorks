@@ -1,6 +1,6 @@
 # Prompt Refiner Guide
 
-The Prompt Refiner is a small instruction LLM (Llama-3.2-3B) that powers the "Refine my prompt" control in Image and Video Studio. It rewrites your prompt to follow the selected generation model's own prompt guide — it does not generate images or video itself.
+The Prompt Refiner is an 8B instruction LLM (TheDrummer/Anubis-Mini-8B-v1, a Llama-3.3 community finetune) that powers the "Refine my prompt" control in Image, Video, and Audio Studio. It rewrites your prompt to follow the selected generation model's own prompt guide — it does not generate images, video, or audio itself. The same model also backs Ideogram 4's magic-prompt expansion and reference-image captioning, so installing it once serves all of these.
 
 ## What It Does
 
@@ -8,7 +8,7 @@ When you click **Refine my prompt**, your current prompt and the selected model'
 
 ## Installation
 
-The refiner runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA) and is **not** auto-downloaded. Install it once from the **Models** screen (it is also offered inline the first time you refine before it is present). It is about 7 GB and downloads into the shared Hugging Face cache, so other tools reuse it.
+The refiner runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA) and is **not** auto-downloaded. Install it once from the **Models** screen (it is also offered inline the first time you refine before it is present). It is 16.1 GB — the stock bf16 checkpoint, downloaded and loaded as-is with no quantization — and downloads into the shared Hugging Face cache, so other tools reuse it.
 
 ## Practical Notes
 

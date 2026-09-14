@@ -108,6 +108,40 @@ describe("StatsScreen", () => {
     ).toBe(1);
   });
 
+  // A classified source with no load receipt is the shape EVERY current run has: SceneWorks holds
+  // a loaded generator, not the loader that owns the receipt, so `executionRepresentation` is
+  // absent on every lane and platform today (sc-21484). What the screen must never do with that
+  // absence is render it as a run — dense or native. The formatting unit tests pin the label; this
+  // pins that the rendered cell actually carries it, in the table and in the detail panel.
+  it("renders an unmeasured execution as 'not measured' beside the stored codec", () => {
+    feed.rows = [
+      {
+        ...SINGLE_ROW,
+        metrics: {
+          ...SINGLE_ROW.metrics,
+          quantLabel: "nvfp4",
+          sourceCodec: "nvfp4-v1",
+          executionRepresentation: undefined,
+        },
+      },
+    ];
+    render();
+    const cells = [...container.querySelectorAll(".stats-table tbody tr:not(.stats-detail-row) td")];
+    const weights = cells.find((cell) => cell.textContent.includes("nvfp4-v1"));
+    expect(weights, `no weights cell in ${cells.map((c) => c.textContent).join(" | ")}`)
+      .toBeDefined();
+    expect(weights.textContent).toContain("not measured");
+    expect(weights.textContent).not.toContain("dense fallback");
+    expect(weights.textContent).not.toContain("native");
+
+    // The detail panel keeps the two facts on separate rows and the tier out of both.
+    clickRow();
+    const detail = container.querySelector(".stats-detail");
+    expect(detail.textContent).toContain("Source codec (stored)");
+    expect(detail.textContent).toContain("Execution (this host)");
+    expect(detail.textContent).toContain("not measured");
+  });
+
   it("opens the run-detail panel on row click", () => {
     render();
     clickRow();

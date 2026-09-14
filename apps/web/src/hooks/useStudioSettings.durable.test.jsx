@@ -62,6 +62,38 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     expect(lastSentMap()["ws-1"].image).toMatchObject({ prompt: "a fox", model: "z_image" });
   });
 
+  it("does not enqueue a durable write when mounting an unchanged cached snapshot", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-ws-1",
+      JSON.stringify({ prompt: "a fox", model: "z_image" }),
+    );
+    await render(<Harness settings={{ prompt: "a fox", model: "z_image" }} />);
+    expect(persistNavigationPreferences).not.toHaveBeenCalled();
+  });
+
+  it("persists an absent empty snapshot but skips a cached empty snapshot", async () => {
+    await render(<Harness settings={{}} />);
+    expect(lastSentMap()["ws-1"].image).toEqual({});
+
+    await act(async () => root.unmount());
+    persistNavigationPreferences.mockClear();
+    window.localStorage.setItem("sceneworks-studio-image-ws-1", JSON.stringify({}));
+    root = createRoot(container);
+    await render(<Harness settings={{}} />);
+    expect(persistNavigationPreferences).not.toHaveBeenCalled();
+  });
+
+  it("still writes when a cached snapshot changes or readiness resumes", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-ws-1", JSON.stringify({ prompt: "old" }));
+    await render(<Harness settings={{ prompt: "new" }} />);
+    expect(lastSentMap()["ws-1"].image.prompt).toBe("new");
+
+    persistNavigationPreferences.mockClear();
+    await render(<Harness ready={false} settings={{ prompt: "new" }} />);
+    await render(<Harness ready settings={{ prompt: "new" }} />);
+    expect(lastSentMap()["ws-1"].image.prompt).toBe("new");
+  });
+
   it("restores the cache from the durable copy after a relaunch", async () => {
     await render(<Harness settings={{ prompt: "a fox", model: "z_image" }} />);
     const durable = lastSentMap();

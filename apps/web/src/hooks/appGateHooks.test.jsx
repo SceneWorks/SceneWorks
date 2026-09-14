@@ -104,6 +104,14 @@ class FakeEventSource {
   }
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 async function settle() {
   await act(async () => {
     for (let i = 0; i < 6; i += 1) {
@@ -201,6 +209,50 @@ describe("useAccessGate (sc-9750)", () => {
     // Mint succeeded → ready flips true and the ticket is stored.
     expect(get().api.ready).toBe(true);
     expect(setMediaTicketSpy).toHaveBeenCalledWith("media-1");
+  });
+
+  it("pauses media-ticket refresh while hidden and leaves one timer after visibility churn", async () => {
+    vi.useFakeTimers();
+    try {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      const pending = deferred();
+      let mints = 0;
+      apiResponders.set("/api/v1/files/ticket", () => {
+        mints += 1;
+        return mints === 1 ? pending.promise : { ticket: `media-${mints}`, expiresInSeconds: 15 };
+      });
+      const mintCalls = () => apiFetch.mock.calls.filter(([path]) => path === "/api/v1/files/ticket").length;
+      const before = mintCalls();
+      mount();
+      await settle();
+      expect(mintCalls()).toBe(before + 1);
+
+      const setVisibility = async (state) => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+        await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+        await settle();
+      };
+      await setVisibility("hidden");
+      await act(async () => vi.advanceTimersByTime(20000));
+      expect(mintCalls()).toBe(before + 1);
+      await setVisibility("visible");
+      await setVisibility("hidden");
+      await setVisibility("visible");
+      expect(mintCalls()).toBe(before + 3);
+
+      pending.resolve({ ticket: "stale", expiresInSeconds: 15 });
+      await settle();
+      await act(async () => vi.advanceTimersByTime(5000));
+      await settle();
+      // The first, hidden in-flight mint is closed, and only the final visible
+      // lifecycle owns a refresh timer.
+      expect(mintCalls()).toBe(before + 4);
+    } finally {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      vi.useRealTimers();
+    }
   });
 
   it("still reports ready (degraded) and pushes a notice when the mint fails", async () => {

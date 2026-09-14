@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,50 +15,55 @@ import {
   PREVIEW_SUPPORT_GENERATOR,
 } from "./previewSupportDerivation.js";
 import previewSupport from "./previewSupport.json";
-// Raw source text (Vite `?raw`) so the guard derives from the same bytes the generator reads. Both
-// live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
-// style.txt / builtin.styles.jsonc pair).
-import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
-import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
-import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";
-import pulidCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs?raw";
-import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
+function readRepositoryFile(relativePath) {
+  return readFileSync(resolve(process.cwd(), "../..", relativePath), "utf8");
+}
+
+function readCapabilityFacts(relativeDirectory) {
+  const directory = resolve(process.cwd(), "../..", relativeDirectory);
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^capabilities\..+\.json$/.test(entry.name))
+    .map((entry) => ({ name: entry.name, facts: JSON.parse(readFileSync(`${directory}/${entry.name}`, "utf8")) }))
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+// This drift guard reads the generator's exact repository inputs in its
+// non-listening Node test process, never via a Vite server's /@fs endpoint.
+const enginesSource = readRepositoryFile("crates/sceneworks-worker/src/engines.rs");
+const qwenEditCandleSource = readRepositoryFile(
+  "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+);
+const pulidMlxSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid.rs");
+const pulidCandleSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid_candle.rs");
+const previewSupportManifestRaw = readRepositoryFile(
+  "config/manifests/builtin.preview-support.jsonc",
+);
 // The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
 // facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
 // it. So a pin edited by hand would leave the whole catalog advertising the PREVIOUS revision's
 // truth with nothing red. `check-license-coverage.mjs` had already learned this (it compares
 // `audit.inferenceRevision` to the live pin set AND runs in the parity lane); this is the same
 // assertion for the same class of artifact, on a guard that runs on every PR.
-import workerCargoToml from "../../../../crates/sceneworks-worker/Cargo.toml?raw";
+const workerCargoToml = readRepositoryFile("crates/sceneworks-worker/Cargo.toml");
 // The DECLARED backend set (sc-17119). Every other input below is discovered from the facts
 // directory, and a directory listing cannot see a file that was never written — which is why
 // `capabilities.mlx.json` was absent for four consecutive pins with the whole suite green.
-import factsDeclarationSource from "../../../../crates/sceneworks-worker/src/engine_capability_facts.rs?raw";
+const factsDeclarationSource = readRepositoryFile(
+  "crates/sceneworks-worker/src/engine_capability_facts.rs",
+);
 import { fallbackModels } from "../constants.js";
 
 // DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
 // up with no edit; a guard that hardcodes `capabilities.candle.json` would then fail the moment the
 // macOS lane lands `capabilities.mlx.json` — i.e. it would punish exactly the follow-up the design
 // is waiting on. Everything below is derived per-backend from whatever is on disk.
-const factsModules = import.meta.glob(
-  "../../../../config/engine-capabilities/capabilities.*.json",
-  { eager: true, query: "?raw", import: "default" },
-);
-const factsEntries = Object.entries(factsModules)
-  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
-  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const factsEntries = readCapabilityFacts("config/engine-capabilities/");
 const factsFiles = factsEntries.map((entry) => entry.facts);
 
 // The AUDIO registry's dumps (sc-17593), one directory down. The glob above is single-level, so the
 // two sets cannot bleed into each other — which matters because they share backend names ("candle"
 // is the audio backend on every platform) while their engine-id namespaces are independent.
-const audioFactsModules = import.meta.glob(
-  "../../../../config/engine-capabilities/audio/capabilities.*.json",
-  { eager: true, query: "?raw", import: "default" },
-);
-const audioFactsEntries = Object.entries(audioFactsModules)
-  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
-  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const audioFactsEntries = readCapabilityFacts("config/engine-capabilities/audio/");
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);
@@ -237,21 +245,26 @@ describe("preview-support catalog: the stage-1 facts files are non-vacuous", () 
     },
   );
 
-  // The assertion `bump-inference.mjs` makes at bump time, made again where CI can actually see it.
-  // Without this, a pin edited outside the sanctioned script leaves every facts file — and therefore
-  // the entire served catalog — describing the PREVIOUS revision's descriptors, silently.
-  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
-    "%s was dumped at the revision the worker currently pins",
-    (name, facts) => {
-      expect(facts.generatedFrom.inferenceRevision, `${name} vs crates/sceneworks-worker/Cargo.toml`)
-        .toBe(inferencePin);
-    },
-  );
-
-  it("the manifest stamps each backend's dump revision, and it is the current pin", () => {
+  // A capability dump is NOT invalidated by a pin bump.
+  //
+  // These two suites used to require every facts file, and every backend in the manifest, to carry
+  // the revision the worker currently pins. That made an ordinary pin bump invalidate the declared
+  // capabilities of both backends at once — and since a dump can only be produced on a lane that
+  // LINKS that backend, refreshing them meant a round trip to a second machine before CI could go
+  // green. Pins change constantly; declared capabilities almost never do. A dump goes stale when a
+  // provider gains or loses a capability, which is a property of the dump's CONTENT, not of the
+  // revision label attached to it.
+  //
+  // So the revision is recorded and no longer enforced. What still holds is the shape: each dump
+  // names a backend matching its filename, is not truncated, and carries a well-formed 40-hex
+  // revision (asserted above), and the manifest still stamps one per backend so the served catalog
+  // says which checkout produced it. Fourth instance of the same defect class — see sc-19728
+  // (decode-quality fingerprints), sc-19751 (license/provenance audits), sc-19758 (closure digests).
+  it("the manifest stamps a well-formed dump revision for each backend", () => {
     const manifest = JSON.parse(previewSupportManifestRaw);
+    expect(manifest.backends.length).toBeGreaterThan(0);
     for (const backend of manifest.backends) {
-      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toBe(inferencePin);
+      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toMatch(/^[0-9a-f]{40}$/);
     }
   });
 
@@ -447,7 +460,7 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
   });
 
   it.each(audioFactsEntries.map((entry) => [entry.name, entry.facts]))(
-    "audio/%s is a real dump: discriminated, non-vacuous, at the current pin",
+    "audio/%s is a real dump: discriminated, non-vacuous, with valid provenance",
     (name, facts) => {
       expect(`capabilities.${facts.backend}.json`).toBe(name);
       // The discriminator is what stops a file in the wrong directory being read as the other kind:
@@ -459,7 +472,10 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
       // count, so a dump in single digits is truncated rather than merely small.
       expect(facts.engines.length).toBeGreaterThan(10);
       expect(facts.engines.every((engine) => engine.modality === "audio")).toBe(true);
-      expect(facts.generatedFrom.inferenceRevision).toBe(inferencePin);
+      // Native facts are content-checked by the backend workflow. Their revision label records
+      // when the lane last dumped them; a merge-only inference repin must not invalidate identical
+      // content or force another platform campaign.
+      expect(facts.generatedFrom.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
     },
   );
 
@@ -533,14 +549,26 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
     }
   });
 
-  it("refuses a media and audio dump of one backend at different revisions", () => {
-    // `candle` is dumped twice — once per registry — and the two must describe one checkout, or
-    // `generatedFrom` claims a state that never existed.
-    expect(() =>
-      derivePreviewSupport(rows, factsFiles, [
-        syntheticAudioFacts({ inferenceRevision: "0".repeat(40) }),
-      ]),
-    ).toThrow(/two different inference revisions/);
+  it("records both revisions when a backend's media and audio dumps disagree", () => {
+    // This used to THROW. `candle` is dumped once per registry, and the two were required to
+    // describe one checkout on the reasoning that anything else claims a state that never existed.
+    //
+    // But the two halves come off different machines: the media candle dump needs a lane that links
+    // the candle media engines (off-Mac), while the audio registry is candle-native everywhere and
+    // is rewritten by the macOS dump. Requiring agreement meant a Mac-side pin bump produced a tree
+    // this function rejected outright, and the derived catalog could not regenerate until a second
+    // machine had run. That is the ordinary mid-bump state of a two-lane repo, not a fiction.
+    //
+    // Inverted rather than deleted, so it is the observable proof of the removal: restoring the
+    // refusal turns this red.
+    const audioRevision = "0".repeat(40);
+    const derivedSplit = derivePreviewSupport(rows, factsFiles, [
+      syntheticAudioFacts({ inferenceRevision: audioRevision }),
+    ]);
+    expect(derivedSplit.generatedFrom.candle.audioInferenceRevision).toBe(audioRevision);
+    // The media half keeps the plain key, so consumers reading `.inferenceRevision` are unaffected.
+    expect(derivedSplit.generatedFrom.candle.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
+    expect(derivedSplit.generatedFrom.candle.inferenceRevision).not.toBe(audioRevision);
   });
 
   it("still derives when no audio dump is supplied, so the argument stays optional", () => {

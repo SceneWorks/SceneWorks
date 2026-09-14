@@ -199,6 +199,145 @@ describe("ImageStudio Save as Preset", () => {
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
   });
+
+  it("normalizes a rejected preset creation into a safe error message", async () => {
+    const context = baseContext({ createPreset: vi.fn(() => Promise.reject({ message: { detail: "not renderable" } })) });
+    await render(context);
+
+    await act(async () => setInput(nameInput(container), "Unavailable preset"));
+    await saveWithScope(container, "This project");
+
+    expect(container.textContent).toContain("Could not save this preset.");
+  });
+});
+
+describe("Image Studio batch cardinality admission", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("confirms an enormous batch from cardinality without materializing its combinations", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        batchMode: true,
+        batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 40000000 images");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("stops styled high-cardinality preflight at the first actionable budget violation", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `${"x".repeat(3600)} ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    expect(container.querySelector(".batch-warning")?.textContent).toContain("Batch prompt 1");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("makes a no-overage styled Cartesian preflight cancelable before inspecting its full product", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `under budget ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    // The first bounded preflight slice has yielded with the run rendered; the old
+    // synchronous walk could not expose Stop until all ten million prompts were read.
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 0/10000000"));
+    expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await click(container.querySelector(".batch-run-progress button"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed run's active queue bounded while preserving its submitted count", async () => {
+    const values = Array.from({ length: 101 }, (_, index) => String(index));
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        batchMode: true,
+        batchPromptsText: "{{value}}",
+        batchVariableValues: { value: values },
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-${sequence++}` }));
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(100));
+
+    expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 100/101");
+    await click([...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done"));
+  });
 });
 
 describe("ImageStudio advanced model defaults", () => {
@@ -304,6 +443,200 @@ describe("ImageStudio advanced model defaults", () => {
     });
     expect(payload.advanced).not.toHaveProperty("steps");
     expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+});
+
+describe("ImageStudio text encoder selector", () => {
+  let container;
+  let root;
+
+  const DEFAULT_ENCODER = {
+    id: "default",
+    label: "Model encoder (default)",
+    description: "Uses the model encoder.",
+    isDefault: true,
+  };
+  const ALTERNATE_ENCODER = {
+    id: "text_encoder_0123456789abcdef0123456789abcdef",
+    label: "qwen3_artist (operator staged)",
+    description: "Uses the staged encoder.",
+    isDefault: false,
+  };
+  const modelWithEncoders = (options) => ({
+    ...Z_IMAGE,
+    textEncoderOptions: options,
+  });
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const openAdvanced = () => click(document.body.querySelector(".advanced-section-toggle"));
+  const generate = () =>
+    click(
+      [...document.body.querySelectorAll("button")].find(
+        (button) => button.textContent === "Generate",
+      ),
+    );
+
+  it("keeps the default payload unchanged and emits an explicit alternate", async () => {
+    const context = baseContext({
+      createImageJob: vi.fn(async () => ({ id: "job-encoder" })),
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+
+    const selector = container.querySelector('select[aria-label="Text encoder model"]');
+    expect(selector.value).toBe("default");
+    await generate();
+    expect(context.createImageJob.mock.calls[0][0].advanced).not.toHaveProperty(
+      "textEncoderModel",
+    );
+
+    await act(async () => setSelect(selector, ALTERNATE_ENCODER.id));
+    await generate();
+    expect(context.createImageJob.mock.calls[1][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("preserves a selected encoder that disappears so submission fails closed server-side", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-stale-encoder" }));
+    const context = baseContext({
+      createImageJob,
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+    await act(async () =>
+      setSelect(
+        container.querySelector('select[aria-label="Text encoder model"]'),
+        ALTERNATE_ENCODER.id,
+      ),
+    );
+
+    await render({
+      ...context,
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER])],
+    });
+    const selector = container.querySelector('select[aria-label="Text encoder model"]');
+    expect(selector.value).toBe(ALTERNATE_ENCODER.id);
+    expect(selector.selectedOptions[0].disabled).toBe(true);
+    expect(container.textContent).toContain("no longer staged");
+
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("restores the persisted selection and records it in a saved preset", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        textEncoderModel: ALTERNATE_ENCODER.id,
+      }),
+    );
+    const context = baseContext({
+      imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+    });
+    await render(context);
+    await openAdvanced();
+
+    expect(container.querySelector('select[aria-label="Text encoder model"]').value).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("sceneworks-studio-image-project_1") || "{}",
+      ).textEncoderModel,
+    ).toBe(ALTERNATE_ENCODER.id);
+
+    await act(async () => setInput(nameInput(container), "Alternate encoder preset"));
+    await saveWithScope(container, "This project");
+    expect(context.createPreset.mock.calls[0][0].defaults.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("restores an authored encoder from a workflow recipe and re-emits it", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-replayed-encoder" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+        studioLaunch: {
+          id: "launch-text-encoder",
+          view: "Image",
+          assetId: "asset-text-encoder",
+          recipe: {
+            model: Z_IMAGE.id,
+            mode: "text_to_image",
+            prompt: "a fox",
+            rawAdapterSettings: { textEncoderModel: ALTERNATE_ENCODER.id },
+          },
+        },
+      }),
+    );
+    await openAdvanced();
+
+    expect(container.querySelector('select[aria-label="Text encoder model"]').value).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
+      ALTERNATE_ENCODER.id,
+    );
+  });
+
+  it("emits the same encoder id for every item in a batch run", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        textEncoderModel: ALTERNATE_ENCODER.id,
+        batchMode: true,
+        batchPromptsText: "first prompt\nsecond prompt",
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-encoder-${sequence++}` }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [modelWithEncoders([DEFAULT_ENCODER, ALTERNATE_ENCODER])],
+      }),
+    );
+
+    const runBatch = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Run batch"),
+    );
+    await click(runBatch);
+
+    expect(createImageJob).toHaveBeenCalledTimes(2);
+    for (const [payload] of createImageJob.mock.calls) {
+      expect(payload.advanced.textEncoderModel).toBe(ALTERNATE_ENCODER.id);
+    }
   });
 });
 
@@ -1949,6 +2282,153 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
     });
     await click(generateButton());
     expect(createImageJob.mock.calls[1][0].advanced.pidTarget).toBe("2k");
+  });
+});
+
+describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => {
+  let container;
+  let root;
+
+  const DECODER_ID = "wan_2_1_vae";
+  const DECODER_MODEL = {
+    ...Z_IMAGE,
+    id: "krea_2_turbo",
+    name: "Krea 2 Turbo",
+    decoders: {
+      byBackend: {
+        candle: [],
+        mlx: [
+          {
+            id: DECODER_ID,
+            label: "Wan 2.1 VAE",
+            available: true,
+            estimatedSizeBytes: 335544320,
+          },
+        ],
+      },
+    },
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("preserves a saved MLX decoder while capabilities are delayed, then restores and submits it", async () => {
+    const storageKey = "sceneworks-studio-image-project_1";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ model: DECODER_MODEL.id, decoder: DECODER_ID }),
+    );
+    const createImageJob = vi.fn(async () => ({ id: "job-decoder" }));
+    const pendingContext = baseContext({
+      createImageJob,
+      imageModels: [DECODER_MODEL],
+      models: [DECODER_MODEL],
+      macCapabilities: { macGatingActive: false, platform: "" },
+      macCapabilitiesAuthoritative: false,
+      preferencesHydrated: true,
+    });
+
+    await render(pendingContext);
+
+    // The inert startup fallback is not Candle evidence: do not reconcile or persist the
+    // restored MLX-only selection, and do not let a request silently omit it.
+    expect(document.body.querySelector(".alternate-decoder-select")).toBeFalsy();
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+    const generate = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate",
+    );
+    expect(generate.disabled).toBe(true);
+    await act(async () => {
+      document.body.querySelector(".studio-shell").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await render({
+      ...pendingContext,
+      macCapabilities: { macGatingActive: true, platform: "macos" },
+      macCapabilitiesAuthoritative: true,
+    });
+    await click(document.body.querySelector(".advanced-section-toggle"));
+
+    const decoder = document.body.querySelector(".alternate-decoder-select select");
+    expect(decoder).toBeTruthy();
+    expect(decoder.value).toBe(DECODER_ID);
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.decoder).toBe(DECODER_ID);
+  });
+
+  it("keeps a failed capability load recoverable without silently dropping the saved decoder", async () => {
+    const storageKey = "sceneworks-studio-image-project_1";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ model: DECODER_MODEL.id, decoder: DECODER_ID }),
+    );
+    const createImageJob = vi.fn(async () => ({ id: "job-native" }));
+    const refreshMacCapabilities = vi.fn(async () => false);
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [DECODER_MODEL],
+        models: [DECODER_MODEL],
+        macCapabilities: { macGatingActive: false, platform: "" },
+        macCapabilitiesAuthoritative: false,
+        macCapabilitiesError: "Could not load engine capabilities: API offline",
+        macCapabilitiesLoading: false,
+        refreshMacCapabilities,
+        preferencesHydrated: true,
+      }),
+    );
+
+    const recovery = document.body.querySelector(".decoder-capability-recovery");
+    expect(recovery).toBeTruthy();
+    expect(recovery.textContent).toContain("API offline");
+    expect(recovery.textContent).toContain("restored decoder has not been changed");
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find((button) => button.textContent === "Retry"),
+    );
+    expect(refreshMacCapabilities).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
+
+    await click(
+      [...recovery.querySelectorAll("button")].find(
+        (button) => button.textContent === "Use Native VAE",
+      ),
+    );
+    expect(document.body.querySelector(".decoder-capability-recovery")).toBeFalsy();
+    expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe("native");
+
+    const generate = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate",
+    );
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("decoder");
   });
 });
 

@@ -1,0 +1,214 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/Mage-Flow-Turbo",
+        "resolvedRevision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-07T16:33:30Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:mage-flow-turbo-shared-ladder",
+        "blockers": [
+          "the pinned mage_flow_turbo provider's own fit model UNDER-PREDICTS this cell: measured peak 21340618752 bytes exceeds its modelled total 18328139520 bytes by 3012479232 bytes at 768x768 on the text_to_image route at bf16. Recorded as measured evidence rather than discarding the capture: `mlx_gen_mage::memory::generation_peak_gb` scales only its linear VAE decode term with geometry and carries no reference-image term at all, and the worker admits this route on that same model (`mlx_fit_gate.rs::request_total_peak_bytes`), so the measured peak is what production admission should anchor on."
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 20267011790
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "stagedComponents",
+            "unit": "count",
+            "value": 2
+          },
+          {
+            "name": "engineModelledTotalBytes",
+            "unit": "bytes",
+            "value": 18328139520
+          },
+          {
+            "name": "engineModelShortfallBytes",
+            "unit": "bytes",
+            "value": 3012479232
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 150082
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 17064130848
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 18005972688
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "mage-flow-turbo-mlx-bf16-768-seed22733-step4",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c96ca295ccfb9b0ce96f",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/Mage-Flow-Turbo@79016f10f96b441bebb6e6f461838adb8fb3ff5c:bf16+SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-305eab036a187a6b93a3",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.46426306056847266,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 150082,
+          "allocatorBytes": 158618,
+          "reclaimableBytes": 8536
+        },
+        "decode": {
+          "activeBytes": 18005972688,
+          "allocatorBytes": 18005972688,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 17064130848,
+          "allocatorBytes": 19325169950,
+          "reclaimableBytes": 2261039102
+        },
+        "overall": {
+          "activeBytes": 18005972688,
+          "allocatorBytes": 20267011790,
+          "reclaimableBytes": 2261039102
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 18924699648,
+        "denoise": 20333985792,
+        "overall": 21340618752
+      },
+      "quality": {
+        "contract": "same seed, prompt, sampling, precision, staged components, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "44fbdd9087353ca6666412f74fc2d9b0a5ae8be6139b9481f0bc34d552356359",
+          "dirty": false,
+          "revision": "e16c6a55e8cb1e2a911ec590e581b068fcc5b529"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:24ee787d053451daf2fefeb4a68eef21f6663fc1502f81625da5b21abc6f377e",
+          "revision": "c8a27f5997221cba534eebb07fa4730a1eadcbef"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 21340618752,
+          "name": "exact_fit",
+          "predictedBytes": 21340618752,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the pinned MLX Mage-Flow-Turbo distilled text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "mage_flow_turbo",
+        "overlay": "none",
+        "provider": "mage_flow_turbo",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

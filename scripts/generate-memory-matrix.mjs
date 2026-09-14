@@ -9,18 +9,63 @@ import { fileURLToPath } from "node:url";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
-import {
-  evidenceSemantics,
-  validateBundle as validateCalibrationBundle,
-} from "./memory-calibration-harness.mjs";
+import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
-const EXPECTED_IMAGE_COUNT = 53;
-// SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
-// so counting its generic route as staged coverage would contradict the captured contract.
-const EXPECTED_MLX_STAGED_COUNT = 38;
+// sc-18815: the modalities the matrix carries. `utility` and `audio` entries have no memory ladder —
+// no rungs, no fit gate, no strategy selector — so they are outside the universe by design rather
+// than by omission, and admitting one would need the same three things video needed here.
+const MATRIX_MODALITIES = new Set(["image", "video"]);
+// sc-22512 deleted `EXPECTED_IMAGE_COUNT = 53` and `EXPECTED_VIDEO_COUNT = 11`. They were frozen
+// catalog populations: adding one model to the shipped catalog reddened generation before anything
+// had a chance to say whether the new entry was well-formed. The population is now DERIVED from the
+// catalog's own enumeration, and the cross-table agreement between the manifest, the source-owned
+// `EXPECTED_IMAGE_IDS` roster and the generated ownership rows carries the whole structural claim —
+// that check reds on disagreement, which is present-and-contradictory data, at any population size.
+// SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
+// eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
+// declare selectable Sequential staged residency, so flux2_dev is now census-required (the assertion
+// direction flipped with the pin). Bernini is the older mirror case — inference sc-18609 made its
+// DECLARED MLX rung-4 ladder actually reachable on both variants, so it belongs in the census.
+//
+// Neither fact is a total. This census used to be pinned to an exact population, which meant hand-
+// renewing 37 -> 38 for a reachability change that had nothing to do with the contract being guarded,
+// and the number never said which entry moved. `assertMlxStagedCoverageIsStructurallyConsistent`
+// replaces it, and is DELIBERATELY WEAKER — the honest scope, so nobody reads more into it:
+//
+//   guarded — bespoke routes never claiming the generic ladder; per-route drift, where entries
+//             sharing a resolved route disagree with each other; and the census being contained in
+//             the image entries.
+//   NOT guarded, as of sc-22512 — which entries are IN the census, and how many. The two named-lane
+//             requirements (flux2_dev, bernini_image) and the "neither empty nor the whole catalog"
+//             band were removed: all three reddened on the ABSENCE of a static-residency
+//             declaration, which an inference pin that stops advertising one, or a catalog whose
+//             image lane declares none, produces without anything being wrong with this document.
+//             Measurement improves the estimate; its absence is the conservative reading, not a
+//             defect. The two ids above are kept as PROSE because the provenance is still worth
+//             reading, not as assertions.
+//   NOT guarded — uniform drift on a route nothing else shares. 35 of the 41 resolved routes are
+//             singletons (only sdxl, flux2_klein_9b, qwen_image_edit, sensenova_u1_8b,
+//             sensenova_u1_8b_fast and z_image_turbo group more than one entry), so a singleton lane
+//             silently dropping out of the census — or silently claiming staged coverage it has not
+//             implemented — passes every assertion here where the old count reddened. A whole shared
+//             family drifting uniformly passes too, for the same reason.
+//   ALSO NOT guarded, as of 2026-08-17 — the per-route comparison SKIPS entries whose MLX tier axis is
+//             a single synthetic `default`, i.e. entries advertising no tier ladder at all (no
+//             `vramGbByTier`, no tier-tagged download variant, and a `quantize` naming no packed tier).
+//             `flux2_klein_9b_true_v2` is the only such entry today, and it shares route
+//             `flux2_klein_9b` with two tiered siblings. Its verdict is structurally fixed at "not
+//             staged" — the tiers its contract declares do not exist for it — so including it reported
+//             a disagreement no declaration could resolve. A future single-dense-tier entry therefore
+//             joins that blind spot silently. Accepted for the same reason as the rest of this note:
+//             the alternative was declaring a packed tier the artifact does not ship.
+//
+// That is the accepted shape-over-population tradeoff, not an oversight: the exact count caught those
+// cases and cost a hand-edit on every unrelated catalog or reachability change, and runtime catching is
+// the chosen tradeoff for what shape assertions cannot express. A staged claim a lane cannot honour
+// surfaces when the ladder is actually engaged.
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
@@ -35,6 +80,16 @@ const RUNGS = [
   "bounded_transformer_residency",
 ];
 
+// The catalog `capabilities` that name a GENERATION MODE, which is the matrix's mode axis. A
+// capability outside this set (a UI affordance, a conditioning kind) is not a mode and must not
+// multiply the cross-product.
+//
+// sc-18815 adds the video modes. Every one is a distinct request shape the worker dispatches on
+// (`video_jobs::resolve_video_route` branches on `request.mode`), and several select a different
+// engine path entirely — `replace_person` and `animate_character` reach the VACE/SCAIL-2 arms rather
+// than the family's base generator. Collapsing them to one `catalog_default` mode, which is what the
+// image-only vocabulary did to every video entry, would publish one cell for coordinates whose peaks
+// are not the same measurement.
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -42,15 +97,20 @@ const GENERATION_CAPABILITIES = new Set([
   "image_inpaint",
   "image_detail",
   "character_image",
+  "style_variations",
+  "text_to_video",
+  "image_to_video",
+  "video_to_video",
+  "first_last_frame",
+  "extend_clip",
+  "video_bridge",
+  "replace_person",
+  "animate_character",
+  "reference_to_video",
+  "reference_video_to_video",
+  "multi_video_to_video",
+  "ads2v",
 ]);
-
-export function activeCalibrationPlan(calibrationPlan) {
-  const retiredModes = new Set(Object.keys(calibrationPlan.retiredModes ?? {}));
-  return {
-    ...calibrationPlan,
-    providers: calibrationPlan.providers.filter((entry) => !retiredModes.has(entry.target.mode)),
-  };
-}
 
 // This is ownership metadata, not conformance data. Drift is checked against the
 // source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
@@ -143,8 +203,131 @@ export const FAMILY_STORIES = {
   15528: { mlx: 15528, candle: 17414 },
 };
 
-/** The stable family group key for a catalog id, which is the family's MLX story id. */
+/**
+ * Ownership for the VIDEO families epic 18803 admits (sc-18815).
+ *
+ * Kept as its own registry rather than as rows in `FAMILY_STORIES` because the two lanes' ownership
+ * rules genuinely differ, and collapsing them would either weaken the image lane's guard or force
+ * this lane to name stories that do not exist:
+ *
+ * - **One story may cover BOTH backends.** Epic 15448 split every image family per backend because
+ *   its evidence is produced on backend-specific hardware — an MLX story cannot be closed from CUDA.
+ *   A video family here is owned by its rung-4 SURVEY story, whose evidence is provider source read
+ *   at the pinned inference revision. sc-18813 delivered the MLX *and* candle LTX verdicts in one
+ *   story from one machine; inventing a per-backend pair would name a candle twin nobody filed.
+ * - **One story may cover several families.** sc-18828 surveys `scail2`, `krea-realtime` and `svd`
+ *   together. They are three unrelated architectures — merging them into one family group to satisfy
+ *   a one-story-one-owner rule would publish a false family — so the rule gives way, not the family.
+ *
+ * `bernini` is deliberately absent: its video and image entries are the SAME provider (`bernini`) and
+ * the SAME architecture, so it stays in image family 15528, whose survey verdict is already written
+ * about the Bernini renderer rather than about a still-image path. sc-18827 reconciles the video-side
+ * entry coverage within that family.
+ */
+export const VIDEO_FAMILY_STORIES = Object.freeze({
+  "ltx-video": 18813,
+  "wan-video": 18826,
+  scail2: 18828,
+  "krea-realtime": 18828,
+  svd: 18828,
+});
+
+/**
+ * The two ownership registries must be DISJOINT (sc-18815 review).
+ *
+ * Contamination in ONE direction already fails loudly: an image family group added to
+ * `VIDEO_FAMILY_STORIES` makes `familyStory` answer with a single video survey story for a lane that
+ * owes two per-backend owners, and the conformance suite reds hard.
+ *
+ * The other direction is silent, and nothing else catches it. `familyStory` consults
+ * `VIDEO_FAMILY_STORIES` FIRST, so a VIDEO family name added to `FAMILY_STORIES` is never read — dead
+ * ownership metadata that looks filed, answers nothing, and keeps looking filed while the real answer
+ * comes from the other registry.
+ */
+export function assertOwnershipRegistriesAreDisjoint(
+  imageFamilies = FAMILY_STORIES,
+  videoFamilies = VIDEO_FAMILY_STORIES,
+) {
+  for (const group of Object.keys(videoFamilies)) {
+    if (Object.hasOwn(imageFamilies, group)) {
+      throw new Error(
+        `memory-matrix: family group ${group} is declared in BOTH FAMILY_STORIES and VIDEO_FAMILY_STORIES — familyStory resolves it from VIDEO_FAMILY_STORIES, so the FAMILY_STORIES row is dead code; delete one`,
+      );
+    }
+  }
+}
+
+// At module scope, so neither registry can be loaded in a drifted state by any consumer.
+assertOwnershipRegistriesAreDisjoint();
+
+/**
+ * Catalog entries that are IN the universe but that the routing catalog routes on NO backend, with
+ * the reason and the story that owns the verdict (sc-18815).
+ *
+ * SC-18826 closed the sole declared defect by adding the missing MLX-only
+ * `wan_2_2_vace_fun_14b` row to `VIDEO_MODEL_CAPS`. The empty map is intentional: the guard below
+ * remains fail-closed for the next wholly-unrouted catalog entry and rejects any declaration that
+ * outlives its defect.
+ *
+ * `mochi_1` is the inverse defect and needs no row: it has a `VIDEO_MODEL_CAPS` row and a worker
+ * route but NO manifest entry, and the universe is built from the manifest, so it is excluded by
+ * construction. That is the correct outcome on its own terms — Mochi is frozen with no weights lane
+ * and epic 18803 lists it out of scope — and `mochi_is_routed_but_not_in_the_universe` pins that the
+ * exclusion is the manifest's doing rather than a coincidence of some other filter.
+ */
+export const UNROUTED_CATALOG_ENTRIES = new Map();
+
+/**
+ * Every entry that resolved to no backend must be a declared one, and every declared one must still
+ * resolve to none. Fails closed both ways so the list can only shrink by fixing the defect.
+ */
+export function assertUnroutedEntriesAreDeclared(models, declared = UNROUTED_CATALOG_ENTRIES) {
+  for (const model of models) {
+    if (!model.backends.length && !declared.has(model.id)) {
+      throw new Error(
+        `${model.id}: the routing catalog routes it on no backend, so it generates zero cells and is indistinguishable from an entry that is not in the catalog at all — declare it in UNROUTED_CATALOG_ENTRIES with its reason and owner, or route it (sc-18815)`,
+      );
+    }
+  }
+  const byId = new Map(models.map((model) => [model.id, model]));
+  for (const [id, entry] of declared) {
+    const model = byId.get(id);
+    if (!model) {
+      throw new Error(`UNROUTED_CATALOG_ENTRIES names ${id}, which is not in the model universe`);
+    }
+    if (model.backends.length) {
+      throw new Error(
+        `${id} is declared unrouted (sc-${entry.owningStory}) but the catalog now routes ${model.backends.join(",")} — delete the row so its cells stop being explained away`,
+      );
+    }
+  }
+}
+
+/** `SC-15509` for an image family group, the family's own name for a video one. */
+export function familyLabel(group) {
+  return typeof group === "number" ? `SC-${group}` : group;
+}
+
+/**
+ * The stable family group key for a catalog id.
+ *
+ * Image families (epic SC-15448) are keyed by the family's MLX story id, which doubles as the group
+ * key. The video families epic 18803 admits are keyed by the family's own NAME, because the story-id
+ * convention does not survive this lane: sc-18828 owns three unrelated families at once, so no
+ * assignment of story ids to those families is both distinct and true. A name is stable, carries no
+ * false ownership claim, and is the vocabulary the epic itself uses. `VIDEO_FAMILY_STORIES` answers
+ * the ownership question the key used to answer implicitly.
+ *
+ * `bernini` (video) and `bernini_image` share group 15528 on purpose — one engine, one block stack,
+ * two catalog entries — so the family is not counted or surveyed twice.
+ */
 export function familyGroup(modelId) {
+  if (modelId.startsWith("ltx_2_3") || modelId === "ltx_2_5") return "ltx-video";
+  if (modelId.startsWith("wan_2_2")) return "wan-video";
+  if (modelId === "scail2_14b") return "scail2";
+  if (modelId === "krea_realtime_14b") return "krea-realtime";
+  if (modelId === "svd") return "svd";
+  if (modelId === "bernini") return 15528;
   if (modelId.startsWith("mage_flow")) return 15509;
   if (modelId.startsWith("z_image")) return 15510;
   if (modelId.startsWith("qwen_image")) return 15511;
@@ -170,12 +353,16 @@ export function familyGroup(modelId) {
 
 export function familyStory(modelId, backend) {
   const group = familyGroup(modelId);
+  // A video family's survey story covers both backends (see `VIDEO_FAMILY_STORIES`), so it answers
+  // for either without a twin. `bernini` is not here: it is image family 15528 and takes the
+  // per-backend path below like every other member of that family.
+  if (Object.hasOwn(VIDEO_FAMILY_STORIES, group)) return VIDEO_FAMILY_STORIES[group];
   const stories = FAMILY_STORIES[group];
-  if (!stories) throw new Error(`${modelId}: family SC-${group} has no ownership entry`);
+  if (!stories) throw new Error(`${modelId}: family ${familyLabel(group)} has no ownership entry`);
   const story = stories[backend];
   if (!story) {
     throw new Error(
-      `${modelId}: family SC-${group} owns no ${backend} story, so a ${backend} cell cannot be attributed — file the ${backend} family twin`,
+      `${modelId}: family ${familyLabel(group)} owns no ${backend} story, so a ${backend} cell cannot be attributed — file the ${backend} family twin`,
     );
   }
   return story;
@@ -255,8 +442,17 @@ const CELL_OWNERSHIP_FIELDS = {
  * story that cannot close it — reached by assignment rather than by backend. So the owner identity is
  * asserted too.
  */
-export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBackendScope()) {
+export function assertCellOwnershipIsBackendScoped(
+  cells,
+  scope = buildStoryBackendScope(),
+  modalityByModelId = new Map(),
+) {
   for (const cell of cells) {
+    // sc-18815: the video lane's ownership is checked by `assertVideoOwnership` against its own rule
+    // (no per-entry story, family story from `VIDEO_FAMILY_STORIES`), because `scope` is the image
+    // lane's registry and a video cell resolves in it to nothing. Skipping is safe only BECAUSE the
+    // other guard runs — the two are a partition of the cells, not a check and an exemption.
+    if (modalityByModelId.get(cell.modelId) === "video") continue;
     for (const [field, expected] of Object.entries(CELL_OWNERSHIP_FIELDS)) {
       const storyId = cell[field];
       if (!Number.isInteger(storyId)) {
@@ -327,7 +523,19 @@ export function assertCellInventoryMatchesCatalog(cells, expectedByScope) {
  * the catalog advertises: every dual-backend entry needs a Candle twin, and an mlx-only entry must
  * NOT have one, because an empty Candle story can never be closed.
  */
-export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
+export function assertTwinCoverage(
+  allModels,
+  modelStories = MODEL_STORIES,
+  familyStories = FAMILY_STORIES,
+) {
+  // sc-18815: the twin rule is an IMAGE-lane invariant and stays at full strength there. It encodes
+  // epic 15448's per-backend split, which exists because an image family's evidence is produced on
+  // backend-specific hardware. The video families this epic admits are owned by a single survey story
+  // whose evidence is provider source read at the pinned revision (`VIDEO_FAMILY_STORIES`), so
+  // demanding a distinct Candle twin would demand a story nobody filed and could only be satisfied by
+  // inventing one. `assertVideoOwnership` checks the video lane against ITS rule instead — the lane
+  // is not exempt, it is checked differently because it is owned differently.
+  const models = allModels.filter((model) => model.modality !== "video");
   const dual = models.filter((model) => model.backends.includes("candle"));
   const dualGroups = new Set(dual.map((model) => familyGroup(model.id)));
   for (const model of models) {
@@ -357,6 +565,155 @@ export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyS
   return { dualModels: dual.length, dualFamilies: dualGroups.size };
 }
 
+// The MLX staged-residency census, checked as structure instead of an exact population (see the note
+// beside `MATRIX_MODALITIES` above). Runs inside `validateMatrix`, so `cells` is still the full resolved
+// cross-product and `coverage` is not populated yet; the census-versus-published cross-check belongs to
+// tests/test_memory_matrix.py, which reads the artifact after the publication slim.
+export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
+  const staged = new Set(
+    matrix.cells
+      .filter(
+        (cell) =>
+          cell.backend === "mlx" && cell.rung === "staged_residency" && isImplemented(cell.state),
+      )
+      .map((cell) => cell.modelId),
+  );
+  // sc-22512 removed the two named-entry census requirements (`flux2_dev` and `bernini_image` were
+  // each asserted INTO the census) and the `0 < size < models` partial-coverage band. All three
+  // reddened on the ABSENCE of a declaration: an inference pin that stops advertising selectable
+  // Sequential residency for one provider, or a catalog whose whole image lane declares none, is a
+  // lane nobody has measured — not a defect in this document. What survives is the containment
+  // relation, which holds at any coverage level including zero. The mirror of this removal lives in
+  // tests/test_memory_matrix.py.
+  //
+  // The containment replacement that first stood here — "every staged id is an id the matrix
+  // universe knows" — was deleted rather than kept, because it could not fail: `staged` is derived
+  // by filtering `matrix.cells`, and every cell is generated FROM `matrix.models`, so the id set is
+  // a subset of the universe by construction. A check whose throw branch is unreachable reads as
+  // coverage while asserting nothing, which is worse than the absent gate it replaced. The live
+  // claim below — a claim two independent declarations can genuinely disagree on — is what carries
+  // this function.
+  //
+  // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
+  // drifting away from its own siblings is exactly what a pinned total could not see.
+  //
+  // EXEMPT: an entry whose MLX tier axis is a single synthetic `default`. That is not drift, it is an
+  // entry with no advertised tier ladder AT ALL — `mlxTiers` falls through to `["default"]` when the
+  // catalog declares no `vramGbByTier`, no tier-tagged download variant, and a `quantize` that names no
+  // packed tier (`<= 0`, i.e. dense; see `resolve_quant`). Such an entry can never reach an Implemented
+  // staged cell, because the tiers its contract declares do not exist for it, so comparing its verdict
+  // against tiered siblings on the same route reports a disagreement that no declaration change can
+  // resolve.
+  //
+  // The instance is `flux2_klein_9b_true_v2`: a convert-at-install entry whose transformer is a FIXED
+  // DENSE BF16 artifact, sharing route `flux2_klein_9b` with the tiered base and KV entries. Coordinator
+  // decision 2026-08-17, building on Michael's report-only ruling the same day: `quantize: 0` stays
+  // because it is the only truthful encoding of that artifact — declaring a packed tier it does not ship
+  // would hand-declare a q8 that does not exist and mislead tier selection, which is the drift class
+  // this epic exists to kill. So the invariant yields on the axis instead of the manifest lying.
+  //
+  // Scoped as narrowly as that reasoning allows: the exemption removes these entries from the CROSS-
+  // ENTRY comparison only. Every other assertion in this function still applies to them, and the
+  // comparison keeps full force among tiered entries sharing a route — see
+  // `a drifting tiered route-mate still reds after the single-dense-tier exemption` in
+  // `generate-memory-matrix.test.mjs`, which exists so the exemption cannot be widened into a hole.
+  const hasSingleDenseTierAxis = (model) => {
+    const tiers = model.axes?.mlx?.tiers ?? [];
+    return tiers.length === 1 && tiers[0] === "default";
+  };
+  const byRoute = new Map();
+  for (const model of matrix.models) {
+    if (hasSingleDenseTierAxis(model)) continue;
+    const verdicts = byRoute.get(model.resolvedRoute) ?? new Set();
+    verdicts.add(staged.has(model.id));
+    byRoute.set(model.resolvedRoute, verdicts);
+  }
+  const split = [...byRoute.entries()].filter(([, verdicts]) => verdicts.size > 1).map(([route]) => route);
+  if (split.length) {
+    throw new Error(`MLX staged coverage disagrees within resolved route(s) ${split.sort().join(",")}`);
+  }
+  // A bespoke route carries its own pipeline and never advertises the GENERIC staged ladder.
+  //
+  // "Generic" is load-bearing and, as of 2026-08-17, actually enforced as written. This used to reject a
+  // bespoke route for ANY implemented staged cell, which conflated two different claims: the generic
+  // base ladder (the `none` overlay, plus the `lora` overlay that rides it) and a route-local closed
+  // overlay the entry declares for itself.
+  //
+  // `routeKind: "bespoke"` means only "no row in `engines.rs`'s MODEL_TABLE" — a SceneWorks worker
+  // DISPATCH fact, and backend-agnostic. It does not mean the engine registry publishes no contract.
+  // PuLID is exactly that split: bespoke in worker dispatch, and on candle genuinely unregistered (the
+  // candle dump carries its typed `bespokeMemoryRouteWaivers` entry), yet the MLX registry publishes a
+  // real `pulid_flux` memory contract with route witnesses at pin 931366f62. SC-18460 wired its MLX
+  // declaration route on that basis, and its census cells bear it out: `character_image` +
+  // `identity` is Implemented on every tier while `none` and `lora` stay Missing on every tier — the
+  // "deliberately closed identity-only contract" this file already describes in
+  // `staticCandleOverlayIsAvailable`.
+  //
+  // So the check now asks the question it always claimed to: does a bespoke route claim staged coverage
+  // on a GENERIC coordinate? Its own closed overlay is the one declaration it IS entitled to make.
+  // Teeth preserved — if PuLID's `none` or `lora` staged cell ever turns Implemented this still reds;
+  // `a bespoke route claiming the generic staged ladder still reds` pins that.
+  const GENERIC_STAGED_OVERLAYS = new Set(["none", "lora"]);
+  const bespoke = matrix.models
+    .filter(
+      (model) =>
+        model.routeKind === "bespoke" &&
+        matrix.cells.some(
+          (cell) =>
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            cell.modelId === model.id &&
+            GENERIC_STAGED_OVERLAYS.has(cell.overlay) &&
+            isImplemented(cell.state),
+        ),
+    )
+    .map((model) => model.id);
+  if (bespoke.length) {
+    throw new Error(`bespoke route(s) ${bespoke.sort().join(",")} claim generic MLX staged coverage`);
+  }
+}
+
+/**
+ * The video lane's ownership rule (sc-18815), which is not the image lane's.
+ *
+ * Two claims, both fail-closed, and both about what must NOT be there as much as what must:
+ *
+ * 1. **No per-entry ownership story is invented.** Epic 18803 does not slice video per (entry,
+ *    backend) — measurement is a runbook (epic 18093) — so `owningModelStories` is `null` on every
+ *    video entry. A number appearing there is a fabricated owner, which is the same false-inventory
+ *    defect SC-15812's guard was written for, reached from the other direction.
+ * 2. **Every advertised backend resolves to the family's real owning story.** `bernini` takes the
+ *    per-backend image path (family 15528) because it IS an image-family member; the rest take
+ *    `VIDEO_FAMILY_STORIES`. Either way the value has to be the one `familyStory` derives, so a hand
+ *    edit here cannot point a cell at a story that does not own it.
+ */
+export function assertVideoOwnership(allModels, videoFamilyStories = VIDEO_FAMILY_STORIES) {
+  for (const model of allModels.filter((entry) => entry.modality === "video")) {
+    const group = familyGroup(model.id);
+    for (const backend of model.backends) {
+      const modelStoryId = model.owningModelStories[backend];
+      if (modelStoryId !== null) {
+        throw new Error(
+          `${model.id}:${backend}: video entries carry no per-entry ownership story, but this one names SC-${modelStoryId} — epic 18803 filed no per-(entry, backend) video stories, so the id cannot be one that owns this cell`,
+        );
+      }
+      const expected = Object.hasOwn(videoFamilyStories, group)
+        ? videoFamilyStories[group]
+        : FAMILY_STORIES[group]?.[backend];
+      if (!expected) {
+        throw new Error(
+          `${model.id}:${backend}: family ${familyLabel(group)} has no owning story on this backend`,
+        );
+      }
+      if (model.owningFamilyStories[backend] !== expected) {
+        throw new Error(
+          `${model.id}:${backend}: owningFamilyStory SC-${model.owningFamilyStories[backend]} is not family ${familyLabel(group)}'s ${backend} owner SC-${expected}`,
+        );
+      }
+    }
+  }
+}
+
 function sha256(body) {
   return createHash("sha256").update(body).digest("hex");
 }
@@ -365,253 +722,12 @@ function sortedUnique(values) {
   return [...new Set(values)].sort();
 }
 
-// SC-16060. "Implemented" is a claim about the CODE, and `Verified` is `Implemented/unverified` plus
-// evidence — never a replacement for it. Before the promotion producer existed no cell could hold
-// `Verified`, so every coverage count could spell this as one exact state and stay correct by
-// accident. The first promoted cell would have silently dropped out of those counts. Coverage
-// surfaces must go through here rather than re-spelling the comparison.
+// "Implemented" is a claim about the CODE, and it is carried by every state the collapsed
+// vocabulary spells for an implemented rung (sc-22513). Coverage surfaces must go through here
+// rather than re-spelling the comparison, so a state added to `IMPLEMENTED_STATES` cannot silently
+// drop out of a count.
 export function isImplemented(state) {
-  return ["Implemented/unverified", "Runtime verified", "Verified"].includes(state);
-}
-
-function calibrationAbiVersion(provider) {
-  return CALIBRATION_ABI_VERSIONS[provider] ?? CALIBRATION_ABI_VERSIONS.default;
-}
-
-export function derivedCalibrationFingerprint({
-  inferencePin,
-  model,
-  provider,
-  backend,
-  tier,
-  mode,
-  overlay,
-  rung,
-  parameters,
-  manifestCalibration,
-}) {
-  return sha256(
-    JSON.stringify({
-      calibrationAbi: {
-        provider,
-        version: calibrationAbiVersion(provider),
-      },
-      inferencePin,
-      model,
-      backend,
-      tier,
-      mode,
-      overlay,
-      rung,
-      parameters,
-      manifestCalibration,
-    }),
-  );
-}
-
-function manifestCalibrationInputs(model, backend, tier) {
-  const scope = model[backend] ?? {};
-  return {
-    minMemoryGb: scope.minMemoryGb ?? null,
-    quantize: scope.quantize ?? null,
-    sequentialPeakGb: scope.sequentialPeakGb?.[tier] ?? null,
-    standardTierLayout: scope.standardTierLayout ?? null,
-    vramGbByTier: scope.vramGbByTier?.[tier] ?? null,
-  };
-}
-
-function runtimeStrategyParameters(parameters) {
-  return Object.fromEntries(
-    Object.entries(parameters).filter(([key]) =>
-      [
-        "decodeTileEdge",
-        "decodeOverlap",
-        "attentionChunkSize",
-        "transformerWindowSize",
-        "transformerWindowComponent",
-      ].includes(key),
-    ),
-  );
-}
-
-function canonicalParameters(parameters) {
-  return Object.fromEntries(Object.entries(parameters).sort(([left], [right]) => left.localeCompare(right)));
-}
-
-export function calibrationBinding(record, cell) {
-  const reasons = [];
-  if (!["complete", "runtime_complete"].includes(record.status)) reasons.push("record-not-complete");
-  if (record.quality.result !== "passed") reasons.push("quality-not-passed");
-  if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
-  if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
-  if (!Array.isArray(cell.engagedRungs)) {
-    reasons.push("composition-unavailable");
-  } else if (JSON.stringify(record.strategy.engagedRungs) !== JSON.stringify(cell.engagedRungs)) {
-    reasons.push("composition-mismatch");
-  }
-  if (
-    JSON.stringify(canonicalParameters(runtimeStrategyParameters(record.strategy.parameters))) !==
-    JSON.stringify(canonicalParameters((() => {
-      const parameters = runtimeStrategyParameters(cell.strategyParameters);
-      // Older records predate this exact string axis. Preserve their historical binding behavior,
-      // while new records that carry the component must match it exactly.
-      if (!Object.hasOwn(record.strategy.parameters, "transformerWindowComponent")) {
-        delete parameters.transformerWindowComponent;
-      }
-      return parameters;
-    })()))
-  ) reasons.push("strategy-parameters-mismatch");
-  const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
-  if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
-  if (record.target.geometry.batch !== 1) reasons.push("batch-out-of-envelope");
-  if (record.target.geometry.frames !== 1) reasons.push("frames-out-of-envelope");
-  if (
-    !cell.evidence.loadability.some(
-      (artifact) =>
-        artifact.repository === record.artifact.repository &&
-        artifact.revision === record.artifact.resolvedRevision &&
-        artifact.variant === record.artifact.variant,
-    )
-  ) reasons.push("artifact-loadability-mismatch");
-  if (
-    record.loadability.result !== "passed" ||
-    !record.loadability.resolvedPathFingerprint
-  ) reasons.push("loadability-not-passed");
-  return { eligible: reasons.length === 0, reasons };
-}
-
-// SC-16060. A cell spans a geometry ENVELOPE; measured evidence covers POINTS inside it. Two
-// separate claims live on a cell, and only one of them is geometry-sensitive:
-//
-//   `state`                  — the rung WORKS. Implemented, parity-passed, engaging the claimed
-//                              composition. One measured geometry establishes it, and envelope
-//                              membership is the right binding, because whether a rung executes
-//                              does not depend on the resolution it executed at.
-//   `memoryCharacterization` — the rung's PEAKS are known across the envelope. Geometry-sensitive
-//                              by construction: `fixedGb + perMpxGb * megapixels`
-//                              (`vram_gate.rs#krea_phase_curve`) has two coefficients, so one
-//                              point cannot determine a slope.
-//
-// Collapsing both into `state` is what let a single 768x768 capture read as certifying a cell whose
-// envelope reaches 2048x2048. `point` is the honest middle state the five-value vocabulary could not
-// express — and it is exactly where Krea's shipped q8/bf16 curves sit, each carrying one geometry
-// point while the gate's own doc comment calls their slopes "fitted from real renders at multiple
-// resolutions".
-//
-// `fitted` asserts the evidence is SUFFICIENT to determine the affine curve, not that a fit has been
-// performed. `coveredPixelBound` is the largest measured area, so a consumer can tell how far the
-// determinable curve reaches without re-deriving it from `measuredGeometries`; it is null below two
-// points because there is no curve to bound.
-export function memoryCharacterization(geometries) {
-  const measured = sortedUnique(
-    geometries.filter((geometry) => /^[1-9][0-9]*x[1-9][0-9]*$/.test(geometry ?? "")),
-  );
-  const areas = measured.map((geometry) => {
-    const [width, height] = geometry.split("x").map(Number);
-    return width * height;
-  });
-  return {
-    status: measured.length === 0 ? "unmeasured" : measured.length === 1 ? "point" : "fitted",
-    measuredGeometries: measured,
-    coveredPixelBound: areas.length > 1 ? Math.max(...areas) : null,
-  };
-}
-
-/**
- * Does one `config/memory-calibration-plan.json` entry target exactly this matrix coordinate?
- *
- * ONE matcher, consumed by both the engaged-composition lookup below and sc-18099's publication
- * predicate. The predicate publishes a cell BECAUSE it is planned, so "planned" has to mean the set
- * the plan actually addresses. A second filter that merely resembled this one would publish — or
- * silently elide — a different population with every test still green, which is the derived-constant
- * failure class this subsystem has already been bitten by.
- *
- * `coordinate` is deliberately the shape a generated cell already has (`modelId`, `provider`,
- * `backend`, `tier`, `mode`, `overlay`, `rung`), so a cell can be passed straight in.
- */
-export function planEntryTargetsCoordinate(entry, coordinate) {
-  return (
-    entry.target.modelId === coordinate.modelId &&
-    entry.target.provider === coordinate.provider &&
-    entry.backend === coordinate.backend &&
-    entry.target.tier === coordinate.tier &&
-    entry.target.mode === coordinate.mode &&
-    matrixOverlayFor(entry.target.overlay) === coordinate.overlay &&
-    entry.rung === coordinate.rung
-  );
-}
-
-function expectedEngagedRungs({
-  model,
-  provider,
-  backend,
-  tier,
-  mode,
-  overlay,
-  rung,
-  status,
-  calibrationPlan,
-}) {
-  if (Array.isArray(status.engagedRungs)) return status.engagedRungs;
-  if (rung === "resident") return ["resident"];
-  const matches = calibrationPlan.providers
-    .filter((candidate) =>
-      planEntryTargetsCoordinate(candidate, {
-        modelId: model.id,
-        provider,
-        backend,
-        tier,
-        mode,
-        overlay,
-        rung,
-      }),
-    )
-    .map((candidate) => candidate.engagedRungs);
-  if (matches.length === 0) return null;
-  if (matches.some((candidate) => JSON.stringify(candidate) !== JSON.stringify(matches[0]))) {
-    throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: conflicting planned compositions`);
-  }
-  return matches[0];
-}
-
-// Derive the smallest host that satisfies the same piecewise reserve policy as the Rust MLX
-// admission envelope. Below the capture host, solve
-// `peak + ceil(reserve * host / capture) <= host`; at and above it preserve the captured absolute
-// reserve. BigInt keeps the peak*host intermediate exact even though every published byte value
-// must remain a JSON-safe integer.
-export function mlxRequiredHostBytes(record) {
-  if (record?.backend !== "mlx") return null;
-  const memoryBytes = record.hardware?.memoryBytes;
-  const mlxLimit = record.hardware?.mlxMemoryLimitBytes;
-  const wiredLimit = record.hardware?.wiredLimitBytes;
-  const predicted = record.predictedPeakBytes?.overall;
-  const wired = record.observedMemory?.overall?.wiredBytes;
-  const reclaimable = record.observedMemory?.overall?.reclaimableBytes;
-  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
-  if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
-
-  const captureHost = BigInt(memoryBytes);
-  if (captureHost === 0n) return null;
-  const processCeiling = BigInt(Math.min(memoryBytes, mlxLimit, wiredLimit));
-  const foreignReserve = captureHost - processCeiling;
-  const nonReclaimableWired = BigInt(Math.max(0, wired - reclaimable));
-  const peak = BigInt(predicted) > nonReclaimableWired ? BigInt(predicted) : nonReclaimableWired;
-  const absoluteRequirement = peak + foreignReserve;
-
-  let required = absoluteRequirement;
-  if (foreignReserve < captureHost) {
-    const denominator = captureHost - foreignReserve;
-    const proportionalRequirement = (peak * captureHost + denominator - 1n) / denominator;
-    if (proportionalRequirement <= captureHost) required = proportionalRequirement;
-  }
-
-  return required <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(required) : null;
-}
-
-export function observedPeakBytes(record) {
-  const overall = record?.observedMemory?.overall;
-  const value = overall?.deviceBytes ?? overall?.activeBytes;
-  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return IMPLEMENTED_STATES.includes(state);
 }
 
 function parseExpectedImageIds(source) {
@@ -643,27 +759,320 @@ function parseEngineRoutes(source) {
   return routes;
 }
 
-// sc-16268: anchored on CODE, not on the `/// An id with no registered generator` doc comment that
-// used to terminate the region. Provenance now hashes these sources with their inert comments
-// stripped, so a parse that reads comment text would let a semantic change slip past the staleness
-// tripwire. The negative control (`assert!(!engine_supports_sequential(...)`) is the real end of the
-// positive sweep and was already the split point, so the parsed set is unchanged.
-function parseMlxSequentialEngines(source) {
-  const test = source.match(
-    /fn engine_supports_sequential_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)assert!\(!engine_supports_sequential/,
+/**
+ * The MLX video-route resolver that owns each video family, keyed by family group.
+ *
+ * One declaration, two consumers: `parseVideoRoutes` iterates it to read the arms, and
+ * `videoRouteArmMissing` uses it to name the function that owes a missing one. Restating the list in
+ * two places would let the diagnostic point at the wrong file the moment a resolver is renamed.
+ *
+ * `bernini` (video) sits in IMAGE family 15528 — one engine, one block stack, two catalog entries —
+ * so its key is that group's number. It is the only numeric key. Bernini and SCAIL-2 are the two
+ * families whose Candle dispatch is bespoke and reuses the same provider id as the MLX resolver,
+ * rather than appearing in generic `candle_video_engine_id`.
+ */
+const VIDEO_ROUTE_RESOLVERS = new Map([
+  ["wan-video", { body: "videoRouteWan", fn: "wan_engine_id" }],
+  ["ltx-video", { body: "videoRouteLtx", fn: "ltx_engine_id" }],
+  ["svd", { body: "videoRouteSvd", fn: "svd_engine_id" }],
+  [15528, { body: "videoRouteBernini", fn: "bernini_engine_id" }],
+  ["scail2", { body: "videoRouteScail2", fn: "scail2_engine_id" }],
+  ["krea-realtime", { body: "videoRouteKreaRealtime", fn: "krea_realtime_engine_id" }],
+]);
+
+/** The `*_engine_id` function that should have supplied `modelId`'s provider on `backend`. */
+function videoRouteResolverName(modelId, backend) {
+  // Bernini has no arm in `candle_video_engine_id` BY DESIGN: `resolve_candle_video_route` matches it
+  // off the model id first, so its candle provider is mirrored from the MLX one. A missing candle
+  // provider there is therefore a missing `bernini_engine_id` arm, and pointing at the candle file
+  // would send a reader to the one place that is correct to be silent.
+  const mirroredFromMlx = modelId === "bernini" || modelId === "scail2_14b";
+  if (backend !== "mlx" && !mirroredFromMlx) return "candle_video_engine_id";
+  const resolver = VIDEO_ROUTE_RESOLVERS.get(familyGroup(modelId));
+  // A video family with no row here is itself the defect — say which one, rather than name nothing.
+  return (
+    resolver?.fn ??
+    `the MLX *_engine_id resolver for family ${familyLabel(familyGroup(modelId))}, which VIDEO_ROUTE_RESOLVERS does not declare`
   );
-  if (!test) {
-    throw new Error("could not locate the MLX sequential-capability registry sweep");
-  }
-  return new Set([...test[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]));
 }
 
-function inferencePin(cargo) {
-  const match = cargo.match(
-    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
+function videoRouteArmMissing(modelId, backend, resolved) {
+  const served = Object.entries(resolved).map(([lane, engine]) => `${lane}=${engine}`);
+  return (
+    `${modelId}: the routing catalog routes ${backend}, but no ${backend} provider resolved — ` +
+    `expected an arm in ${videoRouteResolverName(modelId, backend)}` +
+    (served.length ? ` (resolved only ${served.join(", ")})` : "") +
+    ". A cell must not be stamped with the other backend's provider, which would bind its " +
+    "calibration evidence, plan row and closure digest to a provider that never ran it, so " +
+    "generation stops here (sc-18815)."
   );
-  if (!match) throw new Error("could not resolve the pinned SceneWorks/inference revision");
-  return match[1];
+}
+
+/**
+ * Resolve one catalog entry's route, whichever modality it belongs to.
+ *
+ * The two lanes are shaped differently and the difference is real, not incidental: the image lane has
+ * ONE provider per entry (`MODEL_TABLE` is consulted on both backends), the video lane has one PER
+ * BACKEND (LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle). `engineFor` is what the cell
+ * loop consumes, so a cell can never be stamped with the other backend's provider — which would bind
+ * its calibration evidence, plan row and closure digest to a provider that never ran it.
+ *
+ * Throws on an entry with no route at all. An unrouted entry is not a `Missing` cell, it is an entry
+ * the generator cannot describe, and silently dropping one is exactly the failure this story exists
+ * to remove.
+ *
+ * Throws, too, on an entry the routing catalog routes on a backend that NO `*_engine_id` arm serves
+ * (sc-18815 review). This used to be the quiet path and it was the wrong one to be quiet: deleting
+ * LTX's MLX arm from `ltx.rs` left `engineFor("mlx")` returning `null`, the scalar fell back to
+ * `video.mlx ?? video.candle`, and every MLX cell was stamped `ltx_2_3_distilled` — CANDLE's provider
+ * on an MLX cell, which is the exact substitution this resolver exists to make impossible. Generation
+ * still succeeded; the only thing that caught it was JSON-schema validation two lanes downstream,
+ * reporting `None is not of type 'string'` and naming neither the resolver nor the cause. So: fail
+ * here, name the resolver that owes the arm, and drop the cross-backend scalar fallback entirely so
+ * the wrong provider cannot be synthesised even if some future caller skips the check.
+ */
+function resolveRoute(model, imageRoutes, videoRoutes, backends) {
+  const image = imageRoutes.get(model.id);
+  if (image) {
+    return { ...image, engineFor: () => image.engine };
+  }
+  const video = videoRoutes.get(model.id);
+  if (video) {
+    const engineOn = (backend) => {
+      const engine = video[backend];
+      if (engine) return engine;
+      throw new Error(videoRouteArmMissing(model.id, backend, video));
+    };
+    // Eager, over the backends the CATALOG routes: the failure has to land at build time with the
+    // entry named, not lazily at whichever cell happened to be emitted first.
+    for (const backend of backends) engineOn(backend);
+    const engines = sortedUnique(Object.values(video));
+    return {
+      // The scalar is the provider on the entry's FIRST ROUTED backend. It deliberately does NOT
+      // fall back across backends; the only non-routed case is an entry the catalog routes nowhere
+      // (`UNROUTED_CATALOG_ENTRIES`), which emits no cells and whose backends agree by definition.
+      engine: video[backends[0]] ?? (engines.length === 1 ? engines[0] : null),
+      repo: null,
+      kind: "video",
+      engineFor: engineOn,
+    };
+  }
+  throw new Error(`${model.id}: no resolved route/provider`);
+}
+
+/**
+ * The `(sceneworks id -> engine id)` arms one worker video-route resolver declares.
+ *
+ * The three syntactic forms below are the three the worker actually uses, and each is anchored on the
+ * function's own signature so an unrelated `match model` elsewhere in a 90 KB file cannot contribute
+ * arms. `&'static str` consts are resolved from the same file (`krea_realtime_engine_id` is spelled
+ * entirely in consts), because a parser that silently skipped a const-spelled arm would drop a whole
+ * family from the universe and read as "the worker does not route it".
+ *
+ * Fails closed: an absent function, or a function whose body yields no arm, throws. A video family
+ * whose resolver was renamed must be noticed here, not inferred from an empty map.
+ */
+export function parseVideoEngineIds(source, fnName) {
+  const consts = new Map(
+    [...source.matchAll(/const\s+([A-Z0-9_]+):\s*&'?\s*(?:static\s+)?str\s*=\s*"([^"]+)"\s*;/g)].map(
+      (match) => [match[1], match[2]],
+    ),
+  );
+  const literal = (token) => {
+    const quoted = token.match(/^"([^"]+)"$/);
+    if (quoted) return quoted[1];
+    const resolved = consts.get(token);
+    if (!resolved) {
+      throw new Error(`memory-matrix: ${fnName} names ${token}, which resolves to no &str const`);
+    }
+    return resolved;
+  };
+  const declaration = source.match(
+    new RegExp(`fn ${fnName}\\(model: &str\\) -> Option<&'static str> \\{([\\s\\S]*?)\\n\\}`),
+  );
+  if (!declaration) {
+    throw new Error(`memory-matrix: could not locate ${fnName} — the video route resolvers moved`);
+  }
+  const body = declaration[1];
+  const arms = new Map();
+  // `match model { "a" => Some("x"), "b" | "c" => Some("y"), … }`. Or-pattern support remains
+  // load-bearing for any provider family that maps several catalog ids to one engine; parsing only
+  // the final token would silently drop the other ids and report them unrouted.
+  for (const arm of body.matchAll(
+    /((?:(?:"[^"]+"|[A-Z0-9_]+)\s*\|\s*)*(?:"[^"]+"|[A-Z0-9_]+))\s*=>\s*Some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    const engine = literal(arm[2]);
+    for (const id of arm[1].split("|")) arms.set(literal(id.trim()), engine);
+  }
+  // `(model == "a").then_some("x")`
+  for (const arm of body.matchAll(
+    /model\s*==\s*("[^"]+"|[A-Z0-9_]+)\s*\)\s*\.then_some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    arms.set(literal(arm[1]), literal(arm[2]));
+  }
+  // `matches!(model, "a" | "b").then_some("x")`
+  for (const arm of body.matchAll(
+    /matches!\(\s*model,([^)]*)\)\s*\.then_some\(("[^"]+"|[A-Z0-9_]+)\)/g,
+  )) {
+    const engine = literal(arm[2]);
+    for (const id of arm[1].matchAll(/"([^"]+)"|([A-Z0-9_]+)/g)) {
+      arms.set(literal(id[1] ? `"${id[1]}"` : id[2]), engine);
+    }
+  }
+  if (!arms.size) {
+    throw new Error(`memory-matrix: ${fnName} declared no model -> engine arm`);
+  }
+  return arms;
+}
+
+/**
+ * The union of engine ids `engines.rs#video_engine_ids` maps each video catalog id to, across
+ * backends. Used two ways: as the only source for `wan_2_2_vace_fun_14b` (whose MLX dispatch is a
+ * native VACE arm carrying no id string of its own), and as an independent cross-check that every
+ * per-backend provider derived from `video_jobs/*` is one the worker's own union agrees is that
+ * model's engine. Two sources have to be wrong the same way for a bad provider to reach a cell.
+ */
+function parseVideoEngineIdUnion(enginesBody) {
+  const declaration = enginesBody.match(
+    /fn video_engine_ids\(sceneworks_id: &str\) -> &'static \[&'static str\] \{([\s\S]*?)\n\s{4}\}/,
+  );
+  if (!declaration) {
+    throw new Error("memory-matrix: could not locate video_engine_ids in engines.rs");
+  }
+  const union = new Map();
+  for (const arm of declaration[1].matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*&\[([^\]]*)\]/g)) {
+    const engines = [...arm[2].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+    for (const id of arm[1].matchAll(/"([^"]+)"/g)) union.set(id[1], engines);
+  }
+  if (!union.size) throw new Error("memory-matrix: video_engine_ids declared no arm");
+  return union;
+}
+
+/**
+ * Ids whose MLX provider may come from `engines.rs#video_engine_ids` ALONE (sc-18815 review).
+ *
+ * `wan_2_2_vace_fun_14b` is the real case: its MLX dispatch is the native VACE arm, which carries no
+ * id string, so there is no `*_engine_id` arm to read and the union is the only source.
+ *
+ * The allowlist exists because the fallback was written for exactly that entry but keyed on
+ * `declared.length === 1`, which is a property thousands of ids could satisfy. `mochi_1` already took
+ * it — acquiring an MLX provider derived from `mochi.rs`, a file this generator neither reads nor
+ * fingerprints, so the provider was outside the staleness tripwire. Inert today (mochi has no
+ * manifest entry and so is outside the universe), but it silently downgraded the "two independent
+ * declarations must agree" invariant to single-source for whichever ids happened to hit it. Now a new
+ * one must be named here, with the reason, before it can.
+ */
+export const UNION_ONLY_MLX_ROUTES = new Set(["wan_2_2_vace_fun_14b"]);
+
+/**
+ * Per-backend video providers, derived from the worker's own route resolvers.
+ *
+ * The image lane resolves ONE provider per catalog id, because `MODEL_TABLE` is one table consulted
+ * on both backends. The video lane genuinely does not: LTX is backend-split (`ltx_2_3` on MLX,
+ * `ltx_2_3_distilled` on candle), so a single scalar route would have to be wrong on one of them —
+ * and a wrong provider is not cosmetic, it is the key calibration evidence, the plan, and the
+ * per-provider closure digests all bind on.
+ *
+ * Backend membership is NOT decided here. This answers "which provider serves this id on this
+ * backend if that backend serves it at all"; the routing catalog (`routedLanes`) decides whether it
+ * does. SCAIL-2's Candle `ReplacePersonScail2` dispatch is bespoke and is mirrored explicitly below;
+ * Krea-Realtime remains genuinely MLX-only. The catalog wins, per this epic's stated backend
+ * authority.
+ */
+export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROUTES) {
+  const union = parseVideoEngineIdUnion(bodies.engines);
+  const mlx = new Map();
+  for (const { body, fn } of VIDEO_ROUTE_RESOLVERS.values()) {
+    for (const [id, engine] of parseVideoEngineIds(bodies[body], fn)) mlx.set(id, engine);
+  }
+  const candle = parseVideoEngineIds(bodies.videoRouteCandle, "candle_video_engine_id");
+  // These lanes route off the model id in `resolve_candle_video_route`, BEFORE the generic
+  // `is_candle_video_engine` arm, so they are absent from `candle_video_engine_id` by design and
+  // share the MLX resolver's engine id. Reading only the generic function would leave a provider
+  // hole on a shipping lane.
+  for (const id of ["bernini", "scail2_14b"]) {
+    if (mlx.has(id)) candle.set(id, mlx.get(id));
+  }
+
+  const routes = new Map();
+  for (const id of sortedUnique([...mlx.keys(), ...candle.keys(), ...union.keys()])) {
+    const byBackend = {};
+    if (mlx.has(id)) byBackend.mlx = mlx.get(id);
+    if (candle.has(id)) byBackend.candle = candle.get(id);
+    const declared = union.get(id);
+    if (declared) {
+      // `wan_2_2_vace_fun_14b`'s MLX arm is the native VACE dispatch, which carries no id string, so
+      // the union is its only source. Everything else must AGREE with the union.
+      if (!byBackend.mlx && declared.length === 1 && unionOnlyMlxRoutes.has(id)) {
+        byBackend.mlx = declared[0];
+      }
+      for (const [backend, engine] of Object.entries(byBackend)) {
+        if (!declared.includes(engine)) {
+          throw new Error(
+            `memory-matrix: video route ${id}:${backend} resolves to provider ${engine}, but ` +
+              `engines.rs#video_engine_ids lists ${declared.join(",")} for it — the worker's two ` +
+              "video route declarations disagree",
+          );
+        }
+      }
+    }
+    if (Object.keys(byBackend).length) routes.set(id, byBackend);
+  }
+  return routes;
+}
+
+/**
+ * Direct-only Candle dispatches that deliberately do not make a user-facing Candle lane.
+ *
+ * `parseVideoRoutes` is the matrix's public-route parser: its output is joined with the routing
+ * catalog, so adding a direct/replay executor there would make an unmeasured lane look like a
+ * schedulable capability. MiniMax-H3 is the current case. Its resolver is intentionally kept in
+ * `video_jobs/mod.rs`, outside `candle_video_engine_id`; parse it independently so the contract
+ * still proves the internal arm names the real provider while the matrix keeps it excluded until
+ * `candle_video_routed` flips.
+ */
+export function parseInternalCandleVideoRoutes(candleDispatchSource, minimaxSource) {
+  const directRouteArm =
+    "} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {\n" +
+    "        CandleVideoRoute::MiniMaxH3(engine_id)\n" +
+    "    } else if is_candle_video_engine(&request.model) {";
+  if (!candleDispatchSource.includes(directRouteArm)) {
+    throw new Error(
+      "memory-matrix: MiniMax-H3 direct Candle dispatch no longer selects CandleVideoRoute::MiniMaxH3",
+    );
+  }
+  const engine = minimaxSource.match(
+    /const\s+MINIMAX_H3_ENGINE_ID:\s*&str\s*=\s*"([^"]+)"\s*;/,
+  )?.[1];
+  if (
+    !engine ||
+    !minimaxSource.includes(
+      "sceneworks_core::video_request::is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)",
+    )
+  ) {
+    throw new Error(
+      "memory-matrix: could not resolve MiniMax-H3's shared internal Candle engine id",
+    );
+  }
+  return new Map([
+    ["minimax_h3", engine],
+    ["minimax_h3_ref", engine],
+  ]);
+}
+
+// sc-16268: anchored on CODE, not on a doc comment. Provenance hashes these sources with inert
+// comments stripped, so a parse that reads comment text would let a semantic change slip past the
+// staleness tripwire. SC-18816 deliberately parses the broader staged-residency sweep rather than
+// the selectable-Sequential sweep: unconditional staging is real rung-1 availability even though
+// it does not authorize setting OffloadPolicy::Sequential.
+function parseMlxStagedResidencyEngines(source) {
+  const test = source.match(
+    /fn engine_engages_staged_residency_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)assert!\(!engine_engages_staged_residency/,
+  );
+  if (!test) {
+    throw new Error("could not locate the MLX staged-residency registry sweep");
+  }
+  return new Set([...test[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]));
 }
 
 export function backendScopes(model, routedBackends) {
@@ -671,18 +1080,174 @@ export function backendScopes(model, routedBackends) {
   return ["mlx", "candle"].filter((backend) => served.has(backend));
 }
 
-function tiersFor(model, backend, backendTierOverrides) {
+/**
+ * The per-lane tier sets `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares,
+ * keyed `backend:provider` — read off the Rust SOURCE, the way `parseBackendTierOverrides` reads
+ * InstantID's dense tier, so a rule the worker changes cannot silently stop matching the matrix.
+ *
+ * Why it exists (sc-22731 review): `tiersFor`'s `platforms` filter answers "could this lane's HOST
+ * fetch this download", which is NOT the same question as "does the worker route this lane at this
+ * tier". `bernini`/`bernini_image` is the case that separated them — the only off-Mac download is
+ * the untiered `SceneWorks/bernini` tree, yet the Candle route rule declares `BF16_Q4_Q8` because
+ * `expected_packing` and the published tier subdirs are inside that one repo. Filtering on
+ * `platforms` alone deleted three real Candle tiers on two model ids: six analytic anchors and six
+ * burndown cells for a lane the worker demonstrably routes, which epic 22723 E1 does not exempt
+ * (only a lane/tier the worker does NOT route is exempt).
+ *
+ * Consumed as a FLOOR and never as a ceiling. A rule's `tiers` is the scope at which that
+ * memory-route rule SHAPES a load, not an enumeration of what the lane can open: `ltx_2_3` has no
+ * rule at all and routes three tiers, and `lens` is `Q4_ONLY` on MLX while advertising three. So
+ * this may only keep a tier the `platforms` test would have dropped; it may never drop one.
+ */
+export function parseRouteRegistryLaneTiers(registrySource) {
+  const table = registrySource.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+  if (!table) {
+    throw new Error("memory-matrix: could not locate RULES in memory_route_registry.rs");
+  }
+  // Scoped to `impl MemoryRouteTier`: several enums in this file declare a `pub const ALL`, and an
+  // unanchored match would resolve `ALL_TIERS` to whichever one happened to come first.
+  const tierImpl = registrySource.match(/impl MemoryRouteTier \{([\s\S]*?)\n\}/);
+  const all = tierImpl?.[1].match(/pub const ALL: \[Self; \d+\] = \[([^\]]*)\];/);
+  if (!all) {
+    throw new Error("memory-matrix: could not derive MemoryRouteTier::ALL from memory_route_registry.rs");
+  }
+  const variant = (name) => name.replace(/^Self::|^MemoryRouteTier::/, "").toLowerCase();
+  const tierConstants = new Map([
+    ["ALL_TIERS", all[1].split(",").map((entry) => entry.trim()).filter(Boolean).map(variant)],
+  ]);
+  const KNOWN_TIERS = new Set(["bf16", "q4", "q8", "nvfp4"]);
+  for (const tier of tierConstants.get("ALL_TIERS")) {
+    if (!KNOWN_TIERS.has(tier)) {
+      throw new Error(`memory-matrix: MemoryRouteTier::ALL parsed an unknown tier ${tier}`);
+    }
+  }
+  for (const constant of registrySource.matchAll(
+    /const (\w+): &\[MemoryRouteTier\] = &\[([\s\S]*?)\];/g,
+  )) {
+    tierConstants.set(
+      constant[1],
+      [...constant[2].matchAll(/MemoryRouteTier::(\w+)/g)].map((entry) => variant(entry[1])),
+    );
+  }
+  const lanes = new Map();
+  let seen = 0;
+  for (const row of table[1].matchAll(/MemoryRouteRule \{([\s\S]*?)\n {4}\},/g)) {
+    seen += 1;
+    const backend = row[1].match(/backend: MemoryRouteBackend::(\w+)/)?.[1];
+    const provider = row[1].match(/provider: "([a-z0-9_]+)"/)?.[1];
+    const tiers = row[1].match(/tiers: (\w+)/)?.[1];
+    if (!backend || !provider || !tiers) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} is under-keyed for tiers`);
+    }
+    const resolved = tierConstants.get(tiers);
+    if (!resolved) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} names unknown tier set ${tiers}`);
+    }
+    const key = `${backend.toLowerCase()}:${provider}`;
+    const set = lanes.get(key) ?? new Set();
+    for (const tier of resolved) set.add(tier);
+    lanes.set(key, set);
+  }
+  if (seen === 0) throw new Error("memory-matrix: RULES parsed to zero memory-route rules");
+  return lanes;
+}
+
+/**
+ * The tiers `memory_route_registry.rs` admits for the ENGINE provider this catalog entry routes to
+ * on this lane — `bernini_image` resolves to the engine id `bernini`, which is what the rules are
+ * keyed on. Empty when the registry names no rule for it: silence is not a denial, it just means
+ * this floor contributes nothing and the other two tests in `tiersFor` decide the tier.
+ */
+function routedLaneTiers(routeLaneTiers, route, backend) {
+  if (!routeLaneTiers || !route) return new Set();
+  let provider;
+  try {
+    provider = route.engineFor(backend);
+  } catch {
+    return new Set();
+  }
+  return routeLaneTiers.get(`${backend}:${provider}`) ?? new Set();
+}
+
+function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
   const override = backendTierOverrides.get(`${model.id}:${backend}`);
   if (override) return override;
   const backendTiers = Object.keys(model[backend]?.vramGbByTier ?? {});
+  // sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+  // The manifest's own `platforms` selection is the rule
+  // (`crates/sceneworks-core/src/model_artifacts/artifact_selection.rs`; a row with no `platforms`
+  // key applies everywhere), and MLX is macOS-only by construction while Candle is the off-Mac
+  // lane. Without the filter, `sana_1600m` — whose three packed tiers are `platforms: ["macos"]`
+  // turnkeys and whose only off-Mac download is the dense diffusers snapshot — advertised a
+  // three-tier Candle axis: 20 coordinates no Candle load can reach, contradicting its own shipped
+  // contract (every `sana_1600m` candle implementation declares `"tiers": ["bf16"]`), the worker
+  // (`base.rs` pins the candle SANA tier to `bf16`) and the route registry (`BF16_ONLY`).
+  //
+  // The filter NARROWS ONLY, and only where nothing routes the tier. Epic 22723 E1 exempts exactly
+  // one thing — a (lane, tier) the WORKER DOES NOT ROUTE — so a tier that survives any of the three
+  // tests below stays on the axis even when its own download row is gated away (sc-22731 review;
+  // the first spelling of this filter had only the `platforms` test and got two families wrong):
+  //
+  //   1. An UNTIERED download this lane's host fetches. A row with no `variant` is a bundle whose
+  //      tiers live INSIDE it, so it serves every tier the lane advertises. `bernini`/
+  //      `bernini_image`'s only off-Mac download is exactly that — one untiered `SceneWorks/bernini`
+  //      tree — which is why the Candle route rule declares `BF16_Q4_Q8` ("matches
+  //      `expected_packing` and the published tier subdirs"). Filtering on `platforms` alone sent
+  //      both ids to `["default"]`, deleting six analytic anchors and six burndown cells for a lane
+  //      the worker demonstrably routes. `ltx_2_3` is the same shape from the other direction: its
+  //      bf16 row is `platforms: ["macos"]`, but `video_jobs/candle.rs` resolves `mlxQuantize <= 0`
+  //      to `CandleLtxTier::Bf16` and `candle_ltx_bundle_tier_across_revisions` returns `None` for
+  //      it BECAUSE bf16 is the untiered dense bundle root rather than a packed tier subdir — and
+  //      that bundle is the co-requisite download, which serves every platform.
+  //   2. A tier `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares for this
+  //      exact (backend, provider). The registry is consulted as a FLOOR and never as a ceiling: a
+  //      rule's `tiers` is the scope at which that memory-route rule shapes a load, not an
+  //      enumeration of the tiers the lane can open (`ltx_2_3` has no rule at all and loads three),
+  //      so it can only keep a tier, never remove one.
+  //   3. The lane's own `vramGbByTier` / `quantize` block, which is a lane-local claim rather than a
+  //      download claim, and is unioned in below regardless.
+  const lanePlatform = backend === "mlx" ? "macos" : "linux";
+  const servesLane = (download) =>
+    !download.platforms || download.platforms.includes(lanePlatform);
+  const routedTiers = routedLaneTiers(routeLaneTiers, route, backend);
+  const bundledLane = (model.downloads ?? []).some(
+    (download) => typeof download.variant !== "string" && servesLane(download),
+  );
   const downloadTiers = (model.downloads ?? [])
+    .filter(
+      (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
+    )
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
-  const advertised =
-    backend === "candle" && backendTiers.length
-      ? backendTiers
-      : [...backendTiers, ...downloadTiers, ...inferred];
+  // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
+  // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment
+  // a candle lane declared ANY `vramGbByTier` key, threw `downloadTiers` and `inferred` away.
+  //
+  // That was the original (sc-15506) crude proxy for the one thing the filter above now does
+  // properly: keep a download row this lane's host would never fetch off this lane's axis. It was
+  // written when `downloadTiers` had no `platforms` test at all, so an MLX-only turnkey set would
+  // otherwise have advertised a bogus candle axis. sc-22731 replaced that proxy with the real rule
+  // (`servesLane` + `bundledLane` + `routedTiers`), and the proxy was left behind — still firing,
+  // and now reading `vramGbByTier` as a routing CEILING. It is a MEASUREMENT block: a missing key
+  // says a peak has not been recorded, never that the lane refuses the tier — the same distinction
+  // `parseBackendTierOverrides` is documented on. Its residue deleted six real coordinates:
+  //
+  //   * `flux_dev`, `flux_schnell`, `flux2_dev` at bf16 — `memory_route_registry.rs` declares
+  //     `BF16_NVFP4_Q4_Q8` for `candle:flux1_dev` / `candle:flux1_schnell` / `candle:flux2_dev`,
+  //     and each ships an ungated `bf16/` download row that serves every platform. The sc-22738
+  //     campaign then MEASURED flux_dev and flux_schnell there (executed, authoritative,
+  //     `loadability.result: "passed"` on a `…:bf16` resolved path), and the drop is what left
+  //     those two bundles compiled into `PACKAGED_MEMORY_ANCHOR_SOURCES` citing nothing.
+  //   * `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` at q8 — no registry rule names their
+  //     provider (silence is not a denial; see `routedLaneTiers`), but each lane's own
+  //     `memoryStrategyContract` declares `"tiers": ["q4", "q8", "bf16"]` on every implementation
+  //     and each ships an ungated `q8/` download row. Only `vramGbByTier` was missing q8.
+  //
+  // Removing it does NOT re-open what sc-22731 closed: `sana_1600m` / `sana_sprint_1600m` stay at
+  // `["bf16"]` on candle, because their three packed tiers are `platforms: ["macos"]` and
+  // `servesLane` — not this short-circuit — is what keeps them off the off-Mac axis.
+  const advertised = [...backendTiers, ...downloadTiers, ...inferred];
   return sortedUnique(advertised).filter(
     (tier) => tier !== "int8-convrot",
   ).length
@@ -690,14 +1255,27 @@ function tiersFor(model, backend, backendTierOverrides) {
     : ["default"];
 }
 
-function parseBackendTierOverrides(instantIdSource) {
+/**
+ * The per-lane tier overrides that come from CODE rather than from a manifest declaration: the
+ * InstantID Candle dense tier, read out of the worker's own `instantid.rs`, plus the converter
+ * families' packed tier sets. These are ROUTING facts — what the lane can load at all.
+ *
+ * Exported (sc-22729) so the measurability gap set can narrow a model's tier axis by exactly these
+ * and nothing else. `tiersFor` also consults `model[backend].vramGbByTier`, which is a MEASUREMENT
+ * declaration: a missing key there says a peak has not been recorded, never that the lane refuses
+ * the tier, so a gap set that intersected against it would delete the very cells it exists to
+ * count.
+ */
+export function parseBackendTierOverrides(instantIdSource) {
   const candleDense = instantIdSource.match(
     /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?"([^"]+)"\s*\};/,
   )?.[1];
   if (!candleDense) {
     throw new Error("could not derive InstantID's dense Candle tier from instantid.rs");
   }
-  return new Map([["instantid_realvisxl:candle", [candleDense]]]);
+  // The converter-packed tier sets are shared with the projector's `catalogAxes` so the matrix's
+  // cell universe and the projection's declaration universe cannot disagree about them (sc-21510).
+  return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
 function modesFor(model) {
@@ -747,34 +1325,74 @@ const CONTROL_PROVIDER_OVERRIDES = new Map([
   ["z_image_turbo:mlx", "z_image_turbo_control"],
 ]);
 
-// The pinned Z-Image crate exports one provider-id-specific contract for each of its four registry
-// variants from the same `memory_strategy_contract(provider_id, spec)` implementation. The manifest
-// stores the declaration once on each catalog base entry; allow only these source-proven aliases to
-// consume it. This is intentionally narrower than route equivalence: Qwen's separate control
-// provider, for example, remains unbounded and must not inherit the base declaration.
-const STATIC_CONTRACT_PROVIDER_ALIASES = new Map([
-  ["z_image_control", "z_image"],
-  ["z_image_turbo_control", "z_image_turbo"],
-]);
-
 function staticContractCoversProvider(contract, provider) {
   if (!contract) return false;
-  const aliasedProvider = STATIC_CONTRACT_PROVIDER_ALIASES.get(provider);
-  return contract.provider === provider ||
-    (aliasedProvider !== undefined && aliasedProvider === contract.provider);
+  return contract.implementations.some(
+    (implementation) => (implementation.runtimeProvider ?? contract.provider) === provider,
+  );
 }
 
-function providerFor(model, backend, overlay, route) {
-  if (overlay !== "control") return route.engine;
-  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? route.engine;
+export function declarationModelForCoordinate({ backend, rung, route, provider, model, tier, mode, overlay, manifestById }) {
+  const routeLocalContract = model[backend]?.memoryStrategyContract;
+  const routeLocalImplementation = routeLocalContract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? routeLocalContract.provider) === provider &&
+      implementation.rung === rung &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay),
+  );
+  if (routeLocalImplementation) return model;
+  return model.id === "z_image_edit" && route.engine === "z_image_turbo"
+    ? manifestById.get("z_image_turbo")
+    : model;
+}
+
+export function providerFor(model, backend, overlay, route, mode) {
+  // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
+  // backend, so this is unchanged for it, while a video entry gets the provider that backend
+  // actually loads instead of whichever one happened to be listed first. No `?? route.engine`
+  // fallback: `engineFor` throws on a backend it cannot serve, and falling through to the scalar is
+  // how a candle provider reached an MLX cell in the first place.
+  //
+  // A contract row that names a DISTINCT `runtimeProvider` for this (mode, overlay) owns the lane
+  // (sc-21510). This used to hold only for the `control` overlay, so Krea's and FLUX.2 Klein's
+  // route-local EDIT providers (`krea_2_edit`, `flux2_klein_9b_edit`, …) could never label a cell:
+  // every edit/character cell carried the base engine id, the edit rows bound to nothing, and their
+  // real, witnessed capability read as `declared_cell_absent` drift. The mode filter keeps the base
+  // rows in charge of the modes they declare; a coordinate no row covers falls through to the base
+  // engine exactly as before.
+  const engine = route.engineFor(backend);
+  const contract = model[backend]?.memoryStrategyContract;
+  const declared = [...new Set((contract?.implementations ?? [])
+    .filter((implementation) =>
+      implementation.overlays?.includes(overlay) &&
+      (mode === undefined || implementation.modes?.includes(mode)))
+    .map((implementation) => implementation.runtimeProvider ?? contract.provider))];
+  if (declared.length === 1) return declared[0];
+  if (declared.length > 1) {
+    throw new Error(
+      `${model.id}:${backend}:${mode ?? "(any mode)"}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
+    );
+  }
+  return overlay === "control"
+    ? (CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine)
+    : engine;
 }
 
 function matrixOverlayFor(recordOverlay) {
   return /^control:\d+$/.test(recordOverlay) ? "control" : recordOverlay;
 }
 
-function overlaysFor(model, backend) {
-  const overlays = ["none"];
+function overlaysFor(model, backend, route) {
+  // Some public variants always provision a built-in LoRA. When the backend's exact contract
+  // declares only the LoRA load profile for the model's base provider, publishing `none` creates
+  // plain cells that cannot reach the provider and lets their staged/decode/attention/resident rows
+  // look applicable by accident. One shared STRUCTURAL predicate (sc-20799) — `catalogAxes` mirrors
+  // this same call.
+  const overlays = contractIsLoraOnly(model, backend, route.engineFor(backend))
+    ? ["lora"]
+    : ["none"];
   if (model.loraCompatibility) overlays.push("lora");
   // A DECLARED lane, not a measured one — see CONTROL_LANE_MODELS.
   if (CONTROL_LANE_MODELS.includes(model.id)) overlays.push("control");
@@ -840,6 +1458,18 @@ function geometryFor(model, backend) {
     maxWidth: limits.maxWidth ?? limits.maxSize ?? null,
     minHeight: limits.minHeight ?? limits.minSize ?? null,
     maxHeight: limits.maxHeight ?? limits.maxSize ?? null,
+    // sc-18815: the TEMPORAL half of a video entry's declared envelope. Publishing only the spatial
+    // half would say the envelope is fully described when the axis a video peak actually scales on
+    // is missing — the same silent omission, one field down. These are the catalog's DECLARED
+    // limits, nothing more: how the phase curve represents the temporal axis (raw frames, a
+    // latent-depth regressor, a cross term) is measured and decided by sc-18810/sc-18812, and this
+    // field neither anticipates nor constrains that. Image entries declare none of these keys, so
+    // the filter below drops them and every image envelope is byte-identical to before.
+    defaultDuration: defaults.duration ?? null,
+    durations: Array.isArray(limits.durations) ? limits.durations : [],
+    hardMaxDuration: limits.hardMaxDuration ?? null,
+    defaultFps: defaults.fps ?? null,
+    fps: Array.isArray(limits.fps) ? limits.fps : [],
   };
   return Object.fromEntries(
     Object.entries(envelope).filter(
@@ -848,382 +1478,137 @@ function geometryFor(model, backend) {
   );
 }
 
-function geometryWithinPixels(model, backend, maxPixels) {
-  const envelope = geometryFor(model, backend);
-  return {
-    ...envelope,
-    resolutions: (envelope.resolutions ?? []).filter((resolution) => {
-      const [width, height] = resolution.split("x").map(Number);
-      return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width * height <= maxPixels;
-    }),
-  };
-}
-
-function artifactEvidence(model, route, tier) {
-  const downloads = model.downloads ?? [];
-  const tierMatches = downloads.filter((download) => download.variant === tier);
-  const relevant = tierMatches.length
-    ? [...tierMatches, ...downloads.filter((download) => download.variant == null)]
-    : downloads;
-  const artifacts = relevant.map((download) => ({
-    repository: download.repo ?? null,
-    revision: download.revision ?? null,
-    variant: download.variant ?? null,
-  }));
-  if (!artifacts.length && route.repo) {
-    artifacts.push({ repository: route.repo, revision: null, variant: null });
-  }
-  return [
-    ...new Map(
-      artifacts.map((artifact) => [
-        `${artifact.repository}:${artifact.revision}:${artifact.variant}`,
-        artifact,
-      ]),
-    ).values(),
-  ];
-}
-
-export const RUNG4_APPLICABILITIES = Object.freeze([
-  "full",
-  "partial",
-  "none",
-  "requires-different-primitive",
+/**
+ * Whether this entry advertises rung 1 on this backend.
+ *
+ * This is the RUNG-1 arm's own predicate, and after sc-19542 that is the only place it is applied
+ * unconditionally. The rung-4 arm used to gate every family on it as well; `rung4ContractAdmits`
+ * replaced that, and this function now reaches rung 4 only through the `rung` evaluator in
+ * `RUNG4_PREREQUISITE_EVALUATORS`, for the families whose own provider record declares that edge.
+ *
+ * Availability, not engagement: it answers whether the provider implements rung 1 on this lane. That
+ * is the right question for the edge it now serves, because gen-core's `validate_selection` accepts
+ * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
+ * and for an edge the realization itself appended, `engages` reduces to that rung being declared
+ * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1544-1558` at the
+ * pinned rev `28f0563baa03640ade1635356d2d54fe8a477f1a`: `required_by_realization` is true by construction, so the conjunction is
+ * the `matches!(self.support(rung), Some(Implemented))` term).
+ *
+ * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
+ * prerequisite check. The second arm is `StructurallyNotApplicable`, and it lives in the `rung`
+ * evaluator below rather than here, because it is a fact about the provider's declaration and not
+ * about what this lane makes available.
+ */
+/**
+ * SC-20790 delivered receipt-backed, request-authoritative Candle admission for these bespoke
+ * providers with NO manifest declaration row, on purpose: a `staged_residency` row carrying
+ * `requestContexts` on the host model would make `declared_candle_request_strategy_contract`
+ * treat the base lane's manifest as "relevant" and terminally refuse crossed coordinates, changing
+ * runtime behavior a visibility fix must not touch. The worker census const
+ * (`memory_route_registry.rs#CANDLE_BESPOKE_REQUEST_PROVIDERS`) is the source of truth for WHICH
+ * providers carry this authority; this map binds each to the exact catalog coordinates its lane
+ * serves (from the provider's RULES entry + `declared_candle_bespoke_request` shape arm), and
+ * `parseCandleBespokeStagedLanes` fails generation when the two drift — a delivered lane without a
+ * coordinate map must red the build, never publish as `Missing` (sc-20799).
+ */
+const CANDLE_BESPOKE_REQUEST_LANE_COORDINATES = new Map([
+  [
+    "candle_kolors_ipadapter",
+    {
+      modelId: "kolors",
+      overlays: ["identity"],
+      modes: ["character_image"],
+      tiers: ["bf16", "q4", "q8"],
+    },
+  ],
+  [
+    "candle_kolors_control",
+    {
+      modelId: "kolors",
+      overlays: ["control"],
+      modes: ["text_to_image", "style_variations", "character_image"],
+      tiers: ["bf16", "q4", "q8"],
+    },
+  ],
 ]);
-export const RUNG4_IMPLEMENTATIONS = Object.freeze(["shared-primitive", "provider-local", "none"]);
-export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unmeasured"]);
 
-/**
- * Parse and validate the SC-15969 rung-4 applicability survey.
- *
- * The survey is hand-curated evidence, so every way it could be WRONG has to fail here rather than
- * generate a plausible matrix. The checks that matter:
- *
- * - **Total coverage.** Every (family, backend) pair the catalog advertises needs a verdict. A
- *   family added to `familyGroup` without a survey entry fails generation instead of quietly
- *   emitting `Missing` rung-4 cells that read as surveyed.
- * - **`Structurally N/A` is never assumed.** An `applicability: "none"` verdict without structural
- *   evidence is rejected — the epic allows a static verdict *because* the evidence is present, and
- *   an empty array would turn that allowance into a bare assertion.
- * - **Implementation claims are per entry and mutually consistent.** `implementation: "none"` with
- *   a non-empty legacy `implementedEntries` or exact `implementationScopes` claim (or the reverse)
- *   is a contradiction, and every named entry has to belong to the family that claims it.
- */
-export function parseRung4Survey(body, { familyGroups } = {}) {
-  const parsed = JSON.parse(body);
-  const families = parsed.families;
-  if (!families || typeof families !== "object") {
-    throw new Error("rung-4 survey: missing `families`");
+/** `model.id:overlay:mode:tier` coordinates with receipt-backed bespoke Candle staged coverage. */
+export function parseCandleBespokeStagedLanes(registrySource) {
+  const match = registrySource.match(
+    /const\s+CANDLE_BESPOKE_REQUEST_PROVIDERS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/,
+  );
+  if (!match) {
+    throw new Error(
+      "memory-matrix: could not derive CANDLE_BESPOKE_REQUEST_PROVIDERS from memory_route_registry.rs",
+    );
   }
-  const survey = new Map();
-  for (const [group, family] of Object.entries(families)) {
-    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
-      const at = `rung-4 survey ${family.name ?? group} (${backend})`;
-      if (!RUNG4_APPLICABILITIES.includes(verdict.structuralApplicability)) {
-        throw new Error(`${at}: unknown structuralApplicability ${JSON.stringify(verdict.structuralApplicability)}`);
-      }
-      if (!RUNG4_IMPLEMENTATIONS.includes(verdict.implementation)) {
-        throw new Error(`${at}: unknown implementation ${JSON.stringify(verdict.implementation)}`);
-      }
-      if (!RUNG4_REQUEST_PEAKS.includes(verdict.requestPeak?.finding)) {
-        throw new Error(`${at}: unknown requestPeak finding ${JSON.stringify(verdict.requestPeak?.finding)}`);
-      }
-      for (const [tier, finding] of Object.entries(verdict.requestPeak?.byTier ?? {})) {
-        if (!["bf16", "q4", "q8"].includes(tier)) {
-          throw new Error(`${at}: requestPeak.byTier contains a tier outside the matrix vocabulary`);
-        }
-        if (!RUNG4_REQUEST_PEAKS.includes(finding)) {
-          throw new Error(`${at}: requestPeak.byTier.${tier} has unknown finding ${JSON.stringify(finding)}`);
-        }
-      }
-      for (const [index, scope] of (verdict.requestPeak?.scopes ?? []).entries()) {
-        const scopeAt = `${at}: requestPeak.scopes[${index}]`;
-        if (!RUNG4_REQUEST_PEAKS.includes(scope.finding)) {
-          throw new Error(`${scopeAt}.finding has unknown finding ${JSON.stringify(scope.finding)}`);
-        }
-        for (const [field, values, vocabulary] of [
-          ["tiers", scope.tiers, ["bf16", "q4", "q8"]],
-          ["overlays", scope.overlays, ["none", "lora", "control", "identity"]],
-        ]) {
-          if (values?.length === 0) {
-            throw new Error(`${scopeAt}.${field} is empty — omit it to mean every cell value`);
-          }
-          if (values?.some((value) => !vocabulary.includes(value))) {
-            throw new Error(`${scopeAt}.${field} contains a value outside the matrix vocabulary`);
-          }
-        }
-        if (scope.entries?.length === 0 || scope.modes?.length === 0) {
-          throw new Error(`${scopeAt} has an empty selector — omit it to mean every cell value`);
+  const providers = [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  if (providers.length === 0) {
+    throw new Error("memory-matrix: CANDLE_BESPOKE_REQUEST_PROVIDERS parsed to zero providers");
+  }
+  const mapped = new Set(CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.keys());
+  const unmapped = providers.filter((provider) => !mapped.has(provider)).sort();
+  const stale = [...mapped].filter((provider) => !providers.includes(provider)).sort();
+  if (unmapped.length || stale.length) {
+    throw new Error(
+      "memory-matrix: candle bespoke request lanes disagree with the worker census " +
+        `(censused but unmapped=${unmapped.join(",") || "none"}; ` +
+        `mapped but no longer censused=${stale.join(",") || "none"}). ` +
+        "A delivered receipt-backed lane without a coordinate map would publish as Missing (sc-20799).",
+    );
+  }
+  const lanes = new Set();
+  for (const provider of providers) {
+    const lane = CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.get(provider);
+    for (const overlay of lane.overlays) {
+      for (const mode of lane.modes) {
+        for (const tier of lane.tiers) {
+          lanes.add(`${lane.modelId}:${overlay}:${mode}:${tier}`);
         }
       }
-      if (!verdict.evidence?.length) {
-        throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
-      }
-      if (verdict.structuralApplicability === "none" && !verdict.structural?.length) {
-        throw new Error(
-          `${at}: applicability "none" becomes a Structurally N/A cell, which the epic accepts only with static provider evidence — none is cited`,
-        );
-      }
-      const implemented = verdict.implementedEntries ?? [];
-      const implementationScopes = verdict.implementationScopes ?? [];
-      const carriesLegacyImplementationFields = [
-        "implementedEntries",
-        "implementedModes",
-        "implementedTiers",
-        "implementedOverlays",
-        "strategyParameters",
-      ].some((field) => Object.hasOwn(verdict, field));
-      if (carriesLegacyImplementationFields && implementationScopes.length) {
-        throw new Error(
-          `${at}: use either legacy implementedEntries fields or exact implementationScopes, not both`,
-        );
-      }
-      const hasImplementationClaim = implemented.length > 0 || implementationScopes.length > 0;
-      if ((verdict.implementation === "none") !== !hasImplementationClaim) {
-        throw new Error(
-          `${at}: implementation is ${verdict.implementation} but carries ${hasImplementationClaim ? "an" : "no"} implementation claim — the two must agree`,
-        );
-      }
-      if (implemented.length && !Object.keys(verdict.strategyParameters ?? {}).length) {
-        throw new Error(`${at}: an implemented family must publish the rung's own strategy parameters`);
-      }
-      if (verdict.implementedModes && !implemented.length) {
-        throw new Error(`${at}: implementedModes narrows implementedEntries, which is empty`);
-      }
-      if (verdict.implementedModes?.length === 0) {
-        throw new Error(`${at}: implementedModes is empty — omit it to mean every mode`);
-      }
-      for (const [field, values] of [
-        ["implementedTiers", verdict.implementedTiers],
-        ["implementedOverlays", verdict.implementedOverlays],
-      ]) {
-        if (values && !implemented.length) {
-          throw new Error(`${at}: ${field} narrows implementedEntries, which is empty`);
-        }
-        if (values?.length === 0) {
-          throw new Error(`${at}: ${field} is empty — omit it to mean every cell value`);
-        }
-      }
-      if (verdict.implementedTiers?.some((value) => !["bf16", "q4", "q8"].includes(value))) {
-        throw new Error(`${at}: implementedTiers contains a tier outside the matrix vocabulary`);
-      }
-      if (
-        verdict.implementedOverlays?.some(
-          (value) => !["none", "lora", "control", "identity"].includes(value),
-        )
-      ) {
-        throw new Error(`${at}: implementedOverlays contains an overlay outside the matrix vocabulary`);
-      }
-      const selectorOverlaps = (left, right) =>
-        left === undefined || right === undefined || left.some((value) => right.includes(value));
-      for (const [index, scope] of implementationScopes.entries()) {
-        const scopeAt = `${at}: implementationScopes[${index}]`;
-        if (!scope.entries?.length) {
-          throw new Error(`${scopeAt}.entries must name at least one catalog entry`);
-        }
-        if (!Object.keys(scope.strategyParameters ?? {}).length) {
-          throw new Error(`${scopeAt} must publish the rung's own strategy parameters`);
-        }
-        for (const [field, values, vocabulary] of [
-          ["tiers", scope.tiers, ["bf16", "q4", "q8"]],
-          ["overlays", scope.overlays, ["none", "lora", "control", "identity"]],
-        ]) {
-          if (values?.length === 0) {
-            throw new Error(`${scopeAt}.${field} is empty — omit it to mean every cell value`);
-          }
-          if (values?.some((value) => !vocabulary.includes(value))) {
-            throw new Error(`${scopeAt}.${field} contains a value outside the matrix vocabulary`);
-          }
-        }
-        if (scope.modes?.length === 0) {
-          throw new Error(`${scopeAt}.modes is empty — omit it to mean every mode`);
-        }
-        for (let previous = 0; previous < index; previous += 1) {
-          const other = implementationScopes[previous];
-          if (
-            selectorOverlaps(scope.entries, other.entries) &&
-            selectorOverlaps(scope.tiers, other.tiers) &&
-            selectorOverlaps(scope.modes, other.modes) &&
-            selectorOverlaps(scope.overlays, other.overlays)
-          ) {
-            throw new Error(
-              `${scopeAt} overlaps implementationScopes[${previous}], making strategy parameters ambiguous`,
-            );
-          }
-        }
-      }
-      if (familyGroups) {
-        // Both fields name catalog entries, and both are published onto cells, so both are checked.
-        // Only `implementedEntries` was at first, and a typo'd or foreign id in `blockStacks[].entries`
-        // then rode onto every rung-4 cell of the family as though it were a real per-entry fact.
-        const named = [
-          ...implemented.map((id) => [id, "implementedEntries"]),
-          ...implementationScopes.flatMap((scope, index) =>
-            scope.entries.map((id) => [id, `implementationScopes[${index}].entries`]),
-          ),
-          ...(verdict.requestPeak?.scopes ?? []).flatMap((scope, index) =>
-            (scope.entries ?? []).map((id) => [id, `requestPeak.scopes[${index}].entries`]),
-          ),
-          ...(verdict.blockStacks ?? []).flatMap((stack) =>
-            (stack.entries ?? []).map((id) => [id, `blockStacks[${JSON.stringify(stack.name)}].entries`]),
-          ),
-        ];
-        for (const [id, field] of named) {
-          // `familyGroups` throws on an id the catalog does not know at all; both that and a
-          // real-but-foreign id are the same defect from this field's point of view.
-          let owner = null;
-          try {
-            owner = familyGroups(id);
-          } catch {
-            owner = null;
-          }
-          if (owner !== Number(group)) {
-            throw new Error(`${at}: ${field} names ${id}, which belongs to another family`);
-          }
-        }
-      }
-      if (verdict.overlayIncompatible && !verdict.overlayIncompatible.structural?.length) {
-        throw new Error(`${at}: an overlay incompatibility is a Structurally N/A verdict and needs structural evidence`);
-      }
-      // AC5 as a machine check rather than a convention. A family the primitive cannot express in its
-      // current SHAPE is a finding, not an exemption — so it may not be recorded as implemented, and
-      // it may not be recorded silently either: without the finding the value degrades to a bare
-      // `Missing` cell indistinguishable from "nobody has written it yet".
-      if (verdict.structuralApplicability === "requires-different-primitive") {
-        if (hasImplementationClaim) {
-          throw new Error(
-            `${at}: names implemented entries while declaring the primitive's shape insufficient — one of the two is wrong`,
-          );
-        }
-        if (!verdict.findings?.length) {
-          throw new Error(
-            `${at}: "requires-different-primitive" must state the shape gap as a finding, which is what distinguishes it from an N/A`,
-          );
-        }
-      }
-      survey.set(`${group}:${backend}`, verdict);
     }
   }
-  return survey;
+  return lanes;
 }
 
-/**
- * The survey verdict as it appears ON a rung-4 cell.
- *
- * Built here rather than inside `strategyStatus` so that EVERY rung-4 cell carries it, including
- * Krea's turboFit cell, whose state is decided by measured phase curves several arms earlier. A
- * field present on 6,000 rung-4 cells and absent on one is the kind of hole a consumer only finds
- * at runtime.
- *
- * The two findings the story asks for stay SEPARATE and both travel with the cell: structural
- * applicability (can this architecture be windowed) and the request-peak finding (does doing so move
- * the number that matters). A cell can be `partial`/`unmeasured`, which is neither "implemented" nor
- * "not applicable" — the state the five-value conformance vocabulary alone cannot express.
- */
-function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayIncompatible) {
-  const verdict = survey.get(`${familyGroup(modelId)}:${backend}`);
-  if (!verdict) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
-  const scopedRequestPeak = (verdict.requestPeak.scopes ?? []).find(
-    (scope) =>
-      (scope.entries ?? [modelId]).includes(modelId) &&
-      (scope.tiers ?? [tier]).includes(tier) &&
-      (scope.modes ?? [mode]).includes(mode) &&
-      (scope.overlays ?? [overlay]).includes(overlay),
+export function stagedResidencyIsAvailable({
+  backend,
+  model,
+  route,
+  provider,
+  tier,
+  mode,
+  overlay,
+  stagedResidencyEngines,
+  manifestById,
+  candleBespokeStagedLanes,
+}) {
+  const contract = model[backend]?.memoryStrategyContract;
+  const declaredStagedResidency = contract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? contract.provider) === provider &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay) &&
+      implementation.engagedRungs?.includes("staged_residency"),
   );
-  return {
-    story: 15969,
-    // Always the family's OWN verdict. Overlay incompatibility is a property of the provider's
-    // adapter mechanism, not of the architecture — Krea's 28-block trunk is windowable whatever its
-    // adapters do — so it travels in its own field. Folding it into `structuralApplicability` would
-    // publish `none` for a family whose stack is perfectly windowable, and a consumer filtering that
-    // field for architecturally-inapplicable families would read those cells as false positives.
-    structuralApplicability: verdict.structuralApplicability,
-    requestPeak:
-      scopedRequestPeak?.finding ?? verdict.requestPeak.byTier?.[tier] ?? verdict.requestPeak.finding,
-    implementation: verdict.implementation,
-    overlayIncompatible,
-    // sc-18099: `summary`, `blockStacks` and `findings` moved to `rung4SurveyRows`. They are
-    // constants of the (family, backend) pair, so restating them per cell was 2.72 MB of pure
-    // duplication AND left them unreachable for any family the slim publishes no cell from. What
-    // stays here is what genuinely varies per coordinate: the request-peak scope resolution and the
-    // overlay-incompatibility verdict.
-  };
-}
-
-/**
- * Resolve the exact rung-4 implementation claim for one matrix cell.
- *
- * Most providers publish one parameter shape over a Cartesian entry/tier/mode/overlay selector and
- * continue using the legacy fields. Providers whose catalog entries expose different measured
- * parameter shapes use `implementationScopes`; keeping the parameters on each scope prevents a
- * family-wide claim from inventing unsupported cross-products.
- */
-function rung4Implementation(verdict, modelId, tier, mode, overlay) {
-  const exact = (verdict?.implementationScopes ?? []).find(
-    (scope) =>
-      scope.entries.includes(modelId) &&
-      (scope.tiers ?? [tier]).includes(tier) &&
-      (scope.modes ?? [mode]).includes(mode) &&
-      (scope.overlays ?? [overlay]).includes(overlay),
-  );
-  if (exact) return exact.strategyParameters;
-  const legacyImplemented =
-    (verdict?.implementedEntries ?? []).includes(modelId) &&
-    (verdict?.implementedModes ?? [mode]).includes(mode) &&
-    (verdict?.implementedTiers ?? [tier]).includes(tier) &&
-    (verdict?.implementedOverlays ?? [overlay]).includes(overlay);
-  return legacyImplemented ? verdict.strategyParameters : null;
-}
-
-/**
- * Coverage runs BOTH ways.
- *
- * Catalog -> survey is the one that matters at generation time: an unsurveyed family would emit
- * `Missing` rung-4 cells that read as having been surveyed and found wanting.
- *
- * Survey -> catalog matters for the survey's own upkeep. `rung4SurveyRows` is derived from the
- * generated cells, so a verdict for a family or backend the catalog no longer advertises simply
- * never appears anywhere — it would sit in the file being maintained, reviewed and trusted while
- * having no effect at all.
- */
-export function assertRung4SurveyCoversEveryFamily(survey, models) {
-  const advertised = new Set(
-    models.flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
-  );
-  for (const key of advertised) {
-    if (!survey.has(key)) {
-      const [group, backend] = key.split(":");
-      throw new Error(
-        `family SC-${group} has no ${backend} rung-4 survey verdict, so its bounded_transformer_residency cells would report Missing without ever having been surveyed (SC-15969)`,
-      );
-    }
-  }
-  for (const key of survey.keys()) {
-    if (!advertised.has(key)) {
-      const [group, backend] = key.split(":");
-      throw new Error(
-        `rung-4 survey: family SC-${group} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
-      );
-    }
-  }
-}
-
-/**
- * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same
- * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm
- * below reads the prerequisite from the SAME predicate the rung-1 arm uses. Restating it would let
- * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
- * reporting rung 4 as unreachable.
- */
-function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
+  if (declaredStagedResidency) return true;
   const declaredModel =
+    !model[backend]?.memoryStrategyContract &&
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
       : model;
   return backend === "mlx"
-    ? sequentialEngines.has(route.engine)
+    // The MLX provider id specifically: `engine_engages_staged_residency` is a claim about the MLX
+    // registry, and a video entry's candle provider is a different id (sc-18815). The predicate is
+    // deliberately wider than selectable Sequential: SC-18816 made unconditional staging visible.
+    ? stagedResidencyEngines.has(route.engineFor("mlx"))
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
-        declaredModel.candle?.turboFit !== undefined;
+        declaredModel.candle?.turboFit !== undefined ||
+        // sc-20799: receipt-backed bespoke request admission (SC-20790) — coverage the worker
+        // census declares and no manifest row may carry (see the lane map's docstring).
+        (candleBespokeStagedLanes?.has(`${model.id}:${overlay}:${mode}:${tier}`) ?? false);
 }
 
 function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
@@ -1240,129 +1625,59 @@ function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })
   return capabilities.some((capability) => (capability.overlays ?? ["none"]).includes(overlay));
 }
 
-function declaredEvidence(model, backend, tier) {
-  const scope = model[backend] ?? {};
-  const keys = [
-    "minMemoryGb",
-    "vramGbByTier",
-    "supportsSequentialOffload",
-    "memoryStrategyCapabilities",
-    "memoryStrategyStructuralExemptions",
-    "sequentialPeakGb",
-    "turboFit",
-    "measured",
-    "quantize",
-    "standardTierLayout",
-  ].filter((key) => scope[key] !== undefined);
-  return keys.map((key) => ({
-    source: `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/${key}`,
-    tier,
-  }));
-}
-
-
 /**
- * The live per-provider compile-closure digests, gated against the Cargo pin (sc-17774).
+ * The IMPLEMENTATION axis of a cell (sc-22513, epic 22505 E5).
  *
- * This REPLACES `compatibilityAuthorizes`, which was the only escape from pin-identity invalidation
- * and was hardcoded to a single frozen `flux2_dev` audit object carrying one hand-verified
- * `(captured -> compatible)` revision pair. It authorized exactly one target revision for exactly
- * one provider, so it was spent the moment the pin moved one commit further, and it generalised to
- * nothing. Every provider now gets the same relief from a derived digest, with no hand audit.
+ * This is a claim about CODE and CATALOG only: does this route, on this backend, at this
+ * (tier, mode, overlay), implement this rung — and it is answered from the manifest's declared
+ * memory contract, the worker's routing and staged-residency sources, and nothing else. It carries
+ * no evidence bookkeeping: no calibration fingerprint, no engaged-rung join, no record currency, no
+ * per-geometry characterization. Those were the joins E5 deletes; the MEMORY axis is now exactly
+ * `(anchor present?, derivation defined?)` and is combined with this verdict by `cellState`.
  *
- * The config is derived offline so a reviewer sees a digest change in the diff rather than having it
- * conjured at check time. That makes a stale config the obvious failure mode, so it is a hard error
- * rather than a fallback: a config keyed to an older pin would report currency for closures nobody
- * re-derived. Whether the digests are REAL is a separate question, graded in CI — `check.yml`
- * re-derives them against a shallow fetch of the pinned inference revision, which is possible
- * because SceneWorks/inference is public.
+ * Three verdicts, and they are exhaustive:
+ *   `implemented`      — the rung exists on this coordinate, with a source that says why.
+ *   `structurally-na`  — the rung cannot apply to this architecture (a declared exemption).
+ *   `missing`          — no implementation of this rung on this route.
  */
-export function validatedInferenceClosures(body, pin) {
-  const closures = JSON.parse(body);
-  if (closures.inferenceRevision !== pin) {
-    throw new Error(
-      `${"config/inference-provider-closures.json"} is keyed to ` +
-        `${closures.inferenceRevision?.slice(0, 8) ?? "(unset)"} but Cargo pins ${pin.slice(0, 8)}. ` +
-        "Re-run: node scripts/inference-closure-digest.mjs --repo <inference> --write",
-    );
-  }
-  const digests = new Map();
-  for (const [provider, entry] of Object.entries(closures.providers ?? {})) {
-    if (!/^[0-9a-f]{64}$/.test(entry.digest ?? "")) {
-      throw new Error(`inference closure entry for ${provider} has no usable digest`);
-    }
-    digests.set(provider, entry.digest);
-  }
-  if (!digests.size) throw new Error("config/inference-provider-closures.json declares no providers");
-  return digests;
-}
-
-/**
- * A calibration binding is current when THIS PROVIDER'S closure digest is unchanged — never when the
- * inference pin happens to match. `binding.inferenceRevision` stays as capture provenance.
- */
-function closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }) {
-  const live = inferenceClosureDigests.get(`${backend}:${provider}`);
-  if (!live) {
-    throw new Error(
-      `provider "${provider}" has a bound calibration but no entry in ` +
-        "config/inference-provider-closures.json. Declare its inference crate and regenerate.",
-    );
-  }
-  if (!binding.inferenceClosureDigest) {
-    throw new Error(
-      `a ${provider} calibration binding carries no inferenceClosureDigest. Run ` +
-        "node scripts/backfill-closure-digests.mjs --repo <inference> --write",
-    );
-  }
-  return binding.inferenceClosureDigest === live;
-}
-
-function strategyStatus({
+export function implementationVerdict({
   backend,
   rung,
   route,
   provider,
-  sequentialEngines,
+  stagedResidencyEngines,
   model,
   tier,
   mode,
   overlay,
-  rung4Survey,
   manifestById,
-  inferenceClosureDigests,
+  candleBespokeStagedLanes,
 }) {
-  // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
-  // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
-  // they already inherit its backend scope. Keeping the declaration on the real provider prevents
-  // the catalog alias from becoming a second, independently drifting implementation claim.
-  const declaredModel =
-    model.id === "z_image_edit" && route.engine === "z_image_turbo"
-      ? manifestById.get("z_image_turbo")
-      : model;
+  // A route-local row is authoritative for its exact provider coordinate. Missing sibling rungs may
+  // still inherit the resolved provider's declaration (the established MLX alias behavior), but a
+  // native route can never mask an explicitly authored alias row such as Candle Z-Image Edit.
+  const declaredModel = declarationModelForCoordinate({
+    backend,
+    rung,
+    route,
+    provider,
+    model,
+    tier,
+    mode,
+    overlay,
+    manifestById,
+  });
+  const missing = { implementation: "missing", source: null, parameters: {} };
   // A routing-table lane without a per-backend manifest block is real but wholly untriaged: the
   // optional block is evidence/tuning metadata, not lane-existence metadata. Emit the full slice as
-  // Missing so epic 15448 can see and own that work instead of either hiding the lane or inferring
+  // missing so the work can be seen and owned instead of either hiding the lane or inferring
   // implementation claims from another backend.
-  if (!declaredModel[backend]) {
-    return { state: "Missing", source: null, parameters: {} };
-  }
+  if (!declaredModel[backend]) return missing;
   const staticMemoryContract = declaredModel[backend]?.memoryStrategyContract;
-  const staticRung4Verdict = rung === "bounded_transformer_residency"
-    ? rung4Survey.get(`${familyGroup(model.id)}:${backend}`)
-    : null;
-  const staticRung4Implementation = rung === "bounded_transformer_residency"
-    ? rung4Implementation(staticRung4Verdict, model.id, tier, mode, overlay)
-    : null;
-  const staticRung4Allowed =
-    rung !== "bounded_transformer_residency" ||
-    (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
-      staticRung4Implementation !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
-          staticRung4Allowed &&
+          (implementation.runtimeProvider ?? staticMemoryContract.provider) === provider &&
           implementation.rung === rung &&
           implementation.tiers.includes(tier) &&
           implementation.modes.includes(mode) &&
@@ -1372,101 +1687,98 @@ function strategyStatus({
   const staticContractIsExhaustive =
     staticMemoryContract?.exhaustive === true &&
     staticContractCoversProvider(staticMemoryContract, provider);
-  const allDeclaredCalibrations = (model[backend]?.calibrations ?? []).filter(
+  // The manifest's per-tier calibration rows are read as a DECLARATION that the rung exists on this
+  // coordinate — that is the only thing they still say here. Their fingerprints, engaged rungs and
+  // closure currency were the record-join E5 deletes.
+  const declaredCalibrationRows = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
       binding.provider === provider &&
       binding.tier === tier &&
       binding.mode === mode &&
       matrixOverlayFor(binding.overlay) === overlay &&
-      binding.rung === rung &&
-      staticRung4Allowed,
+      binding.rung === rung,
   );
   if (staticContractIsExhaustive && !staticImplementation) {
-    if (allDeclaredCalibrations.length) {
+    // A catalog self-consistency guard, not an evidence guard: an EXHAUSTIVE provider contract that
+    // does not cover this coordinate while the same entry declares a calibration row for it is a
+    // manifest contradiction, and it survives the collapse because nothing about it is measured.
+    if (declaredCalibrationRows.length) {
       throw new Error(
         `${model.id}:${backend}:${tier}:${mode}:${overlay}:${rung} declares calibration ` +
           `outside exhaustive provider contract ${staticMemoryContract.provider}`,
       );
     }
-    return { state: "Missing", source: null, parameters: {} };
+    return missing;
   }
-  const currentDeclaredCalibrations = allDeclaredCalibrations.filter((binding) =>
-    closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }),
-  );
-  const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
-    const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
-    const parameters = sortedUnique(
-      bindings.map((binding) => JSON.stringify(binding.parameters ?? {})),
-    );
-    if (fingerprints.length !== 1 || parameters.length !== 1) {
-      throw new Error(
-        `${model.id}:${backend}:${tier}:${mode}:${overlay}:${rung} has inconsistent exact calibration bindings`,
-      );
-    }
-    return {
-      state: "Implemented/unverified",
-      source,
-      parameters: {
-        ...(staticImplementation?.parameters ?? {}),
-        ...JSON.parse(parameters[0]),
-        ...(staticImplementation
-          ? { publishedRanges: staticImplementation.parameterRanges }
-          : {}),
-      },
-      calibrationFingerprint: fingerprints[0],
-      engagedRungs: staticImplementation?.engagedRungs,
-      requiresCurrentCalibrationBinding: true,
-      evidenceAdmissionCurrent,
-      // sc-17774: the record-side currency term. It replaces
-      // `compatibleCapturedInferenceRevisions`, which listed the revisions one frozen `flux2_dev`
-      // audit had hand-authorized; currency is now decided per provider by this digest.
-      inferenceClosureDigest: inferenceClosureDigests.get(`${backend}:${provider}`),
-    };
+  // Semantic quality receipts authorize exact geometry choices in the runtime planner. They are
+  // not numeric tuning ranges and must never be projected into the published matrix, where their
+  // presence could be mistaken for measured memory evidence.
+  const publishableParameterRanges = (implementation) => {
+    const { decodeGeometryPolicies: _semanticReceipt, ...publishedRanges } =
+      implementation?.parameterRanges ?? {};
+    return publishedRanges;
   };
-  if (currentDeclaredCalibrations.length) {
-    return calibrationStatus(
-      currentDeclaredCalibrations,
-      "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route",
-      true,
-    );
-  }
-  if (staticImplementation) {
+  // A COVERAGE-ONLY declaration (sc-20246) states rung x tier x mode x overlay coverage and no
+  // parameters, so it must not displace a richer arm below that has parameters to publish. It is
+  // used only where nothing else answers.
+  const coverageDeclaration =
+    staticImplementation && !staticImplementation.parameters ? staticImplementation : null;
+  const coverageVerdict = () =>
+    coverageDeclaration
+      ? { implementation: "implemented", source: coverageDeclaration.source, parameters: {} }
+      : missing;
+  if (staticImplementation && !coverageDeclaration) {
     return {
-      // This declaration inventories production capability only. Exact runtime evidence must still
-      // pass calibrationBinding before the cell can be promoted to Verified.
-      state: "Implemented/unverified",
+      implementation: "implemented",
       source: staticImplementation.source,
       parameters: {
         ...staticImplementation.parameters,
-        publishedRanges: staticImplementation.parameterRanges,
+        ...(staticImplementation.parameterRanges
+          ? { publishedRanges: publishableParameterRanges(staticImplementation) }
+          : {}),
       },
-      calibrationFingerprint: staticImplementation.fingerprint,
-      engagedRungs: staticImplementation.engagedRungs,
-      requiresCurrentCalibrationBinding: allDeclaredCalibrations.length > 0,
-      evidenceAdmissionCurrent: false,
     };
   }
-  if (allDeclaredCalibrations.length) {
-    return calibrationStatus(
-      allDeclaredCalibrations,
-      `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/calibrations`,
-      false,
+  if (declaredCalibrationRows.length) {
+    const parameters = sortedUnique(
+      declaredCalibrationRows.map((binding) => JSON.stringify(binding.parameters ?? {})),
     );
-  }
-  const staticExemption =
-    declaredModel[backend]?.memoryStrategyStructuralExemptions?.[rung];
-  if (staticExemption?.overlays?.includes(overlay)) {
+    if (parameters.length !== 1) {
+      throw new Error(
+        `${model.id}:${backend}:${tier}:${mode}:${overlay}:${rung} has inconsistent declared calibration parameters`,
+      );
+    }
     return {
-      state: "Structurally N/A",
+      implementation: "implemented",
+      source: `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/calibrations`,
+      parameters: JSON.parse(parameters[0]),
+    };
+  }
+  // `modes` and `tiers` are OPTIONAL narrowings, absent meaning "every mode"/"every tier" — the
+  // same shape `memoryStrategyCapabilities` uses below. A structural exemption that cannot be
+  // narrowed by mode would have to claim the rung is inapplicable on modes whose streaming path was
+  // never built at all, which reads as "surveyed and exempted" rather than "not implemented"
+  // (sc-22513).
+  const staticExemption = declaredModel[backend]?.memoryStrategyStructuralExemptions?.[rung];
+  if (
+    staticExemption?.overlays?.includes(overlay) &&
+    (!staticExemption.modes || staticExemption.modes.includes(mode)) &&
+    (!staticExemption.tiers || staticExemption.tiers.includes(tier))
+  ) {
+    return {
+      implementation: "structurally-na",
       source: staticExemption.evidence[0].source,
       parameters: {},
       structural: staticExemption.evidence,
     };
   }
   const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
-  if (staticCapability?.overlays?.includes(overlay)) {
+  if (
+    staticCapability?.overlays?.includes(overlay) &&
+    (!staticCapability.tiers || staticCapability.tiers.includes(tier))
+  ) {
     return {
-      state: "Implemented/unverified",
+      implementation: "implemented",
       source: `config/manifests/builtin.models.jsonc#models/${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,
       parameters: staticCapability.parameters,
     };
@@ -1474,11 +1786,12 @@ function strategyStatus({
   if (
     rung === "resident" &&
     !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image") &&
-    (backend !== "candle" || model.id !== "pulid_flux_dev" ||
+    (backend !== "candle" ||
+      model.id !== "pulid_flux_dev" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }))
   ) {
     return {
-      state: "Implemented/unverified",
+      implementation: "implemented",
       source: `crates/sceneworks-worker/src/engines.rs#${route.kind === "registry" ? "MODEL_TABLE" : "bespoke_advertised"}`,
       parameters: {},
     };
@@ -1488,152 +1801,154 @@ function strategyStatus({
     !(model.id === "krea_2_turbo" && backend === "candle") &&
     (backend !== "candle" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
+    stagedResidencyIsAvailable({
+      backend,
+      model,
+      route,
+      provider,
+      tier,
+      mode,
+      overlay,
+      stagedResidencyEngines,
+      manifestById,
+      candleBespokeStagedLanes,
+    })
   ) {
     return {
-      state: "Implemented/unverified",
+      implementation: "implemented",
       source:
         backend === "mlx"
-          ? "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          ? "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
           : `config/manifests/builtin.models.jsonc#models/${model.id}/candle`,
       parameters: { phaseOrder: ["conditioning", "denoise", "decode"] },
     };
   }
+  // Krea 2 Turbo's Candle ladder is declared per rung in the catalog's own `turboFit` block. Only
+  // the DECLARATION survives here — which rungs it implements and their strategy parameters. Its
+  // evidence records, verification rows and measured pixel envelope were per-geometry bookkeeping.
   if (
     model.id === "krea_2_turbo" &&
     backend === "candle" &&
     mode === "text_to_image" &&
+    overlay === "none" &&
     model.candle?.turboFit?.phaseCurvesByTier?.[tier]
   ) {
-    const rungKeys = {
+    const manifestRung = {
       resident: "resident",
       staged_residency: "threeStage",
       bounded_decode: "tiledVae",
       bounded_attention: "chunkedAttention",
       bounded_transformer_residency: "streamedBlocks",
-    };
-    const manifestRung = rungKeys[rung];
-    if (manifestRung && overlay === "none") {
-      const verification = model.candle.turboFit.verification;
-      const evidenceRecords = (model.candle.turboFit.evidenceRecords ?? []).filter(
-        (record) => record.tier === tier,
-      );
-      const strategyParameters = model.candle.turboFit.strategyParameters?.[manifestRung];
+    }[rung];
+    // `resident` is the ONE rung this block prices without a phase curve — its formula is
+    // `vramGbByTier + cudaHeadroom`, and `phaseCurvesByTier` carries no `resident` key on any tier —
+    // so it is declared by `strategyParameters.resident` alone. Every other rung must carry its own
+    // curve for this tier, or the block is not declaring it (sc-22513: requiring a curve for
+    // `resident` too silently unimplemented Krea Turbo's Candle resident rung on all three tiers).
+    const declaresRung =
+      manifestRung === "resident"
+        ? model.candle.turboFit.strategyParameters?.resident !== undefined
+        : Boolean(model.candle.turboFit.phaseCurvesByTier[tier][manifestRung]);
+    if (manifestRung && declaresRung) {
       return {
-        // This catalog cell spans the manifest's full resolution envelope. Exact measured records
-        // are narrower, so the aggregate cell must remain unverified; runtime may promote only an
-        // exact tier+geometry record after provider fingerprint/loadability checks.
-        state: "Implemented/unverified",
-        source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
+        implementation: "implemented",
+        // The DATA read here is the manifest's own `turboFit` block, not the worker's gate: cite
+        // where the declaration lives (sc-22513).
+        source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit`,
         parameters: {
           manifestRung,
           formula:
             manifestRung === "resident"
               ? "vramGbByTier+cudaHeadroom"
               : "max(text,denoise,decode)+cudaHeadroom",
-          ...strategyParameters,
+          ...model.candle.turboFit.strategyParameters?.[manifestRung],
         },
-        engagedRungs: model.candle.turboFit.engagedCompositions?.[manifestRung],
-        calibrationFingerprint: model.candle.turboFit.calibrationFingerprint,
-        maxPixels: model.candle.turboFit.maxMeasuredPixels,
-        historicalVerification: evidenceRecords.map((record) => ({
-          source: `Shortcut ${record.sourceStory} activity ${record.sourceActivity}`,
-          hardware: verification?.hardware,
-          evidenceScope: record.evidenceScope,
-          runtimeAdmission: record.evidenceScope === "exact_request",
-          tier: record.tier,
-          geometry: `${record.width}x${record.height}`,
-          capturedAt: record.capturedAt,
-          harnessVersion: record.harnessVersion,
-          engagedRungs: record.measuredCompositions?.[manifestRung],
-          observedPeakGb: record.observedPeaksGb?.[manifestRung],
-          ...(record.parity ? { parity: record.parity } : {}),
-        })),
-        currentEnvironmentVerification: [],
-        strategyParameterVerification: evidenceRecords
-          .filter((record) => Number.isFinite(record.predictedPeaksGb?.[manifestRung]))
-          .map((record) => ({
-            source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/evidenceRecords`,
-            tier: record.tier,
-            geometry: `${record.width}x${record.height}`,
-            predictedPeakGb: record.predictedPeaksGb[manifestRung],
-            engagedRungs: record.measuredCompositions?.[manifestRung],
-            exactParameters: strategyParameters,
-          })),
       };
     }
   }
-  // SC-15969. Everything above answers a cell from measured or manifest-declared evidence; this arm
-  // answers the rung-4 cells none of it reaches, from the per-family applicability survey. It is
-  // LAST on purpose — Krea's turboFit rung-4 cell keeps its phase-curve parameters and measured
-  // evidence rather than being flattened to the survey's structural verdict.
-  //
-  // The overlay branch used to be a hardcoded Krea special case here. It now comes from the survey,
-  // because the fact it encodes is a property of a provider's ADAPTER MECHANISM (fold-at-load vs
-  // forward-time residual), not of rung 4: MLX Z-Image streams overlays fine, and generalising
-  // Krea's rule to every family would have been wrong in the other direction.
-  if (rung === "bounded_transformer_residency") {
-    const verdict = rung4Survey.get(`${familyGroup(model.id)}:${backend}`);
-    if (!verdict) {
-      throw new Error(`${model.id}:${backend}: no rung-4 survey verdict (SC-15969)`);
-    }
-    // Implementation is per ENTRY and per MODE — inference may route a catalog entry's modes to
-    // different descriptors than the one carrying the contract — and the rung is unreachable without
-    // its declared rung-1 prerequisite however good the architecture is.
-    const implementationParameters = rung4Implementation(
-      verdict,
-      model.id,
-      tier,
-      mode,
-      overlay,
-    );
-    const implementedHere =
-      implementationParameters !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
-    if (verdict.structuralApplicability === "none") {
-      return {
-        state: "Structurally N/A",
-        source: verdict.structural[0].source,
-        parameters: {},
-        structural: verdict.structural,
-      };
-    }
-    // Overlay incompatibility exempts only where the streaming path actually EXISTS. On an entry or
-    // mode that has no such path, rung 4 is Missing for the ordinary reason, and marking it
-    // structurally exempt would presuppose a path that does not exist — and quietly remove the cell
-    // from the calibration plan's workload as "no run needed".
-    if (implementedHere && overlay !== "none" && verdict.overlayIncompatible) {
-      return {
-        state: "Structurally N/A",
-        source: verdict.overlayIncompatible.structural[0].source,
-        parameters: {},
-        structural: verdict.overlayIncompatible.structural,
-        overlayIncompatible: true,
-      };
-    }
-    if (implementedHere) {
-      return {
-        state: "Implemented/unverified",
-        source: verdict.evidence[0].source,
-        parameters: implementationParameters,
-      };
-    }
-    return { state: "Missing", source: null, parameters: {} };
-  }
-  return { state: "Missing", source: null, parameters: {} };
+  return coverageVerdict();
 }
 
-function validateMatrix(
-  matrix,
-  expectedIds,
-  backendTierOverrides,
-  rung4Survey,
-  cellInventoryExpectations,
-  calibrationPlan,
-) {
-  const ids = matrix.models.map((model) => model.id);
-  if (ids.length !== EXPECTED_IMAGE_COUNT) {
-    throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
+/**
+ * The COLLAPSED cell state (sc-22513, epic 22505 E5).
+ *
+ * A PURE function of four code-and-store facts, and of nothing else:
+ *
+ *   `implementation`     — `implementationVerdict`'s verdict: a claim about code and catalog. A rung
+ *                          that is not implemented is still not implemented; that axis was never
+ *                          measurement bookkeeping and it stays.
+ *   `anchorPresent`      — the anchor store (`config/memory-anchors.json`) holds a measured anchor
+ *                          for this cell's (model, tier, backend lane).
+ *   `derivationDefined`  — the analytic derivation is defined AND wired for this cell's lane, read
+ *                          off the Rust (`memory_anchor.rs` declares it, the lane's real admission
+ *                          source calls it).
+ *   `anchorDerivable`    — the ANCHOR itself is one the lane's law accepts (epic 22505 feature-end
+ *                          fix round, E5): an anchor the store marks `underivedReason` — an
+ *                          axis-free video anchor the pipeline-keyed law refuses, a
+ *                          single-geometry image model no coefficient can be fitted for —
+ *                          validates its measured point and prices nothing, so a wired lane still
+ *                          publishes it as `Anchored/underived` rather than claiming a derived
+ *                          peak. The store field and the Rust laws are bound to each other (every
+ *                          law refuses an anchor carrying the field), so this is a store fact, not
+ *                          a parallel opinion.
+ *
+ * Nothing else may enter: not a record, not a plan row, not a geometry, not a campaign, not a
+ * currency digest. Anchor CURRENCY is reported on the cell beside the state (sc-22511 makes it a
+ * report, never a gate) and deliberately does not move it — a staled loader closure means the
+ * anchor needs re-extraction, not that the rung stopped existing.
+ *
+ * The state vocabulary that replaces Missing / Implemented-unverified / Runtime-verified / Verified:
+ *
+ *   `Missing`           — no implementation of this rung on this route.
+ *   `Structurally N/A`  — the rung cannot apply to this architecture.
+ *   `Implemented`       — implemented; its peak is priced by the analytic floor, not by an anchor.
+ *   `Anchored`          — implemented, a measured anchor covers it, and the lane's derivation can
+ *                         price an arbitrary request from that anchor.
+ *   `Anchored/underived`— implemented and anchored, but the anchor bounds nothing beyond its own
+ *                         measured point: the lane has no wired derivation, or the lane's law
+ *                         refuses this anchor (`anchorDerivable` false).
+ */
+export function cellState({ implementation, anchorPresent, derivationDefined, anchorDerivable }) {
+  if (implementation === "missing") return "Missing";
+  if (implementation === "structurally-na") return "Structurally N/A";
+  if (implementation !== "implemented") {
+    throw new Error(`unknown implementation verdict ${JSON.stringify(implementation)}`);
+  }
+  if (!anchorPresent) return "Implemented";
+  return derivationDefined && anchorDerivable ? "Anchored" : "Anchored/underived";
+}
+
+/** The states that assert the rung's CODE exists. */
+export const IMPLEMENTED_STATES = Object.freeze([
+  "Implemented",
+  "Anchored",
+  "Anchored/underived",
+]);
+
+function validateMatrix(matrix, expectedIds, backendTierOverrides, cellInventoryExpectations) {
+  // sc-18815: censused PER MODALITY. A single total would let a video entry appearing cover for an
+  // image entry disappearing, which is exactly the accounting the image-only filter made impossible
+  // to notice in the other direction.
+  const ids = matrix.models.filter((model) => model.modality === "image").map((model) => model.id);
+  const videoIds = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
+  const unknownModality = matrix.models.filter((model) => !MATRIX_MODALITIES.has(model.modality));
+  if (unknownModality.length) {
+    throw new Error(
+      `matrix carries entries of unadmitted modalities: ${unknownModality.map((model) => `${model.id}(${model.modality})`).join(",")}`,
+    );
+  }
+  // sc-22512: the two pinned modality populations (53 image / 11 video) were deleted. They reddened
+  // on a catalog that GREW — an extra shipped model refused generation outright — which is the
+  // measurement-absence failure surface this story removes.
+  //
+  // Their first replacement, `ids.length + videoIds.length === matrix.models.length`, was deleted
+  // again rather than kept: with `MATRIX_MODALITIES` exhausted by the unadmitted-modality throw
+  // directly above, the two filters partition `matrix.models` by arithmetic, so the branch could
+  // never be taken. It read as coverage while asserting nothing. The duplicate-id check below is
+  // the half of that pair that a real catalog CAN violate — two entries sharing an id — and it
+  // holds at any population size, zero included.
+  if (new Set([...ids, ...videoIds]).size !== ids.length + videoIds.length) {
+    throw new Error("matrix carries duplicate model ids across the modality partition");
   }
   if (
     new Set(expectedIds).size !== ids.length ||
@@ -1646,11 +1961,7 @@ function validateMatrix(
       `manifest image ids, EXPECTED_IMAGE_IDS, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; source-only=${sourceOnly.join(",")})`,
     );
   }
-  if (matrix.summary.mlxStagedStaticCoverage !== EXPECTED_MLX_STAGED_COUNT) {
-    throw new Error(
-      `expected MLX staged static coverage ${EXPECTED_MLX_STAGED_COUNT}/${EXPECTED_IMAGE_COUNT}, found ${matrix.summary.mlxStagedStaticCoverage}`,
-    );
-  }
+  assertMlxStagedCoverageIsStructurallyConsistent(matrix);
   for (const [key, expectedTiers] of backendTierOverrides) {
     const [modelId, backend] = key.split(":");
     const actualTiers = sortedUnique(
@@ -1665,10 +1976,14 @@ function validateMatrix(
     }
   }
   assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
-  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
   assertTwinCoverage(matrix.models);
-  assertCellOwnershipIsBackendScoped(matrix.cells);
-  assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
+  assertVideoOwnership(matrix.models);
+  assertUnroutedEntriesAreDeclared(matrix.models);
+  assertCellOwnershipIsBackendScoped(
+    matrix.cells,
+    buildStoryBackendScope(),
+    new Map(matrix.models.map((model) => [model.id, model.modality])),
+  );
   for (const model of matrix.models) {
     for (const map of ["owningFamilyStories", "owningModelStories", "axes"]) {
       const owned = Object.keys(model[map]).sort();
@@ -1691,168 +2006,78 @@ function validateMatrix(
       }
     }
   }
+  // sc-22513: the state is a PURE FUNCTION of the cell's own three published facts, so the guard is
+  // that recomputing it from those facts reproduces it — and that two cells agreeing on the triple
+  // can never disagree on the state. The second half is what catches a state that has quietly
+  // acquired a fourth input: the outside term would have to split one triple into two states.
+  const statesByFacts = new Map();
   for (const cell of matrix.cells) {
+    const facts = {
+      implementation: cell.implementation,
+      anchorPresent: cell.anchor !== null,
+      derivationDefined: cell.derivationDefined,
+      anchorDerivable: cell.anchor !== null && cell.anchor.derivable,
+    };
+    const recomputed = cellState(facts);
+    if (recomputed !== cell.state) {
+      throw new Error(
+        `${cell.id}: state ${cell.state} is not cellState(${JSON.stringify(facts)}) = ${recomputed}`,
+      );
+    }
+    const key = JSON.stringify(facts);
+    const seen = statesByFacts.get(key);
+    if (seen && seen.state !== cell.state) {
+      throw new Error(
+        `${cell.id} and ${seen.id} share the state facts ${key} but hold ${cell.state} and ${seen.state}: ` +
+          "the cell state depends on something outside (anchor store, derivation, catalog)",
+      );
+    }
+    if (!seen) statesByFacts.set(key, { id: cell.id, state: cell.state });
     if (cell.state !== "Missing" && cell.evidence.staticImplementation.length === 0) {
       throw new Error(`${cell.id}: non-Missing classification has no static evidence`);
     }
     if (cell.state === "Structurally N/A" && cell.evidence.structural.length === 0) {
       throw new Error(`${cell.id}: Structurally N/A classification has no structural evidence`);
     }
-    // SC-15969: the survey verdict rides the rung-4 cells and only those. A rung-4 cell without one
-    // has escaped the survey; any other rung carrying one means the field has drifted off its rung.
-    if ((cell.rung === "bounded_transformer_residency") !== Boolean(cell.rung4Survey)) {
-      throw new Error(
-        `${cell.id}: rung4Survey must be present on exactly the bounded_transformer_residency cells`,
-      );
-    }
-    if (["Verified", "Runtime verified"].includes(cell.state)) {
-      const dynamic = cell.evidence.currentEnvironmentVerification;
-      if (!dynamic.length || !cell.calibrationFingerprint) {
-        throw new Error(`${cell.id}: unsupported dynamic verification claim`);
-      }
-      const requiredStatus = cell.state === "Verified" ? "complete" : "runtime_complete";
-      if (!dynamic.some((evidence) => evidence.recordStatus === requiredStatus)) {
-        throw new Error(`${cell.id}: ${cell.state} lacks a ${requiredStatus} record`);
-      }
-    }
-    // SC-16060. The two claims are independent, and the invariants that keep them from silently
-    // merging back into one field belong here rather than in a consumer.
-    const characterization = cell.memoryCharacterization;
-    const measured = characterization.measuredGeometries.length;
-    const expected = measured === 0 ? "unmeasured" : measured === 1 ? "point" : "fitted";
-    if (characterization.status !== expected) {
-      throw new Error(
-        `${cell.id}: memoryCharacterization is ${characterization.status} on ${measured} measured geometr${measured === 1 ? "y" : "ies"}`,
-      );
-    }
-    // A bound without a determinable curve is the exact overclaim this story exists to stop: it
-    // would read as "covered up to here" on the strength of a single point.
-    if ((characterization.coveredPixelBound !== null) !== (characterization.status === "fitted")) {
-      throw new Error(
-        `${cell.id}: coveredPixelBound is only meaningful on a fitted curve (status ${characterization.status})`,
-      );
-    }
-    // `Verified` is the implementation claim and must never imply geometry coverage. A cell may be
-    // Verified while `unmeasured`/`point` — that is the honest combination. The reverse cannot hold:
-    // measured geometry that bound this cell came from a record, so a cell with no implementation
-    // cannot have one.
-    if (characterization.status !== "unmeasured" && !isImplemented(cell.state)) {
-      throw new Error(
-        `${cell.id}: ${cell.state} cell carries measured geometry (${characterization.measuredGeometries.join(",")})`,
-      );
+    // An anchor may only be cited by a cell whose own coordinate it was measured on.
+    if (cell.anchor && cell.anchor.tier !== cell.tier) {
+      throw new Error(`${cell.id}: cites anchor ${cell.anchor.id}, measured at tier ${cell.anchor.tier}`);
     }
   }
 }
 
-// ── sc-18099: publication ──────────────────────────────────────────────────────────────────────
-//
-// The generator still RESOLVES the whole catalog cross-product and still validates it — every guard
-// above keeps its full reach, `assertCellInventoryMatchesCatalog` included. What changed is what gets
-// WRITTEN. 9,140 coordinates at ~2.5 KB apiece produced a 22 MB committed artifact that no two PRs
-// could merge without regenerating, and ~98% of it said nothing: `Missing`, `unmeasured`, unplanned,
-// no evidence of any kind. The runtime never reads this file; it is a report, and a report that
-// restates the same absence 8,967 times is not more honest than one that counts it.
-//
-// So the elision is COUNTED, not hidden. `summary.elidedCells` and the per-(entry, backend, rung)
-// `coverage` census below are derived from the FULL resolved set, so every coverage claim the old
-// artifact could support is still answerable — including `mlxStagedStaticCoverage`, which is still
-// computed over all 9,140 coordinates with `isImplemented()`. What a coordinate's mere EXISTENCE
-// claimed is preserved separately, in `models[].axes`.
-
 /**
- * Why a cell earns a published row. Stated here, published in `summary.publicationPredicate`, and
- * implemented by `isPublishableCell` — one wording, so a reader of the artifact can tell exactly what
- * an absent coordinate means.
+ * Why a cell earns a published row (sc-18099, rewritten by sc-22513). Stated here, published in
+ * `summary.publicationPredicate`, and implemented by `isPublishableCell` — one wording, so a reader
+ * of the artifact can tell exactly what an absent coordinate means.
  */
 export const PUBLICATION_PREDICATE =
-  "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json " +
-  "targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record " +
-  "in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, " +
-  "current-environment, strategy-parameter, or structural). Every elided coordinate is therefore " +
-  "unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted " +
-  "in `summary.elidedByState` and `coverage`, never dropped.";
+  "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory " +
+  "anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` " +
+  "or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, " +
+  "and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census " +
+  "instead of restated thousands of times.";
 
 /**
  * The publication predicate.
  *
- * Each arm is an EVIDENCE arm — something a human wrote down or a machine measured about this exact
- * coordinate. Two manifest-derived evidence dimensions are deliberately NOT arms:
- * `evidence.declaredCalibration` and `evidence.loadability` are functions of (entry, backend, tier)
- * alone, present on essentially every coordinate, so admitting them would publish the cross-product
- * again under a different name.
+ * The old arms were evidence-join arms — planned by a calibration plan, bound to a record, carrying
+ * measured geometry — and every one of them was the per-record bookkeeping E5 deletes. Two arms are
+ * left, and both say something the census cannot: an ANCHOR is a per-(model, tier, lane) fact, and a
+ * STRUCTURAL exemption cites evidence that an absent row would misreport as "nothing done here".
  *
- * `evidence.structural` rather than `state === "Structurally N/A"`: `validateMatrix` already proves
- * the two agree, and the cited evidence is the reason the row is worth keeping. Eliding a
- * Structurally N/A verdict would be the one genuinely lossy elision, because an absent coordinate
- * reads as "nothing has been done here" and that verdict says the opposite.
- *
- * A bare `isImplemented()` state is NOT an arm on its own. `state` is counted for every coordinate in
- * `coverage[].implemented`, which is what the coverage claim actually needs; a per-coordinate row
- * adds nothing when the claim is "this route exists", replicated across every tier x mode x overlay.
+ * A bare `Implemented` state is deliberately NOT an arm, for the reason sc-18099 gave: it is a claim
+ * about the ROUTE, replicated across every tier x mode x overlay, and `coverage[].implemented` (with
+ * `implementedBy` marginals on mixed lanes) answers it for every resolved coordinate. Admitting it
+ * would publish the 9,305-coordinate cross-product again under a different name — a 6.8 MB artifact
+ * whose whole purpose is to stop repeating itself.
  */
-export function isPublishableCell(cell, { plannedCellIds, calibrationRunCellIds }) {
-  if (plannedCellIds.has(cell.id)) return true;
-  if (calibrationRunCellIds.has(cell.id)) return true;
-  if (cell.memoryCharacterization.status !== "unmeasured") return true;
-  return [
-    cell.evidence.historicalVerification,
-    cell.evidence.currentEnvironmentVerification,
-    cell.evidence.strategyParameterVerification,
-    cell.evidence.structural,
-  ].some((dimension) => dimension.length > 0);
-}
-
-/** Every resolved coordinate the shipped calibration plan targets, matched by the plan's own matcher. */
-export function plannedCellIds(calibrationPlan, cells) {
-  const planned = new Set();
-  for (const cell of cells) {
-    if (calibrationPlan.providers.some((entry) => planEntryTargetsCoordinate(entry, cell))) {
-      planned.add(cell.id);
-    }
-  }
-  return planned;
-}
-
-/**
- * Every shipped plan entry must address a coordinate that actually exists. FAIL CLOSED.
- *
- * ## The defect this exists because of
- *
- * Nine `config/memory-calibration-plan.json` entries (the sc-15817 candle-qwen-edit set) carried
- * `mode: "edit"` while the catalog's mode axis — and therefore every matrix coordinate and every
- * record that could ever bind to one — spells that capability `edit_image`. They matched ZERO
- * coordinates. Nothing noticed: `expectedEngagedRungs` simply returned `null` for compositions it
- * could not find, `memory-calibration.schema.json` types `mode` as a free string, and while the
- * matrix published the whole cross-product the entries' targets were on the page regardless. sc-18099
- * made the consequence visible — `qwen_image_edit_2511` and its lightning twin published no cells at
- * all, so the artifact hid the exact lanes the plan was aiming at — but the mismatch was already
- * costing something worse than visibility: a capture run against those entries would have produced
- * records that bind to nothing.
- *
- * So this is not a slim guard. It is the check that should always have existed: a plan entry naming a
- * coordinate the catalog cannot express is a typo, a stale target, or a vocabulary drift, and all
- * three are defects. It throws rather than warns because the failure mode it replaces was silence.
- */
-export function assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, cells) {
-  const unmatched = calibrationPlan.providers.filter(
-    (entry) => !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
-  );
-  if (!unmatched.length) return;
-  const detail = unmatched
-    .map(
-      (entry) =>
-        `${entry.name} -> ${entry.target.modelId}:${entry.target.provider}:${entry.backend}:` +
-        `${entry.target.tier}:${entry.target.mode}:${matrixOverlayFor(entry.target.overlay)}:${entry.rung}`,
-    )
-    .sort();
-  throw new Error(
-    `config/memory-calibration-plan.json has ${unmatched.length} entr${unmatched.length === 1 ? "y" : "ies"} ` +
-      `that match no resolved matrix coordinate:\n  ${detail.join("\n  ")}\n` +
-      "Each names a (model, provider, backend, tier, mode, overlay, rung) the catalog does not resolve. " +
-      "Check the axis vocabularies first — modes are catalog CAPABILITY ids (`edit_image`, not `edit`) " +
-      "and overlays normalise through matrixOverlayFor. A plan entry that addresses nothing cannot be " +
-      "captured against: the record it would produce binds to no cell (sc-18099).",
-  );
+export function isPublishableCell(cell) {
+  // An anchor is a fact about (model, tier, lane) and therefore rides every rung of that lane,
+  // including rungs the route does not implement. It publishes a row only where there is a rung for
+  // it to say something about.
+  if (cell.state === "Missing") return false;
+  return cell.anchor !== null || cell.evidence.structural.length > 0;
 }
 
 /**
@@ -1955,34 +2180,26 @@ export function assertPublishedDocumentIsClosed(matrix, resolvedCoordinateCount)
   if (publishedIds.size !== matrix.cells.length) {
     throw new Error("published memory-matrix cells contain a duplicate id");
   }
-  for (const run of matrix.calibrationRuns) {
-    if (!publishedIds.has(run.cellId)) {
-      throw new Error(
-        `${run.record.id}: calibration run names cell ${run.cellId}, which the slim did not publish — ` +
-          "a bound record must always keep its cell (sc-18099)",
-      );
-    }
-  }
   for (const [modelId, slice] of Object.entries(matrix.modelSlices)) {
     for (const id of slice) {
       if (!publishedIds.has(id)) throw new Error(`modelSlices.${modelId} names unpublished cell ${id}`);
     }
   }
-  // Both directions on the hoisted manifest evidence: no cell may point at a scope that is not
-  // published, and no scope may be published that no cell points at.
-  const referencedScopes = new Set(matrix.cells.map((cell) => cell.evidence.manifestScope));
+  // sc-22513: every anchor a published cell cites must be a row of the published anchor inventory,
+  // and every inventoried anchor that covers a resolved coordinate must be cited by one. A cited
+  // anchor that no longer exists, or an anchor silently reaching no cell, is the same defect seen
+  // from two sides — and the second direction is what stops the store drifting away from the matrix.
+  const inventory = new Set(matrix.anchors.map((anchor) => anchor.id));
   for (const cell of matrix.cells) {
-    if (!Object.hasOwn(matrix.manifestScopes, cell.evidence.manifestScope)) {
-      throw new Error(`${cell.id}: evidence.manifestScope ${cell.evidence.manifestScope} is not published`);
-    }
-    if (cell.evidence.manifestScope !== manifestScopeKey(cell)) {
-      throw new Error(
-        `${cell.id}: evidence.manifestScope is ${cell.evidence.manifestScope}, not this cell's scope ${manifestScopeKey(cell)}`,
-      );
+    if (cell.anchor && !inventory.has(cell.anchor.id)) {
+      throw new Error(`${cell.id}: cites anchor ${cell.anchor.id}, which the document does not publish`);
     }
   }
-  for (const key of Object.keys(matrix.manifestScopes)) {
-    if (!referencedScopes.has(key)) throw new Error(`manifestScopes.${key} is referenced by no published cell`);
+  const cited = new Set(matrix.cells.filter((cell) => cell.anchor).map((cell) => cell.anchor.id));
+  for (const anchor of matrix.anchors) {
+    if (anchor.cells > 0 && !cited.has(anchor.id)) {
+      throw new Error(`anchors.${anchor.id} reports ${anchor.cells} cells but no published cell cites it`);
+    }
   }
   for (const row of matrix.coverage) {
     if (row.published + row.elided !== row.coordinates) {
@@ -2024,79 +2241,228 @@ export function assertPublishedDocumentIsClosed(matrix, resolvedCoordinateCount)
   }
 }
 
+// ── sc-22513: the memory axis ──────────────────────────────────────────────────────────────────
+//
+// Two facts, and the matrix reads nothing else about memory. Both are derived from checked-in
+// sources the fingerprint covers, so a cell's state is reproducible from the tree alone.
+
 /**
- * The manifest-derived evidence dimensions, published once per scope instead of once per coordinate.
+ * Index the anchor store by the anchor's identity cell — `(model, backend lane, tier)`, which is the
+ * coordinate an anchor is measured AT and the coordinate a cell asks about.
  *
- * `declaredCalibration` and `loadability` are functions of (entry, backend, tier) ALONE — the same
- * two arrays are recomputed identically for every mode x overlay x rung under that scope. They are
- * also the two dimensions deliberately excluded from the publication predicate for exactly that
- * reason. Among the published cells there are 35 distinct scopes carrying 182 copies, and the copies
- * were 154 KB of a ~1 MB artifact whose whole purpose is to stop repeating itself.
- *
- * Cells keep an explicit `evidence.manifestScope` key rather than leaving the reader to rebuild it
- * from the coordinate, so the join is stated and `assertPublishedDocumentIsClosed` can check it.
- * `evidenceDimensions` still names all six dimensions: what changed is where two of them are
- * written, not that the model has them.
+ * The store's second half (`analyticOnly`) is deliberately not indexed as coverage: an analytic-only
+ * row is the store's explicit statement that no retained render anchors that cell, which is the
+ * `anchorPresent: false` case rather than a third one. It is published as an inventory count so the
+ * absence stays visible.
  */
-export function manifestScopeKey(cell) {
-  return `${cell.modelId}:${cell.backend}:${cell.tier}`;
+export function indexAnchorStore(body) {
+  const store = JSON.parse(body);
+  const anchors = new Map();
+  for (const anchor of store.anchors ?? []) {
+    const key = `${anchor.modelId}:${anchor.backend}:${anchor.tier}`;
+    const existing = anchors.get(key);
+    // The store may hold several anchors for one identity cell (different pipeline axes). The cell
+    // asks a yes/no question, so the first by id is cited and the rest are counted — never merged,
+    // which would invent a coordinate no render measured.
+    if (!existing || anchor.id.localeCompare(existing.id) < 0) anchors.set(key, anchor);
+  }
+  return {
+    anchors,
+    total: (store.anchors ?? []).length,
+    analyticOnly: (store.analyticOnly ?? []).length,
+  };
 }
 
-export function hoistManifestScopes(cells) {
-  const scopes = {};
-  const hoisted = cells.map((cell) => {
-    const key = manifestScopeKey(cell);
-    const scope = {
-      declaredCalibration: cell.evidence.declaredCalibration,
-      loadability: cell.evidence.loadability,
-    };
-    const existing = scopes[key];
-    if (existing) {
-      // The hoist is only sound because the two dimensions really are scope-invariant. If a future
-      // change makes either depend on mode, overlay or rung, this catches it at generation time
-      // rather than silently publishing whichever coordinate happened to be visited first.
-      if (JSON.stringify(existing) !== JSON.stringify(scope)) {
-        throw new Error(
-          `${cell.id}: manifest-derived evidence differs between coordinates of scope ${key}, so it ` +
-            "cannot be published per scope — it is no longer a function of (entry, backend, tier)",
-        );
-      }
-    } else {
-      scopes[key] = scope;
-    }
-    const { declaredCalibration, loadability, ...rest } = cell.evidence;
-    return { ...cell, evidence: { ...rest, manifestScope: key } };
-  });
-  return {
-    cells: hoisted,
-    manifestScopes: Object.fromEntries(
-      Object.entries(scopes).sort(([left], [right]) => left.localeCompare(right)),
+/** The loader-closure digest table (sc-22511). Currency is REPORTED on a cell, never gated. */
+export function indexLoaderClosures(body) {
+  const parsed = JSON.parse(body);
+  return new Map(
+    Object.entries(parsed.models ?? {}).map(([key, entry]) => [key, entry.digest ?? null]),
+  );
+}
+
+/**
+ * The store's own record of HOW an anchor's currency key was derived (sc-22667): `null` when at
+ * the record's measurement revision, else the reviewed attestation — measured and attested
+ * revisions, class, why and witness — that `anchor-loader-closure.mjs --stamp-anchors` copied in
+ * from `config/anchor-currency-attestations.json`. Published verbatim so a current anchor never
+ * hides whether it is current by measurement or by attestation.
+ */
+export function currencyAttestationOf(anchor) {
+  const attestation = anchor?.source?.currencyAttestation;
+  return attestation && typeof attestation === "object" ? { ...attestation } : null;
+}
+
+/**
+ * The lanes the analytic derivation is DEFINED and WIRED for, as `<modality>:<backend>` keys.
+ *
+ * Read off the Rust rather than declared here, in both halves, because both halves are code facts:
+ * `memory_anchor.rs` declares `derive_<law>_phase_peaks`, and each lane's REAL admission source is
+ * where the lane is translated to an `AnchorBackend` and priced from an anchor. A derivation that
+ * exists but is called from nowhere is not defined for any lane, and unwiring a lane collapses its
+ * cells to `Anchored/underived` rather than leaving them claiming a derived peak.
+ *
+ * Epic 22505 feature-end fix round (E5): each modality maps to the sources that actually ADMIT it
+ * — video through `video_admission.rs`, image through the candle lane's `vram_gate.rs` /
+ * `candle_memory_strategy.rs` and the MLX lane's `mlx_fit_gate.rs`. The previous single-source
+ * read crossed `video_admission.rs`'s backends with every declared law, so `image:candle` read as
+ * wired off a file that never priced an image.
+ *
+ * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources, entryPoints? }`: the
+ * lane is wired exactly when the law is declared in the derivation source AND some admission
+ * source both calls one of the lane's DECLARED entry points and names the lane's
+ * `AnchorBackend`. The entry points default to `derive_<law>_phase_peaks` (directly or through the
+ * store's `_for_cell` fall-through, which the call-name check also matches by prefix). The image
+ * lanes name the ONE image law as well (sc-22667, epic 22657 E3): `derive_phase_peaks` is the law
+ * both `derive_image_phase_peaks` and `derive_mlx_image_phase_peaks` translate onto, and since
+ * sc-22664/sc-22665/sc-22667 the candle ladder, the Krea lane and the MLX floor call it (or its
+ * activation half, `derive_phase_activation_residues`) directly with the rung's regime rather than
+ * through the shallow shims — so a lane priced from the law itself is wired, and a lane that calls
+ * nothing declared is not.
+ */
+export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByLane) {
+  const declared = new Set(
+    [...derivationSource.matchAll(/pub fn derive_([a-z0-9_]+)_phase_peaks/g)].map(
+      (match) => match[1],
     ),
-  };
+  );
+  // Every anchor-derivation entry point the source declares, by full name: the per-law shims,
+  // the law itself, and its activation half.
+  const declaredEntryPoints = new Set(
+    [
+      ...derivationSource.matchAll(
+        /pub fn (derive_[a-z0-9_]*?(?:phase_peaks|phase_activation_residues))\b/g,
+      ),
+    ].map((match) => match[1]),
+  );
+  const backendTokens = { mlx: "AnchorBackend::Mlx", candle: "AnchorBackend::Candle" };
+  const lanes = new Set();
+  for (const [lane, { law, sources, entryPoints }] of Object.entries(
+    admissionSourcesByLane,
+  )) {
+    if (!declared.has(law)) continue;
+    const backend = lane.split(":")[1];
+    const token = backendTokens[backend];
+    if (!token) throw new Error(`unknown backend in derivation lane ${lane}`);
+    const calls = (entryPoints ?? [`derive_${law}_phase_peaks`]).filter((name) =>
+      declaredEntryPoints.has(name),
+    );
+    const wired = sources.some(
+      (source) => calls.some((name) => source.includes(name)) && source.includes(token),
+    );
+    if (wired) lanes.add(lane);
+  }
+  return lanes;
 }
 
 /**
- * The calibration record as the matrix publishes it (sc-18099).
- *
- * The matrix used to embed each record VERBATIM — 65 copies of rows that already ship, fully
- * schema-validated, in `docs/generated/memory-calibration-evidence.json`. That duplication was 436 KB
- * of the artifact. What the matrix actually needs to say about a record is which coordinate it
- * targets, whether it bound, and how it dates; `id` is the join key back to the full row, and every
- * consumer of the dropped fields already loads that bundle.
+ * The image lanes' entry points onto the law (see `parseAnchorDerivationLanes`): the lane shim,
+ * the law itself, and — for the MLX floor — the law's activation half.
  */
-function publishedCalibrationRecord(record) {
-  return {
-    id: record.id,
-    status: record.status,
-    backend: record.backend,
-    target: record.target,
-    strategy: { rung: record.strategy.rung, engagedRungs: record.strategy.engagedRungs },
-    calibrationFingerprint: record.calibrationFingerprint,
-    capturedAt: record.capturedAt,
-    harnessVersion: record.harnessVersion,
-    repositories: record.repositories,
-    source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
-  };
+export const IMAGE_CANDLE_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_image_phase_peaks",
+  "derive_phase_peaks",
+]);
+export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_mlx_image_phase_peaks",
+  "derive_phase_activation_residues",
+  "derive_phase_peaks",
+]);
+
+/**
+ * Catalog entries deliberately held OUT of the matrix universe (sc-18663, re-homed by sc-22513).
+ *
+ * This used to be read from the rung-4 survey, which has left the fingerprint with the rest of the
+ * measurement-absence machinery. The fact itself survives the collapse and is not a memory fact at
+ * all. Declared here, in the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails
+ * LOUDLY the day the family is routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses
+ * an entry the generator can now resolve.
+ *
+ * ## sc-22737: the recorded reason was STALE, and the true one is narrower
+ *
+ * The old reason read "no familyGroup arm and no video-route resolver row exists". Only the first
+ * clause was ever a fact about this generator, and the second was wrong about the WORKER:
+ * `video_jobs/minimax_h3.rs#minimax_h3_engine_id` exists and `resolve_video_route` consults it, so
+ * the MLX lane IS routed. Re-examined against both sources, the two conditions that actually keep
+ * these entries out are:
+ *
+ * 1. **MLX — the resolver is not in a shape this generator can read.** Every other family's
+ *    `*_engine_id` enumerates its catalog ids (`match model { "a" => Some("x"), … }`, `model == …`,
+ *    or `matches!(model, …)`), and `parseVideoEngineIds` parses exactly those three forms into a
+ *    model -> engine map. MiniMax-H3's is
+ *    `is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)`, and that predicate
+ *    (`sceneworks_core::video_request::is_minimax_h3_model`) is `model.starts_with("minimax_h3")` —
+ *    a PREFIX test, which enumerates nothing. Admitting the family therefore needs the parser to
+ *    grow a fourth form that resolves a prefix predicate out of another crate and expands it
+ *    against the manifest, not merely a `VIDEO_ROUTE_RESOLVERS` row; adding the row alone throws
+ *    `minimax_h3_engine_id declared no model -> engine arm`, which is how this was measured.
+ *
+ * 2. **Candle — the generator's PUBLIC route parser cannot see the arm either.** `parseVideoRoutes`
+ *    reads `video_jobs/candle.rs#candle_video_engine_id`, which has no `minimax_h3` arm; the Candle
+ *    dispatch is deliberately kept OUT of it, in `video_jobs/mod.rs#resolve_candle_video_route`
+ *    (`} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) { CandleVideoRoute::
+ *    MiniMaxH3(engine_id) }`), and is parsed separately by `parseInternalCandleVideoRoutes` for
+ *    exactly that reason. So this half is the SAME parser fact as (1), on the other lane.
+ *
+ * ## sc-22738: reason 2 used to claim the Candle LANE was unrouted. It is not.
+ *
+ * The previous wording read "Candle — the lane is not routed at all", and cited the absent
+ * `candle_video_engine_id` arm as proof. That confused this generator's parser with the ROUTER:
+ * `resolve_candle_video_route` has selected `CandleVideoRoute::MiniMaxH3` since sc-19508, and the
+ * routing catalog declares `VideoModelCaps::new("minimax_h3", true, true, …)` and the same for
+ * `minimax_h3_ref` (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs`), so BOTH lanes are
+ * routed and neither is epic 22723 E1's unrouted-lane exemption.
+ *
+ * That mattered beyond the comment: `measure-memory-catalog.test.mjs` used to take its routed-lane
+ * axis from this generator's `models[].backends`, so the subtraction below silently removed all
+ * twelve MiniMax-H3 cells from the E1 burndown — deleting their plan rows left the measurability
+ * test green. The burndown now reads the routing catalog directly (`routedCatalogLanes`), so this
+ * subtraction is scoped to the MATRIX and cannot exempt a cell from measurability.
+ *
+ * The `minimax_h3` / `minimax_h3_ref` ANCHORS are planned, armed and closed over on BOTH lanes by
+ * sc-22737 (`config/memory-calibration-plan.json`,
+ * `crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs`), so the cells are measurable through
+ * `measure-memory-catalog.mjs` — the oracle epic 22723 E2 names — even while this generator still
+ * subtracts them from the MATRIX universe.
+ */
+const MINIMAX_OUT_OF_MATRIX_REASON =
+  "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), " +
+  "but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX " +
+  "PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 " +
+  "measurability burndown reads the routing catalog and DOES claim these cells";
+
+export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
+  ["minimax_h3", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
+  ["minimax_h3_ref", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
+]);
+
+/**
+ * The subtraction may never outlive its reason. An out-of-matrix entry the catalog no longer carries
+ * is a stale declaration, and one the generator CAN now resolve must join the universe rather than
+ * stay silently subtracted.
+ */
+export function assertOutOfMatrixEntriesAreStillUnroutable(manifestModels, resolver) {
+  for (const [id, entry] of OUT_OF_MATRIX_CATALOG_ENTRIES) {
+    const model = manifestModels.find((candidate) => candidate.id === id);
+    if (!model) {
+      throw new Error(
+        `OUT_OF_MATRIX_CATALOG_ENTRIES names ${id}, which the catalog no longer carries (epic ${entry.epic})`,
+      );
+    }
+    let resolvable = false;
+    try {
+      resolver(model);
+      resolvable = true;
+    } catch {
+      resolvable = false;
+    }
+    if (resolvable) {
+      throw new Error(
+        `${id} is declared out of the matrix, but the generator now resolves its route: admit it to ` +
+          `the universe instead of subtracting it (epic ${entry.epic})`,
+      );
+    }
+  }
 }
 
 // Every source this document is DERIVED from. Exported (sc-16268) so the tests that prove the
@@ -2105,21 +2471,55 @@ function publishedCalibrationRecord(record) {
 // which is the quiet-and-stale outcome the tripwire exists to prevent. `generatedFrom.sources` in
 // the artifact is generated from this same map, so the published key set is the assertable copy.
 export const SOURCE_PATHS = Object.freeze({
+  // ── The POPULATION: which coordinates exist, and which rungs their code implements ───────────
   manifest: "config/manifests/builtin.models.jsonc",
   routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
   imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
+  // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
+  // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
+  // `resolve_candle_video_route` (`video_jobs/mod.rs`) consult one `*_engine_id` function per family,
+  // and those functions are where the model-id -> provider-id mapping actually lives. Deriving the
+  // universe's providers from anywhere else would be a restatement that can drift; deriving them from
+  // here means a worker route change rotates this artifact's provenance, which is the point.
+  videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
+  videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+  videoRouteSvd: "crates/sceneworks-worker/src/video_jobs/svd.rs",
+  videoRouteBernini: "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+  videoRouteScail2: "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+  videoRouteKreaRealtime: "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
+  videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-  memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
-  vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
+  // sc-20799: in SOURCE_PATHS because it DECIDES the implementation verdict —
+  // `CANDLE_BESPOKE_REQUEST_PROVIDERS` is where bespoke Candle staged coverage is declared, and a
+  // source that changes a cell but sits outside the fingerprint is a provenance hole.
+  memoryRouteRegistry: "crates/sceneworks-worker/src/memory_route_registry.rs",
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
-  calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
-  calibrationPlan: "config/memory-calibration-plan.json",
-  inferenceClosures: "config/inference-provider-closures.json",
-  rung4Survey: "config/rung4-applicability-survey.json",
-  cargo: "Cargo.toml",
+  // ── The MEMORY axis: the anchor store, its currency declarations, and the derivation ─────────
+  //
+  // sc-22513 (epic 22505, E5). These four are the whole memory input. What LEFT this map is the
+  // per-record evidence join the matrix no longer performs — the calibration plan, the calibration
+  // evidence bundle, the inference-provider closure ledger, both rung-4 survey artifacts, the engine
+  // capability dumps and the Cargo pin. None of them can move a cell any more, and a source that
+  // cannot move a cell must not rotate the artifact's revision: that is what turned a pin bump or a
+  // campaign edit into a full regeneration diff.
+  anchorStore: "config/memory-anchors.json",
+  anchorLoaderClosures: "config/anchor-loader-closures.json",
+  // The derivation itself, and each lane's REAL admission source (epic 22505 feature-end fix
+  // round, E5). `derivationDefined` is read off these: `memory_anchor.rs` declares
+  // `derive_<law>_phase_peaks`, and per modality the file that maps the lane onto an
+  // `AnchorBackend` and prices from it is: video -> `video_admission.rs`; image ->
+  // `vram_gate.rs` + `candle_memory_strategy.rs` (candle) and `mlx_fit_gate.rs` (MLX, already a
+  // population source above).
+  anchorDerivation: "crates/sceneworks-core/src/memory_anchor.rs",
+  anchorAdmission: "crates/sceneworks-worker/src/video_admission.rs",
+  anchorAdmissionImageVram: "crates/sceneworks-worker/src/vram_gate.rs",
+  anchorAdmissionImageCandle: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+  // The extractor. The store is a pure function of the retained evidence and this script (sc-22510),
+  // so an extractor change is a change to how every anchor was derived.
+  anchorExtractor: "scripts/extract-memory-anchors.mjs",
 });
 
 // `matrixSourceRevision` is generated provenance written back into the manifest's calibration
@@ -2144,17 +2544,15 @@ function manifestRevisionBody(body) {
 
 /**
  * @param {object} [options]
- * @param {boolean} [options.publish] When false, return the document BEFORE sc-18099's publication
- *   step: `cells` is the full resolved cross-product, `modelSlices` covers all of it, and
- *   `calibrationRuns[].record` is the unprojected evidence row. `coverage` and the
- *   `summary.publishedCells`/`elidedCells`/`elidedByState` counts are still computed, because they
- *   describe what publication WOULD do and are derived from the full set either way.
+ * @param {boolean} [options.publish] When false, return the document BEFORE the publication step:
+ *   `cells` is the full resolved cross-product and `modelSlices` covers all of it. `coverage` and
+ *   the `summary.publishedCells`/`elidedCells`/`elidedByState` counts are still computed, because
+ *   they describe what publication WOULD do and are derived from the full set either way.
  *
  *   This exists for the generator's own tests, which assert which STATE the generator assigns to a
- *   coordinate. That is a claim about generation, not about publication, and most of those
- *   coordinates are elided — asserting them against the published subset would silently reduce
- *   thirteen behavioural tests to vacuous ones. The CLI never passes it: `main()` writes the
- *   published document, and the publication path has its own tests.
+ *   coordinate. That is a claim about generation, not about publication, and `Missing` coordinates
+ *   are all elided — asserting them against the published subset would silently make those tests
+ *   vacuous. The CLI never passes it.
  */
 export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true } = {}) {
   const sourcePaths = SOURCE_PATHS;
@@ -2174,22 +2572,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const manifestBody = bodies.manifest;
   const enginesBody = bodies.engines;
   const mlxFitBody = bodies.mlxFitGate;
-  const cargoBody = bodies.cargo;
-  const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
-  const calibrationPlan = activeCalibrationPlan(JSON.parse(bodies.calibrationPlan));
-  // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
-  // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
-  const inferenceClosureDigests = validatedInferenceClosures(
-    bodies.inferenceClosures,
-    inferencePin(cargoBody),
-  );
-  const closureDigestsByProvider = Object.fromEntries(inferenceClosureDigests);
-  const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
-  // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and
-  // TOML — so provenance is stable across semantically inert edits (sc-16129 did the manifest;
-  // sc-16268 the rest). Parsing below still reads the raw `bodies`; only provenance reads these.
+  // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and JS —
+  // so provenance is stable across semantically inert edits (sc-16129 did the manifest; sc-16268 the
+  // rest). Parsing below still reads the raw `bodies`; only provenance reads these.
   const revisionBodies = Object.fromEntries(
     sourceEntries.map(([name, relative]) => [
       name,
@@ -2198,42 +2585,81 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         : semanticSourceBody(relative, bodies[name]),
     ]),
   );
-  const images = manifest.models.filter((model) => model.type === "image");
-  const manifestById = new Map(images.map((model) => [model.id, model]));
+  // sc-22513: the MEMORY axis, both halves, read once.
+  const anchorStore = indexAnchorStore(bodies.anchorStore);
+  const loaderClosures = indexLoaderClosures(bodies.anchorLoaderClosures);
+  const derivationLanes = parseAnchorDerivationLanes(bodies.anchorDerivation, {
+    "video:mlx": { law: "video", sources: [bodies.anchorAdmission] },
+    "video:candle": { law: "video", sources: [bodies.anchorAdmission] },
+    "image:candle": {
+      law: "image",
+      sources: [bodies.anchorAdmissionImageVram, bodies.anchorAdmissionImageCandle],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+    },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [bodies.mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
+  });
+  // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
+  // admitted modality is in, whether or not anything has been measured on it — an entry the matrix
+  // does not carry cannot even report `Missing`, which is how the video lane read as complete while
+  // covering one modality. Adding a modality here is deliberate and gated: it needs route resolution
+  // (`resolveRoutes`) and a family group.
+  //
+  // MINUS `OUT_OF_MATRIX_CATALOG_ENTRIES` (sc-18663, re-homed by sc-22513), whose entries the
+  // generator cannot resolve a route for at all. The subtraction is validated in both directions
+  // below rather than trusted.
+  const entries = manifest.models.filter(
+    (model) => MATRIX_MODALITIES.has(model.type) && !OUT_OF_MATRIX_CATALOG_ENTRIES.has(model.id),
+  );
+  const manifestById = new Map(entries.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
   const routes = parseEngineRoutes(enginesBody);
+  const videoRoutes = parseVideoRoutes(bodies);
   const routedBackends = routedLanes({
     routingCatalog: bodies.routingCatalog,
     routingCandle: bodies.routingCandle,
     routingMlx: bodies.routingMlx,
   });
-  const sequentialEngines = parseMlxSequentialEngines(mlxFitBody);
+  const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
+  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
-  const pin = inferencePin(cargoBody);
+  const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry);
+  assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
+    resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
+  );
   // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
   // bare would let content shift across a source boundary without moving the hash. A NUL cannot
   // occur in any of these text sources, so it is an unambiguous delimiter.
   const sceneWorksRevision = `source-tree:${sha256(
-    sourceEntries
-      .filter(([name]) => name !== "calibrationEvidence")
-      .map(([name]) => revisionBodies[name])
-      .join("\0"),
+    sourceEntries.map(([name]) => revisionBodies[name]).join("\0"),
   )}`;
 
-  // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's MLX
-  // and Candle declarations are checked independently rather than trusting their documented twin set.
-  assertDeclaredControlLanes(images, bodies.imageRouting);
+  // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's
+  // MLX and Candle declarations are checked independently rather than trusting their documented twin
+  // set, over the WHOLE universe rather than just the image half (sc-18815).
+  assertDeclaredControlLanes(entries, bodies.imageRouting);
 
-  const models = images
+  const models = entries
     .map((model) => {
-      const route = routes.get(model.id);
-      if (!route) throw new Error(`${model.id}: no resolved route/provider`);
       const backends = backendScopes(model, routedBackends);
+      const route = resolveRoute(model, routes, videoRoutes, backends);
       return {
         id: model.id,
         name: model.name,
+        modality: model.type,
+        // sc-18815: the family GROUP key, published so a consumer can join an entry to its family.
+        familyGroup: familyGroup(model.id),
         family: model.family ?? null,
+        // Video providers are per-backend (LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on
+        // candle), so the single-valued route the image lane publishes cannot describe them. Publish
+        // the resolved provider per backend and keep the scalar as the first-routed-backend one.
         resolvedRoute: route.engine,
+        resolvedRoutes: Object.fromEntries(
+          backends.map((backend) => [backend, route.engineFor(backend)]),
+        ),
         routeKind: route.kind,
         backends,
         // Per-backend maps, not scalars: the entry has one owner per backend it advertises, and
@@ -2241,8 +2667,14 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         owningFamilyStories: Object.fromEntries(
           backends.map((backend) => [backend, familyStory(model.id, backend)]),
         ),
+        // sc-18815: the video lane has no per-(entry, backend) ownership story and must not invent
+        // one, so the truthful value is `null` and `assertCellOwnershipIsBackendScoped` enforces the
+        // split in both directions.
         owningModelStories: Object.fromEntries(
-          backends.map((backend) => [backend, modelStory(model.id, backend)]),
+          backends.map((backend) => [
+            backend,
+            model.type === "image" ? modelStory(model.id, backend) : null,
+          ]),
         ),
       };
     })
@@ -2254,20 +2686,15 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const cellInventoryExpectations = new Map();
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
-    // sc-18099: the resolved AXES are published on the entry, not just counted here.
-    //
-    // Elision is safe for a coordinate's evidence, which is absent by definition. It is NOT safe for
-    // a lane's EXISTENCE: sc-16069 exists because keying the control overlay off a measurement block
-    // gave the shipping MLX Krea control lane zero cells, and absent evidence read as absent feature.
-    // Publishing only planned-or-evidenced cells would recreate that blind spot for every unmeasured
-    // axis value — no `control` cell, no `bf16` cell, no way to tell an unmeasured lane from one that
-    // does not exist. These four lists ARE the cross-product (tiers x modes x overlays x rungs), so a
-    // reader can see every coordinate the catalog resolves whether or not one was published.
+    // sc-18099: the resolved AXES are published on the entry, not just counted here. Publishing only
+    // the non-Missing subset would otherwise recreate the sc-16069 blind spot for every unimplemented
+    // axis value — no way to tell an unimplemented lane from one that does not exist.
     modelSummary.axes = {};
+    const axesRoute = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
-      const tiers = tiersFor(model, backend, backendTierOverrides);
+      const tiers = tiersFor(model, backend, backendTierOverrides, routeLaneTiers, axesRoute);
       const modes = modesFor(model);
-      const overlays = overlaysFor(model, backend);
+      const overlays = overlaysFor(model, backend, axesRoute);
       modelSummary.axes[backend] = { tiers, modes, overlays, rungs: [...RUNGS] };
       cellInventoryExpectations.set(`${model.id}:${backend}`, {
         tiers: tiers.length,
@@ -2280,157 +2707,68 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   }
 
   const cells = [];
+  const anchorCellCounts = new Map();
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
-    const route = routes.get(model.id);
+    const route = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
       // SC-15812: resolved HERE, inside the per-backend loop, so a cell names the story that owns
       // its (model, backend) pair rather than whichever backend happened to be listed first.
       const owningFamilyStory = modelSummary.owningFamilyStories[backend];
       const owningModelStory = modelSummary.owningModelStories[backend];
-      for (const tier of tiersFor(model, backend, backendTierOverrides)) {
+      // The memory axis is a property of (model, tier, backend lane) and of the lane's derivation —
+      // never of the rung, the mode or the overlay — so it is resolved once per tier here and the
+      // rung loop below cannot make it depend on anything narrower.
+      const derivationDefined = derivationLanes.has(`${modelSummary.modality}:${backend}`);
+      for (const tier of tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route)) {
+        const anchor = anchorStore.anchors.get(`${model.id}:${backend}:${tier}`) ?? null;
+        const anchorRow = anchor
+          ? {
+              id: anchor.id,
+              tier: anchor.tier,
+              source: `config/memory-anchors.json#${anchor.id}`,
+              // sc-22511: REPORTED, never gated. A staled loader closure means the anchor needs
+              // re-extraction; it does not mean the rung stopped existing, so it may not — and by
+              // `cellState`'s signature cannot — move the state.
+              current:
+                loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
+                anchor.source.loaderClosureDigest,
+              // sc-22667: HOW the key was derived. `null` means at the record's own measurement
+              // revision; otherwise the reviewed currency attestation (config/
+              // anchor-currency-attestations.json) that keyed it at a later revision because the
+              // closure diff since the measurement is accounting-only or witnessed unchanged.
+              currencyAttestation: currencyAttestationOf(anchor),
+              // Anchor-level derivability (epic 22505 feature-end fix round, E5): whether the
+              // lane's law accepts THIS anchor, read off the store's own `underivedReason` field
+              // — which the Rust laws honor byte-for-byte — with the stated reason published so
+              // the matrix says WHY a cell is Anchored/underived rather than merely that it is.
+              derivable: !anchor.underivedReason,
+              ...(anchor.underivedReason ? { underivedReason: anchor.underivedReason } : {}),
+            }
+          : null;
         for (const mode of modesFor(model)) {
-          for (const overlay of overlaysFor(model, backend)) {
-            const provider = providerFor(model, backend, overlay, route);
+          for (const overlay of overlaysFor(model, backend, route)) {
+            const provider = providerFor(model, backend, overlay, route, mode);
             for (const rung of RUNGS) {
-              const status = strategyStatus({
+              const verdict = implementationVerdict({
                 backend,
                 rung,
                 route,
                 provider,
-                sequentialEngines,
+                stagedResidencyEngines,
                 model,
                 tier,
                 mode,
                 overlay,
-                rung4Survey,
                 manifestById,
-                inferenceClosureDigests,
+                candleBespokeStagedLanes,
               });
-              const fingerprint =
-                status.state === "Missing"
-                  ? null
-                  : status.calibrationFingerprint ??
-                    derivedCalibrationFingerprint({
-                      inferencePin: pin,
-                      model: model.id,
-                      provider,
-                      backend,
-                      tier,
-                      mode,
-                      overlay,
-                      rung,
-                      parameters: status.parameters,
-                      manifestCalibration: manifestCalibrationInputs(model, backend, tier),
-                    });
-              const calibrationRuns = calibrationBundle.records.filter(
-                (record) =>
-                  record.target.modelId === model.id &&
-                  record.target.provider === provider &&
-                  record.backend === backend &&
-                  record.target.tier === tier &&
-                  record.target.mode === mode &&
-                  matrixOverlayFor(record.target.overlay) === overlay &&
-                  record.strategy.rung === rung,
-              );
-              const engagedRungs = expectedEngagedRungs({
-                model,
-                provider,
-                backend,
-                tier,
-                mode,
-                overlay,
-                rung,
-                status,
-                calibrationPlan,
+              const state = cellState({
+                implementation: verdict.implementation,
+                anchorPresent: anchorRow !== null,
+                derivationDefined,
+                anchorDerivable: anchorRow !== null && anchorRow.derivable,
               });
-              const runSummary = (record) => {
-                const overall = observedPeakBytes(record);
-                const requiredHostBytes = mlxRequiredHostBytes(record);
-                return {
-                  source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
-                  hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
-                  tier: record.target.tier,
-                  geometry: `${record.target.geometry.width}x${record.target.geometry.height}`,
-                  capturedAt: record.capturedAt,
-                  harnessVersion: record.harnessVersion,
-                  recordStatus: record.status,
-                  engagedRungs: record.strategy.engagedRungs,
-                  ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
-                  ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
-                  parity: {
-                    contract: ["exact", "tolerance", "golden"].includes(record.quality.contract)
-                      ? record.quality.contract
-                      : record.quality.maximumErrorThreshold === 0 &&
-                          record.quality.meanErrorThreshold === 0
-                        ? "exact"
-                        : "tolerance",
-                    result: record.quality.result === "not_run" ? "not_run" : record.quality.result,
-                    metric: "maximum_absolute_error",
-                    maximumError: record.quality.maximumError,
-                    fixture: record.fixture,
-                  },
-                };
-              };
-              const eligibleRuns = calibrationRuns.filter(
-                (record) => calibrationBinding(record, {
-                  ...{
-                    calibrationFingerprint: fingerprint,
-                    engagedRungs,
-                    strategyParameters: status.parameters,
-                    geometryEnvelope: status.maxPixels
-                      ? geometryWithinPixels(model, backend, status.maxPixels)
-                      : geometryFor(model, backend),
-                    evidence: { loadability: artifactEvidence(model, route, tier) },
-                  },
-                }).eligible,
-              );
-              const semantics = (record) =>
-                evidenceSemantics(record, {
-                  sceneWorks: sceneWorksRevision,
-                  inference: pin,
-                  inferenceClosureDigests: closureDigestsByProvider,
-                });
-              const historicalRuns = eligibleRuns.filter(
-                (record) => semantics(record) === "historical",
-              );
-              const currentRuns = eligibleRuns.filter(
-                (record) =>
-                  semantics(record) === "current" &&
-                  ["complete", "runtime_complete"].includes(record.status),
-              );
-              const currentFullRuns = currentRuns.filter((record) => record.status === "complete");
-              const currentRuntimeRuns = currentRuns.filter(
-                (record) => record.status === "runtime_complete",
-              );
-              // SC-16060. Characterization counts every geometry bound to this cell — the
-              // manifest-declared captures AND the eligible bundle records — because
-              // `calibrationBinding` has already gated on the calibration fingerprint, which
-              // `memory-calibration-harness.mjs#evidenceSemantics` names as the invalidation switch
-              // that owns SceneWorks drift. The historical/current split is a revision distinction,
-              // and staling a measured slope on an unrelated source edit is the failure that comment
-              // exists to prevent. Promotion to `Verified` is stricter and does require `current`.
-              const characterization = memoryCharacterization([
-                ...(status.historicalVerification ?? []).map((row) => row.geometry),
-                ...eligibleRuns.map(
-                  (record) => `${record.target.geometry.width}x${record.target.geometry.height}`,
-                ),
-              ]);
-              // SC-16060. The producer the vocabulary never had: `Verified` was a listed state with
-              // nothing able to emit it, so the guard in `validateMatrix` was unreachable and a test
-              // asserting zero of them was green for the trivial reason. Promotion is from
-              // `Implemented/unverified` ONLY — `Missing` has no implementation to verify and
-              // `Structurally N/A` has nothing to measure, so neither may be lifted by evidence.
-              const state =
-                status.state === "Implemented/unverified" &&
-                  currentFullRuns.length > 0 &&
-                  (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
-                  ? "Verified"
-                  : status.state === "Implemented/unverified" &&
-                      currentRuntimeRuns.length > 0 &&
-                      (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
-                    ? "Runtime verified"
-                  : status.state;
               const cell = {
                 id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),
                 modelId: model.id,
@@ -2441,45 +2779,25 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 mode,
                 overlay,
                 rung,
-                geometryEnvelope: status.maxPixels
-                  ? geometryWithinPixels(model, backend, status.maxPixels)
-                  : geometryFor(model, backend),
-                strategyParameters: status.parameters,
-                engagedRungs,
+                geometryEnvelope: geometryFor(model, backend),
+                strategyParameters: verdict.parameters,
+                // The three inputs the state is a function of, published so a consumer — and
+                // `validateMatrix` — can recompute it rather than trust it (sc-22513).
+                implementation: verdict.implementation,
+                anchor: anchorRow,
+                derivationDefined,
                 state,
-                memoryCharacterization: characterization,
-                calibrationFingerprint: fingerprint,
                 owningFamilyStory,
                 owningModelStory,
-                ...(rung === "bounded_transformer_residency"
-                  ? {
-                      rung4Survey: rung4SurveyCell(
-                        rung4Survey,
-                        model.id,
-                        backend,
-                        tier,
-                        mode,
-                        overlay,
-                        status.overlayIncompatible === true,
-                      ),
-                    }
-                  : {}),
                 evidence: {
-                  staticImplementation: status.source ? [{ source: status.source }] : [],
-                  declaredCalibration: declaredEvidence(model, backend, tier),
-                  historicalVerification: [
-                    ...(status.historicalVerification ?? []),
-                    ...historicalRuns.map(runSummary),
-                  ],
-                  currentEnvironmentVerification: [
-                    ...(status.currentEnvironmentVerification ?? []),
-                    ...currentRuns.map(runSummary),
-                  ],
-                  loadability: artifactEvidence(model, route, tier),
-                  strategyParameterVerification: status.strategyParameterVerification ?? [],
-                  structural: status.structural ?? [],
+                  staticImplementation: verdict.source ? [{ source: verdict.source }] : [],
+                  structural: verdict.structural ?? [],
+                  anchor: anchorRow ? [{ source: anchorRow.source }] : [],
                 },
               };
+              if (anchorRow && verdict.implementation !== "missing") {
+                anchorCellCounts.set(anchorRow.id, (anchorCellCounts.get(anchorRow.id) ?? 0) + 1);
+              }
               // Mutation seam used by the inventory regression test. The CLI never supplies a filter;
               // every production build emits the full catalog and validates it below before writing.
               if (!cellFilter || cellFilter(cell)) cells.push(cell);
@@ -2490,142 +2808,74 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     }
   }
   cells.sort((left, right) => left.id.localeCompare(right.id));
-  const calibrationRuns = calibrationBundle.records.map((record) => {
-    const cell = cells.find(
-      (candidate) =>
-        candidate.modelId === record.target.modelId &&
-        candidate.resolvedRoute === record.target.provider &&
-        candidate.backend === record.backend &&
-        candidate.tier === record.target.tier &&
-        candidate.mode === record.target.mode &&
-        candidate.overlay === matrixOverlayFor(record.target.overlay) &&
-        candidate.rung === record.strategy.rung,
-    );
-    if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
-    return {
-      cellId: cell.id,
-      binding: calibrationBinding(record, cell),
-      semantics: cell.evidence.currentEnvironmentVerification.some(
-        (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
-      )
-        ? "current"
-        : evidenceSemantics(record, {
-            sceneWorks: sceneWorksRevision,
-            inference: pin,
-            inferenceClosureDigests: closureDigestsByProvider,
-          }),
-      record,
-    };
-  });
 
-  // Replaced after validation with the PUBLISHED cells only (sc-18099). Built over the full set here
-  // so the document shape below is unchanged and `validateMatrix` still sees the full inventory.
+  // The anchor inventory: one row per measured anchor, with how many RESOLVED coordinates it covers
+  // (every non-`Missing` cell of its lane, published or elided — the count is a property of the
+  // catalog, not of the publication step). This is what replaces `calibrationRuns`: the store IS the
+  // evidence join now, and a row says which coordinate the anchor was measured at rather than
+  // restating a record.
+  const anchorInventory = [...anchorStore.anchors.values()]
+    .map((anchor) => ({
+      id: anchor.id,
+      modelId: anchor.modelId,
+      backend: anchor.backend,
+      tier: anchor.tier,
+      provider: anchor.provider,
+      mode: anchor.mode,
+      geometry: anchor.geometry,
+      source: anchor.source.path,
+      current:
+        loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
+        anchor.source.loaderClosureDigest,
+      currencyAttestation: currencyAttestationOf(anchor),
+      cells: anchorCellCounts.get(anchor.id) ?? 0,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+
   const modelSlices = Object.fromEntries(
     models.map((model) => [
       model.id,
       cells.filter((cell) => cell.modelId === model.id).map((cell) => cell.id),
     ]),
   );
-  // SC-15969. One row per surveyed (family, backend), derived from the cells rather than re-read from
-  // the survey file — so a verdict that never reached a cell cannot appear in the summary as if it had.
-  const requestPeakPriority = new Map([
-    ["unmeasured", 0],
-    ["does-not-move", 1],
-    ["moves", 2],
-  ]);
-  const rung4SurveyRowsByFamily = new Map();
-  for (const cell of cells.filter(
-    (candidate) =>
-      candidate.rung === "bounded_transformer_residency" && candidate.overlay === "none",
-  )) {
-    const key = `${familyGroup(cell.modelId)}:${cell.backend}`;
-    const existing = rung4SurveyRowsByFamily.get(key);
-    const requestPeak =
-      !existing ||
-      requestPeakPriority.get(cell.rung4Survey.requestPeak) >
-        requestPeakPriority.get(existing.requestPeak)
-        ? cell.rung4Survey.requestPeak
-        : existing.requestPeak;
-    rung4SurveyRowsByFamily.set(key, {
-      familyStory: familyGroup(cell.modelId),
-      backend: cell.backend,
-      structuralApplicability: cell.rung4Survey.structuralApplicability,
-      requestPeak,
-      implementation: cell.rung4Survey.implementation,
-      // sc-18099: the family-level half of the verdict lives HERE now instead of on the cells.
-      // `summary`, `blockStacks` and `findings` are constants of the (family, backend) pair that
-      // used to be restated on all ~1,828 rung-4 cells — 2.72 MB of the old artifact. Most rung-4
-      // coordinates are elided, so leaving them on cells would drop the verdict's evidence entirely
-      // for every family that publishes none, which is what the survey exists to prevent.
-      //
-      // Read from the survey map, but only for a family the loop above proved REACHED a cell: the
-      // reach proof is this loop, not the field's provenance, so a verdict that generated nothing
-      // still cannot appear here as though it had.
-      ...(({ summary, blockStacks = [], findings = [] }) => ({ summary, blockStacks, findings }))(
-        rung4Survey.get(key),
-      ),
-    });
-  }
-  const rung4SurveyRows = [...rung4SurveyRowsByFamily.values()].sort((left, right) =>
-    `${left.familyStory}:${left.backend}`.localeCompare(`${right.familyStory}:${right.backend}`),
-  );
-  const tally = (rows, key) =>
-    Object.fromEntries(
-      sortedUnique(rows.map((row) => row[key])).map((value) => [
-        value,
-        rows.filter((row) => row[key] === value).length,
-      ]),
+  // sc-18815: censused per modality. `mlxStagedStaticCoverage` is a claim about the image entries —
+  // its denominator says so — so admitting video must not inflate it.
+  const modalityById = new Map(models.map((model) => [model.id, model.modality]));
+  const stagedByModality = (modality) =>
+    new Set(
+      cells
+        .filter(
+          (cell) =>
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            isImplemented(cell.state) &&
+            modalityById.get(cell.modelId) === modality,
+        )
+        .map((cell) => cell.modelId),
     );
-  const mlxStagedModels = new Set(
-    cells
-      .filter(
-        (cell) =>
-          cell.backend === "mlx" &&
-          cell.rung === "staged_residency" &&
-          isImplemented(cell.state),
-      )
-      .map((cell) => cell.modelId),
-  );
+  const mlxStagedModels = stagedByModality("image");
+  const mlxStagedVideoModels = stagedByModality("video");
   const matrix = {
-    // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
-    // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
-    // both, so the two shapes cannot share a version number — that is the whole job of this field.
+    // 11 (sc-22513, epic 22505 E5): the matrix COLLAPSED onto the anchor store. `cells[].state` is a
+    // pure function of `(implementation, anchor present, derivation defined)` and its vocabulary is
+    // new — `Verified`, `Runtime verified` and `Implemented/unverified` are GONE, replaced by
+    // `Implemented`, `Anchored` and `Anchored/underived`. `cells[].memoryCharacterization`,
+    // `calibrationFingerprint`, `engagedRungs`, `plannedPipelineIdentities`,
+    // `pipelineCharacterizations`, `rung4Survey` and the four record-derived evidence dimensions were
+    // REMOVED, along with the root `calibrationRuns`, `rung4SurveyRows`, `manifestScopes`,
+    // `memoryCharacterizationStates` and `generatedFrom.inferenceRevision`. `cells[]` gained
+    // `implementation`, `anchor` and `derivationDefined`; the document gained `anchors`. A
+    // version-10 reader that counted `Verified` cells now reads zero of a state nothing emits, which
+    // is exactly why this is a new version rather than an additive one.
     //
-    // 5 (SC-16060): `claims`, `memoryCharacterizationStates`, and `cells[].memoryCharacterization`
-    // were ADDED and are REQUIRED, and `conformanceStates` changed SHAPE — from bare strings to
-    // `{state, definition}` objects. That last one is not additive: a version-4 reader indexing
-    // `conformanceStates` for a string gets an object. It is also the point of the change — the
-    // states carried no definitions, which is how the pipeline came to hold two contradictory
-    // answers to whether one measured geometry certifies a whole envelope.
-    //
-    // 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were ADDED, and both are REQUIRED —
-    // the first at the document root, the second on every rung-4 cell. A version-3 document has
-    // neither, so it no longer validates against the schema that describes this one. That is the
-    // test: not "does an old reader break" (it does not — the fields are additive), but "is a
-    // document of the old shape still a document of this shape".
-    //
-    // 3 (sc-16268): `cells[].evidenceRevision` was REMOVED. It stamped the same two constants into
-    // every one of the ~7,360 rows — one distinct value, never conditional on the row's evidence
-    // despite the name — so a fingerprint rotation rewrote ~14,700 lines and made any two
-    // concurrent PRs touching a fingerprinted source conflict in a file that cannot be
-    // hand-merged (only regenerated). The values survive verbatim in `generatedFrom`
-    // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
-    // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
-    // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
-    // 7 (sc-18099): the document no longer publishes the catalog cross-product. `cells` is now the
-    // planned-or-evidenced SUBSET (`PUBLICATION_PREDICATE`), `modelSlices` lists only published ids
-    // and may be EMPTY for an entry, `coverage` and `models[].axes` were ADDED and are REQUIRED,
-    // `summary` gained `publishedCells`/`elidedCells`/`elidedByState`/`publicationPredicate`,
-    // `rung4SurveyRows` absorbed the family-level `summary`/`blockStacks`/`findings` that
-    // `cells[].rung4Survey` no longer carries, and `calibrationRuns[].record` is a PROJECTION of the
-    // evidence-bundle row rather than the row itself. `summary.cells` keeps its meaning — the number
-    // of coordinates the catalog resolved to, which is no longer `cells.length`. A version-6 reader
-    // that counts `cells` by state now reads a sample and calls it a census, which is precisely why
-    // this is a new version rather than an additive one.
-    schemaVersion: 7,
+    // 10 (SC-18783): LTX-2.5 plan/evidence bindings named transformer and decoder identities.
+    // 9 (sc-21715): `summary.calibrationRunsByStatus` partitioned the bundle.
+    // 8 (sc-18815): the model universe became modality-aware.
+    // 7 (sc-18099): the document stopped publishing the whole catalog cross-product.
+    // 5 (SC-16060) / 4 (SC-15969) / 3 (sc-16268) / 2 (SC-15812): see the git history.
+    schemaVersion: 11,
     generatedFrom: {
       sceneWorksRevision,
-      inferenceRevision: pin,
       sources: Object.fromEntries(
         sourceEntries.map(([name, source]) => [
           name,
@@ -2633,138 +2883,103 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         ]),
       ),
     },
-    // SC-16060. These carried no definitions, so every consumer supplied its own — which is how the
-    // pipeline came to hold two contradictory answers to "does one measured geometry certify the
-    // envelope?". The claim each state belongs to is now named here, in the artifact, rather than
-    // being inferred from whichever binding rule a reader happened to find first.
+    // The one claim a cell makes, named in the artifact rather than left to a consumer to infer.
     claims: {
       state: {
-        asserts: "the rung WORKS: implemented, parity-passed, engaging the claimed composition",
+        asserts:
+          "whether the rung's CODE exists on this coordinate, and whether a measured anchor plus a " +
+          "wired derivation can price its peak",
         geometrySensitive: false,
         binding:
-          "scripts/generate-memory-matrix.mjs#calibrationBinding — envelope membership, because " +
-          "whether a rung executes does not depend on the resolution it executed at",
-      },
-      memoryCharacterization: {
-        asserts: "the rung's PEAKS are known across the geometry envelope",
-        geometrySensitive: true,
-        binding:
-          "scripts/generate-memory-matrix.mjs#memoryCharacterization — distinct measured " +
-          "geometries, because `fixedGb + perMpxGb * megapixels` has two coefficients and one " +
-          "point cannot determine a slope",
+          "scripts/generate-memory-matrix.mjs#cellState — a pure function of " +
+          "(implementation, anchor present, derivation defined). No record, plan row, geometry, " +
+          "campaign or currency digest may enter it (sc-22513, epic 22505 E5)",
       },
     },
     conformanceStates: [
       {
-        state: "Verified",
+        state: "Anchored",
         definition:
-          "Implemented AND carrying at least one eligible current-environment calibration record. " +
-          "Says nothing about geometry coverage — read `memoryCharacterization` for that.",
+          "Implemented, a measured anchor covers this (model, tier, backend lane), and the lane's " +
+          "analytic derivation is wired — so an unmeasured request geometry is priced from the anchor.",
       },
       {
-        state: "Runtime verified",
+        state: "Anchored/underived",
         definition:
-          "Implemented and production-admissible for an exact base-only coordinate through a " +
-          "current runtime_complete record. This is intentionally below Full Verified: lifecycle " +
-          "recovery and measured negative-mutation coverage remain owned by the catalog story.",
+          "Implemented and anchored, but no derivation is wired for this lane, so the anchor bounds " +
+          "nothing beyond its own measured point.",
       },
       {
-        state: "Implemented/unverified",
-        definition: "The code path exists and is statically evidenced; no current measurement binds it.",
+        state: "Implemented",
+        definition:
+          "The code path exists and is statically evidenced; no measured anchor covers it, so its " +
+          "peak is priced by the lane's analytic floor.",
       },
       {
         state: "Structurally N/A",
         definition: "The rung cannot apply to this architecture; there is nothing to measure.",
       },
       { state: "Missing", definition: "No implementation of this rung on this route." },
-      { state: "Route unavailable/broken", definition: "The route itself does not resolve." },
     ],
-    memoryCharacterizationStates: [
-      {
-        status: "unmeasured",
-        definition: "No geometry has been measured for this cell.",
-      },
-      {
-        status: "point",
-        definition:
-          "Exactly one measured geometry. The peak is known AT that geometry and the slope is " +
-          "undeterminable, so nothing is known about the rest of the envelope.",
-      },
-      {
-        status: "fitted",
-        definition:
-          "Two or more distinct measured geometries — sufficient to determine the affine curve, " +
-          "which is not a claim that a fit has been performed. `coveredPixelBound` is the largest " +
-          "measured area.",
-      },
-    ],
-    evidenceDimensions: [
-      "staticImplementation",
-      "declaredCalibration",
-      "historicalVerification",
-      "currentEnvironmentVerification",
-      "loadability",
-      "strategyParameterVerification",
-    ],
+    evidenceDimensions: ["staticImplementation", "structural", "anchor"],
     summary: {
-      imageModels: models.length,
-      // The number of coordinates the CATALOG resolved to, unchanged in meaning by sc-18099 and no
-      // longer equal to `cells.length`. `publishedCells` and `elidedCells` partition it.
+      catalogEntries: models.length,
+      catalogEntriesByModality: Object.fromEntries(
+        [...MATRIX_MODALITIES].map((modality) => [
+          modality,
+          models.filter((model) => model.modality === modality).length,
+        ]),
+      ),
+      // The number of coordinates the CATALOG resolved to; `publishedCells` and `elidedCells`
+      // partition it.
       cells: cells.length,
       publishedCells: cells.length,
       elidedCells: 0,
       elidedByState: {},
       publicationPredicate: PUBLICATION_PREDICATE,
       mlxStagedStaticCoverage: mlxStagedModels.size,
-      mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
+      // sc-22512: derived from the catalog's own enumeration rather than from a pinned population,
+      // so the denominator tracks whatever the catalog ships.
+      mlxStagedStaticCoverageDenominator: models.filter((model) => model.modality === "image").length,
+      videoMlxStagedStaticCoverage: mlxStagedVideoModels.size,
+      videoMlxStagedStaticCoverageDenominator: models.filter((model) => model.modality === "video").length,
+      // sc-18815: entries in the universe that the routing catalog routes nowhere, and therefore
+      // resolve to zero coordinates.
+      unroutedEntries: [...UNROUTED_CATALOG_ENTRIES]
+        .filter(([id]) => models.some((model) => model.id === id))
+        .map(([id, entry]) => ({ id, ...entry }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      // sc-18663 / sc-22513: entries deliberately subtracted from the universe, named so an absent
+      // entry is never confused with an unrouted one.
+      outOfMatrixEntries: [...OUT_OF_MATRIX_CATALOG_ENTRIES]
+        .map(([id, entry]) => ({ id, ...entry }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      // sc-22513: the anchor census. `anchors` counts the store's measured rows, `analyticOnlyCells`
+      // the rows it explicitly classifies as underivable from retained evidence, and
+      // `anchoredCells`/`staleAnchors` say how far the store reaches and how much of it the loader
+      // closures no longer vouch for. `staleAnchors` is a REPORT: it moves no state.
+      anchors: anchorInventory.length,
+      analyticOnlyCells: anchorStore.analyticOnly,
+      anchoredCells: cells.filter((cell) => cell.anchor !== null && cell.state !== "Missing").length,
+      staleAnchors: anchorInventory.filter((anchor) => !anchor.current).length,
+      // sc-22667: how many of the CURRENT anchors are current by attestation rather than by
+      // measurement at the pin's own closure. A report beside `staleAnchors`, moving nothing.
+      attestedAnchors: anchorInventory.filter(
+        (anchor) => anchor.current && anchor.currencyAttestation !== null,
+      ).length,
       fullModels: 0,
-      calibrationRuns: calibrationBundle.records.length,
-      calibrationRunsByStatus: {
-        complete: calibrationBundle.records.filter((record) => record.status === "complete").length,
-        runtimeComplete: calibrationBundle.records.filter(
-          (record) => record.status === "runtime_complete",
-        ).length,
-      },
-      currentCalibrationRuns: cells.reduce(
-        (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
-        0,
-      ),
-      rung4Survey: {
-        story: 15969,
-        surveyedFamilyBackends: rung4SurveyRows.length,
-        structuralApplicability: tally(rung4SurveyRows, "structuralApplicability"),
-        requestPeak: tally(rung4SurveyRows, "requestPeak"),
-        implementation: tally(rung4SurveyRows, "implementation"),
-      },
     },
     models,
-    rung4SurveyRows,
+    anchors: anchorInventory,
     coverage: [],
-    // Populated by the publication step's `hoistManifestScopes`; empty in the pre-publication view,
-    // where the two dimensions are still on the cells.
-    manifestScopes: {},
     cells,
-    calibrationRuns,
     modelSlices,
   };
-  // Validation runs against the FULL resolved cross-product, before anything is elided. Every guard
-  // above — inventory, ownership scope, twin coverage, rung-4 survey reach, the two-claims
-  // invariants — therefore keeps exactly the reach it had when the artifact was the cross-product.
-  // The slim is a publication step, not a generation step (sc-18099).
-  validateMatrix(
-    matrix,
-    expectedIds,
-    backendTierOverrides,
-    rung4Survey,
-    cellInventoryExpectations,
-    calibrationPlan,
-  );
+  // Validation runs against the FULL resolved cross-product, before anything is elided, so every
+  // guard keeps exactly the reach it had when the artifact was the cross-product.
+  validateMatrix(matrix, expectedIds, backendTierOverrides, cellInventoryExpectations);
 
-  const planned = plannedCellIds(calibrationPlan, cells);
-  const calibrationRunCellIds = new Set(calibrationRuns.map((run) => run.cellId));
-  const published = cells.filter((cell) =>
-    isPublishableCell(cell, { plannedCellIds: planned, calibrationRunCellIds }),
-  );
+  const published = cells.filter((cell) => isPublishableCell(cell));
   const publishedIds = new Set(published.map((cell) => cell.id));
   matrix.coverage = coverageCensus(cells, publishedIds);
   matrix.summary.publishedCells = published.length;
@@ -2778,32 +2993,43 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     ),
   );
   if (!publish) return matrix;
-  const hoisted = hoistManifestScopes(published);
-  matrix.cells = hoisted.cells;
-  matrix.manifestScopes = hoisted.manifestScopes;
+  matrix.cells = published;
   matrix.modelSlices = Object.fromEntries(
     models.map((model) => [
       model.id,
       published.filter((cell) => cell.modelId === model.id).map((cell) => cell.id),
     ]),
   );
-  matrix.calibrationRuns = calibrationRuns.map((run) => ({
-    ...run,
-    record: publishedCalibrationRecord(run.record),
-  }));
   assertPublishedDocumentIsClosed(matrix, cells.length);
   return matrix;
 }
 
-function renderMarkdown(matrix) {
+export function renderMarkdown(matrix) {
   const lines = [
     "# Generated memory-ladder matrix",
     "",
     "> Generated by `scripts/generate-memory-matrix.mjs`. Do not edit by hand.",
     "",
     `- SceneWorks revision: \`${matrix.generatedFrom.sceneWorksRevision}\``,
-    `- Inference revision: \`${matrix.generatedFrom.inferenceRevision}\``,
-    `- Catalog entries: ${matrix.summary.imageModels}`,
+    `- Catalog entries: ${matrix.summary.catalogEntries} (${
+      Object.entries(matrix.summary.catalogEntriesByModality)
+        .map(([modality, count]) => `${modality} ${count}`)
+        .join(", ")
+    })`,
+    ...(matrix.summary.unroutedEntries.length
+      ? [
+          `- Unrouted entries (zero resolved coordinates): ${matrix.summary.unroutedEntries
+            .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.owningStory})`)
+            .join("; ")}`,
+        ]
+      : []),
+    ...(matrix.summary.outOfMatrixEntries.length
+      ? [
+          `- Out-of-matrix entries (subtracted from the universe): ${matrix.summary.outOfMatrixEntries
+            .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.epic})`)
+            .join("; ")}`,
+        ]
+      : []),
     `- Resolved coordinates: ${matrix.summary.cells}`,
     `- Published cells: ${matrix.summary.publishedCells}`,
     `- Elided coordinates: ${matrix.summary.elidedCells} (${
@@ -2811,25 +3037,31 @@ function renderMarkdown(matrix) {
         .map(([state, count]) => `${state} ${count}`)
         .join(", ") || "none"
     })`,
-    `- MLX staged-residency static coverage: ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}`,
-    `- Full models: ${matrix.summary.fullModels}`,
-    `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
-    `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
+    `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
+    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale; ${matrix.summary.attestedAnchors} current by attestation)`,
+    `- Coordinates the store classifies analytic-only: ${matrix.summary.analyticOnlyCells}`,
     "",
-    `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.`,
+    `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
-    "Static capability is never promoted to dynamic verification. The six evidence dimensions stay separate: `staticImplementation`, `historicalVerification`, `currentEnvironmentVerification`, `strategyParameterVerification` and `structural` are per-coordinate and ride the cell; `declaredCalibration` and `loadability` are functions of (entry, backend, tier) alone and are published once per scope in `manifestScopes`, which the cell names through `evidence.manifestScope` (sc-18099).",
-    "`Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.",
+    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    "",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation is bounded to the one revision it names: the next pin bump that moves the loader closure past it stales the anchor again.",
+    "",
+    `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
     "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
     "",
-    "| Catalog entry | Backend | Route | Family story | Model story | Staged residency |",
-    "| --- | --- | --- | --- | ---: | --- |",
+    "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell.",
+    "",
+    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers behind the widened margin — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
+    "",
+    "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
+    "| --- | --- | --- | --- | --- | ---: | --- |",
   ];
   for (const model of matrix.models) {
     for (const backend of model.backends) {
       // sc-18099: read the census, not `cells`. This column is a claim about the whole lane, and
-      // `cells` is now a subset — scanning it would silently under-report every lane whose staged
+      // `cells` is a subset — scanning it would silently under-report every lane whose staged
       // coordinates were elided, which is the coverage regression the slim must not cause.
       const row = matrix.coverage.find(
         (candidate) =>
@@ -2839,39 +3071,64 @@ function renderMarkdown(matrix) {
       );
       if (!row) throw new Error(`${model.id}:${backend}: no staged_residency coverage row`);
       const staged = row.implemented > 0;
-      const stagedState = row.states.Verified
-        ? "Verified"
-        : row.states["Runtime verified"]
-          ? "Runtime verified"
-          : "Implemented/unverified";
+      const stagedState = row.states.Anchored
+        ? "Anchored"
+        : row.states["Anchored/underived"]
+          ? "Anchored/underived"
+          : "Implemented";
+      // sc-20799: a lane whose EVERY staged coordinate is structurally exempt is not `Missing` —
+      // "nobody has written it yet" and "the architecture has no separable component to stage" are
+      // different claims, and conflating them is how a resident-only-by-design lane reads as
+      // undelivered work. A mixed lane (some exempt, some genuinely absent) still reads `Missing`.
+      const structuralOnly =
+        !staged &&
+        row.coordinates > 0 &&
+        (row.states["Structurally N/A"] ?? 0) === row.coordinates;
+      // sc-22513: `Anchored` in this rollup is a claim that a MEASURED anchor prices the lane, and
+      // 7 of the 10 shipped anchors are non-current. Printing the state with no currency signal let
+      // a lane whose every backing anchor has staled read exactly like one measured at the live
+      // closure. The marker is a REPORT, like `anchor.current` on the cell — it does not change the
+      // state, and a lane with even one current anchor is not marked.
+      const laneAnchors = matrix.anchors.filter(
+        (anchor) => anchor.modelId === model.id && anchor.backend === backend,
+      );
+      const allAnchorsStale = laneAnchors.length > 0 && laneAnchors.every((anchor) => !anchor.current);
+      const stagedColumn = staged
+        ? `${stagedState}${stagedState.startsWith("Anchored") && allAnchorsStale ? " (stale)" : ""}`
+        : structuralOnly
+          ? "Structurally N/A"
+          : "Missing";
       lines.push(
-        `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? stagedState : "Missing"} |`,
+        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${stagedColumn} |`,
       );
     }
   }
   lines.push(
     "",
-    `Per-model consumers read \`modelSlices\` in the JSON artifact for an entry's PUBLISHED cells — but since sc-18099 that is a subset, and ${Object.values(matrix.modelSlices).filter((slice) => slice.length === 0).length} of ${matrix.models.length} entries publish none at all. An empty slice means nothing was planned, measured, bound or cited there; it does NOT mean the entry has no lanes. For "which lanes exist" read \`models[].axes\`, and for "how much of a lane is implemented" read \`coverage\`. A cell is Full only when every applicable rung is Verified or Structurally N/A; this static baseline intentionally reports zero Full models.`,
+    `Per-model consumers read \`modelSlices\` in the JSON artifact for an entry's PUBLISHED cells — a subset, and ${Object.values(matrix.modelSlices).filter((slice) => slice.length === 0).length} of ${matrix.models.length} entries publish none at all. An empty slice means this entry implements no rung the matrix can see; it does NOT mean the entry has no lanes. For "which lanes exist" read \`models[].axes\`, and for "how much of a lane is implemented" read \`coverage\`.`,
     "",
-    "## Rung 4 — per-family applicability survey (SC-15969)",
+    "## Measured anchors (sc-22507, epic 22505)",
     "",
-    "Source: `config/rung4-applicability-survey.json`, derived from the pinned inference revision's provider code. The two findings are deliberately separate: **can** the architecture be windowed, and **does** doing so move the request peak. A family can be structurally capable and still correctly default to not using the rung.",
+    "Source: `config/memory-anchors.json`, extracted from the retained calibration corpora by `scripts/extract-memory-anchors.mjs`. One anchor per `(model, tier, backend lane)` carries the measured per-phase decomposition of a single retained render; every other geometry is derived analytically from it. A `(model, tier, lane)` the corpus cannot anchor is classified `analyticOnly` in the store rather than left silent.",
     "",
-    "`partial` means windowable over a sub-stack but not the whole trunk — neither Implemented nor Structurally N/A, and recorded rather than rounded to either.",
-    "",
-    "| Family story | Backend | Structural applicability | Implementation | Request peak |",
-    "| --- | --- | --- | --- | --- |",
+    "| Anchor | Model | Backend | Tier | Measured geometry | Current | Coordinates |",
+    "| --- | --- | --- | --- | --- | --- | ---: |",
   );
-  for (const row of matrix.rung4SurveyRows) {
+  for (const anchor of matrix.anchors) {
+    const geometry = `${anchor.geometry.width}x${anchor.geometry.height}${
+      anchor.geometry.frames > 1 ? `x${anchor.geometry.frames}f` : ""
+    }`;
+    const attested = anchor.currencyAttestation;
+    const current = !anchor.current
+      ? "no — re-extract"
+      : attested
+        ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
+        : "yes";
     lines.push(
-      `| SC-${row.familyStory} | ${row.backend} | ${row.structuralApplicability} | ${row.implementation} | ${row.requestPeak} |`,
+      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${current} | ${anchor.cells} |`,
     );
   }
-  lines.push(
-    "",
-    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}. sc-18099 split the verdict by what it is a property OF: the family-level summary, block-stack inventory and findings are on \`rung4SurveyRows\` in the JSON artifact — carried once per (family, backend), so they survive a family whose rung-4 cells were all elided — while \`cells[].rung4Survey\` keeps the genuinely per-coordinate half, the resolved request-peak finding and the overlay-incompatibility verdict.`,
-    "",
-  );
+  lines.push("");
   return lines.join("\n");
 }
 

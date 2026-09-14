@@ -4,6 +4,11 @@ use super::prelude::*;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+use super::run_blocking_with_heartbeat;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use super::wan::scail2_sampling;
 #[cfg(target_os = "macos")]
 use super::wan::{
@@ -15,6 +20,55 @@ use super::{
     vace::{load_source_video_frames, replacement_status_value, resolve_character_references},
     wan::local_mlx_dir,
 };
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS;
+
+/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
+
+/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
+/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
+/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
+/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
+/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
+/// `person_segment_sam3` vs `person_segment_sam3_candle`) plus the paint background, so the
+/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) async fn scail2_segment_blocking<R, F>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    task_label: &'static str,
+    segment: F,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
+{
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        SCAIL2_SEGMENT_CANCEL_MESSAGE,
+        task_label,
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || segment(flag)),
+    )
+    .await
+}
 
 // ---------------------------------------------------------------------------
 // Real MLX SCAIL-2 generation (macOS, via mlx-gen-scail2, epic 5439 / sc-5448): end-to-end character
@@ -23,9 +77,9 @@ use super::{
 // needs from native SAM3 (no user masks): the reference image and the driving frames are each
 // segmented (every person → a distinct palette color, left-to-right) and painted onto the
 // whose-world-to-keep background (animation: driving bg black, ref bg white). Conditioning =
-// `Reference` (the character) + `Mask` (its color mask) + `ControlClip{frames, mask}` (driving video +
+// ordered `Reference` + `Mask` pairs (one per character) + `ControlClip{frames, mask}` (driving video +
 // per-frame color masks). `replace_person` (cross-identity, replace_flag=true) is the same engine,
-// wired in sc-5452; multi-character (paired ref+mask) awaits the engine request-contract extension.
+// wired in sc-5452.
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX SCAIL-2 asset.
@@ -133,9 +187,10 @@ pub(super) fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static st
 }
 
 /// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot. The canonical six-file
-/// inventory and this predicate live together in `sceneworks_core::mlx_tier_completeness`, so the
-/// MLX and shared-Candle resolvers cannot drift. A partially-downloaded tier fails this and
-/// [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
+/// inventory and exact q4/q8/bf16 config-marker contract live together in
+/// `sceneworks_core::mlx_tier_completeness`, so the catalog and native resolvers cannot disagree
+/// about an installed tier. A partial or mixed-marker tier fails this and [`scail2_tier_subdir`]
+/// falls through to a smaller complete tier rather than half-loading.
 #[cfg(target_os = "macos")]
 pub(super) fn scail2_tier_is_complete(dir: &Path) -> bool {
     sceneworks_core::mlx_tier_completeness::scail2_tier_complete(dir)
@@ -256,11 +311,91 @@ pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
     }
 }
 
+/// Segment every SCAIL-2 character separately, keeping the caller's order and checking the
+/// heartbeat-owned cancellation flag between references. A single all-images SAM3 invocation
+/// would blur reference association and could continue through five expensive encodes after a
+/// cancellation; the engine instead receives a strict image/mask pair for each character.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn segment_scail2_references<F>(
+    references: Vec<Image>,
+    cancel: &gen_core::CancelFlag,
+    mut segment_one: F,
+) -> WorkerResult<Vec<(Image, Image)>>
+where
+    F: FnMut(&Image, &gen_core::CancelFlag) -> WorkerResult<Image>,
+{
+    if references.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SCAIL-2 Animate Character requires at least one reference character image.".to_owned(),
+        ));
+    }
+    if references.len() > MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters."
+        )));
+    }
+
+    let mut pairs = Vec::with_capacity(references.len());
+    for reference in references {
+        crate::person_segment_sam3_common::check_segment_canceled(Some(cancel))?;
+        let mask = segment_one(&reference, cancel)?;
+        crate::person_segment_sam3_common::check_segment_canceled(Some(cancel))?;
+        pairs.push((reference, mask));
+    }
+    Ok(pairs)
+}
+
+/// Build the strict SCAIL-2 conditioned-input grammar: ordered `Reference`, `Mask` pairs for
+/// every character, followed by the driving `ControlClip`. In particular, do not use the generic
+/// image-only `MultiReference` carrier: it cannot associate each identity image with the color mask
+/// SCAIL-2 must encode alongside it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn scail2_animate_conditioning(
+    reference_pairs: Vec<(Image, Image)>,
+    driving: Vec<Image>,
+    driving_mask: Vec<Image>,
+) -> WorkerResult<Vec<Conditioning>> {
+    if reference_pairs.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SCAIL-2 Animate Character requires at least one reference character image.".to_owned(),
+        ));
+    }
+    if reference_pairs.len() > MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters."
+        )));
+    }
+
+    let mut conditioning = Vec::with_capacity(reference_pairs.len() * 2 + 1);
+    for (reference, mask) in reference_pairs {
+        conditioning.push(Conditioning::Reference {
+            image: reference,
+            strength: None,
+        });
+        conditioning.push(Conditioning::Mask { image: mask });
+    }
+    conditioning.push(Conditioning::ControlClip {
+        frames: driving,
+        mask: driving_mask,
+        masking_strength: 1.0,
+        start_frame: 0,
+        mode: ReplacementMode::default(),
+    });
+    Ok(conditioning)
+}
+
 /// Resolve a SCAIL-2 request into the engine conditioning: load the reference character image and the
 /// driving clip, segment both with native SAM3 (every person → a palette color), paint the color-coded
-/// masks (animation background convention), and assemble `Reference` + `Mask` + `ControlClip`. The
-/// segmentation + painting run on the blocking pool (GPU inference). The reference is
-/// `referenceAssetIds[0]` (preferred) or `sourceAssetId`; the driving clip is `sourceClipAssetId`.
+/// masks (animation background convention), and assemble strict ordered `Reference`, `Mask` pairs
+/// before the `ControlClip`. Every `referenceAssetIds` entry is independently loaded and segmented
+/// in caller order; a legacy `sourceAssetId` remains the single-reference fallback. The segmentation
+/// + painting run on the blocking pool (GPU inference).
 #[cfg(target_os = "macos")]
 pub(super) async fn resolve_scail2_conditioning(
     api: &ApiClient,
@@ -269,25 +404,41 @@ pub(super) async fn resolve_scail2_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
-    let ref_id = request
-        .reference_asset_ids
-        .first()
-        .map(String::as_str)
-        .or(request.source_asset_id.as_deref())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "scail2 animate_character requires a reference character image (referenceAssetIds \
-                 or sourceAssetId)."
-                    .into(),
+    // The ordered plural list wins. The legacy i2v source image remains only as a single-reference
+    // fallback, never an unpaired extra character.
+    let reference_ids: Vec<&str> = if request.reference_asset_ids.is_empty() {
+        request.source_asset_id.as_deref().into_iter().collect()
+    } else {
+        request
+            .reference_asset_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a reference character image (referenceAssetIds \
+             or sourceAssetId)."
+                .into(),
+        ));
+    }
+    if reference_ids.len() > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    let references = reference_ids
+        .into_iter()
+        .map(|reference_id| {
+            load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
             )
-        })?;
-    let reference = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        ref_id,
-        project_path,
-    )?;
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     // The driving video → frames at the output size (the engine re-resizes internally).
     let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
@@ -322,16 +473,16 @@ pub(super) async fn resolve_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-                &rm,
-                &rt,
-                std::slice::from_ref(&reference),
-                Some(flag),
-                None,
-            )?;
-            let mask =
-                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
-            Ok((reference, mask))
+            segment_scail2_references(references, &flag, |reference, flag| {
+                let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                    &rm,
+                    &rt,
+                    std::slice::from_ref(reference),
+                    Some(flag.clone()),
+                    None,
+                )?;
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            })
         },
         move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(

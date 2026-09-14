@@ -72,9 +72,7 @@ pub(crate) fn find_manifest_entry(
         .into_iter()
         .find(|entry| entry_has_id(entry, entity_id))
         .filter(|entry| {
-            scope.map_or(true, |scope| {
-                entry.get("scope").and_then(Value::as_str) == Some(scope)
-            })
+            scope.is_none_or(|scope| entry.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .filter(|entry| include_archived || !manifest_entry_archived(entry))
         .ok_or_else(not_found)

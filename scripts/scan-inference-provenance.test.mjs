@@ -8,12 +8,18 @@
 //   * the crate-prefix inventory's serialize/parse/hash round trip, which the fail-closed coverage
 //     guard in check-license-coverage.mjs pins its population against.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   MARKER,
+  ROOT_CRATE_PREFIX,
   cratePopulationSha256,
   parseCrates,
+  scanCrates,
   serializeCrates,
 } from "./scan-inference-provenance.mjs";
 
@@ -131,9 +137,43 @@ test("parseCrates rejects a malformed row rather than silently dropping a crate"
   assert.throws(() => parseCrates("crates/a\ncrates/b c\n"), /malformed crate prefix row/);
 });
 
-test("an empty crate prefix cannot survive the serialize/parse round trip", () => {
-  // Why scanCrates rejects "" outright: a root Cargo.toml owning top-level production .rs files
-  // produces it, serializeCrates renders it as a blank line, and parseCrates drops blank lines — so
-  // the crate silently leaves the population it is supposed to be classified in.
-  assert.deepEqual(parseCrates(serializeCrates(["", "crates/a"])), ["crates/a"]);
+test("an empty crate prefix is rejected instead of becoming match-all or disappearing", () => {
+  assert.throws(
+    () => serializeCrates(["", "crates/a"]),
+    /empty crate prefix is unsafe; use "\." for the root Cargo manifest/,
+  );
+});
+
+test("root-owned Rust uses an explicit narrow label and does not swallow a nested crate", (t) => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "inference-provenance-root-crate-"));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+
+  fs.mkdirSync(path.join(repo, "crates/media/nested/src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "Cargo.toml"), '[workspace]\nmembers = ["crates/media/nested"]\n');
+  fs.writeFileSync(
+    path.join(repo, "crates/media/root_owned.rs"),
+    "pub const ROOT_OWNED: bool = true;\n",
+  );
+  fs.writeFileSync(
+    path.join(repo, "crates/media/nested/Cargo.toml"),
+    '[package]\nname = "nested"\nversion = "0.1.0"\nedition = "2021"\n',
+  );
+  fs.writeFileSync(path.join(repo, "crates/media/nested/src/lib.rs"), "pub fn nested() {}\n");
+
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "add", "."]);
+  execFileSync(
+    "git",
+    ["-C", repo, "-c", "user.name=Codex Test", "-c", "user.email=codex@example.invalid", "commit", "-qm", "fixture"],
+  );
+  const revision = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+
+  assert.equal(ROOT_CRATE_PREFIX, ".");
+  assert.deepEqual(scanCrates(repo, revision), [ROOT_CRATE_PREFIX, "crates/media/nested"]);
+  assert.deepEqual(
+    parseCrates(serializeCrates(scanCrates(repo, revision))),
+    [ROOT_CRATE_PREFIX, "crates/media/nested"],
+  );
 });

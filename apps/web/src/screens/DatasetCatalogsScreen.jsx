@@ -6,6 +6,7 @@ import { RequiredModelsNotice } from "../components/RequiredModelsNotice.jsx";
 import { PERSON_DETECT_MODEL_ID, POSE_DETECT_MODEL_ID } from "../constants.js";
 import { missingRequiredModels } from "../modelEligibility.js";
 import { useAppStatic } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { formatBytes } from "../formatting.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { persistNavigationPreferences } from "../uiPreferences.js";
@@ -513,7 +514,7 @@ function CatalogCuration({ catalogId, token }) {
           <input
             aria-label="Catalog text search"
             onChange={(event) => setQuery((current) => ({ ...current, text: event.target.value }))}
-            placeholder="red dress, full_bodyâ€¦"
+            placeholder="red dress, full_body…"
             value={query.text}
           />
         </label>
@@ -568,7 +569,7 @@ function CatalogCuration({ catalogId, token }) {
       {error ? <p className="notice error" role="alert">{error}</p> : null}
       <div className="catalog-facets" aria-label="Faceted counts">
         {facets.map((facet) => (
-          <span key={facet.field}><strong>{facet.field}</strong>{facet.values?.map((value) => `${value.value} (${count(value.count)})`).join(" Â· ")}</span>
+          <span key={facet.field}><strong>{facet.field}</strong>{facet.values?.map((value) => `${value.value} (${count(value.count)})`).join(" · ")}</span>
         ))}
       </div>
       <form className="catalog-saved-view-form" onSubmit={saveView}>
@@ -697,7 +698,7 @@ function CatalogCuration({ catalogId, token }) {
                 src={withMediaTicket(`${API_BASE_URL}/api/v1/catalogs/${encodeURIComponent(catalogId)}/records/${encodeURIComponent(record.id)}/thumbnail`)}
               />
               <span>{record.metadata?.caption ?? record.id}</span>
-              <small>{record.metadata?.analysis?.medium ?? record.metadata?.medium ?? "Unclassified"}{review ? ` Â· ${review.decision}` : ""}</small>
+              <small>{record.metadata?.analysis?.medium ?? record.metadata?.medium ?? "Unclassified"}{review ? ` · ${review.decision}` : ""}</small>
             </button>
           );
         })}
@@ -727,6 +728,7 @@ export function DatasetCatalogsScreen() {
   // re-render on every SSE job tick (sc-8855). That is why the required-model notice below is
   // given no `downloadJobs` — it falls back to its local "Queued" state, which needs no live jobs.
   const { token = "", models = [], createModelDownloadJob, setActiveView } = useAppStatic();
+  const screenActive = useScreenActive();
   // The two cache-only preprocessors structured analysis resolves before it can run
   // (catalog_semantic_jobs.rs). Declaration order is display order.
   const missingStructuredModels = useMemo(
@@ -744,10 +746,18 @@ export function DatasetCatalogsScreen() {
   const [analyzerDraft, setAnalyzerDraft] = useState(DEFAULT_ANALYZER_SETTINGS);
   const [analysisGpu, setAnalysisGpu] = useState("auto");
   const generationRef = useRef(0);
+  // Poll invalidation and mutation ownership are intentionally independent. A hidden
+  // keep-alive screen tears down its poller, but that must not strand an owned mutation's
+  // busy state when the screen becomes active again.
+  const mutationGenerationRef = useRef(0);
   const analyzerDraftVersionRef = useRef("");
   const pollAbortRef = useRef(null);
   const mutationAbortRef = useRef(null);
   const selected = catalogs.find((catalog) => catalog.id === selectedId) ?? null;
+  // Status changes only while a processor is actively making progress. A terminal or
+  // paused catalog has no useful periodic work, and a kept-alive screen must not keep
+  // its poller alive behind another route.
+  const shouldPollSelected = screenActive && selected?.processing?.state === "running";
 
   useEffect(() => {
     const version = selected
@@ -762,6 +772,7 @@ export function DatasetCatalogsScreen() {
     generationRef.current += 1;
     pollAbortRef.current?.abort();
     mutationAbortRef.current?.abort();
+    mutationGenerationRef.current += 1;
     setBusy("");
     setSelectedId(id);
     persistNavigationPreferences({ selectedCatalogId: id });
@@ -805,11 +816,12 @@ export function DatasetCatalogsScreen() {
       controller.abort();
       pollAbortRef.current?.abort();
       mutationAbortRef.current?.abort();
+      mutationGenerationRef.current += 1;
     };
   }, [refresh, token]);
 
   useEffect(() => {
-    if (!selectedId) return undefined;
+    if (!selectedId || !shouldPollSelected) return undefined;
     const generation = ++generationRef.current;
     let timer = null;
     let stopped = false;
@@ -830,6 +842,10 @@ export function DatasetCatalogsScreen() {
             : catalog
         )));
         setError("");
+        // Do not arm another timer after the response itself reaches a terminal or
+        // paused state. The render triggered above will also tear this effect down,
+        // but this closes the small interval before that cleanup runs.
+        if (updated.processing?.state !== "running") stopped = true;
       } catch (err) {
         if (isAbortError(err) || stopped || generation !== generationRef.current) return;
         if (err.status === 404) {
@@ -851,7 +867,7 @@ export function DatasetCatalogsScreen() {
       if (timer !== null) window.clearTimeout(timer);
       pollAbortRef.current?.abort();
     };
-  }, [pollEpoch, refresh, selectedId, token]);
+  }, [pollEpoch, refresh, selectedId, shouldPollSelected, token]);
 
   async function chooseFolder(setter) {
     if (!isDesktop) return;
@@ -864,7 +880,7 @@ export function DatasetCatalogsScreen() {
   }
 
   async function mutate(action, request, success) {
-    const generation = ++generationRef.current;
+    const mutationGeneration = ++mutationGenerationRef.current;
     pollAbortRef.current?.abort();
     mutationAbortRef.current?.abort();
     const controller = new AbortController();
@@ -873,16 +889,16 @@ export function DatasetCatalogsScreen() {
     setError("");
     try {
       const result = await request(controller.signal);
-      if (controller.signal.aborted || generation !== generationRef.current) return;
-      const next = await refresh({ quiet: true, signal: controller.signal, generation });
-      if (controller.signal.aborted || generation !== generationRef.current) return;
+      if (controller.signal.aborted || mutationGeneration !== mutationGenerationRef.current) return;
+      const next = await refresh({ quiet: true, signal: controller.signal });
+      if (controller.signal.aborted || mutationGeneration !== mutationGenerationRef.current) return;
       success?.(result, next);
     } catch (err) {
-      if (!isAbortError(err) && generation === generationRef.current) {
+      if (!isAbortError(err) && mutationGeneration === mutationGenerationRef.current) {
         setError(safeCatalogError(err, action));
       }
     } finally {
-      if (generation === generationRef.current) {
+      if (mutationGeneration === mutationGenerationRef.current) {
         setBusy("");
         setPollEpoch((current) => current + 1);
       }

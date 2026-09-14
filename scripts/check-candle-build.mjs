@@ -91,16 +91,14 @@ const STEPS = [
     args: ["check", "-p", "sceneworks-rust-api", "--features", "backend-candle"],
   },
   {
-    label: "check (Candle memory adapter)",
-    args: [
-      "check",
-      "-p",
-      "sceneworks-memory-adapter",
-      "--features",
-      "candle",
-      "--bin",
-      "memory-candle-adapter",
-    ],
+    label: "check (Candle memory adapter, all targets)",
+    // `--all-targets`, NOT `--bin memory-candle-adapter` (sc-18808 review). `cargo check --bin`
+    // does not compile `#[cfg(test)]`, and this script IS the only candle-configured lane that runs
+    // on a feature-targeted PR — windows-candle.yml has no such trigger. Under the narrow selector
+    // the crate's candle `#[test]` module was not even TYPECHECKED anywhere a PR could see, so a
+    // test that failed to compile merged green and first broke on a self-hosted `cuda` runner.
+    // It still only typechecks the tests; running them remains windows-candle.yml's job.
+    args: ["check", "-p", "sceneworks-memory-adapter", "--features", "candle", "--all-targets"],
   },
 ];
 

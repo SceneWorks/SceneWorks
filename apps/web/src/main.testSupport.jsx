@@ -264,8 +264,33 @@ export function familyFilter(container) {
   return container.querySelector(".models-family-select");
 }
 
+// The unified checkpoint-import panel (epic 20398, sc-20650) replaced the old standalone
+// "Import model" form. It opens COLLAPSED and leads with the linked-library choice, so a test that
+// wants the managed (upload / URL / HF / Civitai) form has to open the disclosure and pick
+// "Add to SceneWorks" first — `openModelImportPanel` does both. `modelImportPanel` returns the
+// managed form once it is on screen, and null when the whole section is absent.
 export function modelImportPanel(container) {
-  return container.querySelector("form[aria-label='Import model']");
+  return container.querySelector("form[aria-label='Add to SceneWorks']");
+}
+
+export function checkpointImportSection(container) {
+  return container.querySelector(".model-import-panel-section");
+}
+
+export async function openModelImportPanel(container, act) {
+  const section = checkpointImportSection(container);
+  if (!section) return null;
+  const toggle = section.querySelector(".checkpoint-import-toggle");
+  if (toggle?.getAttribute("aria-expanded") === "false") {
+    await act(async () => toggle.click());
+  }
+  const managed = [...section.querySelectorAll('[role="radio"]')].find((node) =>
+    node.textContent.startsWith("Add to SceneWorks"),
+  );
+  if (managed && managed.getAttribute("aria-checked") === "false") {
+    await act(async () => managed.click());
+  }
+  return modelImportPanel(container);
 }
 
 export function buttonInside(scope, label) {

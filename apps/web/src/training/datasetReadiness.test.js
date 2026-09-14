@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   aestheticScore,
@@ -46,6 +46,21 @@ describe("captionHash", () => {
     expect(await captionHash("tiny test image")).toBe(
       "d93dcd03ca0197eb0ae2041bfc1b3c3b78399bb19e904c901713bcc85cc39cf7",
     );
+  });
+
+  it("uses the same SHA-256 fallback when crypto.subtle is unavailable", async () => {
+    vi.stubGlobal("crypto", undefined);
+    try {
+      expect(await captionHash("tiny test image")).toBe(
+        "d93dcd03ca0197eb0ae2041bfc1b3c3b78399bb19e904c901713bcc85cc39cf7",
+      );
+      // Locks the UTF-8 input bytes as well as the digest algorithm.
+      expect(await captionHash("snowman ☃")).toBe(
+        "06ab2a8c60adfdefc20e9f26ac58a9151eb716c8c3d34b8cf034ae1a00b0a20a",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

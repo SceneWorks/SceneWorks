@@ -112,6 +112,7 @@ fn multipart_error(error: &axum::extract::multipart::MultipartError) -> ApiError
         ApiError {
             status: error.status(),
             detail: error.body_text(),
+            context: None,
             code: None,
         },
         INSPECT_CODE_BAD_MULTIPART,
@@ -148,6 +149,7 @@ pub(crate) async fn inspect_workflow(
     let mut multipart = multipart.map_err(|rejection| ApiError {
         status: rejection.status(),
         detail: rejection.body_text(),
+        context: None,
         code: Some(INSPECT_CODE_BAD_MULTIPART),
     })?;
     let mut file: Option<PathBuf> = None;
@@ -166,6 +168,7 @@ pub(crate) async fn inspect_workflow(
                         return Err(ApiError {
                             status: StatusCode::BAD_REQUEST,
                             detail: "Only one file field is allowed".to_owned(),
+                            context: None,
                             code: Some(INSPECT_CODE_BAD_MULTIPART),
                         });
                     }
@@ -197,6 +200,7 @@ pub(crate) async fn inspect_workflow(
     let temp_path = file.ok_or_else(|| ApiError {
         status: StatusCode::BAD_REQUEST,
         detail: "Upload file field is required".to_owned(),
+        context: None,
         code: Some(INSPECT_CODE_BAD_MULTIPART),
     })?;
     // The chunk read is bounded but synchronous (`workflow_png` walks chunk headers off the
@@ -208,6 +212,7 @@ pub(crate) async fn inspect_workflow(
     let read = read.map_err(|error| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         detail: format!("Workflow chunk read failed: {error}"),
+        context: None,
         code: Some(INSPECT_CODE_READ_FAILED),
     })?;
 
@@ -317,6 +322,7 @@ pub(crate) async fn get_asset_workflow(
             detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
                      The image itself is unaffected."
                 .to_owned(),
+            context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         }
     })?;
@@ -350,6 +356,7 @@ pub(crate) async fn get_asset_workflow(
             detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
                      The image itself is unaffected."
                 .to_owned(),
+            context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         });
     }
@@ -458,6 +465,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
         WorkflowChunkError::NotPng => ApiError {
             status: StatusCode::BAD_REQUEST,
             detail: error.to_string(),
+            context: None,
             code: Some(INSPECT_CODE_NOT_PNG),
         },
         // OUR staged temp could not be opened or read. The caller's bytes were written
@@ -468,6 +476,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
             detail: "SceneWorks could not read the uploaded image back off disk, so its workflow \
                      could not be checked. Nothing is known to be wrong with the file — try again."
                 .to_owned(),
+            context: None,
             code: Some(INSPECT_CODE_READ_FAILED),
         },
         // A PNG whose framing never got as far as our keyword. The upstream `detail` is `png`'s
@@ -477,6 +486,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
             detail: "This PNG could not be read far enough to look for a workflow, so it may be \
                      truncated or damaged."
                 .to_owned(),
+            context: None,
             code: Some(INSPECT_CODE_UNREADABLE),
         },
         // Same treatment, same reason: a corrupt zlib stream's message is not a sentence.
@@ -486,6 +496,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
                 "This PNG's workflow text could not be read as text within {limit} bytes, so the \
                  recipe it claims cannot be shown."
             ),
+            context: None,
             code: Some(INSPECT_CODE_UNREADABLE),
         },
         // `Encode` is unreachable on a read; given a sentence rather than left to a catch-all so a
@@ -493,6 +504,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
         WorkflowChunkError::Encode { .. } => ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             detail: "This image's workflow could not be processed.".to_owned(),
+            context: None,
             code: Some(INSPECT_CODE_UNREADABLE),
         },
         // The remaining variants' own sentences are already written FOR a person and name a
@@ -504,6 +516,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
         | WorkflowChunkError::Envelope(_) => ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             detail: error.to_string(),
+            context: None,
             code: Some(INSPECT_CODE_UNREADABLE),
         },
     }

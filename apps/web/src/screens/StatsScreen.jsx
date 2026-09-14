@@ -15,7 +15,15 @@ import {
 
 import { useAppStatic } from "../context/AppContext.js";
 import { useGenerationMetrics } from "../hooks/useGenerationMetrics.js";
-import { formatBytes, formatMs, formatPercent, quantLabel } from "../formatting.js";
+import {
+  executionRepresentationLabel,
+  formatBytes,
+  formatMs,
+  formatPercent,
+  quantLabel,
+  sourceCodecLabel,
+  weightFactsLabel,
+} from "../formatting.js";
 import {
   computeKpis,
   deriveFilterOptions,
@@ -80,6 +88,10 @@ function statusTone(status) {
 const COLUMNS = [
   { key: "model", label: "model", get: (r) => r.metrics?.model ?? "—" },
   { key: "quant", label: "quant", get: (r) => quantLabel(r.metrics?.quantLabel) },
+  // The stored codec and what this run actually executed it as, beside the requested tier rather
+  // than folded into it (sc-21484). "nvfp4-v1 - dense fallback" is a legitimate and common row:
+  // the file is NVFP4 and this host ran it dense.
+  { key: null, label: "weights", get: (r) => weightFactsLabel(r.metrics) },
   { key: "sampler", label: "sampler", get: (r) => r.metrics?.sampler ?? "—" },
   { key: "scheduler", label: "sched", get: (r) => r.metrics?.scheduler ?? "—" },
   { key: "cfg", label: "cfg", numeric: true, get: (r) => num1(r.metrics?.guidanceScale) },
@@ -119,7 +131,9 @@ function RunDetail({ row, onClose }) {
   const items = [
     ["Job", `${typeLabel(row.type)} · ${row.jobId}`],
     ["Model", m.model ?? "—"],
-    ["Quant", `${quantLabel(m.quantLabel)}${m.quantBits ? ` (${m.quantBits}-bit)` : ""}`],
+    ["Quant tier (requested)", `${quantLabel(m.quantLabel)}${m.quantBits ? ` (${m.quantBits}-bit)` : ""}`],
+    ["Source codec (stored)", sourceCodecLabel(m.sourceCodec)],
+    ["Execution (this host)", executionRepresentationLabel(m.executionRepresentation)],
     ["Backend", m.backend ?? "—"],
     [
       "Sampler / scheduler",

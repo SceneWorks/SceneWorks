@@ -7,6 +7,7 @@ import {
   serializeLora,
 } from "../presetUtils.js";
 import { terminalStatuses } from "../jobTypes.js";
+import { defaultTurboVariant, turboVariantsForModel } from "../minimaxH3Turbo.js";
 import { useStudioState } from "./useStudioState.js";
 
 // Module-level so the "first time this key is seen" initial is referentially stable — a
@@ -103,6 +104,47 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
       return kept.length === ids.length ? ids : kept;
     });
   }, [loras.length, selectedModel, compatibleLoraKey, compatibleLoras, setSelectedLoraIds]);
+
+  // MiniMax-H3 turbo, default-on (sc-18727). Simple deliberately shows no turbo CONTROL — the
+  // adapter is already in its picker like any other LoRA, and adding a second surface for it would
+  // be exactly the advanced knob this shell exists to leave out. What Simple must not inherit is the
+  // DEFAULT, because "no turbo" here means a measured 2 h 25 m render where the advanced studio
+  // ships 12.6 min. So the seed runs identically in both shells and only the control differs.
+  //
+  // One-shot per model, marked even when a variant is already selected, for the reason the advanced
+  // copy documents: without the marker, re-seeding on every empty selection would silently undo a
+  // deliberate removal from the picker.
+  const [turboSeededModels, setTurboSeededModels] = useStudioState(
+    scope,
+    "turboSeededModels",
+    EMPTY_IDS,
+  );
+  useEffect(() => {
+    const modelId = selectedModel?.id;
+    if (!modelId || turboSeededModels.includes(modelId)) {
+      return;
+    }
+    const variants = turboVariantsForModel(selectedModel, compatibleLoras);
+    if (!variants.length) {
+      return;
+    }
+    setTurboSeededModels((seeded) => (seeded.includes(modelId) ? seeded : [...seeded, modelId]));
+    if (selectedLoraIds.some((id) => variants.some((variant) => variant.id === id))) {
+      return;
+    }
+    const preferred = defaultTurboVariant(selectedModel, variants);
+    if (!preferred) {
+      return;
+    }
+    setSelectedLoraIds((ids) => (ids.includes(preferred.id) ? ids : [...ids, preferred.id]));
+  }, [
+    selectedModel,
+    compatibleLoras,
+    turboSeededModels,
+    selectedLoraIds,
+    setTurboSeededModels,
+    setSelectedLoraIds,
+  ]);
 
   const effectiveLoraWeight = useCallback(
     (lora) => {

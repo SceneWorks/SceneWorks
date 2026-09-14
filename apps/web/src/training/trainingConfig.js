@@ -57,6 +57,161 @@ export const trainingAdapterVersionLabels = {
   v2: "v2 — experimental (heavier de-distill)",
 };
 
+export const ltx25ValidationDefaults = Object.freeze({
+  width: 960,
+  height: 544,
+  frames: 89,
+  fps: 24,
+  steps: 30,
+  videoCfgScale: 3.0,
+  audioCfgScale: 7.0,
+  videoStgScale: 1.0,
+  audioStgScale: 1.0,
+  stgBlocks: [28],
+  guidanceRescale: 0.7,
+  videoModalityGuidanceScale: 3.0,
+  audioModalityGuidanceScale: 3.0,
+  generateAudio: true,
+});
+
+const condition = (type, probability, extra = {}) => ({ type, probability, ...extra });
+const generated = (conditions = []) => ({ isGenerated: true, conditions });
+const frozen = () => ({ isGenerated: false, conditions: [] });
+const LTX25_WORKFLOW_PLANS = Object.freeze({
+  i2v_lora: { video: generated([condition("firstFrame", 0.5)]), audio: generated() },
+  t2v_lora: { video: generated(), audio: generated() },
+  v2a_lora: { video: frozen(), audio: generated() },
+  a2v_lora: { video: generated(), audio: frozen() },
+  t2a_lora: { video: null, audio: generated() },
+  video_extend_lora: { video: generated([condition("prefix", 1, { temporalBoundary: 8 })]), audio: generated() },
+  video_inpainting_lora: { video: generated([condition("mask", 1, { tensorKey: "video_mask" })]), audio: null },
+  video_outpainting_lora: { video: generated([condition("spatialCrop", 1, { spatialRegion: [0, 0, 288, 576] })]), audio: null },
+  video_suffix_lora: { video: generated([condition("suffix", 1, { temporalBoundary: 8 })]), audio: generated() },
+  audio_extend_lora: { video: null, audio: generated([condition("prefix", 1, { temporalBoundary: 8 })]) },
+  audio_inpainting_lora: { video: null, audio: generated([condition("mask", 1, { tensorKey: "audio_mask" })]) },
+  audio_suffix_lora: { video: null, audio: generated([condition("suffix", 1, { temporalBoundary: 8 })]) },
+  av2av_ic_lora: {
+    video: generated([condition("reference", 1, { tensorKey: "video_reference" })]),
+    audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]),
+  },
+  v2v_ic_lora: {
+    video: generated([
+      condition("reference", 1, { tensorKey: "video_reference" }),
+      condition("firstFrame", 0.2),
+    ]),
+    audio: null,
+  },
+  a2a_ic_lora: { video: null, audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]) },
+});
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+export function ltx25WorkflowPlan(workflow, previousVideo = null, previousAudio = null) {
+  const canonical = LTX25_WORKFLOW_PLANS[workflow] ?? LTX25_WORKFLOW_PLANS.t2v_lora;
+  const mergeModality = (next, previous) => {
+    if (!next) return null;
+    return {
+      isGenerated: next.isGenerated,
+      conditions: next.conditions.map((entry) => {
+        const old = previous?.conditions?.find((candidate) => candidate?.type === entry.type);
+        return old ? { ...entry, ...old, type: entry.type } : { ...entry };
+      }),
+    };
+  };
+  return {
+    video: mergeModality(cloneJson(canonical.video), previousVideo),
+    audio: mergeModality(cloneJson(canonical.audio), previousAudio),
+  };
+}
+
+function ltxValidationSnapshot(value = {}) {
+  const merged = { ...ltx25ValidationDefaults, ...value };
+  return {
+    width: numberFromDraft(merged.width),
+    height: numberFromDraft(merged.height),
+    frames: numberFromDraft(merged.frames),
+    fps: numberFromDraft(merged.fps),
+    steps: numberFromDraft(merged.steps),
+    videoCfgScale: numberFromDraft(merged.videoCfgScale),
+    audioCfgScale: numberFromDraft(merged.audioCfgScale),
+    videoStgScale: numberFromDraft(merged.videoStgScale),
+    audioStgScale: numberFromDraft(merged.audioStgScale),
+    stgBlocks: Array.isArray(merged.stgBlocks)
+      ? merged.stgBlocks.map(Number)
+      : String(merged.stgBlocks).split(",").map((item) => Number(item.trim())).filter(Number.isFinite),
+    guidanceRescale: numberFromDraft(merged.guidanceRescale),
+    videoModalityGuidanceScale: numberFromDraft(merged.videoModalityGuidanceScale),
+    audioModalityGuidanceScale: numberFromDraft(merged.audioModalityGuidanceScale),
+    generateAudio: Boolean(merged.generateAudio),
+  };
+}
+
+function validateLtxValidationControls(value, issues) {
+  const validation = ltxValidationSnapshot(value);
+  const integerRange = (field, min, max, label = optionLabel(field)) => {
+    const current = validation[field];
+    if (!Number.isInteger(current) || current < min || current > max) {
+      issues.push(issue.error("ltxValidation", `${label} must be an integer between ${min} and ${max}`));
+      return false;
+    }
+    return true;
+  };
+  const finiteRange = (field, min, max, label = optionLabel(field)) => {
+    const current = validation[field];
+    if (!Number.isFinite(current) || current < min || current > max) {
+      issues.push(issue.error("ltxValidation", `${label} must be between ${min} and ${max}`));
+    }
+  };
+
+  for (const field of ["width", "height"]) {
+    if (integerRange(field, 32, 4096) && validation[field] % 32 !== 0) {
+      issues.push(issue.error("ltxValidation", `${optionLabel(field)} must be aligned to 32 pixels`));
+    }
+  }
+  if (integerRange("frames", 1, 257) && validation.frames % 8 !== 1) {
+    issues.push(issue.error("ltxValidation", "Frames must satisfy frames % 8 = 1"));
+  }
+  integerRange("fps", 1, 120, "FPS");
+  integerRange("steps", 1, 100);
+  for (const field of [
+    "videoCfgScale", "audioCfgScale", "videoStgScale", "audioStgScale",
+    "videoModalityGuidanceScale", "audioModalityGuidanceScale",
+  ]) {
+    finiteRange(field, 0, 20);
+  }
+  finiteRange("guidanceRescale", 0, 1);
+
+  if (validation.stgBlocks.length !== 1
+    || !Number.isInteger(validation.stgBlocks[0])
+    || validation.stgBlocks[0] < 0
+    || validation.stgBlocks[0] > 47) {
+    issues.push(issue.error("ltxValidation", "STG blocks must contain one integer block index between 0 and 47"));
+  }
+}
+
+function ltxModalitySnapshot(modality) {
+  if (!modality) return undefined;
+  const spatialRegion = (value) => {
+    if (Array.isArray(value)) return value.map(Number);
+    const text = String(value ?? "").trim();
+    return text ? text.split(",").map((part) => Number(part.trim())).filter(Number.isFinite) : undefined;
+  };
+  return {
+    isGenerated: Boolean(modality.isGenerated),
+    conditions: (modality.conditions ?? []).map((entry) => compactObject({
+      type: entry.type,
+      probability: numberFromDraft(entry.probability),
+      temporalBoundary: numberFromDraft(entry.temporalBoundary),
+      spatialRegion: spatialRegion(entry.spatialRegion),
+      tensorKey: asText(entry.tensorKey).trim(),
+      spatialScaleFactor: numberFromDraft(entry.spatialScaleFactor),
+      temporalScaleFactor: numberFromDraft(entry.temporalScaleFactor),
+    })).map((entry) => (entry.spatialRegion?.length ? entry : compactObject({ ...entry, spatialRegion: undefined }))),
+  };
+}
+
 export function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
 }
@@ -159,6 +314,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
   const outputLabel = outputKindLabel(target, advanced.networkType);
+  const ltxWorkflow = asText(advanced.ltxWorkflow || "t2v_lora");
+  const ltxPlan = ltx25WorkflowPlan(ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
   return {
     outputName: previousDraft.outputName ?? (dataset?.name ? `${dataset.name} ${outputLabel}` : ""),
     triggerWord: triggerPhrase || asText(defaults.triggerWord),
@@ -205,6 +362,14 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     batchSize: numericDraft(defaults.batchSize ?? defaultBatchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation ?? defaultGradientAccumulation),
     seed: numericDraft(defaults.seed),
+    ...(target?.baseModel === "ltx_2_5"
+      ? {
+          ltxWorkflow,
+          ltxVideo: ltxPlan.video,
+          ltxAudio: ltxPlan.audio,
+          ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
+        }
+      : {}),
   };
 }
 
@@ -315,6 +480,48 @@ export function configValidation(
       ),
     );
   }
+  if (selectedTarget?.baseModel === "ltx_2_5") {
+    const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)
+      ? selectedTarget.limits.ltxWorkflows
+      : [];
+    if (!workflows.includes(configDraft.ltxWorkflow)) {
+      issues.push(issue.error("ltxWorkflow", "Choose a supported LTX-2.5 workflow"));
+    }
+    const missingPrepared = (activeDataset?.items ?? []).filter(
+      (item) => !String(item?.ltxPreparedBundlePath ?? "").trim(),
+    );
+    if (missingPrepared.length) {
+      issues.push(issue.error(null, `Attach an LTX prepared bundle to all ${missingPrepared.length} unprepared dataset item(s).`));
+    }
+    for (const modality of [configDraft.ltxVideo, configDraft.ltxAudio].filter(Boolean)) {
+      for (const condition of modality.conditions ?? []) {
+        const probability = Number(condition.probability);
+        if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+          issues.push(issue.error("ltxWorkflow", "LTX condition probability must be between 0 and 1"));
+        }
+        if (["mask", "reference"].includes(condition.type) && !String(condition.tensorKey ?? "").trim()) {
+          issues.push(issue.error("ltxWorkflow", `${optionLabel(condition.type)} conditions require a tensor key`));
+        }
+        if (["prefix", "suffix"].includes(condition.type) && Number(condition.temporalBoundary) <= 0) {
+          issues.push(issue.error("ltxWorkflow", "LTX temporal boundaries must be greater than zero"));
+        }
+        if (condition.type === "spatialCrop") {
+          const region = Array.isArray(condition.spatialRegion)
+            ? condition.spatialRegion.map(Number)
+            : String(condition.spatialRegion ?? "").split(",").map((part) => Number(part.trim()));
+          if (region.length !== 4 || region.some((value) => !Number.isFinite(value)) || region[2] <= region[0] || region[3] <= region[1]) {
+            issues.push(issue.error("ltxWorkflow", "LTX spatial regions require y1,x1,y2,x2 with positive area"));
+          }
+        }
+        for (const scale of [condition.spatialScaleFactor, condition.temporalScaleFactor]) {
+          if (scale !== undefined && scale !== "" && Number(scale) <= 0) {
+            issues.push(issue.error("ltxWorkflow", "LTX condition scale factors must be greater than zero"));
+          }
+        }
+      }
+    }
+    validateLtxValidationControls(configDraft.ltxValidation, issues);
+  }
   return issues;
 }
 
@@ -370,6 +577,10 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
   // more prompts than render.
   const editedPrompts = promptLinesToList(configDraft.samplePrompts);
   const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
+  const ltxWorkflow = asText(configDraft.ltxWorkflow).trim();
+  const ltxPlan = selectedTarget?.baseModel === "ltx_2_5"
+    ? ltx25WorkflowPlan(ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
+    : null;
   const advanced = compactObject({
     ...defaultAdvanced,
     networkType,
@@ -401,6 +612,14 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
     requestedGpu: configDraft.requestedGpu,
+    ...(ltxPlan
+      ? {
+          ltxWorkflow,
+          ltxVideo: ltxModalitySnapshot(ltxPlan.video),
+          ltxAudio: ltxModalitySnapshot(ltxPlan.audio),
+          ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation),
+        }
+      : {}),
   });
   return {
     targetId: selectedTarget.id,

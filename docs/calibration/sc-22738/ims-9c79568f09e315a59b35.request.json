@@ -1,0 +1,63 @@
+{
+  "action": "run",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "memoryBytes": 137438953472,
+    "metalDevice": "Apple M5 Max",
+    "mlxMemoryLimitBytes": 130567005798,
+    "model": "Mac17,6",
+    "osVersion": "26.6.2",
+    "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+    "wiredLimitBytes": 87044670532
+  },
+  "planned": {
+    "backend": "mlx",
+    "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+    "evidenceScope": "authoritative",
+    "expectedResult": "passed",
+    "fixture": "ltx-2-5-mlx-bf16-dev-conv-512x768-f145-fps24-seed18755",
+    "loadShape": "eager_materialization",
+    "logicalCaseId": "implan-60e0ebe2b85d84cd4161",
+    "modelLoadGroup": null,
+    "modelLoadPolicy": "fresh_per_case",
+    "negative": false,
+    "strategy": {
+      "engagedRungs": [
+        "resident"
+      ],
+      "parameters": {},
+      "rung": "resident"
+    },
+    "target": {
+      "decoder": "conv",
+      "geometry": {
+        "batch": 1,
+        "frames": 145,
+        "height": 768,
+        "width": 512
+      },
+      "mode": "text_to_video",
+      "modelId": "ltx_2_5",
+      "overlay": "none",
+      "provider": "ltx_2_5",
+      "tier": "bf16",
+      "transformerVariant": "dev"
+    }
+  },
+  "repositories": {
+    "inference": {
+      "closureDigest": "c5405daa2a2132bf79c28d00dc56a9c3948c7b1312cefdf7098e94a2350d7116",
+      "dirty": false,
+      "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+    },
+    "sceneWorks": {
+      "dirty": false,
+      "matrixSourceRevision": "source-tree:485b02f3328895faf5817b413a0df227cf51756fac7b1898e1e51e9194dd95bb",
+      "revision": "61255b64a74a4572e288a69af648696d6ae4783a"
+    }
+  },
+  "repositoryPaths": {
+    "inference": "/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/inf-M",
+    "sceneWorks": "/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/rerun-mlx"
+  }
+}

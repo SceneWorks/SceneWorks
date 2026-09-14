@@ -83,7 +83,7 @@ export function editableLora(link) {
   return {
     name: link?.name ?? "",
     triggerWords: (link?.triggerWords ?? []).join(", "),
-    defaultWeight: link?.defaultWeight ?? 0.8,
+    defaultWeight: link?.defaultWeight ?? 1.0,
     families: extractFamilies(link).join(", "),
     scope: link?.scope ?? "project",
   };

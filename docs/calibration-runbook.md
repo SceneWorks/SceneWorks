@@ -27,13 +27,23 @@ Companions, not prerequisites — you should not need to open either to finish a
 
 Measuring a lane **improves prediction**. It does not unlock anything.
 
-Since epic 18093 (sc-18095/18096/18097), a lane whose provider compile closure has moved keeps
-serving its measured numbers behind a **widened admission margin**, and unmeasured cells are admitted
-from **fitted estimates** behind a wider margin still
-(`crates/sceneworks-worker/src/ladder_margin_policy.rs`). Nothing in `npm run check`,
-`npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are zero staleness gates
-in CI**. So the payoff of a capture is narrower margins and better-grounded admission on that lane,
-not a ladder that was previously refused.
+**Measurement currency is a re-capture signal for the probe tooling, and nothing else (sc-22738,
+Michael's standing rule: "The App Runtime should ALWAYS continue behaving as if the measurement were
+valid").** A lane whose provider compile closure has moved keeps serving its measured numbers
+**exactly as measured** — a stale calibration record is graded at its measured peak, a stale anchor
+binds and derives, a stale fitted curve matches, and a stale measured lower bound refuses, all
+identically to current ones. Unmeasured cells are admitted from **fitted, anchor-derived, or floor
+estimates** behind whichever allowance names their remaining uncertainty
+(`crates/sceneworks-worker/src/ladder_margin_policy.rs`; sc-22508 replaced the single per-backend
+multiplier with one named term per basis; sc-22738 retired the "stale-measured" widening that epic
+18093 had charged a moved closure). The runtime admission seam carries no field, parameter or
+function that could express "stale" — `scripts/runtime-admission-currency.test.mjs` keeps it that
+way — so a critical fix in shared engine code, which touches nearly every closure, ships without
+hours of re-measurement and without silently moving what a live request gets. Nothing in
+`npm run check`, `npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are
+zero staleness gates in CI, and staleness never changes runtime behaviour**. So the payoff of a
+capture is a measurement where there was an estimate, and a fresher measurement where the
+tooling reports a stale one — never a ladder that was previously refused or widened.
 
 Read that as permission to measure the lane that matters and leave the rest on estimates.
 
@@ -64,8 +74,11 @@ measurement; a planned-but-undeclared lane needs both an adapter arm and a closu
   ...
 ```
 
-`IMPACT` is stale bindings × the margin the runtime is applying to them right now, so the top row is
-the lane where a capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
+`IMPACT` is stale bindings × the lane's derived recapture spread — the report's own ranking weight for
+"how much measured surface a re-capture refreshes", NOT a margin the runtime applies (since sc-22738
+the runtime widens nothing for staleness; the report's "serving under a widened margin" header
+predates that and describes the ranking, not admission) — so the top row is the lane where a
+capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
 worker's fit gates consult today); `RECORDS` is corpus debt. Prefer bindings.
 
 `CAPTURE` (sc-18212) is §2c answered mechanically: the report parses the two adapter binaries'
@@ -75,8 +88,9 @@ planned lane with no arm as **uncapturable**, in its own section, visibly distin
 capture". `candle:z_image` — declared, 90 authoritative plan entries, no arm — used to print as
 "declared but never captured", which read as pending measurement work; it is an
 adapter-implementation task, and the report now says so. Planned-but-undeclared lanes
-(`candle:qwen_image_edit`, `candle:qwen_image`) are enumerated too. **§2c/§2d below remain the
-diagnosis**; the report is now an index into them, not a substitute for them.
+(`candle:qwen_image_edit`; `candle:qwen_image` was one until sc-22725 declared it) are enumerated
+too. **§2c/§2d below remain the diagnosis**; the report is now an index into them, not a substitute
+for them.
 
 🔴 **This report enumerates DECLARED and PLANNED lanes only, so it still cannot tell you a lane does
 not exist.** A lane is keyed exactly as `config/inference-provider-closures.json` keys it
@@ -111,27 +125,48 @@ node -e 'const c=require("./config/inference-provider-closures.json");
   console.log(c.providers["<lane>"] ?? "NOT DECLARED")'
 ```
 
-If it prints `NOT DECLARED`, the capture will fail in seconds — the harness derives one closure
-digest per lane **before the first capture invocation** precisely so this does not surface after a
-multi-hour sweep. Add the lane per §7c first.
+If it prints `NOT DECLARED`, the capture **still runs and still writes a record** — sc-22512 made an
+undeclared lane a non-refusal. What you lose is currency: the harness derives the closure digest
+*after* the provider probe returns, and an undeclared lane derives none at all, so the record carries
+no currency term and can therefore never read `current` or certify a cell
+(`scripts/memory-calibration-harness.mjs`, `closureDigest` in `capturePlannedCase`). Add the lane per
+§7c **before** booking the host so the capture is promotable on the spot. Declaring it afterwards is
+recoverable without re-capturing — `node scripts/backfill-closure-digests.mjs --repo <inference-checkout>
+--write` stamps a record that carries no digest yet — but that is a repair, not the path this runbook
+walks.
 
-### 2b. The plan has entries for the lane, and you know its fixture
+### 2b. The plan declares an ANCHOR for the cell you want measured
 
-`--fixture` — not `--provider` — is how a multi-rung ladder is selected as one reproducible capture.
-Derive it from the plan rather than guessing:
+sc-22514 collapsed `config/memory-calibration-plan.json` to an ANCHOR plan: an object keyed
+`<modelId>:<tier>:<backend>` with exactly one entry per key. `--anchor` names that key. There is no
+fixture selector, no rung ladder and no partition — one key is one capture is one record. Read the
+declared keys for a lane rather than guessing:
 
 ```bash
 node -e 'const [backend,provider]=process.argv[1].split(":");
   const plan=require("./config/memory-calibration-plan.json");
-  const rows=plan.providers.filter(p=>p.backend===backend&&p.target.provider===provider);
-  if(!rows.length) throw new Error("no plan entries for "+process.argv[1]);
-  console.log([...new Set(rows.map(p=>`${p.evidenceScope}  ${p.fixture}`))].join("\n"))' <lane>
+  const rows=Object.entries(plan.anchors).filter(([k,a])=>k.endsWith(":"+backend)&&a.provider===provider);
+  if(!rows.length) throw new Error("no anchor declared for "+process.argv[1]);
+  console.log(rows.map(([k,a])=>`${k}  ${a.evidenceScope}  ${a.fixture}`).join("\n"))' <lane>
 ```
 
-Verified for `mlx:z_image_turbo` → `authoritative  fresh-five-rung-z-image-q4-768-seed16402-step2`.
+Verified for `mlx:z_image_turbo` → `z_image_turbo:q4:mlx  authoritative
+fresh-five-rung-z-image-q4-768-seed16402-step2`.
 
-Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` selection derives no
+Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` anchor derives no
 digest and can never be current evidence.
+
+🔴 **The anchor's `geometry` is a FREE PLAN CHOICE, not a restatement of the geometry the packaged
+anchor was captured at, and the two are allowed to disagree.** The packaged anchors in
+`config/memory-anchors.json` (surfaced as `anchors[].geometry` in `docs/generated/memory-matrix.json`)
+record where the *last* capture happened; the plan records where the *next* one should happen. Five
+cells disagree today on purpose — `krea_2_turbo:q4:candle`, `flux2_dev:q4:mlx`, `flux2_dev:q8:mlx`,
+`ltx_2_5:bf16:mlx` and `ltx_2_5:q8:mlx` all plan a smaller geometry than the packaged anchor carries
+— and re-capturing any of them **legitimately moves** the packaged geometry to the planned one.
+Nothing derives one from the other and nothing gates on their agreement, so do **not** "fix" a plan
+geometry to match a packaged anchor: editing the plan changes what the next capture measures, and
+that is a measurement decision. Read `crates/sceneworks-core/src/memory_anchor.rs` for how a
+non-anchor cell is derived from whatever geometry the anchor actually carries.
 
 ### 2c. A provider adapter covers the lane
 
@@ -140,8 +175,68 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl` (all five catalog routes, keyed on `(provider, modelId)` — sc-22729), `instantid` (sc-22729), `krea_2_turbo_control`, `flux2_dev`, `flux2_klein_9b` (sc-22727; serving BOTH the `flux2_klein_9b` and `flux2_klein_9b_kv` catalog models, told apart by `target.modelId`), `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`), `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo` (the turnkey still family, sc-22732 — one arm over three engine crates, member resolved from `(provider, mode)`, every member plain text-to-image; each binds its own artifact family and Ideogram binds a SECOND one for bf16; the rows bind the per-(route, tier) identities of the sc-22732 inference head — see the note below), `sensenova_u1_8b`, `sensenova_u1_8b_fast` (the SenseNova-U1 family, sc-22734 — one arm serving SIX catalog ids on TWO engine ids, resolved from `(provider, modelId)` because each id ships its own independently pinned tiered rehost and mints its own per-route calibration fingerprint) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. InstantID exposes only Resident and Staged. FLUX.2-dev is **resident rung only**; the klein manifest declares five rungs, but the shape this arm loads (`Resident` + `Eager`, sc-22727) implements resident + bounded decode/attention and leaves staged residency and rung 4 `Missing` — those two require the streamable shape. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `sdxl_arm` — `the MLX SDXL arm does not implement modelId "<id>" on provider "sdxl"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew); `sensenova_arm` — `the MLX SenseNova arm does not implement modelId {id:?} on provider {provider:?} (family: …)` |
+| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, all five catalog routes, no inline arm), `instantid` (sc-22729; a **bespoke** arm, bf16 only), `flux2_dev` and `flux2_klein_9b` (sc-22727; five-rung reference path, no inline arm; the klein id serves `flux2_klein_9b` and `flux2_klein_9b_kv`), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`), `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo` (the turnkey still family, sc-22732; five-rung reference path, no inline arm. Kolors and both Lens routes take the packed tier's `LoadSpec::quant` EXPLICITLY because the worker's `candle_quant_for_resolved_tier` does not carve them out; the two Ideogram routes do NOT, because `candle-gen-ideogram`'s exact directory route refuses `quantize: Some(_)` and proves the tier off the packed headers — `TURNKEY_CANDLE_MEMBERS` states the decision per member. Kolors' `candle_kolors_ipadapter` and `candle_kolors_control` routes are deliberately NOT served: different providers, different overlays, different measurements.), `sensenova_u1_8b`, `sensenova_u1_8b_fast` (the SenseNova-U1 family, sc-22734 — the same six catalog ids on two engine ids, resolved from `(provider, modelId)`; the contract classifies `StagedResidency` and `BoundedDecode` as `StructurallyNotApplicable` on this lane, so its anchors plan the RESIDENT rung rather than the candle default) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"`; `sensenova_arm` — `the Candle SenseNova arm does not implement modelId {id:?} on provider {provider:?} (family: …)` |
+
+🔴 **The SDXL family is keyed on `(provider, modelId)`, not on the provider alone** (sc-22729). The
+worker routes five catalog models — `sdxl`, `realvisxl`, `realvisxl_lightning`,
+`illustrious_xl_v1`, `illustrious_xl_v2` — onto the single `sdxl` engine id on BOTH lanes
+(`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`), each with its own independently pinned
+tiered rehost. The engine id is not an artifact identity: `candle-gen-sdxl` seals a per-route
+repository/revision and mints a per-route calibration fingerprint
+(`sdxl-candle-<route>-staged-decode-attention-v1`), while `mlx-gen-sdxl` mints ONE route-independent
+string (`sdxl-mlx-unet-shared-ladder-v3`) for all five. Each model therefore has its own
+`SCENEWORKS_<MODEL>_{REPOSITORY,REVISION,ROOT}` triple, and both adapters refuse a `modelId` no
+family member serves by name. `instantid_realvisxl` rides the separate bespoke `instantid` provider
+on the SAME `SceneWorks/realvisxl-mlx` backbone, bound through its own
+`SCENEWORKS_INSTANTID_REALVISXL_*` triple so the two can never satisfy each other's plans.
+
+**Every cell in the family is DECLARED — a plan anchor and both loader-closure declarations on
+every routed lane. Two engine-side facts keep some of them from being CAPTURABLE at inference
+`c6d6a4db`, and neither is adapter or plan work:**
+
+> ✅ **RESOLVED at the current pin `e34d7b46` (sc-22738).** The inference-side repair landed:
+> `SDXL_ROUTES` now pins `illustrious_xl_v1` at `778c3f02…` and `illustrious_xl_v2` at `672e9851…`,
+> which is exactly what `config/manifests/builtin.models.jsonc` ships, so the plan classifies all
+> six cells `runnable`. On CUDA run 34272596969 they nonetheless failed — because
+> `memory-candle-adapter` **transcribed** the old revisions into `SdxlCandleArm::route_revision` and
+> refused a drift that no longer existed. That field is gone: `sdxl_candle_route_revision` reads
+> `candle_gen_sdxl::SDXL_ROUTES` out of the linked engine crate at the pin, and additionally refuses
+> a route whose repository disagrees with the one the adapter stages. The check survives; it can no
+> longer be wrong about what the engine pins, and a future route move needs no edit here. **The
+> paragraph below is kept as the description of the CONDITION** — read it if `--list` ever reports
+> these cells `harness_unsupported` again.
+
+- `illustrious_xl_v1` / `illustrious_xl_v2` on **candle**, all three tiers — six cells.
+  `candle-gen-sdxl`'s `SDXL_ROUTES`
+  (`crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs`) pins those two routes at
+  revisions `config/manifests/builtin.models.jsonc` no longer ships. `path_has_snapshot` matches
+  that literal before `SdxlArtifactSeal::capture` will seal, and `candle_gen_sdxl::load` propagates
+  the failure, so **no root the manifest can resolve can ever load these two on candle**. All six
+  cells are planned and both closures are declared; `measure-memory-catalog.mjs --list` reports them
+  `harness_unsupported` for the engine's own reason. NOTHING is hard-coded: both halves of the
+  comparison are READ — the engine revision out of the pinned inference checkout, the shipped one
+  out of the manifest — so the refusal clears itself the moment the engine agrees. With no
+  inference checkout to read (`--inference-repo` / `$INFERENCE_REPO`), the cells classify normally
+  and say the comparison did not happen. The fix is inference-side (PR 946), not a plan or adapter
+  change.
+- `instantid_realvisxl` q4/q8 on **candle**. The candle InstantID stack is dense-only: the worker
+  hard-pins its tier subdir to `bf16/` on the non-macOS branch
+  (`crates/sceneworks-worker/src/image_jobs/instantid.rs:234-253`) and the provider declares
+  `resolved_numeric_tier()` as Bf16/no-quant. `scripts/generate-memory-matrix.mjs`'s
+  `parseBackendTierOverrides` reads that same worker source, so these are not cells at all — a packed candle anchor could only ever measure
+  bf16 weights.
+
+**Adapter environment for the SDXL family.** The three caller-staged SDXL components
+(`tokenizer_clip_l`, `tokenizer_clip_bigg`, `vae_fp16_fix`) are REQUIRED by `candle-gen-sdxl` at
+exact upstream revisions, and the catalog binds them from each model's own manifest corequisites as
+`SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L` / `_TOKENIZER_CLIP_BIGG` / `_VAE_FP16_FIX`. InstantID
+additionally needs its identity stack, which the worker fetches on FIRST USE rather than declaring
+as a manifest download — so there is nothing for the harness to resolve and the operator stages it,
+exactly as `image_jobs/instantid.rs` reads it: `SCENEWORKS_INSTANTID_WEIGHTS` (a directory holding
+`ip-adapter.safetensors`, `scrfd_10g.safetensors`, `arcface_iresnet100.safetensors`) and
+`SCENEWORKS_INSTANTID_CONTROLNET` (the IdentityNet `ControlNetModel` directory). `--list` reports an
+unset or absent one as `weights_missing` naming the variable.
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -152,6 +247,34 @@ human copy; the report is the derived one. Grep before you schedule anyway:
 ```bash
 grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
+
+The FLUX.1 MLX plan rows (sc-22726) name the per-(route, tier) production calibration identities
+that inference PR 943 (`story/sc-22726-flux-calibration-identity`) makes `mlx-gen-flux` and
+`mlx-gen-pulid` publish for every worker load shape; the arm binds them after the epic's pin bump.
+
+The turnkey still rows (sc-22732 — `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo`
+on both lanes) do the same for inference PR `story/sc-22732-epic-22723-memory-anchor-measurability`,
+which gives all six engine crates a per-(route, artifact-proven tier) production identity for every
+worker load shape. Both arms carry the table weights-free (`turnkey_calibration_fingerprint`) and
+refuse a mismatched row before any environment or weight work. Two rows are easy to get wrong:
+`lens_turbo` bf16 on MLX is `lens-turbo-bf16-mlx-shared-ladder-v1`, NOT the legacy
+`lens-text-encoder-window-2026-07-31-v1` (that key names the SC-15800 narrowed text-encoder envelope,
+reachable only under `Sequential + DeferredMaterialization`, and the arm loads `Resident`); and the
+Candle Ideogram rows are `ideogram4-candle-request-scoped-staged-residency-v1-<route>-<tier>` — the
+`…-static-v1-<route>` literals the manifest used to declare existed in no engine, which is why
+`candle-gen-ideogram` had never published an identity a capture could bind.
+The 36 Mage-Flow plan rows (sc-22733) likewise name the per-(route, tier) identities inference PR 953
+(`story/sc-22733-epic-22723-memory-anchor-measurability`) makes both engines publish — MLX
+`mage-flow-<route>-<tier>-mlx-shared-ladder-v1` (bound by the engine only to a tier PROVEN off the
+component directories it opened), Candle `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3` — and
+both arms refuse a plan row naming anything else before the load. The retired single string
+`mage-flow-mlx-shared-ladder-2026-08-03-v1` survives nowhere in this repo except as the worker's
+`mlx_fit_gate` estimator handshake, which the epic's pin bump must move to the per-tier table. The
+rows also bind the shape the WORKER loads, per lane and tier: deferred on every MLX cell (typed
+rules, BTR declared on all three tiers), and on Candle deferred at bf16 only — the generated Candle
+BTR row lists `["bf16"]`, so the worker's declaration evaluator refuses q4/q8 and loads them eager.
+The worker's `memory_route_registry` Mage tests drive both evaluators over the real manifest entries
+and pin the plan rows to them.
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
 on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
@@ -194,9 +317,14 @@ with no records to be stale.
 
 Two more traps in the same area:
 
-- **A named arm is not automatically a current-evidence lane.** `candle:qwen_image` has an adapter arm
-  but its 5 plan entries are all `candidate` scope, so no capture through it can ever be `current`
-  (§2b). Check the arm *and* the scope.
+- **A named arm is not automatically a current-evidence lane.** Scope is a second, independent gate:
+  only `authoritative` plan entries reach the currency comparison, so a lane whose entries are all
+  `candidate` can never produce `current` evidence no matter how complete its arm and closure
+  declaration are (§2b). `candle:qwen_image` used to be the standing example — arm, no closure entry,
+  all-`candidate` entries — and sc-22725 closed it out: the lane now carries a
+  `candle:qwen_image` closure declaration and **3 `authoritative` plan entries** (q4/q8/bf16), and is
+  reported as *pending capture* rather than permanently non-current. The remaining candidate-scope
+  rows in the plan are `candle:qwen_image_edit`'s (§2d row four). Check the arm *and* the scope.
 - **A closure-table entry is not an arm.** `candle:flux2_dev` is declared, digested and has committed
   records, and still has no arm. Declaration, evidence and capturability are three separate facts.
 
@@ -218,7 +346,8 @@ only in §2b**, and mistaking one for the other prescribes writing plan entries 
 | `NOT DECLARED` | OK | empty | planned but never declared **or** implemented — usually a lane whose entries are all `candidate` scope, which no closure entry would make current anyway | adapter arm, then decide whether the entries should be re-scoped `authoritative`; only then a closure stub |
 | declared | OK | non-empty | capturable | continue to §3 |
 
-Row four is instantiated today: `candle:qwen_image_edit` has **9 plan entries, all `candidate`**, is
+Row four is instantiated today: `candle:qwen_image_edit` has **2 plan entries, all `candidate`** (it
+carried 9 when this section was written; the anchor-per-cell rewrite of epic 22505 collapsed them), is
 absent from the 10 declared lanes, and has no adapter arm (its rejection is pinned by
 `candle.rs:1668-1673`). Its plan entries being candidate-scope is why nobody has missed the closure
 entry — per §2b, candidate scope can never become current evidence.
@@ -283,6 +412,124 @@ disk. The manifest declares three tiers for that artifact, so a three-tier story
 fetch `q4` (33.6 GB, and it is the `default: true` tier) and `bf16` (113 GB)
 (`config/manifests/builtin.models.jsonc`, the `flux2_dev` `downloads` array). Neither absence is
 visible from the repo directory or from the marker discussed next.
+
+🔴 **`ls` the snapshot is not enough — the tier may not exist at the revision the manifest pins.**
+Second worked example, `SceneWorks/ltx-2.3-mlx`, provisioned for sc-18809. The snapshot on this Mac
+held `gemma/` + `q8/` only; the manifest declares four rows. `hf download … --include 'bf16/*'`
+**exited 0 having fetched nothing**, because the pinned revision `254989c3…` (2026-06-14) predates
+the upstream `bf16/` upload `01df27d3…` (2026-07-05) by three weeks. The glob was correct and the
+tier was published — just not at the pin. So the download reported success, no directory appeared,
+and the failure would have surfaced later as the engine's `missing transformer.safetensors`.
+
+Two things follow, and both are now enforced rather than remembered:
+
+- **Verify the pin, not the repo.** `node scripts/check-download-patterns.mjs` used to resolve every
+  glob against the repo's *default branch*, so it passed this entry for weeks. As of sc-18809 it
+  fetches `/api/models/<repo>/revision/<rev>` per entry and prints the revision it checked
+  (`ltx_2_3/bf16  SceneWorks/ltx-2.3-mlx@254989c3ca7e  bf16/*`). Run it before quoting a tier as
+  fetchable.
+
+  As of sc-18854 this is **enforced on every PR**, without putting the HF API on a required lane.
+  The check is split in two: `--write` is a networked RECORDER that transcribes one file listing per
+  `repo@revision` key into `config/download-pattern-evidence.json`, and `--check` is a hermetic GATE
+  that re-derives the claims from the manifests and grades them against those committed listings
+  with no network at all. `npm run check` runs the gate, so it reaches check.yml's `parity-scaffold`
+  and the required `parity` aggregator.
+
+  **So the workflow when you touch a `downloads[]` entry or a LoRA `source` is: re-record, then
+  commit the evidence with your manifest change.**
+
+  ```
+  npm run record:download-patterns   # networked; rewrites config/download-pattern-evidence.json
+  npm run check:download-patterns:offline   # what CI runs; no network
+  ```
+
+  🔴 **`config/download-pattern-evidence.json` is GENERATED. Regenerate it — never hand-edit it.**
+  The gate's entire trust chain terminates in that one multi-thousand-line file, and it is trusted
+  unconditionally: a one-line edit to any `files` array turns a real zero-match green, and a `gated`
+  flipped to `false` un-tracks an unfetchable repo. Neither is plausible to catch by eye in a review
+  of a machine-generated diff. The only honest edit is a re-record. If you find yourself wanting to
+  change the artifact by hand, the thing that is actually wrong is the manifest entry or the
+  waiver list in `scripts/check-download-patterns.mjs`.
+
+  **Reviewing someone else's evidence diff** — there is a no-write verify mode for exactly this:
+
+  ```
+  node scripts/check-download-patterns.mjs --write --dry-run
+  ```
+
+  It performs the same networked re-record, writes nothing, and ends with an
+  `=== ARTIFACT VERDICT: … ===` banner. **The banner, not the absence of noise above it, is the
+  signal:**
+
+  - `=== ARTIFACT VERDICT: UP TO DATE (N key(s)) — exit 0 ===` — the committed artifact is
+    byte-identical to what a re-record produces. That is what distinguishes an honest re-record
+    from a hand edit.
+  - `=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===` — it is not. Re-record and **read the diff
+    before concluding anything**: a manifest/evidence change or a hand edit both red this mode.
+
+  🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
+  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner —
+  today's tree prints `SERVED BY A DIFFERENT REPO (1)` on every clean run, with no
+  `ACCESS-GATED` or `ZERO-MATCH PATTERNS` line — but they deliberately do not move the
+  exit status, because an anti-tamper mode that reds unconditionally signals nothing. Grade those
+  lists with `npm run check:download-patterns:offline`; that is the gate CI runs.
+
+  Do **not** read the absent zero-match line as the two modes having converged. They answer
+  different questions, and `scripts/check-download-patterns.test.mjs` no longer relies on a live
+  catalog defect to prove it: the collision case now injects a bogus declared pattern into a
+  throwaway copy of the catalog, which moves a live verdict without moving the artifact.
+
+  `--dry-run` is rejected outright when it is not paired with `--write`, including in combination
+  with `--check` or `--self-test` (both of which ignore it — they never touch the network or the
+  artifact). Same reason: a flag that is silently swallowed lets a reviewer believe they verified
+  the artifact when they did not.
+
+  It is a **human tool and is deliberately wired into nothing**: it needs huggingface.co, and the
+  entire point of the record/grade split is that no required lane depends on that.
+
+  Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
+  `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
+  run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
+  out of a real zero-match. All 95 of 95 keys are pinned to immutable lowercase 40-hex revisions,
+  whose listings cannot go stale. sc-18924 closed the last 11-key moving-default-branch window and
+  made missing, branch, or tag revisions a hard offline-gate failure, so a new manifest entry cannot
+  silently reopen it.
+
+  Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
+  (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.
+  A green metadata listing does **not** mean a repo is fetchable: `gated: "auto"` answers 200 and
+  then 401s the actual download unless the token's account has accepted that repo's licence.
+  sc-18923 removed the two catalog instances by pinning checksum-identical public rehosts; any new
+  gated source fails the offline gate unless it receives an explicit tracked waiver.
+- **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
+  `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
+  exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference
+  dominating revision, mirroring `bundled_ltx_gemma_dir`'s sc-14377 fix for the co-requisite TE.
+  Without that a bf16 request silently renders at whatever tier sits in the selected snapshot.
+
+Inventory after provisioning, following symlinks (`du -shL`), all four manifest rows now pinned to
+`01df27d3…`: `gemma/` 26.4 GB, `q4/` 20.5 GB, `q8/` 29.7 GB, `bf16/` 47.1 GB. Blob-level dedup means
+the bump itself re-downloads nothing — the cache is keyed by LFS digest and `01df27d3…` only *added*
+`bf16/`.
+
+🔴 **Record WHICH snapshot each tier landed in, not just that it landed.** "Provisioned at the
+manifest revision" and "provisioned" are different claims, and this host is the worked example of the
+gap. Actual layout, `models--SceneWorks--ltx-2.3-mlx/snapshots/`, with no `refs/main`:
+
+| snapshot | holds | files |
+| --- | --- | --- |
+| `254989c3…` (pre-bump) | `gemma/` `q4/` `q8/` | **39** ← selected |
+| `01df27d3…` (the manifest pin) | `gemma/` `bf16/` | 27 |
+
+So `q4` and `q8` are on disk at the **old** revision, not the manifest's. Because blobs are shared by
+LFS digest the bytes are identical either way, and `hf download` at the new pin would only re-link
+them — this is bookkeeping, not a re-fetch. But it is exactly the layout that breaks a naive presence
+check: with no `refs/main`, `resolve_huggingface_snapshot_dir` falls to "most files" and selects the
+39-file **pre-bump** snapshot, which has no `bf16/` and never will. Any probe that looks only there is
+permanently false — see `ensure_ltx_{q8,bf16}_present`, which sc-18809 had to move onto the same
+cross-revision scan as the resolver for precisely this reason. When you write "tier X is provisioned"
+into a handoff, name the snapshot.
 
 ⚠ **This step answers "which tiers exist", NOT "which tiers are usable" — do not let it become the
 latter.** In that same worked example, `find … -name .sceneworks-model-revision` over the entire
@@ -357,7 +604,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — six families, one per provider arm
+### Adapter environment — one family per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -376,15 +623,207 @@ SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated 
 SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
 
-# memory-mlx-adapter — z_image_turbo   (mlx.rs:1063-1076)
+# memory-mlx-adapter — qwen_image_edit: BOTH edit catalog ids, one engine provider (sc-22728)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx  # fixed; validated against QWEN_EDIT_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — the qwen_image_edit_2511_lightning built-in distill LoRA ONLY (sc-22728).
+# NOT a manifest download: the worker fetches it lazily at a pinned revision, so the catalog runner
+# derives this family from `PROVIDER_FAMILIES.qwen_image_edit.sideArtifact` rather than from a
+# `downloads[]` entry. The production id `qwen_image_edit_2511` must NOT be given these.
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>     # the snapshot; the arm joins QWEN_EDIT_LIGHTNING_FILE
+
+# memory-mlx-adapter — z_image_turbo, and the z_image_edit alias (`mode: edit_image`, same weights)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
-SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/q4     # tier hardcoded q4
+SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target (sc-22724; was hardcoded q4)
+
+# memory-mlx-adapter — z_image (the undistilled base; sc-22724)
+SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
+SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — flux2_klein_9b   (the base klein rehost; sc-22727)
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx  # fixed; validated against FLUX2_KLEIN_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — flux2_klein_9b, driven for the flux2_klein_9b_kv CATALOG MODEL (sc-22727).
+# The SAME engine provider id loads a DIFFERENT artifact; the engine discriminates on the snapshot
+# path and on LoadSpec::resolved_route, so the two get separate env families rather than one.
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx  # fixed; validated against FLUX2_KLEIN_KV_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_dev, and the pulid_flux character route over the SAME backbone (sc-22726)
+SCENEWORKS_FLUX1_DEV_REPOSITORY=SceneWorks/flux1-dev-mlx     # fixed; validated against FLUX1_DEV_REPOSITORY
+SCENEWORKS_FLUX1_DEV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_DEV_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_schnell
+SCENEWORKS_FLUX1_SCHNELL_REPOSITORY=SceneWorks/flux1-schnell-mlx  # fixed; validated against FLUX1_SCHNELL_REPOSITORY
+SCENEWORKS_FLUX1_SCHNELL_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_SCHNELL_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
+
+# BOTH adapters — the six Mage-Flow variants (sc-22733). Each variant ships the DiT ALONE under
+# `<snapshot>/<tier>/transformer/`, so a Mage capture binds TWO artifact triples: the variant's own
+# tier root, and the SHARED text-encoder/VAE components snapshot below. Both engines resolve that
+# split through `LoadSpec::components` (mlx-gen-mage `resolve_component_dirs`, candle-gen-mage
+# `resolved_component_dirs`); neither rehost can satisfy the other's role, and the variant rehost has
+# no `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find.
+SCENEWORKS_MAGE_FLOW_REPOSITORY=SceneWorks/Mage-Flow                    # fixed; MAGE_FLOW_REPOSITORY
+SCENEWORKS_MAGE_FLOW_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_ROOT=/abs/path/.../snapshots/<rev>/<tier>          # bf16 | q4 | q8
+SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY=SceneWorks/Mage-Flow-Base          # fixed; MAGE_FLOW_BASE_REPOSITORY
+SCENEWORKS_MAGE_FLOW_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Turbo        # fixed; MAGE_FLOW_TURBO_REPOSITORY
+SCENEWORKS_MAGE_FLOW_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY=SceneWorks/Mage-Flow-Edit          # fixed; MAGE_FLOW_EDIT_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY=SceneWorks/Mage-Flow-Edit-Base       # MAGE_FLOW_EDIT_BASE_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Edit-Turbo     # MAGE_FLOW_EDIT_TURBO_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+
+# BOTH adapters — the SHARED Mage text encoder + VAE, co-required by every Mage manifest entry at the
+# SAME revision. Unlike every root above, this one is the SNAPSHOT: the tier is the first path element
+# INSIDE it, and each arm joins `<tier>/text_encoder` and `<tier>/vae` itself.
+SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY=SceneWorks/Mage-Flow-Components-mlx  # MAGE_COMPONENTS_REPOSITORY
+SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT=/abs/path/.../snapshots/<rev>
+
+# BOTH adapters — the pulid_flux IDENTITY STACK (sc-22726). NOT a manifest download on either lane:
+# the worker fetches it on first use, so an anchor binds the operator's pre-staged copy through the
+# same env var both worker lanes already honour (image_jobs/pulid.rs `ensure_pulid_weights`,
+# image_jobs/pulid_candle.rs `ensure_pulid_candle_weights`). ONE directory holding all five loose
+# files — it IS the provider's `face_dir`, which both engines read scrfd/arcface/bisenet out of by
+# name. A missing file is refused before the load, naming it.
+SCENEWORKS_PULID_WEIGHTS=/abs/path/to/pulid-flux-bundle
+#   pulid_flux_v0.9.1.safetensors   (guozinan/PuLID)
+#   eva02_clip_l_336.safetensors    (SceneWorks/pulid-flux-mlx)
+#   bisenet_parsing.safetensors     (SceneWorks/pulid-flux-mlx)
+#   scrfd_10g.safetensors           (SceneWorks/instantid-mlx)
+#   arcface_iresnet100.safetensors  (SceneWorks/instantid-mlx)
+
+# memory-mlx-adapter — sana_1600m / sana_sprint_1600m (sc-22731; the MLX turnkeys)
+SCENEWORKS_SANA_REPOSITORY=SceneWorks/Sana_1600M_1024px_mlx    # fixed; validated against SANA_REPOSITORY
+SCENEWORKS_SANA_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_SANA_SPRINT_REPOSITORY=SceneWorks/Sana_Sprint_1.6B_1024px_mlx  # validated against SANA_SPRINT_REPOSITORY
+SCENEWORKS_SANA_SPRINT_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_SPRINT_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+
+# memory-candle-adapter — sana_1600m / sana_sprint_1600m (sc-22731). A DIFFERENT repository from the
+# MLX lane's, and the ROOT IS THE SNAPSHOT ITSELF — no `<tier>` component. The worker resolves
+# `huggingface_pinned_snapshot_dir(SANA_CANDLE_DIFFUSERS_REPO, …)` off-Mac (`image_jobs/base.rs`),
+# `candle-gen-sana`'s `validate_immutable_root` requires exactly that root, and its
+# `validate_load_spec` refuses any `LoadSpec::quantize`. bf16 is the ONLY tier this lane has: the
+# packed q4/q8 turnkeys above are `platforms: ["macos"]`, so there is no q4/q8 Candle cell to plan.
+SCENEWORKS_SANA_DENSE_REPOSITORY=Efficient-Large-Model/Sana_1600M_1024px_diffusers
+SCENEWORKS_SANA_DENSE_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_DENSE_ROOT=/abs/path/.../snapshots/<rev>       # NO tier component
+SCENEWORKS_SANA_SPRINT_DENSE_REPOSITORY=Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers
+SCENEWORKS_SANA_SPRINT_DENSE_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_SPRINT_DENSE_ROOT=/abs/path/.../snapshots/<rev>
+
+# BOTH adapters — chroma1_hd / chroma1_base / chroma1_flash (sc-22731). Three separate receipt and
+# evidence domains (SC-20788) over three separate rehosts, so THREE env families — never one shared
+# `CHROMA1`, which would let a Flash plan be satisfied by HD weights. `candle-gen-chroma` pins each
+# route's repository and revision by name and cross-checks the path tier against the transformer's
+# own packed marker, refusing the crossing.
+SCENEWORKS_CHROMA1_HD_REPOSITORY=SceneWorks/chroma1-hd-mlx     # validated against CHROMA1_HD_REPOSITORY
+SCENEWORKS_CHROMA1_HD_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_HD_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
+SCENEWORKS_CHROMA1_BASE_REPOSITORY=SceneWorks/chroma1-base-mlx
+SCENEWORKS_CHROMA1_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_CHROMA1_FLASH_REPOSITORY=SceneWorks/chroma1-flash-mlx
+SCENEWORKS_CHROMA1_FLASH_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_FLASH_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+# BOTH adapters — kolors (sc-22732). The ChatGLM3-6B text encoder, the SDXL-style U-Net, the dense
+# SDXL VAE and the derived fast tokenizer are ALL packed inside each tier subdir, so this one root
+# is the whole load. Kolors' IP-Adapter and strict-pose ControlNet stacks live in their own upstream
+# repos, but those are the two BESPOKE routes and no anchor measures them.
+SCENEWORKS_KOLORS_REPOSITORY=SceneWorks/kolors-mlx           # fixed; validated against KOLORS_REPOSITORY
+SCENEWORKS_KOLORS_REVISION=<exact artifact revision>
+SCENEWORKS_KOLORS_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — lens (sc-22732). gpt-oss-20b MoE text encoder + FLUX.2 autoencoder, packed per
+# tier; base Lens is NOT dense-TE, so nothing extra is bound.
+SCENEWORKS_LENS_REPOSITORY=SceneWorks/lens-mlx               # fixed; validated against LENS_REPOSITORY
+SCENEWORKS_LENS_REVISION=<exact artifact revision>
+SCENEWORKS_LENS_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
+
+# BOTH adapters — lens_turbo (sc-22732). Its OWN rehost at its OWN revision, split from base Lens the
+# way flux1_schnell is split from flux1_dev: a turbo plan satisfied by base weights would re-label
+# the base model's peaks as the distilled model's.
+SCENEWORKS_LENS_TURBO_REPOSITORY=SceneWorks/lens-turbo-mlx   # fixed; validated against LENS_TURBO_REPOSITORY
+SCENEWORKS_LENS_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_LENS_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
+
+# BOTH adapters — ideogram_4 AND ideogram_4_turbo, PACKED tiers only (sc-22732). One repo at one
+# revision serves both members; the Qwen3-VL-8B text encoder is inside each tier subdir, and the
+# turbo member's `turbo_lora.safetensors` rides the same snapshot.
+SCENEWORKS_IDEOGRAM_REPOSITORY=SceneWorks/ideogram-4-mlx     # fixed; validated against IDEOGRAM_REPOSITORY
+SCENEWORKS_IDEOGRAM_REVISION=<exact artifact revision>
+SCENEWORKS_IDEOGRAM_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # q4 | q8 ONLY — bf16 is the family below
+
+# BOTH adapters — the Ideogram bf16 tier (sc-22732). It is the ONLY shipped cell in the catalog whose
+# tier is not in its family's default repository: the MLX-quantized turnkey above is not bf16, so the
+# worker resolves this separate repo at a separate revision (`image_jobs/base.rs` IDEOGRAM_BF16_REPO)
+# and so must a capture. Binding bf16 through the packed family would name the wrong repository AND
+# the wrong revision in the record's loadability fingerprint — the one claim about the snapshot that
+# nothing downstream can re-derive. `--list` picks the family per tier for you
+# (`PROVIDER_FAMILIES.ideogram_4.tiers` in scripts/measure-memory-catalog.mjs).
+SCENEWORKS_IDEOGRAM_BF16_REPOSITORY=SceneWorks/ideogram-4    # fixed; validated against IDEOGRAM_BF16_REPOSITORY
+SCENEWORKS_IDEOGRAM_BF16_REVISION=<exact artifact revision>
+SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
+
+# BOTH adapters — the SenseNova-U1 family (sc-22734). SIX catalog ids on TWO engine ids, and SIX
+# env families: each id ships its OWN independently pinned tiered rehost, so the arm resolves the
+# family from `(provider, modelId)` and NOT from the provider alone. Binding an infographic id to
+# SENSENOVA_U1_8B would load base weights and re-label base SenseNova's peaks as the finetune's.
+# Each is validated against the matching `*_REPOSITORY` const in the adapter's lib.rs.
+#   sensenova_u1_8b                      → SENSENOVA_U1_8B                      SceneWorks/sensenova-u1-8b-mlx
+#   sensenova_u1_8b_infographic_v2       → SENSENOVA_U1_8B_INFOGRAPHIC_V2       SceneWorks/sensenova-u1-8b-infographic-v2-mlx
+#   sensenova_u1_8b_infographic_v3       → SENSENOVA_U1_8B_INFOGRAPHIC_V3       SceneWorks/sensenova-u1-8b-infographic-v3-mlx
+#   sensenova_u1_8b_fast                 → SENSENOVA_U1_8B_FAST                 SceneWorks/sensenova-u1-8b-fast-mlx
+#   sensenova_u1_8b_infographic_v2_fast  → SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST  SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx
+#   sensenova_u1_8b_infographic_v3_fast  → SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST  SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx
+SCENEWORKS_<FAMILY>_REPOSITORY=<the row's repository above>
+SCENEWORKS_<FAMILY>_REVISION=<exact artifact revision>
+SCENEWORKS_<FAMILY>_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8, derived from the plan target
 
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY
 SCENEWORKS_KREA_REVISION=<exact base artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter AND memory-candle-adapter — krea_2_raw (plain text-to-image, sc-22735)
+# The UNDISTILLED Krea 2 base: the same engine crates as Turbo (mlx-gen-krea / candle-gen-krea)
+# under its own registry id, off its OWN tiered rehost. Its own family on purpose — a Raw plan
+# satisfied by Turbo weights would file the distilled model's peaks under the true-CFG base's name.
+SCENEWORKS_KREA_RAW_REPOSITORY=SceneWorks/krea-2-raw-mlx     # fixed; validated against KREA_RAW_REPOSITORY
+SCENEWORKS_KREA_RAW_REVISION=<exact base artifact revision>
+SCENEWORKS_KREA_RAW_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — krea_realtime_14b (text-to-video, sc-22735; MLX-ONLY)
+# The autoregressive VIDEO member of the family. There is no candle-gen-krea-realtime at all, the
+# worker refuses the job off macOS by name (video_jobs/mod.rs), and every shipped download is
+# platforms:["macos"] — so this family is never exported for a candle capture. Each <tier>/ subdir
+# is a COMPLETE self-contained tree (the Krea DiT at that tier plus the stock Wan 2.1 z16 VAE, UMT5
+# encoder and tokenizer), so this is three vars, not four: there is no separate co-requisite root.
+SCENEWORKS_KREA_REALTIME_REPOSITORY=SceneWorks/krea-realtime-14b-mlx  # validated against KREA_REALTIME_REPOSITORY
+SCENEWORKS_KREA_REALTIME_REVISION=<exact artifact revision>
+SCENEWORKS_KREA_REALTIME_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
 
 # memory-mlx-adapter — sdxl (plain text-to-image)
 SCENEWORKS_SDXL_REPOSITORY=SceneWorks/sdxl-base-mlx          # fixed; validated against SDXL_REPOSITORY
@@ -405,6 +844,80 @@ SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated 
 SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
+# memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+# sc-22738: `ltx_2_3:{bf16,q4,q8}:mlx` are ORDINARY catalog anchors. The arm admits a `run` through
+# the production budget — the worker's weights floor + the engine's conservative decode profile
+# against the probed `hardware.memoryBytes`, decided by gen-core's shared predicate, then the
+# pinned provider's own check on the loaded generator — and returns the budget's refusal verbatim
+# or measures. SC-19642's unconditional pre-load refusal (and its `_measurementSafety` demand,
+# which the anchor-plan schema cannot carry) is gone; the SC-18946 records keep their dispositions
+# as history. Containment is `scripts/measure-memory-catalog.mjs`, which runs EVERY MLX capture
+# under `scripts/memory-calibration-watchdog.py`. Its footprint hard stop is
+# `min(incident − 2 GiB, hardware.memoryBytes − 2 GiB)` and its whole-host free floor is the flat
+# 2 GiB reserve. `hardware.wiredLimitBytes` is NOT a term in either: it caps Metal buffers, while
+# the guard samples the kernel `phys_footprint`, which counts non-Metal pages too — as a hard stop
+# it killed a `flux2_dev:bf16` render this host completes (sc-22738, measured 2026-09-06). A hard
+# stop has exactly THREE triggers: a GOOD sample at or above the footprint ceiling (or below the
+# free-memory/swap floor); loss of the guarded ROOT process from a sample it was enumerated for;
+# and sampler faults that persist for `--telemetry-fault-window` (60 s) of WALL CLOCK with no good
+# sample, which stops as `telemetry_lost` carrying its `telemetryFaultHistory`. Every sampler
+# failure path — a `/usr/bin/footprint` timeout or non-zero exit, a parse failure, the aggregate
+# telemetry deadline, the host free-memory probe, the `/bin/ps` process-group census — shares that
+# one window, and NONE of them escalates on its own: a tolerated tick emits `telemetry_fault` and
+# keeps the previous good sample as the current reading. A false hard stop is a process-group
+# SIGKILL through a live Metal command buffer, which has wedged this host's GPU; a late stop is the
+# cheaper failure. The cadence is one tick per `--sample-interval` (2 s) and each probe inside a
+# tick — census, footprint, host pressure — gets its own full `--telemetry-timeout` (10 s), with
+# the aggregate staleness deadline derived as three of those, never shorter than one full sample.
+# The census carries that same budget (`CENSUS_TIMEOUT_SECONDS`, adopted from
+# `--telemetry-timeout`), not the 1 s it used to hard-code, and a census that FAILS is an UNKNOWN
+# view in which the previous census stands: only a SUCCESSFUL census that lacks the root, or the
+# guarded child reporting its exit, is root loss. `monitor_failure` is reserved for an exception
+# that is not a telemetry source failing at all. Every default matters: at 0.25 s / 1 s shared
+# across the probes, `footprint` on a 38 GB process received 0.31 s of budget and `bernini:q4:mlx`
+# was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside 1.2 s; with the
+# census still on 1 s, `bernini:q8:mlx` was SIGKILLed 85 minutes in at a steady 52 GB by a single
+# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`).
+SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
+SCENEWORKS_LTX_REVISION=<exact artifact revision>
+SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_LTX_TEXT_ENCODER_ROOT=/abs/path/.../snapshots/<rev>/gemma
+# The Gemma-3-12B co-requisite is a HARD load-time requirement of the pinned provider
+# (`resolve_gemma_dir`; sc-13664 removed the env/HF-cache fallbacks), rides `LoadSpec::text_encoder`,
+# and is snapshot-validated against the SAME repository and revision as the tier root — a mismatched
+# TE silently changes the measured conditioning peak. Both roots must therefore resolve under one
+# revision. On this host q4/q8 originally materialised under the pre-bump snapshot `254989c3…` while
+# the manifest pins `01df27d3…`; `hf download --revision 01df27d3… --include 'q8/*' --include 'q4/*'`
+# re-links them at the manifest revision for **zero bytes**, because the blobs are shared (sc-18810).
+
+# memory-mlx-adapter — ltx_2_5 (SC-18783; the arm with NO `SCENEWORKS_LTX25_*` family for you to
+# set). Every artifact variable below is derived and exported by the HARNESS from
+# `--ltx25-snapshot-root` — repository, revision, the `<transformerVariant>/<tier>` root, the shared
+# enhancer's bytes/digest, the dev refinement adapter's bytes/digest — and `ltx25ProviderEnvironment`
+# DELETES any inherited copy first, so exporting them by hand does nothing. What the operator (or, in
+# a catalog walk, `measure-memory-catalog.mjs`) still owes the arm is the RAW-LOG PAIR:
+SCENEWORKS_MEMORY_CAPTURE_DIR=/absolute/path/outside/both/checkouts/raw
+SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX=docs/calibration/<campaign>
+# sc-22738: `mlx_ltx25.rs#prepare_source_capture` `required_env`s BOTH, unconditionally and before
+# the load, because this arm emits a `physical_mlx` sourceCapture on every run — it persists the
+# canonical selected/reference AV pair under `<capture-dir>/<source-prefix>`. It is the SECOND arm
+# that does so; the Qwen MLX arm (`qwen_source_capture`) is the other, and no third arm on either
+# lane does. The three `ltx_2_5:*:mlx` anchors booked on 2026-09-06 all died on
+# `required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set` — bf16 after 883 s,
+# because the harness re-hashes the ~90 GB snapshot before the adapter is ever spawned — since the
+# catalog runner set the pair for `qwen_image` alone. `PROVIDER_FAMILIES.ltx_2_5` now declares
+# `sourceCapture: true` and the runner derives the pair (and `--raw-log-dir` /
+# `--source-path-prefix`, and `ingest --source-root`, and the receipt copy of the `<session>.log` +
+# `<session>.request.json` pair into the campaign directory — the rendered A/V pair stays in the
+# work dir, its digest/length/geometry/frames being the evidence) from that flag; a test walks the MLX dispatch and reds if the declared set ever stops
+# matching the arms that really emit. This is NOT the Qwen `physical` currency rule: the harness
+# demands a validated physical source session before it calls an anchor current for
+# `modelId === "qwen_image"` only, so LTX-2.5 writes the receipt without owing it for currency.
+#
+# The Candle arm (`ltx_2_5_distilled`) emits NO sourceCapture, so it must be given NEITHER the pair
+# nor `--raw-log-dir`: `capturePlannedCase` refuses a configured raw-log directory whose provider
+# returned no source capture, which is the same failure from the other side.
+
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 
@@ -412,7 +925,175 @@ SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
+
+# memory-candle-adapter — qwen_image_edit (sc-22728; the SAME two families as the MLX arm, because
+#                          both lanes load the same rehost and the same pinned distill LoRA)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning   # Lightning id only
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>
+
+# memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm), and the
+#                          z_image_edit alias (`mode: edit_image`, same weights; sc-22724)
+SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
+SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-candle-adapter — z_image (the undistilled base; sc-22724; same family as the MLX base arm)
+SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
+SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-candle-adapter — flux2_dev, flux2_klein_9b and the flux2_klein_9b_kv catalog model
+# (sc-22727). The SAME three env families as the MLX arms: one artifact family per catalog model.
+SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx
+SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>        # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
 ```
+
+The FLUX.2 anchors resolve their family member from `(target.provider, target.modelId)`, not from
+the provider alone: `flux2_klein_9b` and `flux2_klein_9b_kv` are two catalog models over ONE engine
+provider id (`crates/sceneworks-worker/src/engines.rs`), and both adapters bind the catalog id as
+`LoadSpec::resolved_route` — the same lever the worker sets. What the engine does with it is
+per lane: on MLX `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant artifact
+with it (`mlx-gen-flux2/src/artifact_inventory.rs`); on Candle the binding is inert —
+`candle-gen-flux2` never reads `resolved_route` (its probe labels are hardcoded), so there the
+per-model env family is the ONLY thing that keeps a KV plan off the base rehost. The KV model's
+loader-closure declaration names `engineId: "flux2_klein_9b"` on both lanes (§7c-bis).
+
+**The MLX klein cells capture, and need the epic's pin bump (sc-22738) to do it in CI.** They were
+recorded here as "declared but NOT capturable" while the pin was `c6d6a4db`. Inference PRs 948 and
+949 (both on `feature/sc-22723-memory-anchor-measurability`, merged at `d5270c68`) removed both
+halves of that, and the shape the arm loads changed with them. This is the state after those PRs,
+measured on this Mac, so nobody re-derives it.
+
+*What the engine now accepts (PR 949).* The shipped q4 and q8 klein rehosts carry a STALE
+`quantization` marker in `text_encoder/config.json` — on both
+`SceneWorks/flux2-klein-9b-mlx@acf05e8d` and `SceneWorks/flux2-klein-9b-kv-mlx@406265be` — while the
+Qwen3 shards under it are dense, exactly as the manifest and `config/tier-integrity.jsonc` say. The
+engine no longer trusts the marker: `KleinArtifactInventory::verify_turnkey_with_contracts` reads the
+real tensor headers, admits the tier as dense under that stale-marker allowance, and the text-encoder
+load derives its quant from the validated source. The same PR admits sharded bf16 components and HF
+cache `blobs/` symlink targets, which is what the tier-only discovery-root confinement used to refuse
+on the bf16 tier. `verify_for_provider` now accepts the shipped q4/q8/bf16 for both `Resident +
+Eager` and `Sequential + Deferred` with `LoadSpec.quantize = None`. Both old refusals are gone.
+
+*The shape: the RESIDENT rung's, which is eager.* The klein arms load `Resident` +
+`EagerMaterialization` + `quantize: None`. They used to load `Sequential` +
+`DeferredMaterialization`, for a reason that PR 948 retired: at `c6d6a4db` that was the ONLY shape
+the engine published a calibration identity under (`klein_contract_for` set `calibration` iff
+`klein_streamable(spec)`). PR 948 made the identity a property of the ADMITTED ARTIFACT and its
+tier — published for every load shape, `Resident + Eager` included — and left `klein_streamable`
+gating rung 4 alone. With the identity no longer forcing the choice, the shape follows the rung the
+anchor prices, and at the resident rung it MUST be eager: a deferred klein transformer cannot render
+without a block window. `mlx-gen-flux2/src/transformer.rs` refuses with *"flux2: a deferred
+transformer requires an explicit block window"* the moment `block_stream` is set and no window is
+selected. That is not a deduction — it is the first sc-22727 proof capture below. Both klein manifest
+entries still declare an MLX `bounded_transformer_residency` row with
+`requiredOffloadPolicy: "sequential"`, and the worker still binds `Applied` + Deferred + Sequential
+when THAT rung is the one being engaged; the resident rung's own row declares no
+`requiredOffloadPolicy` at all, which is the worker's eager default. The MLX adapter's
+`the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan` binds the arm to the
+RESIDENT row for exactly this reason, and
+`flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable` transcribes
+`klein_streamable` term by term so the arms can assert they are outside it. The dev arm is unchanged
+and was always `Resident` + `Eager`.
+
+*The identities the plan binds.* The manifest's rung rows carry the WEIGHTS-FREE registry
+declaration (`flux2-klein-static-registry-behavior-v2-flux2-klein-9b`), which is a declaration and
+not what a load of real weights returns. The plan rows carry the PRODUCTION identity PR 948 mints:
+`flux2-klein-9b-<tier>-mlx-shared-ladder-<artifact_tag>-t2i-v1`, where `artifact_tag` is `rehost` for
+the base repo and `kv-rehost` for the KV repo (`KleinArtifactInventory::artifact_tag`, resolved from
+the snapshot path, so the two shipped repos differ even though they share a provider id) and the
+route is `t2i` because `flux2_klein_9b` is the only klein provider this text-to-image lane loads
+(`edit` / `kv-edit` belong to the edit providers). The bf16 turnkey is `BaseRehost(None)`, NOT
+`CalibratedBase`, so it takes `rehost` too — measured, not assumed. The adapter's
+`flux2_calibration_fingerprint` writes all six as literals rather than reading the pinned crate,
+because the minting function does not exist at `c6d6a4db` and CI builds `c6d6a4db`; the capture
+refuses a loaded contract whose identity differs, so the copies cannot drift once the pin moves.
+
+*The proof captures.* `measure-memory-catalog.mjs --backend mlx --no-commit`, one anchor at a time,
+against an inference checkout at `d5270c68` and a locally bumped pin, on this Mac, clean trees, work
+dir outside the repo, `--hf-cache /Volumes/Models/huggingface/hub`. The bump and the evidence were
+reverted afterwards; nothing here is committed.
+
+1. `flux2_klein_9b:q4:mlx` under the OLD `Sequential` + `Deferred` shape → **failed at 123 s** with
+   *"generate measured FLUX.2-dev render: unsupported: flux2: a deferred transformer requires an
+   explicit block window"*. It cleared the contract read, the inventory verification and the full
+   load — both PR 949 gates — and died at the render. This is the measurement that chose the shape.
+2. `flux2_klein_9b:q4:mlx` under `Resident` + `Eager` → **captured in 125 s**, `runtime_complete`,
+   `evidenceScope: authoritative`, `loadShape: eager_materialization`, rung `resident`, identity
+   `flux2-klein-9b-q4-mlx-shared-ladder-rehost-t2i-v1`. Observed overall: 30.93 GB active,
+   61.91 GB allocator envelope.
+3. `flux2_klein_9b_kv:q4:mlx` → **captured in 118 s**, identity
+   `flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1`, 30.93 GB active / 61.96 GB allocator.
+   The KV repo resolves its own artifact tag through its own env family, as designed.
+4. `flux2_klein_9b:bf16:mlx` → **captured in 293 s**, identity
+   `flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1`, 43.98 GB active / 73.89 GB allocator.
+
+The q8 cells and `flux2_klein_9b_kv:bf16:mlx` were not run; they are the same code path with a
+different tier segment, and the campaign will capture them.
+
+*What CI builds.* SceneWorks is still pinned to `c6d6a4db` on this branch, where the engine refuses
+the shipped rehosts and publishes no production identity, so these six cells are not capturable in CI
+yet. The epic's pin bump (sc-22738) is what makes them capturable; the arm, the plan rows, both
+closure declarations and the manifest reconciliation are already in place, so no SceneWorks change is
+needed when it lands. Do not "fix" the interim by copying weights into a flattened root: that would
+measure a tree the worker never opens.
+
+*The seam that hid all of this.* `evaluate_declared_mlx_load_shape_for_request` proves the BTR row
+against a candidate through `memory_strategy_contract(provider, candidate)`, and used to collapse an
+`Err` to `false` with `.ok().flatten()` (`crates/sceneworks-worker/src/memory_route_registry.rs`). At
+`c6d6a4db` that turned the inventory refusal into "not implemented": the declaration was `Refused`,
+the worker fell back to an eager resident load, the streamable branch was never entered, the
+inventory was never verified, and the model ran with NO calibration identity — silently. The
+downgrade is still the right fallback (a load that cannot prove its rung must not claim it), so
+sc-22727 kept it and added a `tracing::warn!` naming the provider and the error at that seam
+(`provider_implements_declared_strategy`, with a weights-free unit test).
+
+`flux2_dev:bf16:mlx` is planned at **512²** rather than the lane's usual 768². §6c records that the
+113 GB dense FLUX.2-dev export does not fit a 128 GB Mac at 1024²; the plan geometry is a free plan
+choice (§2b), so the bf16 anchor is declared at the smallest square this arm measures and its
+fixture name (`flux2-dev-mlx-bf16-512-seed18218-step2`) carries the edge. Nothing derives the
+capture geometry from a sibling tier's.
+
+`scripts/measure-memory-catalog.mjs` derives every one of these from the plan and the manifest
+(`PROVIDER_FAMILIES`); `--list --backend <lane>` is the oracle for whether a cell is measurable on
+this host (`runnable` / `weights_missing`) — epic 22723. The `z_image_edit` anchors plan
+`provider: z_image_turbo, mode: edit_image`: the catalog id is a worker-side alias for the Turbo
+provider (`crates/sceneworks-worker/src/engines.rs`), so the adapter loads the Turbo provider and
+conditions the request on one reference image; its loader-closure declaration names that alias
+explicitly (`engineId` in `config/anchor-loader-closures.json`, §7c-bis).
+
+The two Qwen EDIT ids are the other shape of the same thing (sc-22728), and the differences are worth
+stating because they are the ones that bite:
+
+* `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` both plan `provider: qwen_image_edit,
+  mode: edit_image` and both load the SAME rehost — so neither the provider nor the artifact
+  distinguishes them. The adapter arm is resolved from `(target.provider, target.modelId)` on both
+  lanes, and each member's fixture prefix and step count are bound to it, so a 4-step distilled
+  capture cannot be recorded under the production id.
+* The Lightning id declares `overlay: lora`: its built-in lightx2v distill LoRA is a real second
+  network folded into the MMDiT at load. It is the ONE artifact in `PROVIDER_FAMILIES` that no
+  manifest download ships (the worker fetches it lazily at a pinned revision), so it is declared as a
+  model-keyed `sideArtifact` and reaches the arm through `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*`.
+* On **Candle** the edit provider is BESPOKE — `edit.rs`'s own words: "driven directly by the worker
+  … the registered `qwen_image` descriptor stays txt2img-only" — so the arm calls
+  `QwenEdit::load_with_memory_context` + `generate_with_memory_context`, the worker's exact pair, and
+  is dispatched ahead of the five-rung path. Going through the catalog there would load the txt2img
+  provider and record it under an edit id.
+* The edit models do **not** carry the physical-receipt requirement. The harness scopes it to
+  `record.target.modelId === "qwen_image"` (`requiresPhysicalMlxProvenanceForCurrency`), and a test
+  binds `PROVIDER_FAMILIES[*].physical` to exactly that set — passing `--raw-log-dir` for an arm that
+  emits no `sourceCapture` makes the harness refuse the render.
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before
 model load, not after. The plain MLX Krea arm is reference-free, rejects overlays and PiD, and runs
@@ -475,10 +1156,20 @@ at, not a build pin.
 
 ## 6. The capture
 
-`--output` and `--resume` should point **outside the repository**. `.tmp/` is gitignored today
+`--output` should point **outside the repository**. `.tmp/` is gitignored today
 (`.gitignore:298-301`, added deliberately for this), so it also works — but the failure mode when an
-ignore rule changes is a multi-hour sweep discarded at the end, and the CI lanes themselves write to
-`$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
+ignore rule changes is a multi-hour capture discarded at the end, and the CI lanes themselves write
+to `$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
+
+**One command captures one anchor and writes one record.** There is no campaign to schedule, no
+resume, no reuse assessment and no batch. Capturing a second cell means running the command a second
+time with a different `--anchor`, producing a second file.
+
+The arms that need the raw-log pair are exactly the MLX arms that EMIT a provider `sourceCapture`:
+`qwen_image` (`mlx.rs#qwen_source_capture`) and `ltx_2_5` (`mlx_ltx25.rs#prepare_source_capture`,
+sc-22738). Both `required_env` the capture directory before the load and refuse without it; the
+coupling is enforced from the other side too, so passing `--raw-log-dir` to any OTHER arm makes the
+harness refuse the render. See the LTX-2.5 block under "Adapter environment".
 
 For physical MLX capture, the raw-log directory must also stay outside the checkout. Run
 `scripts/hash-artifact-inventory.mjs --root <exact-tier-root> --github-env <env-file>` once before
@@ -491,7 +1182,10 @@ encoded in the filename and the bytes it reads after the provider exits. The har
 `physical_mlx` source session per fresh case and writes the exact request and provider response beside
 them. A physical session is invalid unless it carries exactly one typed `request`, `selected_rgb`,
 and `reference_rgb` receipt at three distinct paths, so removing an entry cannot make a missing file
-disappear from validation. The request receipt must be canonical JSON for the one record bound to the
+disappear from validation. The rendered outputs themselves (`.rgb`, and the `.avbin` A/V pair the
+LTX-2.5 MLX arm writes) are verified against their receipts at capture and at `ingest --source-root`
+and are NOT committed (sc-22738); the session log and request receipt are. A committed bundle whose
+rendered outputs are absent validates on the receipt alone. The request receipt must be canonical JSON for the one record bound to the
 session, and both RGB receipts must match that record's logical case and geometry. The temporary
 directory therefore mirrors the repository-relative tree. Validation also reconstructs the full
 evidence record from the immutable provider response, request, and artifact input, requires every
@@ -503,10 +1197,11 @@ streams and hashes every artifact byte, including Hugging Face symlink targets.
 
 ### 6a. Locally on the host
 
-> Provenance: the adapter builds and `harness run` were **not** executed while writing this runbook —
-> a real capture is a multi-hour GPU sweep on dedicated hardware. Every flag below is transcribed
-> from `memory-calibration-harness.mjs:1186-1233` and from the two checked-in capture workflows,
-> which run exactly these commands. `harness check` WAS executed (on the committed bundle).
+> Provenance: the adapter builds and `harness capture` were **not** executed while writing this
+> runbook — a real capture is a multi-hour GPU render on dedicated hardware. Every flag below is
+> transcribed from `memory-calibration-harness.mjs` (`main`, the `capture` arm) and from the two
+> checked-in capture workflows, which run exactly these commands. `harness check` WAS executed (on
+> the committed bundle).
 
 ```bash
 # Apple silicon
@@ -519,40 +1214,701 @@ cargo build --release --locked -p sceneworks-memory-adapter \
 ```
 
 ```bash
-node scripts/memory-calibration-harness.mjs run \
-  --config config/memory-calibration-plan.json \
-  --backend <backend> \
-  --fixture <fixture from §2b> \
-  --fresh-per-case \
+node scripts/memory-calibration-harness.mjs capture \
+  --plan config/memory-calibration-plan.json \
+  --anchor <key from §2b> \
   --provider-command '["/abs/path/to/target/release/memory-<backend>-adapter"]' \
   --sceneworks-repo /abs/path/to/SceneWorks \
   --inference-repo /abs/path/to/inference \
   --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
   --source-path-prefix docs/calibration/<story-or-campaign> \
-  --resume docs/generated/memory-calibration-evidence.json \
-  --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
+  --output /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json
 ```
+
+To capture EVERY anchor the plan declares for this host's backend, committing each one as it
+lands, use `scripts/measure-memory-catalog.mjs` instead of repeating the command by hand — it runs
+exactly this capture plus §7a and §8 per anchor and stops cleanly on Ctrl-C; see
+[memory-calibration-harness.md](memory-calibration-harness.md), "Measuring the whole catalog on one
+host". On this Mac the shipped snapshots live under `/Volumes/Models/huggingface/hub` (and the
+LTX-2.5 snapshot under `~/ModelStaging/sc18783-hf-cache`), which is what its `--hf-cache` is for.
 
 Then schema-check the raw bundle before doing anything else:
 
 ```bash
 node scripts/memory-calibration-harness.mjs check \
-  --input /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
+  --input /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json \
+  --source-root /abs/path/OUTSIDE/the/repo/raw-receipts
 ```
 
-Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
+Flag notes, all from the `capture` arm of `main`:
 
-- `--backend` is **required** whenever the plan contains both backends; one provider process probes
-  one backend-specific hardware shape.
+- `--anchor` is the plan key `<modelId>:<tier>:<backend>`. An unknown or malformed key fails in
+  milliseconds, before the adapter is started. The backend comes out of the key, so there is no
+  `--backend`.
+- `--plan` defaults to `config/memory-calibration-plan.json`; pass it explicitly in a script.
 - `--provider-command` is a **JSON argv array**, quoted as one shell word.
-- `--fresh-per-case` forces one fresh process per case (the oracle shape both CI lanes use);
-  `--batch-rungs` forces one target's rungs into an experimental batch.
-- `--resume <bundle>` suppresses already-complete cases. The runner **atomically checkpoints the
-  accumulated schema-valid bundle after every successful provider response**, so an interrupted
-  sweep can be resumed by pointing `--resume` at the partial output and re-running. Only schema-valid
-  `complete` records suppress their executed passing cases; a gated or candidate record suppresses a
-  repeated *attempt* only when its logical case, harness version, repository receipts and hardware
-  probe all match.
+- `--raw-log-dir` and `--source-path-prefix` come as a PAIR or not at all, and the directory must sit
+  outside both checkouts.
+- An `ltx_2_5` anchor additionally requires
+  `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2`.
+  The harness validates that exact public repository/revision and the anchor's nested layout, hashes
+  its `<transformerVariant>/<tier>` root once, hashes the shared enhancer root once, hashes the dev
+  refinement adapter file once when the anchor is a dev variant, and sets their byte counts and
+  digests on the provider invocation. It re-hashes all of them around the invocation, so a mutation
+  during the render is caught rather than recorded. The adapter refuses a missing shared inventory
+  before provider construction. **Both lanes** are served from that one snapshot (sc-22725), under
+  each lane's own engine id — `ltx_2_5` on MLX, `ltx_2_5_distilled` on Candle — so the plan row's
+  `provider` selects which arm is prepared, and a row naming the other lane's id is refused rather
+  than prepared against a loader that never asked for it. A `dev` anchor also binds
+  `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, the snapshot root the Candle arm's
+  `ltx25_official_dev_adapter` (`candle.rs`) joins `distilled_lora/…` against. **That binding is in
+  place for a future Candle `dev` anchor and reaches nothing today**: no plan row is both `candle`
+  and `transformerVariant: "dev"` — every MLX row is `dev` (and MLX never reads this variable, it
+  takes the adapter file's bytes and digest instead) and every Candle row is `distilled`. Do not read
+  the binding as evidence that a Candle dev capture has been exercised; adding such a plan row is
+  what would first exercise it.
+- The composition is NOT a flag. An anchor is the `resident` composition on MLX and the shallow
+  optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
+  `scripts/extract-memory-anchors.mjs` can actually price.
+
+#### What each anchor's run can END as (`measure-memory-catalog.mjs`)
+
+One row per outcome the walk reports in its summary table and its `summary-*.json`. The first five
+are NOT walk failures — the walk's exit code is 2 only if some anchor ended outside this group's
+first five:
+
+| outcome | what happened | tree |
+|---|---|---|
+| `committed` | the render finished, and its record, packaged-source entry, re-derived store, stamp and matrix landed as one commit | one commit |
+| `committed_exceeded` | the render ENDED AT A CEILING — the footprint watchdog hard-stopped it, or Metal refused this process's submissions at the host's wired limit — and that landed as a **measured lower bound** (sc-22738) through the same ingest path | one commit |
+| `captured` | `--no-commit`: the bundle was written and schema-checked, nothing ingested | clean |
+| `exceeded` | `--no-commit`: the render hit a ceiling (either kind); it is named on the row but there is nowhere to put it | clean |
+| `artifact_unsupported` | the pinned engine's production loader refused the shipped artifact (sc-22738) — the row carries the loader's own `unsupported:` sentence verbatim; **no evidence, no bound, no commit** | clean |
+| `runtime_budget_exceeded` | the probe ran out of its WALL-CLOCK budget and was stopped (below), **having measured nothing** — so no bound is recorded and the cell classifies `runnable` again. Its own outcome since sc-22738's run 34356681566, not folded in with `capture_failed`; still a walk failure (exit 2). The reason names the budget in its own seconds, the backstop's later deadline as itself, this backend's longest completed capture and the cell it was read from, and the `--probe-budget-minutes <lane>=N` re-run that raises this lane alone | clean |
+| `capture_failed` | the capture died for a reason that is NEITHER a footprint stop, a wall-clock stop, a wired-limit refusal nor a pinned-artifact refusal (or is a ceiling the row cannot bind an artifact for), **or** it is the second consecutive Metal refusal, which halts the walk | clean |
+| `check_failed` | the bundle failed `harness check` | clean |
+| `ingest_failed` | a post-capture step failed; the tree was rolled back to HEAD | clean |
+
+A cell can also end before it starts. `--list` classifies an anchor whose store already carries a
+**current** measured lower bound as `exceeded_current`, and such a row is never in the runnable set —
+with or without `--skip-current`, so it reaches none of the outcomes above and cannot move the exit
+code. That is deliberate: the host has already established the one fact a re-run could establish
+(the peak at this geometry is at or above a footprint it had to stop), so booking it again spends
+another guarded render — 76 minutes for the `bernini:bf16:mlx` stop — to learn nothing. Until
+sc-22738 it classified `runnable`, because a bound's bundle has an EMPTY `records` array and the
+matrix publishes only anchors, so neither index the classifier consulted could see it.
+
+Currency is the SAME rule an anchor's is: the bound's `source.loaderClosureDigest` against the digest
+`config/anchor-loader-closures.json` carries for that `(model, lane)`. A pin bump or a closure edit
+that stales the bound puts the cell straight back to `runnable`, with no edit to the runner — and
+that is ALL it does: production keeps refusing exactly what the bound refused when measured
+(sc-22738), because a shared-engine fix silently re-admitting a request a host was already unable to
+finish is the failure the bound exists to prevent.
+
+**Every probe carries a wall-clock budget (sc-22738, 2026-09-07; re-based 2026-09-08).** The
+guard's ceilings bound a probe that CLIMBS; they say nothing about one that stops climbing, and
+`scail2_14b:bf16:mlx` sat flat at 93.5 GB under the 94.82 GB kill line for 90 minutes with the
+adapter parked in `mlx::core::eval`. So `measure-memory-catalog.mjs` passes the guard a
+`--max-runtime-seconds` on every capture, defaulted per lane by `PROBE_BUDGET_MINUTES` — **165
+minutes for a video anchor, 60 for an image one** (the lane is derived from the plan: a video anchor
+renders more than one frame), overridable for a run with `--probe-budget-minutes N` — or **per
+lane**, `--probe-budget-minutes video=240[,image=90]`, so raising the budget for one wedged 14B
+video cell does not also hand every image cell four hours to hang in (sc-22738 review). The campaign
+workflow carries it as the `probe_budget_minutes` dispatch input, so raising a lane needs no source
+edit; the value is passed verbatim and an unknown lane name is refused by the walk rather than
+ignored. `--dry-run` prints the resulting budget per row. Each default rests on the longest COMPLETED figure its lane has
+witnessed (`WITNESSED_CAPTURE_SECONDS`), cleared by the 1.8× margin policy: 4,470 s PER RENDER
+for video and 847 s per capture cycle for image. That flat 93.5 GB line was a render in progress,
+not a wedge: a video arm USED TO render its clip THREE times per capture (measured, clean warm
+control, warm repeat), a SCAIL-2 render is a 14B DiT under CFG whose main thread waits on the GPU
+at every step by design, and the same cell stopped at every tier under a 90-minute budget with the
+GPU at 99–100% utilization and no GPU fault in the system log. (The watchdog stream's
+`providerPhase` is `null` for every anchor — the runner passes no `--provider-phase-profile` — so
+its absence is not a progress signal.)
+
+**A video capture is ONE measured render (sc-22738, decided 2026-09-08).** The three-render
+contract — measured render, clean warm control, warm repeat — stays on the IMAGE lane, where it is
+cheap; on the video lane it cost 2× the render for checks the anchor never reads. The anchor's phase
+peaks come from the FIRST render (`extract-memory-anchors.mjs` and `memory_anchor.rs` read only the
+three phase peaks, the overall allocator envelope and `outputFps`), while the warm passes fed the
+determinism envelope (`quality`), the clean-warm allocator bounds (`lifecycleClean*` /
+`lifecycleWarmRepeat*`) and the `warm_repeat` scenario. Witnessed under the three-render contract:
+`scail2_14b:bf16:mlx` 8,709 s per capture (~2,903 s per render); `wan_2_2_t2v_14b:bf16:mlx`
+13,411 s (4,470 s per render, the longest completed dense render on file);
+`wan_2_2_t2v_14b:q4:mlx` exceeded a 16,200 s budget WITHOUT finishing (>5,400 s per render — the
+packed tier dequantizes per step and is slower than dense). The lane is a property of the plan row
+(`sceneworks_memory_adapter::capture_policy`: `geometry.frames > 1` is video, the same derivation
+the runner budgets by), never a per-model choice: every MLX video arm — LTX-2.3 (ordinary capture;
+the SC-20318 campaign entries keep their lifecycle proofs), LTX-2.5, MiniMax-H3, Bernini's video
+member, Krea Realtime, Wan 2.2 / SCAIL-2 — reads it before it renders, and the still `bernini_image`
+member served by the same arm keeps its three renders. The candle video arms already captured one
+render. The receipt states what was NOT measured instead of writing zeros: `warm_repeat` is
+`not_run` with the reason, `quality` carries `warmPasses: 0` with `result: not_run` and the
+thresholds only (no comparison figure, no `identicalInputs`, no typed `audio` block — an LTX-2.5
+session files `selected_av` alone), and no `lifecycleClean*` / `lifecycleWarmRepeat*` measurement
+is emitted. Every consumer degrades to "not measured" for such a record — the JSON schema, the
+harness's `validateRuntimeComplete`, `sceneworks-core::memory_calibration` and the adapter's own
+response validator accept the declared shape — and nothing invalidates the video cells captured
+WITH warm passes (`docs/calibration/sc-22738/*`, `sc-18791/*`): a record without the declaration
+keeps every previous requirement. So the video budget is now per render: 165 minutes = 9,900 s is
+2.2× the 4,470 s witness and 1.83× the 5,400 s packed-tier lower bound.
+
+**The CANDLE lane's own witnesses (sc-22738 review, 2026-09-10).** Every figure above is `:mlx`,
+which cost nothing while the budget reached no candle probe — and everything once the runner's
+backstop made it a hard kill at exactly 9,900 s on the CUDA lane. Run 34356681566's own committed
+anchors supply the missing evidence (branch `story/sc-22738-candle-evidence-34356681566`, the 20 it
+landed before it wedged): the three `ltx_2_5:*:candle` video cells completed in 300 s, 285 s and
+446 s of capture→capture cycle on 2026-09-09, and `qwen_image_edit_2511:q8:candle` in 239 s on the
+image lane — read as consecutive `capturedAt` deltas, the same way the 847 s image witness is, and
+therefore UPPER bounds on the captures inside them. The candle video lane is an order of magnitude
+faster than the MLX one, 165 minutes clears its longest completed cycle by 22×, and the 19h43m
+`scail2_14b:bf16:candle` cell was a WEDGE rather than a slow render. Both lane defaults therefore
+stand where they are, now with a completed capture of each backend behind them
+(`VIDEO_RENDER_WITNESSES_SECONDS`, `IMAGE_CAPTURE_WITNESSES_SECONDS`) — the kill line is set by the
+slower backend, and the faster one runs far inside it. What is still unwitnessed is the heavy end of
+the candle video lane (`scail2_14b`, `wan_2_2_i2v_14b`, `wan_2_2_t2v_14b`: 14B DiTs at 480p/720p),
+which is why a stop names its witness cell and the flag that raises the lane rather than leaving an
+operator to re-run into the same second.
+
+A probe that reaches its budget is stopped and reported on its own outcome,
+`runtime_budget_exceeded`, naming the budget in its own seconds, the peak footprint sampled where
+one was (so you can tell a probe wedged at the ceiling from one wedged at 3 GB), the lane's longest
+completed render (video) or capture (image) **and the longest one on this cell's own backend, with
+the cell it was read from**; a run
+launched with `--probe-budget-minutes` below its lane's default is told, in the reason, that the
+stop is a budget shortfall and not evidence of a stall, and one at or above the default is told the
+exact `--probe-budget-minutes <lane>=N` that would raise it.
+
+**WHY THE ROW NAMES THE WITNESS CELL (sc-22738 review, 2026-09-10).** The budget is a hard kill on
+every lane now, so a cell it stops either wedged or could not finish inside it, and only the
+operator can tell which. The candle video witnesses are all `ltx_2_5` (300 s, 285 s and 446 s per
+cycle in run 34356681566) while the heavy candle video cells are 14B DiTs at 480p/720p that have
+never completed a candle render, so "the candle lane finishes video in five minutes" must never be
+read as evidence about `scail2_14b:bf16:candle`. The row therefore states the figure, the cell it
+belongs to, and the flag — it claims nothing about what else has or has not completed, because
+`VIDEO_RENDER_WITNESSES_SECONDS` / `IMAGE_CAPTURE_WITNESSES_SECONDS` hold each backend's LONGEST
+capture rather than a record of every one. And a re-run at the same budget dies at the same second:
+if the render was still making progress, raise that lane and re-run, rather than re-running into it.
+
+**TWO things impose that budget, and they are not alternatives (sc-22738, run 34356681566).** On a
+Mac the footprint guard does it, via `--max-runtime-seconds`, on its ONE stop path — the same
+SIGTERM→SIGKILL escalation and post-stop census a footprint stop takes. Everywhere else the RUNNER
+does it: `measure-memory-catalog.mjs` bounds each capture's whole process TREE
+(`probeTimeoutMs` → `stopProcessTree`; `taskkill /T /F` on Windows, where node's `kill()` reaches
+only the immediate child and would leave `memory-candle-adapter.exe` running). The guard is
+Darwin-only by construction — its sampler is `/usr/bin/footprint` — so until this was added the
+budget reached NO probe on the Windows CUDA lane: run 34356681566 sat on `scail2_14b:bf16:candle`
+(85/132) from 15:15:45Z to the job's cancellation at 10:59:16Z the next day, 19h43m against a
+165-minute budget, and the remaining 47 cells were never reached. On a Mac the runner's bound sits
+two minutes BEHIND the guard's deadline (`RUNNER_BACKSTOP_GRACE_SECONDS`), so the guard keeps owning
+every stop it can make and the runner fires only when the guard did not. A runner stop says so in
+its reason — naming its own later deadline as itself, never as the budget — and claims no ceiling
+and no sampled peak where no guard ran.
+
+**A STOPPED PROBE STILL KEEPS WHAT IT MEASURED (sc-22738 review).** The guard writes
+`physical_footprint_at_or_above_<ceiling>:observed_<footprint>` at the instant it fires, and its
+post-stop reap can then wedge past the two-minute grace — so the runner reads the event log BEFORE
+its backstop reports, and a bound already in it is committed as `committed_exceeded` rather than
+thrown away. Narrow on purpose: only a FOOTPRINT stop (or the Metal wired-limit refusal) counts,
+because `stopProcessTree` SIGTERMs the guard and the guard writes `monitor_signal_SIGTERM` on its
+way out — the runner's own kill must never be filed as a fact about the model.
+
+**Otherwise it is not an exceedance:** the run never
+crossed a line, so no bound is written (the harness's `record-exceeded` refuses a wall-clock stop
+outright), the store keeps no trace, the watchdog stream and per-anchor log stay in the work dir,
+and the cell classifies `runnable` again on the next `--list`. Re-run it, or re-run it with a larger
+`--probe-budget-minutes <lane>=N` if you believe the render was still making progress — and never
+below the lane default for a cell whose witnessed capture is longer than the budget you are about to
+give it.
+
+**`committed_exceeded` is the one that changed (sc-22738).** A footprint hard stop used to be a
+`capture_failed` that stamped nothing at all: the store kept no trace, and production went on
+admitting the very request the host had just been unable to finish. `bernini:bf16:mlx` is the case
+that forced it — 848×480×49 ran 72 minutes and reached 97,147,294,328 bytes of physical footprint on
+this 128 GiB Mac before the guard stopped it mid-decode, and the next campaign would have queued the
+identical render.
+
+The stop is now written by `harness record-exceeded` into an `exceededBounds` bundle, which then
+goes through the SAME `check` → `ingest` → `PACKAGED_MEMORY_ANCHOR_SOURCES` → `extract` → `stamp` →
+matrix → commit path a completed capture takes. Its store row lives in `config/memory-anchors.json`
+under `exceededBounds`, alongside `anchors` and `analyticOnly`, and carries the same
+`source.loaderClosureDigest` currency key — so the tooling can see when a bound is worth stopping at
+again, exactly as it can for a measured anchor. The runtime never reads that key (sc-22738): a stale
+bound refuses, and a stale anchor derives, exactly as a current one.
+
+What a bound claims is ONE inequality — *the peak at this geometry is at least this* — and nothing
+else. It prices no estimate, widens no envelope and enters no derivation. Its only consumers are the
+two refusals, which apply the same predicate (`ExceededBound::refuses_host`): a host no larger than
+the one that failed is refused outright, and a larger host is graded on whether it can offer the
+footprint plus the lane's activation allowance.
+
+- **Production**: `video_admission::exceeded_bound_refusal` refuses before the load, ahead of the
+  ladder — a measurement has no estimate margin to be forgiven inside, so it decides before any
+  estimate is priced and an analytic estimate for the cell is simply outranked.
+- **Capture**: `mlx.rs#exceeded_bound_capture_refusal_in`, at the one seam every provider arm
+  passes through (`run_with`), so the next campaign refuses the same render in milliseconds instead
+  of re-burning 72 minutes and putting the host's GPU at risk again — **only while the bound is
+  current**. This seam is probe tooling, and it states the same contract the catalog walk states: a
+  bound whose `source.loaderClosureDigest` equals the digest `config/anchor-loader-closures.json`
+  declares for its `(model, lane)` at the pin classifies the cell `exceeded_current` (never
+  scheduled) and is refused here if handed over anyway; a bound that has **staled** classifies
+  nothing, is refused nowhere on the capture side, and the guarded capture runs. Its outcome
+  supersedes the bound: a completed capture retires it (`extract-memory-anchors.mjs`
+  `retainExceededBounds` — same identity, geometry covering the bound's, later, on a host no
+  larger), a new stop replaces it at the new closure. Before this conjunct the walk listed a
+  stale-bounded cell `runnable` and the adapter refused it on `refuses_host` alone, so the row read
+  `capture_failed` and no bound could ever be lifted by re-measurement — the only way the standing
+  rule allows one to be lifted. Production is deliberately not mirrored on the conjunct: the
+  runtime keeps refusing on a stale bound until the store no longer carries it.
+
+Neither is a measurement gate (E5). A bound refuses exactly one thing — re-running a render this
+class of machine has already proven it cannot finish — and every cell no hard stop has ever bounded,
+which is all of them until one is, is untouched. A bound can also be attested past a pin bump like
+an anchor (`config/anchor-currency-attestations.json`, keyed by the bound's store id; stamped by the
+same `--stamp-anchors` walk): the claim is narrower — the closure diff cannot change the peak the
+stop was reached at — and, as for an anchor, it moves what the campaign schedules and nothing in the
+runtime.
+
+To record a stop by hand from a retained event log (what seeded the Bernini row):
+
+```bash
+node scripts/memory-calibration-harness.mjs record-exceeded \
+  --plan config/memory-calibration-plan.json --anchor bernini:bf16:mlx \
+  --provider-command '["/abs/path/to/target/release/memory-mlx-adapter"]' \
+  --sceneworks-repo /abs/path/to/SceneWorks --inference-repo /abs/path/to/inference \
+  --watchdog-events /abs/path/to/<anchor>-watchdog.jsonl \
+  --artifact '{"repository":"…","resolvedRevision":"…","variant":"bf16","inventorySha256":"…"}' \
+  --output /abs/path/OUTSIDE/the/repo/<anchor>-exceeded.json
+```
+
+It runs no render. It probes the adapter for the host's hardware (the same `action: "probe"` a
+capture takes first), reads the guard's `hard_stop` event for both figures, and binds the artifact
+the runner had set up — there is no provider fragment to trust, because there is no completed run.
+A log with no `hard_stop` and no `--provider-stderr` is refused rather than turned into a bound from
+its last sample.
+
+#### The SECOND kind of ceiling: a process-scoped Metal refusal (sc-22738, measured 2026-09-06)
+
+`flux2_dev:bf16:mlx` rendered for 775 s on the 128 GiB Mac, its watchdog stream peaked at
+**86,988,010,336** bytes — 0.065% under this host's Metal wired limit of **87,044,670,532** — and
+the adapter then exited 1 carrying the engine's own error:
+
+```
+[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors)
+(00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)
+```
+
+The guard never fired: its kill line is 94,822,600,832, and `phys_footprint` is not the quantity
+Metal ceilings anyway. So `hard_stop` reads nothing, the walk recorded `capture_failed`, nothing
+reached the store — and production would admit the identical request (an image render at the
+ladder's bf16 rung with no measured MLX anchor) and fail the same way.
+
+**The rule.** A capture whose provider stderr carries BOTH the IOGPU status code `00000004` and the
+phrase `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored`, on a run whose guard log has NO
+`hard_stop`, is recorded through the same `record-exceeded` → ingest → commit path, with two extra
+arguments the runner supplies from its own pre-capture probe:
+
+```bash
+  --provider-stderr /abs/path/to/<anchor>-provider-stderr.txt \
+  --wired-limit-bytes 87044670532
+```
+
+**Which figures the bound carries, and the tolerance.**
+
+- `observedFootprintBytes` is the watchdog stream's **peak** sample — never its last, which reads the
+  torn-down husk (29 MB on the flux2 run).
+- `ceilingBytes` is that **same peak**, not the wired limit. The run was only ever observed 56,660,196
+  bytes short of the limit, and `sceneworks_core::memory_anchor` refuses a row whose footprint is
+  under its own ceiling, so recording the limit there would state a crossing nothing witnessed. The
+  limit is not lost: it is on `hardware.wiredLimitBytes` and spelled into the reason.
+- `reason` is `metal_submissions_ignored:observed_<peak>:wired_limit_<limit>`; the schema admits only
+  this and the guard's own `physical_footprint_at_or_above_<ceiling>:observed_<footprint>`.
+- `providerStderrSha256` hashes the refusal's witness, as `eventFileSha256` does the guard's.
+- **Tolerance: the peak must be at or above 98% of the wired limit** (`METAL_REFUSAL_TOLERANCE`,
+  2%). The sampler runs every 2 s, so its reading is always at least one interval stale when Metal
+  refuses; the flux2 terminal climb was ~306 MB/s, i.e. ~612 MB (0.70%) of lag per interval, and the
+  actual gap was 0.065%. 2% is ~2.8 intervals — loose enough for a faster terminal climb, tight
+  enough that a GPU fault taken well below the limit is NOT laundered into a memory bound. Outside
+  the band the record is refused and the anchor stays `capture_failed`.
+- `--wired-limit-bytes` must equal the limit the adapter probes inside `record-exceeded`. A host
+  whose Metal policy moved between the capture and the record is one neither reading speaks for.
+
+**Process-scoped vs WEDGED HOST — the discriminator is two in a row.** `SubmissionsIgnored` has two
+scopes. On the flux2 run it was the process's: the next anchor (`krea_2_raw:bf16:mlx`) committed
+normally four minutes later. The same string is also what a **wedged host** says — the GPU stays in
+its error state and refuses every process until the machine is **rebooted** — and on a wedged host
+every remaining anchor would "measure" a bound at whatever footprint it happened to reach, filling
+the store with inequalities about the driver rather than about the models.
+
+So: **one refusal is a bound; two consecutive refusals halt the walk.** The second one is a
+`capture_failed`, records nothing, and sets `state.halt` naming the reboot, which makes the run exit
+non-zero after the summary. Reboot the host, then re-run the walk — the first anchor's bound is
+already committed and its cell will classify `exceeded_current`, so the walk resumes past it.
+
+#### A THIRD non-failure: the pinned engine refuses the shipped artifact (`artifact_unsupported`)
+
+Neither of the two ceilings above. The adapter never finished loading: `catalog.media().load(...)`
+— the same call the worker makes through `crates/sceneworks-worker/src/inference_runtime.rs` —
+returned a gen-core `Unsupported`, and the arm printed it as
+
+```
+load real <provider> <tier> provider: unsupported: <the engine's own sentence>
+```
+
+`artifactUnsupported()` in `measure-memory-catalog.mjs` matches exactly that line and puts the
+engine's sentence on the anchor row. Nothing is recorded: no capture bundle, no `exceededBounds`
+entry, no commit, no touch of `config/memory-anchors.json`. A load that never completed measured
+nothing and exceeded nothing, so there is no inequality to write down — the row states only that
+this cell does not load at this pin.
+
+It does not fail the walk. The alternative — exiting 2 — would red every campaign until somebody
+re-hosts a model, while telling the operator nothing they can act on. The walk prints a dedicated
+block after the summary table naming each refused anchor and its reason, so the finding is loud
+without being a build break.
+
+**Re-running does not help.** Only a new rehost revision (a manifest pin bump) or an engine change
+(an inference pin bump) can move one of these cells, and either event stales the closure digest, so
+the cell simply becomes capturable again on its own.
+
+##### Open: two rehosts the pinned engine refuses (measured 2026-09-06, pin `3b922bac6094e06f98bb2598a6d6fe10dc92739e`)
+
+For the artifact owner. Neither is fixed here — this walk does not modify artifacts.
+
+| cell(s) | repo @ revision | file / key | the engine's check |
+|---|---|---|---|
+| `wan_2_2_i2v_14b:q4:mlx` (and `:q8:mlx`, same shape) | `SceneWorks/wan2.2-i2v-a14b-mlx` @ `c6c78617` | `q4/high_noise_model.safetensors` (and `low_noise_model.safetensors`, and both under `q8/`) — `head.head.weight` ships **dense BF16 `[64, 5120]`** with no `head.head.scales` / `head.head.biases` | `gen_core::wan_i2v_memory::packed_transformer_bytes` demands `.scales` for **every** 2-D `.weight` in a packed tier |
+| `wan_2_2:{bf16,q4,q8}:mlx` | `SceneWorks/wan2.2-ti2v-5b-mlx` @ `bb1b0552` | `<tier>/config.json` carries an extra **`"max_area": 901120`** key; every other key and value matches the canonical preset exactly | `mlx_gen_wan::memory_strategy::canonical_config` compares the parsed JSON for **exact equality** with `WanModelConfig::wan22_ti2v_5b().to_json()`, which stopped emitting `max_area` in sc-12308 |
+
+Two different postures, and they are worth telling apart before anyone edits a repo:
+
+- **TI2V-5B blocks production.** `mlx-gen-wan/src/model.rs:465` calls `contract_for_loaded(spec)`
+  unconditionally in `load()` and propagates its error, and `supported_load_surface` is TRUE for a
+  plain dir / bf16 / Resident / Eager request with no controls — i.e. an ordinary TI2V-5B job. All
+  three tiers therefore fail to load in the app on this host, not only under the capture arm. The
+  `max_area` value itself is correct (`MAX_AREA_5B` = 1280×704) and the loader no longer reads the
+  key; it is inert data that an exact-equality check rejects. Fix is a one-key rehost, or teaching
+  `canonical_config` to ignore a legacy `max_area`.
+- **I2V-A14B does NOT block production, only measurement.** The packed accounting is reached
+  through `i2v_memory_strategy::prepare`, which `model.rs:2217` runs only when
+  `spec.prepared_file_pins().is_prepared()`. No SceneWorks video route prepares file pins —
+  `crates/sceneworks-worker/src/paths.rs:346` (`prepare_load_spec_with_file_pins`) has image-lane
+  callers only — so a production Wan job skips the seal, loads fine, and gets no calibration
+  identity. The capture arm prepares pins on purpose (that is what reaches the calibrated path), so
+  it is the only caller that sees the refusal. Note also that the sibling
+  `SceneWorks/wan2.2-t2v-a14b-mlx` @ `991eb255` leaves `head.head` dense in exactly the same way, so
+  this is the rehost pipeline's standing convention rather than one bad build — and gen-core's own
+  second pass in `packed_transformer_bytes` already prices a dense residual tensor correctly. The
+  first loop just refuses before that pass can run.
+
+### 6a-bis. The whole catalog on a runner — `memory-catalog-campaign.yml` (sc-22738)
+
+The same `measure-memory-catalog.mjs` walk as §6a, run on the self-hosted GPU boxes instead of an
+interactive shell, so a multi-hour campaign does not tie up a terminal (and, on the MLX side, does
+not have to run on the dev Mac at all).
+
+**Trigger.** Actions → *Memory catalog campaign* → *Run workflow*, or:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=mlx -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f 'runner_label=rw-krea (nax-macos-2, the second Mac)'
+```
+
+It is `workflow_dispatch`-ONLY — no `push`, no `pull_request`, no `schedule`. It gates nothing and
+can never become a required check; per the *Gate teardown* note in FEATURE_DEVELOPMENT.md,
+measurement runs at epic end or on explicit request, never per code change.
+
+**Inputs.** `backend` (`mlx` | `candle`), `campaign` (one path segment, e.g. `sc-22738`), `anchors`
+(comma-separated keys), `models` (space-separated ids), `skip_current` (default true),
+`hf_cache_roots`, `download_missing` (default false), `ref` (the branch to walk from and the PR
+base), `runner_label` (mlx only), `push_every`, and the three operator-staged identity-bundle paths
+`instantid_weights` / `instantid_controlnet` / `pulid_weights` (sc-22738 — see the staging note in
+§6a-bis's download section below). `anchors`, `models`, `skip_current`, `hf_cache_roots` and
+`download_missing` map one-for-one onto the script's `--anchors` / `--model` / `--skip-current` /
+`--hf-cache` / `--download-missing` flags; the three bundle paths are not flags at all — they are
+copied into the job environment under the names the worker itself reads.
+
+**Where each lane runs.**
+
+| backend | `runs-on` | box |
+|---|---|---|
+| `mlx` (default) | `[self-hosted, macOS, ARM64, rw-krea]` | `nax-macos-2`, the second Mac |
+| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax]` | `nax-macos`, the dev Mac |
+| `candle` | `[self-hosted, Windows, X64, cuda]` | the RTX PRO 6000 Windows box |
+
+🔴 Weight-set labels move between the two Macs — they name a weight set, not a machine. Both label
+sets above were confirmed against the `runner_name` of jobs that actually served them, which is the
+only way to check (`gh api /orgs/SceneWorks/actions/runners` 403s without `admin:org`). Re-confirm
+before assuming `rw-krea` is still the second Mac, and remember that a label no runner carries does
+not fail the dispatch: the job queues silently until the run is cancelled.
+
+**What the job does.** Checks out `ref` shallowly (`fetch-depth: 1` — nothing in the campaign reads
+history beyond HEAD, and a full clone of this repo's 2+ GiB pack was costing 27+ minutes on the
+Windows box), cuts (or, on a re-run, RESUMES — see below) the branch
+`story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on
+the current branch and refuses a detached HEAD, and this keeps it off `feature/*` and `main`),
+prepares the inference clone, builds the release adapter (`--features mlx --bin memory-mlx-adapter`,
+or `--features candle --bin memory-candle-adapter` under `vcvars64`), prints the `--list` table as
+the job summary, runs `--dry-run`, then walks for real with `--work-dir` under `$RUNNER_TEMP`.
+
+**Inference is fetched ONCE, shallow, into a clone that outlives the job.** The campaign used to
+download the ~650 MB inference repo twice per dispatch — once by `cargo fetch --locked` (the
+workspace pins `candle-kernels` at a `SceneWorks/inference` rev and `.cargo/config.toml` sets
+`git-fetch-with-cli = true`) and once by `scripts/ci/memory-catalog/inference.sh`. On the Windows
+CUDA box that was fatal rather than merely slow: run 34044786385 sat 70 minutes at ~150 KB/s inside
+cargo's fetch, died with `fetch-pack: unexpected disconnect`, and started over.
+
+So `inference.sh` now runs **before** `cargo fetch` and does the only network fetch of that repo the
+job makes:
+
+- **Persistent.** The clone lives at `$INFERENCE_CLONE_DIR` — `D:\memory-catalog-inference` on the
+  CUDA box (set in the job env; `D:` is where that runner already keeps its per-runner caches),
+  `$HOME/memory-catalog-inference` on the Macs (the script's default, because a job-level `env:`
+  cannot expand `$HOME`). Not under `$GITHUB_WORKSPACE` or `$RUNNER_TEMP`: both are wiped between
+  jobs, which is what made every dispatch re-pull the repo. A directory that is not a clone of
+  `SceneWorks/inference` is discarded and re-initialised rather than fetched into.
+- **Shallow, and only the revisions this walk needs.** `git fetch --depth 1` for the pin **plus**
+  every revision `node scripts/anchor-loader-closure.mjs --anchor-revisions` prints — the harness
+  runs `--stamp-anchors` per anchor, which digests each packaged anchor's loader closure at *its
+  own* record's (or attested) inference revision, generally older than the pin and not necessarily
+  on any branch tip. That flag exists to be this fetch list, derived from the same store the
+  stamping walks, so the two cannot drift. All the missing revisions go in ONE fetch, so the server
+  deltas their trees against each other instead of sending one full tree apiece; the fetch retries
+  five times with backoff, because the observed failure is a dropped transfer, not a bad revision.
+- **Cargo reads the clone, not github.com.** The step exports `GIT_CONFIG_COUNT=1` /
+  `GIT_CONFIG_KEY_0=url.file://<clone>.insteadOf` / `GIT_CONFIG_VALUE_0=https://github.com/SceneWorks/inference`
+  into `$GITHUB_ENV`, git's own env-config channel (git ≥ 2.31). It has to be the environment and
+  not `git config --global`: the `git-fetch-with-cli` path spawns git with an empty `HOME` and
+  `GIT_CONFIG_NOSYSTEM=1` for this public repo (sc-17879), so no config *file* is read at all. The
+  rewrite is git-level, so `Cargo.lock` and the cargo db name still key on the github.com URL —
+  only the bytes' origin changes. `cargo fetch` emits one benign warning, `rejected
+  refs/commit/<pin> because shallow roots are not allowed to be updated`; the commit still lands.
+
+Measured on a Mac against the live remote: 11 revisions, 35 s and a 513 MB `.git` on a cold clone,
+0 s and no fetch on the second run, `cargo fetch --locked` exit 0 both times with the pin present in
+`$CARGO_HOME/git/db/inference-*`. The other git dependencies (mlx-rs, mlx-c, candle) are untouched
+by the single rewrite and still fetch from their own remotes.
+
+**The inference pin is derived, never typed.** The job reads `pub const INFERENCE_PIN` out of
+`crates/sceneworks-memory-adapter/src/lib.rs` — the same constant `compiledInferencePin()` reads —
+and hard-fails unless the clone's HEAD equals it and the tree is clean. `npm run bump:inference`
+moves both at once; this workflow needs no edit on a pin bump and writes to no pin site. A pin bump
+simply adds one revision to the next run's fetch list; everything already in the persistent clone is
+reused.
+
+**Partial results survive.** The walk runs in the background while a poller pushes the branch every
+`push_every` landed anchor commits, and a further `if: always()` push runs after success, failure,
+timeout and cancellation alike — so a cancelled campaign still ships every anchor it finished. The
+work dir (summary JSON, per-anchor logs, retained raw bundles) is uploaded as a run artifact on
+every outcome, and a final step opens `chore(<campaign>): <backend> catalog campaign results` into
+`ref` when the branch has commits. Nothing is merged automatically.
+
+**Re-running a failed dispatch is the recovery, and it resumes (sc-22738, run 34490358777).**
+`gh run rerun --failed` reuses the RUN ID — `github.run_attempt` is the counter that moves — so the
+new attempt lands on the SAME `story/<campaign>-<backend>-campaign-<run_id>` branch. It continues
+that branch instead of colliding with it: anchors an earlier attempt pushed are fetched back (their
+tree is what `--skip-current` reads, so they plan as `current` and are skipped), the walk appends
+the rest, and the PR that is already open picks up the new commits. Nothing measured is discarded —
+even commits an attempt made but never managed to push are kept and go up with the next push. Before
+this, `git switch -c` hit `fatal: a branch named 'story/…-<run_id>' already exists` twelve seconds
+in, so the documented recovery for a transient infra fault produced a second, different failure that
+looked like the first. The three arms and the reasoning live in
+`scripts/ci/memory-catalog/branch.sh`; a re-run served by a DIFFERENT runner listener is fine, since
+the decision reads the remote rather than the box.
+
+🔴 **If the repository forbids Actions from opening PRs, that final step WARNS rather than failing
+(sc-22738, run 34356681566).** `gh pr create` returns
+
+```
+pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve
+pull requests (createPullRequest)
+```
+
+when the repository/organization setting *"Allow GitHub Actions to create and approve pull
+requests"* is off. No `permissions:` block overrides it — `pull-requests: write` is already granted
+— so the step emits a `::warning` with a ready-to-click
+`compare/<ref>...<campaign branch>?expand=1` URL, writes the same link into the job summary, and
+exits 0. The branch and the artifact are already safe at that point; only the click is missing.
+That single message is the ONLY failure treated this way: any other `gh pr create` failure (a bad
+token, a base ref that does not exist, a rejected body) still reds the step, because there the PR is
+genuinely lost and nothing else would say so.
+
+Each job takes a `concurrency` group keyed on (backend, runner) with `cancel-in-progress: false`, so
+two campaigns queue rather than share a GPU. `timeout-minutes` is a wedge ceiling (2880 mlx / 1440
+candle), not a measured budget — and since sc-22738 each anchor is separately bounded by the harness
+(`PROBE_BUDGET_MINUTES`), so the job ceiling only catches a wedge OUTSIDE a probe.
+
+**Hugging Face roots.** `hf_cache_roots` (newline- or `;`-separated) wins; otherwise the runner-level
+`$SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE`; otherwise the lane default (`/Volumes/Models/huggingface/hub`
+on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a warning, not an
+error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
+snapshot is under none of them plans as `weights_missing` rather than failing the run.
+
+**The candle job builds with rustc DIRECT, not through sccache (sc-22738, run 34490358777).** The
+shared Windows runner exports `RUSTC_WRAPPER=sccache`, and an installed daemon can reset its own
+local connection mid-build: *"An existing connection was forcibly closed by the remote host. (os
+error 10054)"*, followed by `error: could not compile candle-transformers` and **no rustc diagnostic
+at all** — the wrapper drops the socket, so there is nothing to attribute the failure to. Run
+34490358777 died that way four minutes into *Build the candle memory adapter*.
+`windows-candle.yml` had already met this twice (the backend-candle test and the sidecar check) and
+answered it by clearing the wrapper for those jobs; this lane compiles the same candle + CUDA graph
+on the same box, cold on every dispatch (`actions/checkout`'s `clean` takes `target/` with it), so
+it now carries the identical step in the identical position — after
+`prepare-rust-runner` (which only clears a *missing* wrapper) and before the first `cargo`
+invocation. It does **not** take that block's second step, the job-local `CARGO_HOME`: each runner
+service already pins its own `D:\cargo-home-N` (sc-17614) and serves one job at a time, while a
+`$RUNNER_TEMP` `CARGO_HOME` is re-downloaded every run — the wrong trade on the box whose slow link
+this lane's whole fetch design exists to work around.
+
+**The candle job censuses the GPU before it walks (sc-22738).** Run 34272596969 spent 51 guarded
+renders — roughly an hour of GPU time — producing 51 copies of one sentence: *"untrustworthy stable
+idle baseline: pure compute processes [6308] are resident on the profiled GPU; the peak is
+contaminated"*. Pid 6308 was a `memory-candle-adapter.exe` orphaned when the previous dispatch
+(34271044903) was cancelled: the harness launches the adapter **detached**, deliberately, so a
+Ctrl-C cannot reach it mid-command-buffer, and the runner's own *"Cleaning up orphan processes"* only
+reaps a step's direct children.
+
+`scripts/ci/memory-catalog/gpu-preflight.sh` now runs between *Build the candle memory adapter* and
+*Plan the walk*:
+
+1. censuses by **process type**: `nvidia-smi pmon -i $CUDA_VISIBLE_DEVICES -c 1 -s um` for the
+   `C` / `C+G` / `G` column, joined by pid to `nvidia-smi -i $CUDA_VISIBLE_DEVICES
+   --query-compute-apps=pid,process_name,used_memory --format=csv,noheader` for the full process
+   path and memory that `pmon` truncates. The whole census — graphics rows included — is printed;
+2. terminates anything matching `*memory-candle-adapter*` / `*memory-mlx-adapter*` — **ours, by
+   name**. Never an arbitrary pid: this box also serves `windows-candle.yml` and
+   `desktop-windows.yml`;
+3. censuses again, and **fails the job** with `::error title=Profiled GPU is not idle` naming the
+   pid, the process and its memory if a **pure-compute (`C`)** row is left. Find out whose it is
+   before killing it.
+
+**Type, not presence (the run-34297841666 false positive).** The first spelling of this step
+censused with `--query-compute-apps` alone, which on Windows WDDM returns every process holding a
+device context. It refused twenty desktop graphics contexts — `explorer.exe`,
+`WindowsTerminal.exe`, `StartMenuExperienceHost.exe`, three pids reading `[Insufficient
+Permissions]`, all with `[N/A]` memory — on a host where the engine's own guard had flagged exactly
+one pid. The engine discriminates by type: `candle-gen/src/testkit.rs::pure_compute_pids` counts
+`C` and explicitly passes over `C+G` and `G` because *"WDDM desktop processes are reported as C+G
+even with zero SM/memory activity"*. This step asks the same question with the same command, so a
+preflight refusal and an engine refusal cannot disagree. An unreadable process name is classified by
+its type like any other row; an *unrecognised* type is warned about, never refused.
+
+No `nvidia-smi` on PATH is a warning, not a failure — and so is an `nvidia-smi` whose `pmon` will
+not run, because without the type column every desktop context reads as compute again. The engine's
+stable-idle guard still refuses a contaminated peak per anchor; this step is the cheap way to find
+out early. **The guard itself is
+untouched.** It is measurement validity — a peak sampled beside a foreign process is not this
+model's peak — not a gate on anything shipping (see FEATURE_DEVELOPMENT.md, *Gate teardown*).
+
+The walk carries the other half. A `capture_failed` reason naming pids is annotated with each
+process's **name** (queried once per streak, so the operator gets `[6308 = …\memory-candle-adapter.exe
+(12345 MiB)]` rather than a bare number), and `CONTAMINATION_ABORT_STREAK` (5) consecutive refusals
+naming the *same* process halt the walk with a summary line instead of burning the rest of the
+catalog. That is deliberately a **host**-level abort: a per-cell host condition — an empty snapshot,
+an unstaged component — must never abort the walk, and no longer can.
+
+**Fetching the missing snapshots — `download_missing` / `--download-missing` (sc-22738).** Neither
+box holds the whole catalog. Copying the missing snapshots off the Mac's SSD is slower than fetching
+them from the hub on the Windows box's own link (measured 2026-09-08), so the campaign can fetch
+what it needs:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=candle -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f download_missing=true
+```
+
+- **Only `weights_missing` anchors.** A `runnable` cell is never re-fetched, and a cell refused for
+  any other reason (`no_adapter_arm`, `lane_undeclared`, `exceeded_current`, `harness_unsupported`)
+  is not a weights problem and gets no download. After the fetch the cell is classified **again**,
+  by the same `classifyAnchor` that refused it.
+- **Nothing is invented.** Each anchor's repositories are the ones the classifier probes (the
+  LTX-2.5 snapshot, the per-(lane, tier) artifact, `upstream`, the SDXL and Mage-Flow components,
+  the member's side artifact), and each repository's revision and file globs come from the manifest
+  download rows for that model, tier and platform. `--revision` is **always** the pinned revision —
+  never `main`, which pinning a manifest download removes from the mirror anyway — so a repository
+  the manifest ships unpinned (the upstream Wan 2.2 / SVD Diffusers checkpoints) is reported as not
+  fetchable instead of being resolved off a branch. So are the hand-staged roots (PuLID's identity
+  bundle, the InstantID stack): they are operator env vars, not hub repositories.
+- **Destination: the FIRST `--hf-cache` root**, i.e. the first line of `hf_cache_roots` above —
+  `E:\huggingface\hub` on the CUDA box, `/Volumes/Models/huggingface/hub` on a Mac. Standard hub
+  layout (`models--<org>--<name>/snapshots/<rev>/…`, with `refs/` exactly as the CLI writes them),
+  because it is the CLI that writes it: `hf download <repo> --revision <rev> --include <glob> …
+  --cache-dir <root>` (falling back to `huggingface-cli` when `hf` is not installed).
+- **One at a time, resumable.** These are multi-GB transfers on a link that has already killed a
+  parallel fetch; the CLI resumes a partial download, so a re-dispatch pays only for what is
+  missing. Each landed snapshot logs `download: <key> <repo>@<rev> <n> files, <bytes> bytes`.
+- **A failed fetch never stops the walk.** That one anchor stays `weights_missing (download failed:
+  <reason>)` and the campaign moves on, exactly as an absent snapshot does today.
+- **An EMPTY snapshot directory is fetchable, and is never booked as runnable** (sc-22738, run
+  34272596969). A hub fetch interrupted after the snapshot tree was created and before a blob landed
+  leaves `models--<org>--<name>/snapshots/<rev>/<tier>/` present and empty. That plans as
+  `weights_missing (snapshot present but empty: <path>)`, which makes it eligible here — the CLI
+  resumes an interrupted download — instead of being booked, loaded, and then thrown out of the walk
+  by the artifact inventory. (It was: `artifact inventory is empty:
+  E:\huggingface\hub\models--SceneWorks--Mage-Flow-Base\snapshots\d642341926…\q4` aborted that run at
+  cell 61 of 132 and discarded the remaining 71.)
+- **No hub CLI on PATH is stated ONCE, loudly.** Before it fetches anything the walk probes
+  `hf --version`, then `huggingface-cli --version`. When neither runs, it writes a
+  `::warning title=Hugging Face CLI missing` at the top of the step and every cell it silenced
+  carries `weights_missing (… download unavailable: no Hugging Face CLI on PATH …)` — rather than N
+  identical `ENOENT` lines buried in a multi-hour log. A CLI that is present but exits non-zero
+  counts as installed: its own download error describes a broken install better.
+- **`$HF_TOKEN`** is exported into the job from the repository/org secret of that name and is read
+  by the CLI, not by this script. Every artifact the campaign fetches today is public, so an unset
+  token only matters for a gated repository; set the secret (or export `HF_TOKEN` /
+  `HUGGING_FACE_HUB_TOKEN` on the runner) before dispatching one. `HF_HUB_ENABLE_HF_TRANSFER` is
+  runner-level opt-in and is not set here.
+- **`--dry-run --download-missing`** prints one line per snapshot it would fetch, with the
+  manifest's own `estimatedSizeBytes` where the rows declare it, and fetches nothing. That is what
+  the workflow's *Plan the walk* step runs; the `--list` table in the same step deliberately does
+  **not** carry the flag, so reading the plan can never start a download.
+- **ONE GLOB PER INVOCATION, and never a dotfile** (sc-22738, run 34356681566). The fetch used to
+  hand `hf download` a repeated `--include` per glob. The modern `hf` (typer, `list[str]`) appends
+  a repeated option; the `huggingface-cli` spelling it superseded parses it with argparse
+  `nargs="*"` and keeps only the **last** occurrence — so on a runner carrying the older spelling
+  every multi-glob target fetched its last glob and nothing else. That cost 19 cells in one run:
+  Mage-Flow landed `<tier>/vae` and no `<tier>/text_encoder` (12 cells), LTX-2.3 landed the tier and
+  no `gemma/` sibling, MiniMax-H3 landed the base DiT and no `transformer_ref/`. Neither
+  single-invocation spelling is safe on both grammars (`--include a b` is two POSITIONAL filenames
+  to the new CLI, which then *ignores* `--include`), so the fetch now runs one invocation per glob,
+  which reads identically under both and re-downloads nothing because the CLI resumes. Every
+  invocation also carries `--exclude "*/.*" --exclude ".*"`: `candle-gen-sdxl`'s `collect_files`
+  refuses **any** dot-prefixed file anywhere under a sealed source, which is how the two Illustrious
+  bf16 cells died on a snapshot's own `.gitattributes`. The top-level pattern is passed **last** so
+  it is the one the argparse CLI keeps. `scripts/hash-artifact-inventory.mjs` ignores dotfiles for
+  the same reason — a receipt must not depend on how the operator obtained the snapshot.
+
+**The three identity stacks `--download-missing` cannot fetch, and how to stage them on the CUDA
+box (sc-22738).** `instantid_realvisxl` and `pulid_flux` load identity stacks the worker fetches on
+FIRST USE rather than declaring as manifest downloads, so there is no repository for the walk to
+resolve and `--list` reports them by variable name. Run 34356681566 planned all four of those cells
+`weights_missing` for exactly that reason. There is **no staging script** — the files are three
+loose bundles, listed with their upstream repositories in the *Adapter environment for the SDXL
+family* note above and in the `SCENEWORKS_PULID_WEIGHTS` block of the adapter-environment listing.
+Stage them anywhere on the box and name the directories at dispatch:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=candle -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f download_missing=true \
+  -f instantid_weights='E:\identity\instantid' \
+  -f instantid_controlnet='E:\identity\instantid-controlnet' \
+  -f pulid_weights='E:\identity\pulid-flux'
+```
+
+`scripts/ci/memory-catalog/stage-identity-bundles.sh` copies each **non-empty** input into
+`$GITHUB_ENV` under the name the worker reads (`SCENEWORKS_INSTANTID_WEIGHTS`,
+`SCENEWORKS_INSTANTID_CONTROLNET`, `SCENEWORKS_PULID_WEIGHTS`). An input left empty is *not*
+exported, so a runner whose service environment already carries the real path keeps it — the input
+is an override, never a blanking. Whether the named directory is complete stays `--list`'s question:
+a half-staged bundle is `weights_missing` naming the missing file, not `runnable`.
 
 ### 6b. Through the guarded dispatch
 
@@ -577,8 +1933,7 @@ gh workflow run macos-mlx.yml --ref main \
 
 Validates the identities, resolves (without printing) the snapshot root, checks out inference at the
 exact revision into `.calibration/inference`, builds the release adapter, runs the harness with
-`--fresh-per-case` on fixture `qwen-image-<tier>-seed<15511|16353>-step2` (seed 15511 for `bf16`,
-16353 for the packed tiers — macos-mlx.yml:809-813), schema-checks the bundle and uploads it as
+`--anchor qwen_image:<tier>:mlx`, schema-checks the bundle and uploads it as
 `memory-mlx-evidence-<tier>-<run_id>`. That artifact contains the bundle plus the immutable raw log
 and selected/reference outputs in their repository-relative tree. Validate a downloaded artifact
 with `memory-calibration-harness.mjs check --input <bundle> --source-root <unpacked-raw-root>`, then
@@ -598,24 +1953,29 @@ gh workflow run macos-mlx.yml --ref main \
   -f z_image_revision=<exact 40-hex artifact revision>
 ```
 
-No tier input — the fixture is fixed at `fresh-five-rung-z-image-q4-768-seed16402-step2`. It first
-runs `assess-reuse` and **asserts the verdict is `unable_to_amortize`** before capturing
-(macos-mlx.yml:841-848), then runs `--fresh-per-case` and uploads
-`sc-16059-mlx-reuse-{run_id}` containing the bundle and the assessment.
+No tier input — the anchor is fixed at `z_image_turbo:q4:mlx`. It captures that one anchor,
+schema-checks it, and uploads `sc-16059-mlx-anchor-{run_id}` containing the bundle.
 
 **`candle:krea_2_turbo`** — `run_five_rung_reference` on `windows-candle.yml` (:134-163, 460-476):
 
 ```bash
 gh workflow run windows-candle.yml --ref main \
   -f run_five_rung_reference=true \
-  -f provision_krea_snapshot=false \
+  -f provision_snapshot=false \
   -f inference_revision=<exact adapter INFERENCE_PIN> \
-  -f krea_repository=SceneWorks/krea-2-turbo-mlx \
-  -f krea_revision=<exact 40-hex artifact revision>
+  -f provision_repository=SceneWorks/krea-2-turbo-mlx \
+  -f provision_revision=<exact 40-hex artifact revision>
 ```
 
-Captures fixture `fresh-five-rung-krea-q4-1024-seed16402-step2` **twice** — once `--fresh-per-case`,
-once `--batch-rungs` — schema-checks both and runs `compare-reuse` between them.
+🔴 **These are the post-sc-18677 input names.** Provisioning was generalized away from the
+hardcoded Krea reference and the inputs were **renamed, not duplicated**:
+`provision_krea_snapshot` → `provision_snapshot`, `krea_repository` → `provision_repository`,
+`krea_revision` → `provision_revision` (windows-candle.yml, `workflow_dispatch` header). The old
+spellings are silently ignored rather than rejected, and because an omitted `workflow_dispatch`
+input takes its **default**, a dispatch using them still runs — against whatever the defaults say.
+Verified against the real dispatch in sc-11045 (run 33000590976).
+
+Captures the `krea_2_turbo:q4:candle` anchor once and schema-checks it.
 
 Retrieve any of them with `gh run download <run-id>`.
 
@@ -634,10 +1994,11 @@ from a real capture rather than trusted forward.
   **3.85 s per invocation**. This is a hard **floor** and known not to cover the dominant cost: those
   records are `gated`, exercising the VAE decode seam only — no text-encoder or DiT load, no
   conditioning, no denoise, no lifecycle injection, no warm A→B→A.
-- **A five-rung lane is 5 certifying records** (one per cell), each a fresh model load under
-  `--fresh-per-case`. At the assumed 300 s that is ~25 minutes of provider time plus five cold model
-  loads; the floor anchor says the harness overhead itself is seconds. Budget hours, not minutes, and
-  do not promise a number — measure yours and report it.
+- **A lane is now ONE certifying record per (model, tier)** — sc-22514 replaced the five-rung ladder
+  with a single anchor, so the cost of a lane fell by roughly the length of the ladder. Each capture
+  is still one fresh cold model load; the floor anchor says the harness overhead itself is seconds.
+  Budget hours, not minutes, for a whole model's three tiers, and do not promise a number — measure
+  yours and report it.
 - **I/O is not the bottleneck**: warm-page-cache sequential reads of real safetensors shards on this
   Mac measured 11.3 GB/s and 12.3 GB/s, so a 20 GiB tier streams in under 2 s. Dequantisation, graph
   construction and denoise are unmeasured.
@@ -653,6 +2014,394 @@ from a real capture rather than trusted forward.
   lane cannot be measured at the production geometry at all; three-tier coverage there needs a
   ≥192 GB Mac, or bf16 rows captured at a reduced geometry and labelled as such. Establish this
   before you accept a three-tier scope, not after two tiers have already been swept.
+- 🔴 **…but establish it by MEASURING, because the obvious arithmetic over-counts a staged pipeline.**
+  Counter-example, `mlx:ltx_2_3` bf16, settled in sc-18809. The arithmetic said no: 47.1 GB of dense
+  bf16 tier plus the 26.4 GB Gemma co-requisite is **73.5 GB of weights** before a single video
+  activation, on a 128 GiB box, across an envelope reaching 449 frames. That is the same shape as the
+  `flux2_dev` finding above, and the epic carried it as a live risk. **It was wrong**, because the two
+  giants never co-reside: sc-10976 stages the text phase (build TE → `encode_av` → `eval` → drop →
+  `clear_cache()`) *before* the AvDiT materializes, so the weights floor is `max(TE, DiT)`, not their
+  sum. Measured with the committed real-weights test (below), the bf16 co-residence estimate is
+  69.20 GiB while the actual staged peak at the same geometry is **36.89 GiB** — 47% lower. Whenever a
+  provider stages components, an additive weights sum is an upper bound that can be off by nearly 2×;
+  read the provider's load path before quoting it, and prefer one cheap measured load over the sum.
+
+### bf16 feasibility, measured — the shape of an answer this section wants
+
+Host: Apple M5 Max, **128 GiB** unified (`sysctl hw.memsize` → `137438953472`). The ceiling that
+actually binds is Metal's `recommendedMaxWorkingSetSize` = `115448725504` B = **107.52 GiB**
+(`MTLCreateSystemDefaultDevice().recommendedMaxWorkingSetSize`); `maxBufferLength` is 80.64 GiB, which
+bounds any *single* allocation and is nowhere near binding here. Quote both — `hw.memsize` alone
+overstates what Metal will wire.
+
+Instrument, on real weights at inference pin `b965641e`:
+
+```bash
+cargo test -p mlx-gen-ltx --release --test sequential_residency_real_weights -- --ignored --nocapture
+# with LTX_MODEL_DIR=<snapshot>/<tier> and LTX_GEMMA_DIR=<snapshot>/gemma
+```
+
+It brackets a real staged `generate` in `reset_peak_memory()` / `get_peak_memory()`. Confirm the run
+was not skipped — an `#[ignore]`d test that returns early still reports `ok`, so require the printed
+line and a non-trivial wall time.
+
+🔴 **Read the reproducibility column before you use any of these numbers.** The command above
+reproduces the **first two rows only**. That test's geometry is *hardcoded* at 256×256×9 — verified at
+inference pin `b965641e` and byte-identical at inference `HEAD` (`1ee44388`), with a clean working
+tree. The two larger rows were captured by hand-editing that geometry onto env vars locally; **that
+edit was never committed and no longer exists anywhere**, so those rows cannot be re-run from any
+revision of either repo as written.
+
+| tier | geometry | frames | stage-2 latent tokens | DiT weights | **staged peak** | wall | reproducible? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| q4 | 256×256 | 9 | 128 | 10.57 GiB | 33.10 GiB | 15.6 s | ✅ via the command above |
+| bf16 | 256×256 | 9 | 128 | 35.37 GiB | 36.89 GiB | 13.6 s | ✅ via the command above |
+| bf16 | 768×512 | 145 | 7 296 | 35.37 GiB | 43.87 GiB | 90.6 s | ❌ one-off, uncommitted instrumentation |
+| bf16 | **1280×704** | **449** | **50 160** | 35.37 GiB | **87.07 GiB** | 847.8 s | ❌ one-off, uncommitted instrumentation |
+
+Lifting the geometry onto env vars in the committed inference test is **sc-18856**; until that lands,
+treat the bottom two rows as **anecdote with a number attached** — good enough to have retired a scope
+risk, not good enough to fit a curve on.
+
+**Verdict: bf16 ran to completion at the manifest maximum on this host, and the reason the planning
+arithmetic said it could not is structural.** The last row is that maximum — the largest
+`limits.resolutions` entry at `hardMaxDuration` 15 s × the fastest declared 30 fps, so 450 raw frames
+snapped to 449 by LTX's `8k + 1` stride. It completed and returned all 449 frames.
+
+Separate the two claims, because they are not equally earned:
+
+- **The structural finding is solid**: the weights floor is `max(TE, DiT)`, not `TE + DiT`, because
+  sc-10976 stages and drops the text phase before the AvDiT materializes. This is visible in the
+  *reproducible* rows alone (36.89 GiB staged vs a 69.20 GiB co-residence estimate) and it does not
+  depend on the two one-off captures at all.
+- 🔴 **The "19% headroom" figure is NOT yet earned.** It reads `87.07` against the 107.52 GiB ceiling,
+  and every one of the caveats below cuts in the same direction — the true production peak is
+  *higher* than 87.07, by an unmeasured amount. Do not plan against 20 GiB of slack.
+
+⚠ **Caveats that bound what this table can be used for.** All four apply to every row:
+
+1. **All four rows ran `video_mode: "no_audio"`.** Per inference `mlx-gen-ltx/src/model.rs`, that
+   gate (`if Self::no_audio(req)`) skips `decode_audio_track` — the audio VAE *and* the vocoder — which
+   a **default** production LTX job runs. The table measures a non-default path, and the omitted decode
+   sits at the 449-frame tail where memory is already highest.
+2. **`get_peak_memory()` is MLX *active* memory and excludes the allocator cache**, but the 107.52 GiB
+   `recommendedMaxWorkingSetSize` ceiling bounds active **+** cache. `clear_cache()` only runs at phase
+   boundaries, so cache growth *inside* the 449-frame decode is unaccounted for on the very row that
+   defines the envelope. `get_cache_memory()` was not logged.
+3. **n = 1, at the maximum envelope.** One sample, no variance, no re-run — on the row carrying the
+   entire feasibility claim.
+4. **Captured on an otherwise-idle host**, with nothing else resident. A real worker shares the box
+   with the API process, the OS, and anything else the user is running; none of that is accounted for.
+
+Two things fell out that the sweep should **re-measure before building on**, not consume:
+
+- **Peak looks linear in stage-2 latent token count**, `T_lat · (H/32) · (W/32)` with
+  `T_lat = 1 + (frames − 1)/8`. Across the three bf16 rows the marginal cost is 0.997 then
+  1.032 MiB/token, and `36.89 GiB + 1.0 MiB × tokens` predicts the max-envelope peak as 85.87 GiB
+  against 87.07 GiB measured — 1.4% error over a **392×** token range. Neither raw frame count nor
+  area alone can do that; the product is the right regressor *shape*.
+  🔴 **But two of the three points are the non-reproducible rows, so this is a hypothesis with n = 3,
+  not a fit.** sc-18810 must **re-measure these points itself** once sc-18856 commits the geometry
+  knob, and fit on its own captures — do not inherit `1.0 MiB/token`, `85.87 GiB`, or the 1.4% error
+  as settled inputs.
+- **Which phase is the floor flips with tier.** For q4 the text phase dominates (peak 33.10 GiB with a
+  10.57 GiB DiT); for bf16 the DiT does (35.37 GiB). A model that assumes one or the other is wrong
+  for half the tiers of the same lane. This one rests entirely on the two **reproducible** rows.
+
+**What a sweep may assume on this host.** bf16 completed at the maximum `limits` combination — the
+five declared resolutions (0.41–0.90 MP) crossed with durations 4–15 s and fps 24/25/30, i.e. 96–449
+frames — and q8 (20.6 GiB DiT) and q4 (10.6 GiB) sit strictly below it in the DiT phase. So the lane
+needs **no reduced-geometry caveat and no ≥192 GB Mac**, and three-tier coverage is in scope.
+
+🔴 **What it may NOT assume: a specific headroom number.** The measured 87.07 GiB was taken with audio
+decode skipped, without cache accounting, once. Re-measure at the geometry you actually intend to
+sweep, with audio on, before treating any margin as spendable. Budget wall clock too: the
+max-envelope bf16 row took **14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
+
+### sc-18810 re-measured it through the committed apparatus — three of those claims did not survive
+
+Every number below is **measured** — from `docs/generated/ltx-mlx-geometry-sweep-sc-18810.json`,
+captured through the sc-18808 MLX arm and `scripts/memory-calibration-harness.mjs` on the
+**production full-A/V path** (`video_mode` unset, audio track decoded — the row above used
+`no_audio`), q8, inference pin `b965641e` — **except where a paragraph says PREDICTED**, which means
+it is computed from the engine's committed `LTX_VAE_*` cost model and has no record behind it. §5 is
+the only such paragraph. 13 records over **8 captured fixtures spanning 7 distinct {w,h,frames}
+geometries plus one fps probe** — the probe repeats `{768x512, f241}` at 24 fps, and §3 below argues
+that is the same geometry, so it may not also be counted as an eighth one. Replicates on four of them
+give a measured noise floor rather than an assumed one: decode is byte-identical across repeats,
+denoise varies by 0.001% (2.7e-4 GiB), and the text phase by 0.33% (0.110 GiB).
+
+🔴 **That noise floor is CROSS-SESSION and CROSS-REVISION, and every "× noise" statement below
+inherits it.** The capture crashed the host after four records and resumed later, so it spans two
+driver sessions and **four SceneWorks revisions** — `f301d712` (session 1, 4 records), then
+`817cf550`, `41e8151f` and `c30c4974` (session 2, 9 records). Both sessions' logs ship
+(`docs/calibration/sc-18810/precrash-q8-run.log` and `sweep-run.log`) and
+`ltx-temporal-form-fit-sc-18810.json`'s `sourceSessions` says which records came from which; the
+original PR committed only the second log, so four records had no terminal line anywhere. **Every
+one of the four replicate groups contains one record from each session**, so not one of them is a
+back-to-back repeat: the floor bounds repeat-plus-revision variation, not repeat variation alone. The
+text floor's own maximum spread happens to fall between two session-2 records (`41e8151f` 33.2283
+vs `817cf550` 33.1188 GiB), so it is cross-revision even setting the crashed session aside. This is
+reported rather than corrected because correcting it means re-rendering, and a floor that is too
+WIDE is the conservative direction for a residual to be compared against.
+
+⚠️ The evidence **bundle**'s own `sourceSessions` is `[]` for this lane, as it is for sc-18808: the
+harness only populates it on its capture path and these records were ingested without it. The
+per-session provenance above is derived from the committed logs by
+`scripts/fit-ltx-temporal-form.mjs`, and a captured record with no `OK` terminal in a committed log
+now **throws** rather than shipping — which is the guard that would have caught the original gap.
+
+**1. The peak is not one curve — it is the max of three, and only the phases are fittable.** The
+shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
+than incidental. Fitting the *overall* peak with any single form leaves a held-out error of
+**≥10.26 GiB** (94× the text-phase noise floor) for all five candidate forms, because a max of linear
+pieces is not linear. Fitting each phase separately, and taking each phase's OWN best form, lands at
+**0.019–0.30 GiB** — decode 0.019 (`cross`), denoise 0.13 (`latent_tokens`), text 0.30 (`area_only`).
+⚠️ That band is a per-phase *best-of*, and it is **not** the band any single shipped form achieves:
+the `cross` form sc-18812 actually adopts spans **0.019–0.44 GiB** (0.0185 / 0.1741 / 0.4438). Citing
+0.019–0.30 as `cross`'s own accuracy is the mis-read that shipped once already, in the
+`perMpxFrameGb` schema description. Add the temporal term *per phase*; never to the aggregate.
+
+**Admission-margin verdict (SC-18829): keep the ratified constants unchanged.** Runtime adds each
+phase's maximum fit/held-out absolute residual before taking the maximum over all three phases, and
+only then applies the ordinary backend estimate margin. This construction is explicitly exempt from
+the measured-binding-phase pin: it does not assume that one phase remains binding, because every
+phase is independently represented and residual-bounded at the request geometry. The largest
+adopted q8 `cross` residual is 0.4438 GiB; the 10% MLX estimate margin over the observed 33–40 GiB
+phase envelope contributes roughly 3.3–4.0 GiB on top of that bound. The residual is therefore not
+being spent as margin, and the margin is not being used to conceal a missing phase. Candle has no
+promoted temporal curve yet, so this verdict changes no Candle constant or evidence claim.
+
+**Currency at the final provider-contract pin:** the SC-18808 q8 curve is historical by design.
+SC-19109 changes the loaded provider contract/carrier fingerprint and the final inference feature
+closure changes the provider digest, so runtime must reject the old fingerprint/`87a27d…` closure
+instead of making that artifact reachable by alias. SC-18946 owns the frozen-closure q8 reseed/refit
+and the first q4, bf16, and rung-2 captures. The schema-v2 producer groups those new records by their
+complete identity and can promote them without code changes; until those physical captures exist,
+the final atomic inference pin will route q8, q4, and bf16 through the provider-owned conservative
+geometry/temporal fallback. The historical capture pin `b965641e` had neither the loaded LTX
+contract nor that profile API. This branch's frozen preparation pin `b4a29108` contains both and
+exercises the fallback, but it is not the permanent inference-`main` pin and carries no replacement
+physical captures yet; this checkpoint therefore must not be reported as production-complete.
+
+**Multi-curve promotion is selector-complete, not tier-pooled.** The fit report's canonical
+`selectorFits` partitions records by model, catalog family, provider, backend, tier, mode, rung,
+load shape, batch, inference closure, calibration ABI/fingerprint, and decode pass before fitting
+any coefficient. Its legacy `fits.<phase>.<tier>` view is emitted only when that tier maps to one
+complete selector; a campaign containing (for example) q8 staged and q8 bounded-decode records
+omits the ambiguous q8 legacy slice instead of pooling them. `video-memory-curves.json` consumes the
+matching selector fit and exact sorted record IDs. Its `sourceCatalog` hashes every immutable source
+file's exact bytes, and each curve separately names the path, digest, and record subset it consumed;
+the Rust loader recomputes those source handshakes and rejects missing, extra, cross-curve-reused, or
+selector-mismatched records before any curve can evaluate.
+
+**2. The phase coefficients are the right order of magnitude for the staged components, and the
+per-voxel one matches the engine's own fit to 0.3%.** 🔴 Every coefficient below is fitted on **four
+q8 geometries (seven records) of the six declared `fit` rows** — one was attempted and killed, one
+was never begun; see *Coverage is derived* below — and scored on six held-out records. The
+"× noise" figures are against the cross-session, cross-revision floor described above.
+
+| phase | best form | coefficients (q8) | held-out max residual |
+| --- | --- | --- | --- |
+| text | `fixedGb + perMpxGb·mpx` (no temporal term) | 32.92 + 0.68·mpx | 0.30 GiB (2.8× noise) |
+| denoise | `fixedGb + perLatentTokenGb·T_lat·(W/32)·(H/32)` | 20.52 + 0.000986/token | **0.13 GiB** |
+| decode | `fixedGb + perMpxGb·mpx + perMpxFrameGb·(mpx·frames)` | 2.52 + 0.12·mpx + 0.2998·mpx·frames | **0.019 GiB** |
+
+🔴 **The intercepts are NOT identities, and an earlier revision of this section said they were by
+comparing GiB against GB.** The coefficient column is GiB; `stagedTextEncoderBytes` and
+`stagedTransformerBytes` are decimal bytes. In **one unit (GB)**:
+
+- denoise intercept **22.03 GB** against a **20.61 GB** transformer — **1.42 GB unexplained (6.9%)**
+- text intercept **35.35 GB** against a **32.73 GB** staged text encoder — **2.62 GB unexplained (8.0%)**
+
+The GiB→GB factor is **7.37%**, so the apparent agreement WAS that factor. The residue is plausibly
+other resident state (the connector, small components, allocator overhead), but nothing here
+establishes that — and the denoise gap is ~10× that fit's own 0.13 GiB held-out residual, so it is
+not measurement slack either. Treat the intercepts as fitted parameters near the component sizes, not
+as the component sizes.
+
+The **per-voxel** result is unit-clean and stronger than first claimed. `perMpxFrameGb` 0.2998 GiB per
+`mpx·frames` is **322 B per output voxel**. The engine's own single-pass decode cost is
+`LTX_VAE_ACCUM_BYTES_PER_VOXEL + LTX_VAE_TILE_BYTES_PER_OUT_VOXEL` (a single pass is one tile, so
+both terms apply), and those two are documented as fitted at **~36 + ~287 = 323 B/voxel**, then
+rounded *up* to 40 + 300 = 340 for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). Measured 322
+against the engine's fitted **323** is **0.3%** — an independent reproduction of that fit, not of the
+rounded constant. `perLatentTokenGb` 0.000986 is **1.009 MiB/token**, which reproduces the withdrawn
+`0.997–1.032 MiB/token` above — as a **denoise-phase** relation, not an overall-peak one.
+
+🔴 **The additive `perFrameGb` form should not be adopted, but "15–350× worse" over-sells it and is
+withdrawn.** Held-out max residuals, additive against the `cross` form actually adopted by sc-18812:
+decode **6.5722 vs 0.0185** (355×), denoise **2.6848 vs 0.1741** (15.4×) — and text **0.3445 vs
+0.4438**, where additive is **1.29× BETTER**. The range holds on the two phases that carry the
+temporal response, not on all three. The adoption still stands: text is nearly flat in frames (all
+five candidates land within 0.164 GiB of each other there, 0.3015–0.4650, against a 22.6 GiB spread
+on decode), `cross` strictly contains `area_only` and `output_voxels` so neither can be refitted to
+beat it, and the 0.0993 GiB `cross` concedes on text is *below* that phase's own 0.1095 GiB
+replicate floor — the largest of the three floors by orders of magnitude (denoise 2.7e-4, decode 0).
+
+**3. 🔴 fps is a real but negligible memory axis — not an unmeasurable one.** Measured at identical
+`{768x512, 241 frames}`, fps 30 vs 24 (a 25% difference in audio-latent length): conditioning
+**identical to the byte**, decode identical to within 400 B, denoise **+26.0 MB (+0.075%)**. The
+argument for ignoring it is MAGNITUDE, not resolution: 26.0 MB is **90× this dataset's own denoise
+replicate floor** (2.7e-4 GiB) and is comfortably resolvable — it is under the *text*-phase floor
+only. It is 0.075% of the denoise phase and 0.07% of the run's 33.23 GiB active peak, and at this
+geometry the admission quantity (`max` over phases, here the text phase) is **identical to the byte**
+across the two fps values. So the joint audio denoise does cost memory, and the cost is far below any
+headroom a budget would carry. `GeometryEnvelope`'s missing fps axis is not a correctness gap for
+memory — but sc-18812 should record it as *small*, not as *unmeasured*.
+
+**4. 🔴 `recommendedMaxWorkingSetSize` does not bound active + cache.** Measured directly here:
+`recommendedMaxWorkingSetSize` = 115,448,725,504 B = **107.52 GiB**, `maxBufferLength` = 80.64 GiB,
+`hw.memsize` = 128 GiB, MLX's own `get_memory_limit()` = 130,567,005,798 B = **121.60 GiB**
+(0.95 × `hw.memsize`). q8 at 640x640 x 177 reached **24.30 GiB peak active + 90.68 GiB end-of-phase
+allocator cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that
+completed and was bit-identical on warm repeat.
+
+> **Provenance of the 114.98 GiB.** It is the **session-1** record (`f301d712`, 08:31:49Z). Its
+> session-2 replicate (`817cf550`) reads **115.47 GiB** — 0.49 GiB higher, the largest replicate
+> spread in this series and, like every replicate here, cross-revision. Either record clears the
+> 107.52 GiB ceiling by more than 7 GiB, so the finding does not turn on which one is quoted; the
+> lower one is quoted deliberately, because the claim is that even the *smaller* reading exceeds the
+> ceiling.
+
+⚠️ That 114.98 GiB is an **upper bound on co-existence, not a simultaneous maximum**.
+`PhaseMemory::capture()` pairs a phase-**window** peak (`get_peak_memory`) with an **instantaneous**
+end-of-phase cache reading (`get_cache_memory`); MLX exposes no "cache at the active peak". Cache
+enters the decode at ~0 and grows monotonically to 90.68 GiB, so the two readings are furthest apart
+exactly where the number is largest, and the 7.46 GiB excess is 6.5% of the reading — inside that
+uncertainty. The **qualitative** finding is not in doubt (it is corroborated by the driver log's
+free-disk trace, 81 → 16 GiB across two large decodes): MLX's cache is elastic, grows past the
+recommended working set, and is released under pressure. Log it — but a feasibility ceiling is not
+made of active+cache, and the cache series is unfittable (held-out error ≥20 GiB for every form).
+Tightening 114.98 GiB into a true simultaneous reading would need cache sampled at the active peak —
+an MLX-side hook this apparatus does not have — and a re-render, so the bound is stated rather than
+closed.
+
+**5. 🔴 Peak memory is NON-MONOTONIC in frames, and the worst geometry is the write cap. PREDICTED —
+no f297 or f305 record was captured.** Rung 2 engages on TWO independent bounds:
+
+- the **write bound**, `VaeTiling::LTX.writable_frame_cap(h,w) = i32::MAX/(8·h·w)`
+  (`gen-core/src/tiling.rs:167`, `full_res_channels: 8`) = 682 / 682 / 655 / **297** / **297** over
+  the five declared resolutions. It does not move with the host.
+- the **memory bound**, single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() × 0.85`. It
+  does, and it binds **earlier** on a smaller machine.
+
+🔴 So the claim that holds everywhere is **ONE-SIDED: no host can exceed 297 single-pass output frames
+at 0.90 MP, and smaller hosts tile earlier via the memory bound.** "The 0.90 MP buckets tile from 298
+frames on every host" is FALSE and this repository's own CI falsifies it — the hosted `macos-26`
+runner tiles `768x512 x 97`, **585 frames below that bucket's 682 cap**, purely for memory.
+
+There are in fact **three** outcomes at a given geometry, not two, and the third is only visible on a
+small host: below the full-output **accumulator floor** (`3.3 GB + 40 B/voxel`) no tiling helps —
+the accumulators hold the assembled video — so `budgeted_plan` **refuses before any render**. That
+runner reports `~13 GB just for the output buffers, over this machine's ~6 GB safe budget` at
+1280x704 f297. All three outcomes are now pinned at fixed budgets in
+`the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`, and the live host's own outcome
+is asserted as a total function of its budget rather than assumed.
+
+Predicted from the committed cost model: single-pass decode climbs to **94.3 GB** at 1280x704 f297
+(`3.3 GB + 340 B/voxel × 267,632,640`). One lattice step above, at f305, the decode must tile, and its
+cost is `3.3 GB + 40 B/voxel × 274,841,600 = 14.3 GB` of unavoidable full-output accumulators plus
+`300 B` per tile-voxel. The selector keeps the **largest** tile that fits, so the tiled cost *rises*
+with host memory: **≈15.0 GB** where only the smallest selectable tile (192 px × 64 frames) fits,
+**18.5–21.8 GB** across the 384–512 px × 96-frame range, and **≈63.8 GB** on this 128 GiB host, which
+affords 768 px × the full 305 frames under its 103.4 GiB ceiling. The collapse across the cap is real
+on every host but much smaller on a large one (94.3 → 63.8 GB here). The most expensive geometry in
+the declared envelope is still the cap, not the maximum, and a curve fitted across that boundary fits
+through a capability change.
+
+**6. 🔴 What actually bounds this host is FREE DISK, via swap.** Because the allocator cache grows
+past physical memory, large single-pass decodes push the box into swap. From the committed driver log
+(`docs/calibration/sc-18810/sweep-run.log`): 704x1280 x 177 (159,498,240 output voxels) completed;
+768x512 x 449 (176,553,984 voxels) was **killed by a signal** after 1238 s with free disk falling
+81 → 16 GiB; 1280x704 x 241 (217,169,920 voxels) was begun at 16 GiB free and left **no terminal line
+at all** — the driver itself did not survive it; and 768x512 x 361 (141,950,976 voxels) was killed
+later in the same session at lower free space. Across that one session free space went
+**95 → 15 GiB against the driver's 25 GiB floor**, and the driver halted itself on that floor rather
+than continuing. The safe ceiling therefore *moves with free disk*, and degraded as APFS local
+snapshots pinned the churn. Check `df -h /System/Volumes/Data` before AND during, and treat any
+single-pass decode above ~150M output voxels as needing tens of GiB of headroom. This is a HOST
+verdict, not a model verdict.
+
+**Candle adoption/measurement state (explicitly not a fitted-curve claim).** No Candle LTX or Wan
+geometry sweep has been promoted into `video-memory-curves.json`; the only fitted curve in this
+section remains historical MLX LTX q8. SceneWorks now has the synchronous post-load CUDA
+`mem_get_info` snapshot and fixed cold-load provider attribution needed for a truthful live budget.
+At the historical `b965641e` capture pin the provider-owned geometry/frames decode profile and the
+loaded Candle generator contract were absent, so Candle failed open before selection. The frozen
+preparation pin `b4a29108` includes the reviewed SC-19117 profile and SC-19223 contract: unmeasured
+Candle routes now use the provider-owned decode working set plus each contract component exactly
+once and the ordinary 4% estimate margin. This is schema-capable estimate fallback, **not** a fitted
+curve, an optimization claim, or Candle calibration; the permanent inference-`main` pin must still
+consume the same APIs. A fitted Candle curve remains blocked on a real GPU sweep with the same
+fit/held-out, per-phase, closure-bound evidence discipline above.
+
+**Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
+from two artifacts — the dataset (was a record captured?) and the driver logs (was it ever begun, and
+did it terminate?) — and **throws** when the plan and the logs disagree. It used to take "attempted
+and killed" from a hardcoded two-element array, and that array was wrong: `1280x704 f241` was
+published as `not_attempted_host_limit` while the log shows it was begun. Final counts, all read from
+`coverage.byState` rather than typed here: **8 captured fixtures over 7 distinct geometries /
+13 records**, 3 attempted-and-not-survived, 7 `not_attempted_host_limit`, **1 `stopped_before`**, and
+25 never reached (**12 bf16, 11 q4, 2 q8** — the two q8 rows are the rung-2 boundary pair).
+
+🔴 **One declared `fit` row was never captured, so the realized fit design is smaller than the plan
+declares.** Of the six q8 rows pre-registered as `fit`, **four produced records**. `768x512 f361` was
+attempted and killed. `1280x704 f177` was **never begun at all** — it is the geometry the driver
+named on its `STOP` line when free disk fell through the floor, and it now has its own
+`stopped_before` bucket rather than being buried among the unreached rows. An earlier revision of
+this paragraph said the unreached rows were "all bf16 and q4"; three were q8, and one of those three
+was this `fit` row, so the false parenthetical was also what concealed it. The row keeps its `fit`
+role — re-labelling a pre-registered role after seeing which points survived is exactly the
+after-the-fact redraw the role vocabulary exists to prevent — and the fit script's test
+*"the REALIZED fit design is smaller than the declared one"* pins the 6-declared / 4-realized split
+against the shipped bundle. **Every q8 coefficient in §2 is therefore fitted on four geometries
+(seven records), not six**, and re-capturing either missing row is a change to the fit, not a
+confirmation of it.
+
+## 6d. What the emitted memory counters mean (schema v5, sc-18864)
+
+A phase carries **three** numbers, and only two of them are measurements.
+
+| field | MLX | CUDA | kind |
+|---|---|---|---|
+| `activeBytes` | `mlx_rs::memory::get_peak_memory()` | `nvidia-smi memory.used` delta | peak over the phase window |
+| `reclaimableBytes` | `mlx_rs::memory::get_cache_memory()` | `0` (no caching allocator) | instantaneous at the phase boundary |
+| `allocatorBytes` | `activeBytes + reclaimableBytes` | same | **derived**, and the validators enforce the identity |
+
+`allocatorBytes` is an **upper bound on co-existence, not a simultaneous maximum**: it adds a
+peak-over-window to an instantaneous-at-boundary reading, and MLX exposes no "cache at the active
+peak". During an LTX decode the cache is ~0 on entry and grows monotonically to its end-of-phase
+value, so the bound is loosest exactly where it is largest — up to **142.6 GB on a 137.4 GB host**
+for a q8 render that completed and was bit-identical on warm repeat.
+
+**Only `activeBytes` may be compared against a hardware or wired ceiling.** The allocator cache is
+elastic; MLX releases it under pressure, which is why a completing render co-existed **7.46 GiB
+above** Metal's `recommendedMaxWorkingSetSize` (§6c). Both `validate_complete` and
+`validate_runtime_complete` — and their JS mirrors — now run that check against `activeBytes`.
+
+Schema v4 also carried `deviceBytes` and `wiredBytes`. **Both adapters set them to verbatim copies
+of `allocatorBytes`**, provably so across all 456 committed phase objects that carried them (404
+across the five bundles plus 52 in the thirteen immutable v4 receipts), and MLX exposes no third
+counter they could have carried. Schema v5 removes them rather than inventing readings for them, so
+a record can no longer *represent* `wiredBytes > hardware.wiredLimitBytes` — the shape every
+committed MLX record used to carry, and the reason none could be promoted past `gated`.
+
+### What happened to the records captured under v4
+
+**Migrated in place, not re-captured and not tombstoned.** No capture was ever physically
+impossible: across every committed MLX record, `activeBytes` is under both `memoryBytes` and
+`wiredLimitBytes` — the inversion lived entirely in the aliased names. Dropping the two aliases is
+lossless, so the corrected record is exactly what the fixed adapter would have emitted for the same
+measurement, and re-running renders would have destroyed information (fresh weights, fresh host
+state) to recover numbers already retained. `docs/generated/memory-matrix.json` re-generates
+**bitwise identical outside its provenance block**, which is the check that the migration moved no
+published cell.
+
+The immutable provider-stdout receipts under `docs/calibration/` still carry the v4 shape and
+**must not be rewritten** — they are byte-addressed provenance. `recordFromPhysicalMlxResponse`
+projects v4 → v5 during reconstruction, and **refuses** a receipt whose aliases are not copies of
+`allocatorBytes`, because that would mean the adapter measured something the names claimed.
 
 ## 7. Ingest, stamping, and a new lane
 
@@ -661,32 +2410,40 @@ A capture has **two halves**, and both must land or the lane does not move. §7a
 `config/manifests/builtin.models.jsonc`. Doing only the first is the single most likely way to finish
 this runbook and change nothing the runtime reads — §7d quantifies exactly what that costs.
 
-### 7a. Merge into the committed bundle
+### 7a. Commit the bundle, then re-derive the anchor store
 
-> Provenance: written from `memory-calibration-harness.mjs:1197-1201`, not re-executed while writing
-> this runbook — `ingest` needs a real captured bundle as input.
+A capture writes its own `{records: [...]}` bundle. There is no merge step and no `--resume` merge
+base: `scripts/extract-memory-anchors.mjs` walks EVERY retained corpus under `docs/calibration/` and
+`docs/generated/`, so committing the file under `docs/calibration/<story>/` is what publishes it.
 
 ```bash
+# 1. validate (and normalize) the captured bundle
 node scripts/memory-calibration-harness.mjs ingest \
-  --input /abs/path/OUTSIDE/the/repo/<lane>-evidence.json \
-  --resume docs/generated/memory-calibration-evidence.json \
-  --output /abs/path/OUTSIDE/the/repo/merged.json
+  --input /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json \
+  --source-root /abs/path/OUTSIDE/the/repo/raw-receipts \
+  --output docs/calibration/<story>/<anchor>-evidence.json
+
+# 2. copy the raw receipts' docs/calibration/... tree into the checkout beside it
+
+# 3. re-derive the anchor store and stamp its currency keys (CPU-only, seconds)
+node scripts/extract-memory-anchors.mjs
+node scripts/anchor-loader-closure.mjs --stamp-anchors
 ```
 
-Merge is commutative and stable-sorted; **different content under the same resolved identity is
-rejected** rather than resolved by arrival order. Copy `merged.json` over
-`docs/generated/memory-calibration-evidence.json` once it validates.
+An anchor is only DERIVED from a corpus named in `PACKAGED_MEMORY_ANCHOR_SOURCES`
+(`crates/sceneworks-core/src/memory_anchor.rs`) — the Rust loader hard-rejects any other path. A new
+corpus that is not named there contributes envelope evidence to an `analyticOnly` row instead, which
+is the correct default until the lane's derivation law is fitted to it. Add the file to that list in
+the same PR when it is meant to anchor.
 
 Record ids are content-derived and re-validated on read, so a capture at a new revision necessarily
 produces **new record ids**; a bundle whose ids do not re-derive fails with
-`<id>: deterministic identity mismatch` (`memory-calibration-harness.mjs:503`). Never hand-edit a
-record field and keep its id.
+`<id>: deterministic identity mismatch`. Never hand-edit a record field and keep its id.
 
 ### 7b. Confirm the closure digest is on every record
 
-The runner stamps it at capture time from the inference checkout it was given
-(memory-calibration-harness.mjs:927-957), one digest **per lane**, keyed on each plan entry's own
-`<backend>:<target.provider>`. Verify rather than assume — `evidenceSemantics` fails **loudly** if it
+The runner stamps it at capture time from the inference checkout it was given, keyed on the
+anchor's own `<backend>:<provider>` lane. Verify rather than assume — `evidenceSemantics` fails **loudly** if it
 is absent (memory-calibration-harness.mjs:656-662):
 
 ```
@@ -762,6 +2519,122 @@ The key is `<backend>:<provider>`; a bare provider id is ambiguous (`krea_2_turb
 both backends with different crates). `buildClosureConfig` also asserts the provider is really
 declared in the crate you named, so a wrong crate fails rather than digesting the wrong tree.
 
+#### 7c-bis. The memory ANCHOR currency key — `anchor-loader-closure.mjs` (sc-22511)
+
+`config/anchor-loader-closures.json` is the second derived closure file, and it answers a narrower
+question than the one above: not "did this provider's crate change?" but "did the code that loads
+THIS model change?" — a file-level unit walked from the model's declared loader entry points. It is
+what `memory_anchor.rs` compares an anchor's recorded `source.loaderClosureDigest` against.
+
+It has the same seed-then-derive shape, and the same two invocations:
+
+```bash
+# 1. Hand-add ONLY the key and its entry points to config/anchor-loader-closures.json:
+#      "<modelId>:<backend>": { "entryPoints": ["crates/…/src/model.rs", …] }
+#    digest / closureFileCount / closureFiles are all derived. An entry point that never carries
+#    the model id as a string literal is REFUSED — a wrong entry point digests the wrong loader.
+#    A CATALOG ALIAS the inference tree never names (z_image_edit → z_image_turbo) declares the
+#    engine id it resolves to as "engineId"; the literal rule is then asked of that id and the
+#    alias is hashed into the closure text (sc-22724):
+#      "z_image_edit:mlx": { "engineId": "z_image_turbo", "entryPoints": [ …the Turbo loader… ] }
+#
+# 2. Derive every declared model's digest from a real clone.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --write
+
+# 3. Prove it took.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --check
+
+# One model's canonical closure text, for reading a diff rather than a digest:
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --model ltx_2_5:mlx
+```
+
+Both default `--revision` to the pin in the workspace `Cargo.toml`, exactly as
+`inference-closure-digest.mjs` does.
+
+**The other half lives in the anchor store, and it is frozen.** Each anchor's
+`source.loaderClosureDigest` records what its model's loader looked like **at the revision that
+anchor was measured at** — not at the pin. Currency is the comparison of the two, so a recorded key
+derived at the pin would compare a value with itself and report "current" through every loader
+change there is. `extract-memory-anchors.mjs` therefore **carries that one field forward** instead
+of re-deriving it; it is seeded, once, out of band:
+
+```bash
+# Digest every packaged anchor at ITS OWN record's inference revision and write the keys in.
+# The clone must carry every cited revision (seven, today), not just the pin.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors
+
+# Verify instead of write.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors --check
+```
+
+Run it when a NEW anchor enters the store (the extractor fails loudly for an anchor with nothing to
+carry forward). Running it after a pin bump changes nothing by itself — every key is re-derived at
+its own measurement revision — and it must never be bent into a stamp at the pin: that would rewrite
+the measurement's own provenance and mark every anchor current again. A pin bump is *supposed* to
+leave the moved models' anchors stale.
+
+**A historical revision that cannot key a model NARROWS the unit — it is not an error (sc-22738).**
+The walk stands in each anchor's own measurement revision, which can predate the declaration it is
+reading. Two ways that shows up, and they are the same fact:
+
+- an entry point **does not exist yet** (`mlx-gen-ltx/src/memory_strategy.rs` postdates the LTX-2.3
+  capture), or
+- an entry point exists but **does not carry the model's literal yet** — for a catalog alias, the
+  `engineId` literal. `z_image_edit:mlx` resolves to `z_image_turbo`, which both Z-Image entry
+  points spell at the pin and neither spells at `bb2bc989`.
+
+Either way the entry point is dropped from that revision's unit and the reason is printed under the
+anchor's `--stamp-anchors` row (`narrowed: <file> (<reason>)`). The entry-point list is part of the
+hashed text, so a key derived over a narrower list can never equal the pin's and the anchor simply
+reads **not current** — which is the truth about a measurement the current declaration cannot
+describe. A revision that narrows to *nothing* still derives a real, reproducible digest; it does
+not abort the stamp.
+
+The literal rule itself is unchanged and still throws **at the pin**, where a declaration naming no
+loader is a bug (`assertModelIsNamedByEntryPoints`; `anchorLoaderDigests` takes `assertNamed`, true
+by default and false only on the historical walk that already applied the rule as a narrowing). And
+it stays a **whole-list `some()`** rule: one entry point naming the id vouches for the list. Do not
+"tighten" it to per-file — five shipped units (`flux2_dev:mlx`, `krea_2_raw:mlx`, `z_image:mlx`,
+`z_image_turbo:candle`, `bernini:mlx`) keep an entry point that does not itself carry the literal at
+the pin, and narrowing per file silently re-keys anchors that are not stale.
+
+**Currency attestations — the second gate, written down (sc-22667).** A staled key says the
+loader's *source* moved. This runbook's invalidation doctrine is two-gated: only a load-or-device-path
+change with no behaviour witness says the *memory behaviour* moved, and a differing digest alone is
+not that evidence. When a pin bump stales an anchor and the closure diff since its measurement is
+accounting-only (contract pricing, byte walkers, architecture facts, tests, docs) — or a re-measure
+on the same hardware reproduces the anchor across the range — record that reading, per anchor, in
+`config/anchor-currency-attestations.json`: `measuredRevision` (must equal the cited record's),
+`attestedRevision` (the pin), `class` (`accounting-only` | `witnessed-unchanged`), `why` (the
+file-by-file reading), `witness` (the re-measure, or why none was needed) and
+`filesChangedSinceMeasurement` (every closure file in the diff with its class; derive the list with
+`git diff --name-only <measured>..<pin> -- <every crate `closureFiles` names>`). `--stamp-anchors`
+then derives that anchor's key at `attestedRevision` and copies the justification into the store's
+`source.currencyAttestation`, the matrix reports the row as `yes — attested …` and counts it under
+`summary.attestedAnchors`, and `sceneworks-core` validates the shape at load. The attestation is
+bounded: the next pin bump that moves the closure past `attestedRevision` stales the anchor again,
+and a re-capture that moves the record's revision refuses the entry until it is rewritten or deleted.
+**Never attest a load-or-device-path change without a measured witness** — re-capture instead. The
+first five entries and their reading are in
+`docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md`.
+
+A historical revision that predates a file today's declaration names (`mlx-gen-ltx`'s per-model
+`memory_strategy.rs` postdates the LTX-2.3 capture) narrows that anchor's entry-point list rather
+than failing. The list is part of the hashed text, so the digest cannot equal the pin's, and the
+anchor reads not-current — which is the truth about it.
+
+⚠ **`--check` is a derivation check, not a staleness gate, and it is deliberately wired into no CI
+job.** It asks "is the checked-in file what the walker derives at this revision?" — a question about
+whether someone hand-edited derived data. It does NOT ask "do the anchors still match", and nothing
+in CI may be made to. **A pin bump whose loader source genuinely moved is designed to leave anchors
+stale**: the matrix and `npm run report:stale-lanes` report them as such, the runtime keeps pricing
+from them exactly as before (sc-22738 — staleness never changes runtime behaviour), and the render
+still runs. Gating on that would rebuild the pin-bump-forces-re-measurement coupling this epic (E8)
+exists to remove. Run `--check`
+by hand after a `--write`, and after a pin bump run `--write` and commit whatever it produces — a
+run that changes nothing is the expected case, and a run that changes a digest is information, not a
+failure.
+
 ### 7d. 🔴 Move the lane's SHIPPED bindings — the half that actually changes the runtime
 
 **Do not skip this. Without it your capture promotes nothing.**
@@ -801,8 +2674,18 @@ compare:
 | `report:stale-lanes` totals | `8 stale, 0 current` — **unchanged** | `7 stale, 1 current` |
 | the lane on the stale list | still ranked **#2**, `5/5` bindings `0/5` records, `status=partially-stale` | **gone** — listed under `CURRENT (no widening applied)` |
 | shipped stale bindings | 33 | 28 |
-| `summary.currentCalibrationRuns` | 5 | 5 |
-| `z_image_turbo` mlx cell states | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+| `summary.currentCalibrationRuns` (deleted — see below) | 5 | 5 |
+| `z_image_turbo` mlx cell states (pre-collapse vocabulary) | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+
+> **sc-22513 (epic 22505, E5).** The last two rows are recorded as they were measured, in the
+> vocabulary of the pre-collapse artifact. Both surfaces are gone: `summary.currentCalibrationRuns`
+> and the root `calibrationRuns` array were deleted with the promotion machinery, and no cell state
+> is `Verified` or `Implemented/unverified` any more. A cell's state is now a pure function of
+> `implementation`, `anchor` and `derivationDefined` — `Missing / Structurally N/A / Implemented /
+> Anchored / Anchored/underived` — and an anchor's currency is REPORTED beside it
+> (`cells[].anchor.current`, `summary.staleAnchors`) rather than promoting it. The rows above are
+> still the load-bearing evidence for the §7d lesson: the evidence half alone moves nothing the
+> runtime reads. §10 step 1 below is written against the surviving surface.
 
 The evidence-only path produces `current` records that promote **nothing**. The report does not clear
 the lane; it reports `status=partially-stale` with `captured=066ff9c6a26e,5b9092c67e0f` — the two
@@ -842,13 +2725,47 @@ candle:flux1_dev historical 5  candle:flux1_schnell historical 5
 candle:flux2_dev historical 5  mlx:z_image_turbo historical 5
 ```
 
-`matrix.summary.currentCalibrationRuns` is `0`. Several tests **pin that as an exact set**, not as an
-upper bound, so a capture that lands a `current` lane turns them red. This is the tests being right
-about yesterday, not your measurement being wrong — but it means **a measurement PR is never
-docs-only**, and you must plan to update the affected ones in the same commit.
+Several tests **pin that as an exact set**, not as an upper bound, so a capture that lands a
+`current` lane turns them red. This is the tests being right about yesterday, not your measurement
+being wrong — but it means **a measurement PR is never docs-only**, and you must plan to update the
+affected ones in the same commit.
+
+> **sc-22513.** The matrix no longer carries a `calibrationRuns` array or a
+> `summary.currentCalibrationRuns` count — the retained corpus above is validation data for the
+> derivation, not a matrix input. What the matrix now reports about currency is per ANCHOR:
+> `summary.staleAnchors` over `summary.anchors`, and `current` on each `anchors[]` row and each
+> `cells[].anchor`. It moves no state (sc-22511), so landing a current lane can no longer flip a
+> cell — but the pins below and `npm run report:stale-lanes` still move, and the artifact still has
+> to be regenerated (§8) in the same commit.
+
+> **sc-22738 — a measured lower bound moves NO pinned set.** Landing one changes the matrix only
+> through its fingerprints (`generatedFrom.sceneWorksRevision` and the `anchorStore` /
+> `anchorDerivation` / `anchorAdmission` source digests): a bound is not an anchor, so
+> `summary.anchors`, `summary.staleAnchors` and every `cells[].anchor` are untouched, and
+> `npm run report:stale-lanes` still reads the bounded lane as PENDING CAPTURE — which is the truth
+> about it, because nothing has been measured to completion there. Verified by landing the
+> `bernini:bf16:mlx` stop: `docs/generated/memory-matrix.json` moved on four digest lines and
+> nothing else. What DOES move is `docker/rust.Dockerfile`, which must copy the new corpus into both
+> builder contexts (`platform-review-contracts.test.mjs` reds otherwise), and the compiled-in list
+> in `memory_anchor.rs`, which must stay SORTED — `appendPackagedSource` inserts in place for
+> exactly that reason. **The runner writes both COPY lines itself** (`insertEvidenceCopy`, added in
+> the same step as the embed and carried in the same commit), on the completed-capture path as much
+> as on the hard-stop one — before that, every anchor commit landed a tree that reds the
+> platform-review suite until someone added the lines by hand.
+>
+> Those COPY lines are **per campaign directory, not per corpus** —
+> `COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/`, once per builder stage. The
+> per-corpus form grew a Docker layer per ingested anchor and this campaign's 112 anchors carried
+> the `builder` stage to 141 `RUN|COPY|ADD` instructions, past the overlay driver's ~125 limit: the
+> `parity-docker` lane failed to *prepare* the build (`max depth exceeded`, layer 126/143) with a
+> perfectly good tree. So ingesting into a campaign the Dockerfile already carries now moves
+> `docker/rust.Dockerfile` not at all, and only the first anchor of a NEW campaign adds a line.
+> `scripts/measure-memory-catalog.test.mjs` holds every stage under 100 instructions.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
-simulating an `mlx:z_image_turbo` capture on `origin/main`, both ways (§7d):
+simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).
+Its rows name assertions that lived on the deleted promotion machinery; treat it as the SHAPE of the
+blast radius, and enumerate your own by running the suites named under it:
 
 | test | assertion | evidence half only | + §7d bindings |
 | --- | --- | --- | --- |
@@ -890,7 +2807,7 @@ python3.12 -m venv /abs/path/OUTSIDE/the/repo/venv
 /abs/path/OUTSIDE/the/repo/venv/bin/python -m pytest -q tests/test_memory_matrix.py
 ```
 
-Verified on `origin/main` today: `9 passed in 19.16s`. Note the bare `python3.12` on this host has no
+Verified on this branch (sc-22513): `11 passed in 2.69s`. Note the bare `python3.12` on this host has no
 `pytest` — the venv is not optional.
 
 How to handle a red: **relax the pin to the new truth, do not delete the assertion.** The comment
@@ -904,17 +2821,22 @@ moved and why.
 
 Four checks. Do all four; the first three are cheap.
 
-**1. The new record reads as `current` for its lane.**
+**1. The lane's anchor reads as `current`.**
+
+The matrix no longer publishes per-record rows, so ask the anchor inventory instead of the deleted
+`calibrationRuns` array (sc-22513). `npm run report:stale-lanes` answers the same question per lane
+and is the shorter route; this reads the artifact directly:
 
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
-  const c={}; for (const r of m.calibrationRuns) {
-    const k=`${r.record.backend}:${r.record.target.provider} ${r.semantics}`; c[k]=(c[k]||0)+1; }
-  console.log(c); console.log("currentCalibrationRuns:", m.summary.currentCalibrationRuns)'
+  const c={}; for (const a of m.anchors) {
+    const k=`${a.backend}:${a.provider} ${a.current ? "current" : "stale"}`; c[k]=(c[k]||0)+1; }
+  console.log(c);
+  console.log("anchors:", m.summary.anchors, "stale:", m.summary.staleAnchors)'
 ```
 
-Your lane must now appear as `current`, and `currentCalibrationRuns` must have risen by the number of
-records you landed. But **that alone is not success** — it is true on the evidence-only path too
+Your lane's anchor must now read `current`, and `summary.staleAnchors` must have fallen by one per
+lane you re-extracted. But **that alone is not success** — it is true on the evidence-only path too
 (§7d). All three of these must hold:
 
 ```bash
@@ -925,26 +2847,33 @@ npm run report:stale-lanes    # your lane must have LEFT the stale list, and the
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
   const z=m.cells.filter(c=>c.modelId==="<modelId>"&&c.backend==="<backend>");
-  const s={}; for(const c of z) s[c.state]=(s[c.state]||0)+1; console.log(s)'
-# the measured rungs must now be Verified, not Implemented/unverified
+  const s={};
+  for(const c of z){
+    const currency=c.anchor?(c.anchor.current?"current":"stale"):"no-anchor";
+    const k=`${c.state} (${currency})`; s[k]=(s[k]||0)+1;
+  }
+  console.log(s)'
+# the measured rungs must read `Anchored` (or `Anchored/underived` where the lane has no wired
+# derivation) with `anchor.current: true` — NOT `Implemented`, which means no anchor reached them
 ```
 
-Measured on the `mlx:z_image_turbo` simulation: the corrected procedure gives
-`7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings, and
-`{ 'Implemented/unverified': 85, Verified: 5 }`. The evidence-only path gives `8 stale, 0 current`,
-the lane still ranked #2 as `5/5` bindings `0/5` records, and `Verified: 0`.
+Measured on the `mlx:z_image_turbo` simulation, in the pre-collapse vocabulary: the corrected
+procedure gives `7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings,
+and the five measured cells promoted. The evidence-only path gives `8 stale, 0 current`, the lane
+still ranked #2 as `5/5` bindings `0/5` records, and no cell promoted. Post-sc-22513 the same split
+shows up as `anchor.current` rather than as a state change.
 
 Failure modes:
 
-- **Records stay `historical`** — the captured digest does not match the live one for the lane:
+- **The anchor stays stale** — the captured digest does not match the live one for the lane:
   usually the inference checkout was not at the pin (§5), or the closure table was regenerated after
   the capture.
 - **Records are `current` but the lane is still listed, as `partially-stale`** — you did §7a-7c and
   skipped §7d. Go back and move the manifest bindings.
-- **Records are `current`, the lane is clear, but no cell is `Verified`** — the binding moved but does
-  not match the record on fingerprint, geometry, parameters, artifact revision or `engagedRungs`;
-  `calibrationBinding` requires an exact ordered match. Compare the binding object against the record
-  field by field.
+- **The lane is clear but its cells read `Implemented`, with `anchor: null`** — the record landed but
+  `scripts/extract-memory-anchors.mjs` did not derive an anchor from it, so nothing in
+  `config/memory-anchors.json` covers that (model, tier, backend lane). Re-run the extractor and
+  check the lane appears in the store rather than in `analyticOnly`.
 
 **2. `verify_model_snapshot` binds the fixture to real weights** — §4. Re-run it after the capture,
 with `--inventory-output`, and cite the `inventory_sha256` in the PR. Where the lane's artifact has no

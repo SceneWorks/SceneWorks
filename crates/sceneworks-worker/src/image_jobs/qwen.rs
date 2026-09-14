@@ -339,7 +339,12 @@ async fn generate_qwen_control_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = attach_selected_decoder(spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
     spec = apply_measured_mlx_load_shape(QWEN_CONTROL_ENGINE_ID, spec);
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -537,7 +542,7 @@ async fn ensure_distill_lora_cached(
     }
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
@@ -846,7 +851,12 @@ async fn generate_qwen_edit_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     spec = apply_measured_mlx_load_shape(engine_id, spec);
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

@@ -394,6 +394,221 @@ fn model_paths_admit_operator_configured_external_roots() {
         .expect_err("a sibling of the external root is still rejected");
 }
 
+/// sc-18306: imported providers re-open the selected single-file DiT for streamed transformer
+/// windows. Confinement must therefore validate the canonical target but retain the lexical symlink
+/// entry, whose extension and lstat identity are part of the load contract.
+#[cfg(unix)]
+#[test]
+fn model_file_paths_keep_the_confined_symlink_entry() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let blobs = data_dir.join("models").join("blobs");
+    let snapshot = data_dir
+        .join("models")
+        .join("snapshots")
+        .join("deadbeef");
+    std::fs::create_dir_all(&blobs).expect("blobs dir creates");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    let blob = blobs.join("extensionless-content-addressed-object");
+    std::fs::write(&blob, b"weights").expect("blob writes");
+    let link = snapshot.join("imported-dit.safetensors");
+    std::os::unix::fs::symlink(&blob, &link).expect("snapshot symlink creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+    let resolved = super::normalize_app_managed_model_file_path(
+        &settings,
+        &link.display().to_string(),
+        "Imported DiT",
+    )
+    .expect("confined model file accepted");
+
+    assert_eq!(resolved, link);
+    assert_eq!(
+        resolved.extension().and_then(|extension| extension.to_str()),
+        Some("safetensors")
+    );
+    assert_eq!(
+        resolved.canonicalize().expect("resolved canonicalizes"),
+        blob.canonicalize().expect("blob canonicalizes")
+    );
+
+    let outside = temp.path().join("outside.safetensors");
+    std::fs::write(&outside, b"outside weights").expect("outside fixture writes");
+    let escape = snapshot.join("escape.safetensors");
+    std::os::unix::fs::symlink(&outside, &escape).expect("escaping symlink creates");
+    super::normalize_app_managed_model_file_path(
+        &settings,
+        &escape.display().to_string(),
+        "Imported DiT",
+    )
+    .expect_err("a lexical model-file entry cannot admit a canonical target outside every root");
+
+    let outside_entry = temp.path().join("outside-entry.safetensors");
+    std::os::unix::fs::symlink(&blob, &outside_entry).expect("inward symlink creates");
+    super::normalize_app_managed_model_file_path(
+        &settings,
+        &outside_entry.display().to_string(),
+        "Imported DiT",
+    )
+    .expect_err("a model-file entry outside every root cannot be admitted by an inward target");
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_model_files_detect_persistent_final_and_intermediate_symlink_aba() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let models = data_dir.join("models");
+    std::fs::create_dir_all(&models).expect("models dir creates");
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+
+    // Final-entry sequence: A -> B -> a newly-created link back to A. Both persistent states are
+    // rejected; the path-token contract intentionally does not claim to catch an active actor that
+    // swaps and restores the original pathname object wholly inside one read callback.
+    let a = models.join("a");
+    let b = models.join("b");
+    std::fs::write(&a, b"same-size-A").expect("A writes");
+    std::fs::write(&b, b"same-size-B").expect("B writes");
+    let final_link = models.join("final.safetensors");
+    symlink(&a, &final_link).expect("final A link creates");
+    let final_pin = super::pin_app_managed_model_file(&settings, &final_link, "Model")
+        .expect("final link pins");
+    std::fs::remove_file(&final_link).expect("final A link removes");
+    symlink(&b, &final_link).expect("final B link creates");
+    final_pin
+        .ensure_unchanged()
+        .expect_err("persistent final A-to-B retarget is rejected");
+    std::fs::remove_file(&final_link).expect("final B link removes");
+    // Recreate the same resolved target through a different lexical spelling. A filesystem may
+    // immediately reuse the deleted link's inode and ctime, so repeating the identical link text
+    // would make the fixture depend on allocator timing rather than the entry fingerprint contract.
+    symlink(Path::new("./a"), &final_link).expect("recreated final A link creates");
+    final_pin
+        .ensure_unchanged()
+        .expect_err("recreated final A entry is not the pinned entry");
+
+    // Intermediate-component sequence with the same shape. The leaf spelling and contents remain
+    // unchanged; lstat identity on the parent symlink is what closes the replacement gap.
+    let tree_a = models.join("tree-a");
+    let tree_b = models.join("tree-b");
+    std::fs::create_dir_all(&tree_a).expect("tree A creates");
+    std::fs::create_dir_all(&tree_b).expect("tree B creates");
+    std::fs::write(tree_a.join("model.safetensors"), b"same").expect("tree A model writes");
+    std::fs::write(tree_b.join("model.safetensors"), b"same").expect("tree B model writes");
+    let active = models.join("active");
+    symlink(&tree_a, &active).expect("active A link creates");
+    let intermediate_path = active.join("model.safetensors");
+    let intermediate_pin =
+        super::pin_app_managed_model_file(&settings, &intermediate_path, "Model")
+            .expect("intermediate link pins");
+    std::fs::remove_file(&active).expect("active A link removes");
+    symlink(&tree_b, &active).expect("active B link creates");
+    intermediate_pin
+        .ensure_unchanged()
+        .expect_err("persistent intermediate A-to-B retarget is rejected");
+    std::fs::remove_file(&active).expect("active B link removes");
+    symlink(Path::new("./tree-a"), &active).expect("recreated active A link creates");
+    intermediate_pin
+        .ensure_unchanged()
+        .expect_err("recreated intermediate A entry is not the pinned component");
+}
+
+#[test]
+fn prepared_route_shapes_install_the_exact_file_token_sets() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let models = data_dir.join("models");
+    std::fs::create_dir_all(&models).expect("models dir creates");
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+
+    let make = |name: &str| {
+        let path = models.join(name);
+        std::fs::write(&path, format!("weights-{name}")).expect("fixture writes");
+        path
+    };
+    let primary = make("primary.safetensors");
+    let control = make("control.safetensors");
+    let adapter_a = make("adapter-a.safetensors");
+    let adapter_b = make("adapter-b.safetensors");
+    let text_encoder = make("text-encoder.safetensors");
+    let vae = make("vae.safetensors");
+
+    let pin = |path: &Path| {
+        super::pin_app_managed_model_file(&settings, path, "Route source")
+            .expect("route source pins")
+    };
+    let assert_shape = |label: &str,
+                        mut spec: gen_core::LoadSpec,
+                        paths: &[&Path]| {
+        let pins = paths.iter().map(|path| pin(path)).collect::<Vec<_>>();
+        super::prepare_load_spec_with_file_pins(&mut spec, pins, label)
+            .expect("route spec prepares");
+        let mut actual = spec
+            .prepared_file_pins()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut expected = paths.iter().map(|path| path.to_path_buf()).collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(actual, expected, "{label} exact prepared File set");
+        spec.validate_prepared_file_pins()
+            .expect("exact route set validates");
+    };
+
+    assert_shape(
+        "Krea imported normal",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::File(primary.clone())).with_adapters(vec![
+            gen_core::AdapterSpec::new(adapter_a.clone(), 0.5, gen_core::AdapterKind::Lora),
+            gen_core::AdapterSpec::new(adapter_b.clone(), 0.7, gen_core::AdapterKind::Lokr),
+        ]),
+        &[&primary, &adapter_a, &adapter_b],
+    );
+    assert_shape(
+        "Krea imported pose",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::File(primary.clone()))
+            .with_control(gen_core::WeightsSource::File(control.clone()))
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                adapter_a.clone(),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )]),
+        &[&primary, &control, &adapter_a],
+    );
+    assert_shape(
+        "ComfyUI Z-Image",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::File(primary.clone()))
+            .with_component(
+                gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
+                gen_core::WeightsSource::File(text_encoder.clone()),
+            )
+            .with_component(
+                gen_core::COMFYUI_VAE_COMPONENT,
+                gen_core::WeightsSource::File(vae.clone()),
+            ),
+        &[&primary, &text_encoder, &vae],
+    );
+    assert_shape(
+        "ComfyUI Qwen-Image",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::File(primary.clone())).with_component(
+            gen_core::COMFYUI_VAE_COMPONENT,
+            gen_core::WeightsSource::File(vae.clone()),
+        ),
+        &[&primary, &vae],
+    );
+    assert_shape(
+        "ComfyUI FLUX.2",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::File(primary.clone())),
+        &[&primary],
+    );
+}
+
 /// Configuring an external root must widen the allow-list to *that root only* — a
 /// sibling directory stays rejected. Without this, "point at my ComfyUI folder"
 /// would quietly become "read anything on the host", which is the arbitrary-file-read
@@ -842,4 +1057,401 @@ async fn ffmpeg_runner_surfaces_bounded_stderr_from_failing_process() {
         }
         other => panic!("expected Engine, got {other:?}"),
     }
+}
+
+fn synthetic_ffmpeg_sleep_args() -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            "cmd".to_owned(),
+            "/C".to_owned(),
+            "ping -n 6 127.0.0.1 >NUL".to_owned(),
+        ]
+    } else {
+        vec!["sh".to_owned(), "-c".to_owned(), "sleep 5".to_owned()]
+    }
+}
+
+fn synthetic_ffmpeg_success_args() -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            "cmd".to_owned(),
+            "/C".to_owned(),
+            "echo ffmpeg-normal-completion 1>&2".to_owned(),
+        ]
+    } else {
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'ffmpeg-normal-completion\\n' >&2".to_owned(),
+        ]
+    }
+}
+
+#[derive(Clone)]
+struct FfmpegLifecycleStubState {
+    cancel_requested: bool,
+    heartbeats: Arc<AtomicUsize>,
+    progress: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl FfmpegLifecycleStubState {
+    fn new(cancel_requested: bool) -> Self {
+        Self {
+            cancel_requested,
+            heartbeats: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+async fn spawn_ffmpeg_lifecycle_stub(state: FfmpegLifecycleStubState) -> String {
+    async fn heartbeat_route(State(state): State<FfmpegLifecycleStubState>) -> Response {
+        state.heartbeats.fetch_add(1, Ordering::SeqCst);
+        Json(worker_snapshot_json("test-worker")).into_response()
+    }
+    async fn job_route(
+        State(state): State<FfmpegLifecycleStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<FfmpegLifecycleStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(payload): Json<Value>,
+    ) -> Response {
+        state.progress.lock().expect("progress lock").push(payload);
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+#[test]
+fn ffmpeg_runner_deadline_configuration_is_finite_and_fail_closed() {
+    let default = ffmpeg_execution_timeout_from(None);
+    assert!(default > Duration::ZERO);
+    assert_eq!(
+        ffmpeg_execution_timeout_from(Some("37")),
+        Duration::from_secs(37)
+    );
+    assert_eq!(ffmpeg_execution_timeout_from(Some("0")), default);
+    assert_eq!(ffmpeg_execution_timeout_from(Some("invalid")), default);
+
+    let huge = u64::MAX.to_string();
+    assert_eq!(
+        ffmpeg_execution_timeout_from(Some(&huge)),
+        FFMPEG_EXECUTION_TIMEOUT_MAX,
+        "an oversized environment value is capped instead of reaching Instant arithmetic"
+    );
+    let deadline = std::panic::catch_unwind(|| ffmpeg_execution_deadline(Duration::MAX));
+    let (_, effective) = deadline.expect("Duration::MAX deadline construction must not panic");
+    assert_eq!(effective, FFMPEG_EXECUTION_TIMEOUT_MAX);
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_context_free_timeout_cleans_blocked_stdin_and_is_typed() {
+    let started = std::time::Instant::now();
+    let error = run_ffmpeg_with_stdin_chunks_and_timeout(
+        synthetic_ffmpeg_sleep_args(),
+        // Larger than a normal pipe buffer, so the writer is still pending when teardown runs.
+        vec![vec![0_u8; 2 * 1024 * 1024]],
+        None,
+        Duration::from_millis(150),
+    )
+    .await
+    .expect_err("a context-free FFmpeg child must hit its execution deadline");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "timeout cleanup must not wait for the synthetic five-second child"
+    );
+    match error {
+        WorkerError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::TimedOut),
+        other => panic!("expected a typed TimedOut I/O error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_job_context_timeout_keeps_heartbeat_and_is_typed() {
+    let state = FfmpegLifecycleStubState::new(false);
+    let base_url = spawn_ffmpeg_lifecycle_stub(state.clone()).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let context = FfmpegContext::new(&api, &settings, "job-21742", "cancel fixture");
+
+    let error = run_ffmpeg_capture_stderr_with_timeout(
+        synthetic_ffmpeg_sleep_args(),
+        Some(context),
+        Duration::from_millis(250),
+    )
+    .await
+    .expect_err("a job-context FFmpeg child must hit the same deadline");
+
+    assert!(
+        state.heartbeats.load(Ordering::SeqCst) >= 1,
+        "the immediate lifecycle tick must preserve FFmpeg's Busy heartbeat"
+    );
+    match error {
+        WorkerError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::TimedOut),
+        other => panic!("expected a typed TimedOut I/O error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_job_context_preserves_normal_completion_and_explicit_cancel() {
+    let normal_state = FfmpegLifecycleStubState::new(false);
+    let normal_base = spawn_ffmpeg_lifecycle_stub(normal_state.clone()).await;
+    let mut normal_settings = test_settings(normal_base.clone(), None);
+    normal_settings.api_url = normal_base;
+    let normal_api = ApiClient::new(&normal_settings);
+    let normal_context =
+        FfmpegContext::new(&normal_api, &normal_settings, "job-normal", "not canceled");
+    let stderr = run_ffmpeg_capture_stderr_with_timeout(
+        synthetic_ffmpeg_success_args(),
+        Some(normal_context),
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("normal job-context completion stays successful");
+    assert!(stderr.contains("ffmpeg-normal-completion"));
+
+    let cancel_state = FfmpegLifecycleStubState::new(true);
+    let cancel_base = spawn_ffmpeg_lifecycle_stub(cancel_state.clone()).await;
+    let mut cancel_settings = test_settings(cancel_base.clone(), None);
+    cancel_settings.api_url = cancel_base;
+    let cancel_api = ApiClient::new(&cancel_settings);
+    let cancel_context = FfmpegContext::new(
+        &cancel_api,
+        &cancel_settings,
+        "job-cancel",
+        "FFmpeg canceled by test.",
+    );
+    let error = run_ffmpeg_capture_stderr_with_timeout(
+        synthetic_ffmpeg_sleep_args(),
+        Some(cancel_context),
+        Duration::from_secs(3),
+    )
+    .await
+    .expect_err("an explicit cancel still wins before the deadline");
+    assert!(matches!(
+        error,
+        WorkerError::Canceled(ref message) if message == "FFmpeg canceled by test."
+    ));
+    assert!(cancel_state.heartbeats.load(Ordering::SeqCst) >= 1);
+    assert!(
+        cancel_state
+            .progress
+            .lock()
+            .expect("progress lock")
+            .iter()
+            .any(|payload| payload["status"] == "canceled"),
+        "explicit cancellation must retain its terminal job update"
+    );
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_heartbeat_failure_is_preserved_and_cleans_the_child() {
+    let base_url = spawn_failing_heartbeat_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let context = FfmpegContext::new(&api, &settings, "job-heartbeat", "not canceled");
+    let started = std::time::Instant::now();
+
+    let error = run_ffmpeg_capture_stderr_with_timeout(
+        synthetic_ffmpeg_sleep_args(),
+        Some(context),
+        Duration::from_secs(3),
+    )
+    .await
+    .expect_err("the heartbeat failure must propagate before the execution deadline");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "heartbeat cleanup must not wait for the synthetic five-second child"
+    );
+    assert!(matches!(
+        error,
+        WorkerError::Api {
+            status: reqwest::StatusCode::CONFLICT,
+            ..
+        }
+    ));
+}
+
+#[test]
+#[ignore = "subprocess helper invoked explicitly by the open-pipe lifecycle regression"]
+fn ffmpeg_open_pipe_parent_child() {
+    // The direct child exits immediately after launching a grandchild that inherits stderr. That is
+    // the exact pipe shape that used to leave `stderr_task.await` hanging after `child.wait()` had
+    // already succeeded.
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "tests::ffmpeg_open_pipe_holder_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(StdStdio::null())
+        .stdout(StdStdio::null())
+        .stderr(StdStdio::inherit())
+        .spawn()
+        .expect("spawn inherited-stderr holder");
+    drop(child);
+}
+
+#[test]
+#[ignore = "subprocess helper invoked explicitly by the open-pipe lifecycle regression"]
+fn ffmpeg_open_pipe_holder_child() {
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_deadline_covers_an_inherited_open_stderr_pipe_after_child_exit() {
+    let args = vec![
+        std::env::current_exe()
+            .expect("test binary")
+            .to_string_lossy()
+            .into_owned(),
+        "--exact".to_owned(),
+        "tests::ffmpeg_open_pipe_parent_child".to_owned(),
+        "--ignored".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    let started = std::time::Instant::now();
+    let error = run_ffmpeg_capture_stderr_with_timeout(args, None, Duration::from_secs(1))
+        .await
+        .expect_err("an inherited open stderr pipe must not outlive the execution deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the stderr join must share the child execution deadline"
+    );
+    match error {
+        WorkerError::Io(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            assert!(
+                !error.to_string().contains("cleanup also failed"),
+                "an already-exited direct child is a safe race, not a cleanup failure: {error}"
+            );
+        }
+        other => panic!("expected a typed open-pipe timeout, got {other:?}"),
+    }
+    // Let the deliberately inherited holder exit before the regression itself returns, so the test
+    // suite never leaks its synthetic grandchild into a later test.
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+}
+
+const FFMPEG_TIMEOUT_HELPER_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_HELPER";
+const FFMPEG_TIMEOUT_HELPER_DIR_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_HELPER_DIR";
+
+#[test]
+fn ffmpeg_timeout_helper_child() {
+    if std::env::var_os(FFMPEG_TIMEOUT_HELPER_ENV).is_none() {
+        return;
+    }
+    let dir = PathBuf::from(
+        std::env::var_os(FFMPEG_TIMEOUT_HELPER_DIR_ENV).expect("helper directory is configured"),
+    );
+    std::fs::write(dir.join("started"), std::process::id().to_string())
+        .expect("helper records its PID");
+    std::thread::sleep(Duration::from_secs(2));
+    std::fs::write(dir.join("completed"), b"late completion")
+        .expect("a live helper records completion");
+}
+
+#[tokio::test]
+async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut command = tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .args([
+            "--exact",
+            "tests::ffmpeg_timeout_helper_child",
+            "--nocapture",
+        ])
+        .env(FFMPEG_TIMEOUT_HELPER_ENV, "1")
+        .env(FFMPEG_TIMEOUT_HELPER_DIR_ENV, temp.path());
+
+    let error = run_ffmpeg_probe_command_with_timeout(command, Duration::from_secs(1))
+        .await
+        .expect_err("the direct-probe lifecycle must time out its real child");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    let pid = std::fs::read_to_string(temp.path().join("started"))
+        .expect("the helper started before the deadline")
+        .parse::<u32>()
+        .expect("helper PID parses");
+
+    #[cfg(unix)]
+    {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .status()
+            .expect("probe helper PID")
+            .success();
+        assert!(!alive, "timed-out helper PID {pid} must already be reaped");
+    }
+    #[cfg(windows)]
+    let _ = pid;
+
+    // Past the helper's own two-second completion point, it still cannot write: the timed-out child
+    // was killed rather than merely having its wait future dropped.
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    assert!(!temp.path().join("completed").exists());
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn ffmpeg_frame_count_probe_wrapper_preserves_timeout_but_not_ordinary_failure() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut timeout_command =
+        tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+    timeout_command
+        .args([
+            "--exact",
+            "tests::ffmpeg_timeout_helper_child",
+            "--nocapture",
+        ])
+        .env(FFMPEG_TIMEOUT_HELPER_ENV, "1")
+        .env(FFMPEG_TIMEOUT_HELPER_DIR_ENV, temp.path());
+    let error = probe_source_frame_count_command_with_timeout(
+        timeout_command,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("the frame-count wrapper must not mutate TimedOut into unknown/None");
+    match error {
+        WorkerError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::TimedOut),
+        other => panic!("expected a typed frame-count timeout, got {other:?}"),
+    }
+
+    let missing = temp.path().join("missing-ffmpeg");
+    let ordinary = probe_source_frame_count_command_with_timeout(
+        tokio::process::Command::new(missing),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("ordinary unavailable probe remains a safe per-frame fallback");
+    assert_eq!(ordinary, None);
 }

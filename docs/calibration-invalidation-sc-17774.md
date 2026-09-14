@@ -107,6 +107,18 @@ changed are demoted, and the regenerated files show which.
 
 ## What a demotion costs at runtime
 
+> **Superseded by sc-22738 (epic 22723): NOTHING.** Michael's standing rule — "The App Runtime
+> should ALWAYS continue behaving as if the measurement were valid" — retired every runtime
+> consumer of currency. A calibration record, anchor, fitted curve or measured lower bound whose
+> closure has moved is graded, bound, matched and enforced exactly as a current one; the
+> "stale-measured" widening described below, the `verified_lower_alternative` /
+> `collect_estimate_bases` closure conjuncts, the `StaleBundle` fallback and the anchor
+> `is_current` conjunct are all gone, and the runtime seam carries no field that could express
+> "stale" (`scripts/runtime-admission-currency.test.mjs`). The closure digest stays exactly what
+> the rest of this document says it is — the per-provider unit the PROBE TOOLING re-captures on
+> (`npm run report:stale-lanes`, `measure-memory-catalog.mjs`, the matrix). Everything below the
+> next blockquote is retained as history of how the runtime side evolved before it was removed.
+>
 > **Superseded by sc-18095/sc-18096 (epic 18093)**: in
 > `memory_strategy::candidate_exclusion` a moved closure no longer excludes a candidate at all.
 > Fully-verified measured evidence whose closure went stale stays **eligible**, graded at its peak
@@ -170,7 +182,7 @@ that by default.
 | `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports — 65 record digests and all 33 manifest digests, with none left directly maintained |
 | `scripts/inference-closure-digest.test.mjs` | the derivation itself, hermetically, over a synthetic workspace |
 | `scripts/backfill-closure-digests.test.mjs` | the stamper's locator over synthetic JSONC (comment-separated digest updated not duplicated, nested and sibling objects never claimed, a hex value inside a comment never mistaken for a key), and the `--verify` verdict itself |
-| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate demotes a moved closure and admits an unmoved one, on both the ladder and the named refusal alternative |
+| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | since sc-22738: the runtime gate admits a moved closure EXACTLY as an unmoved one, on the ladder, the named refusal alternative and the estimate bases (`a_moved_provider_closure_admits_the_ladder_at_the_exact_measured_peak`); `scripts/runtime-admission-currency.test.mjs` keeps every currency identifier out of the admission modules |
 
 The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
 other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That

@@ -9,6 +9,50 @@ fn text_to_image_preset_defaults_exclude_retired_style_mode() {
     );
 }
 
+/// Parity guard for the web `loraWeight` fallback (`apps/web/src/presetUtils.js`): the weight a
+/// preset APPLIES must match the weight the studio SHOWS, or a run silently uses a scale the user
+/// never picked. ONE default for every family — krea-2 used to be special-cased and deliberately
+/// no longer is.
+#[test]
+fn preset_lora_weight_defaults_to_one_for_every_family() {
+    use crate::recipe_presets::preset_lora_weight;
+    use serde_json::json;
+
+    let none = json!({});
+
+    for lora in [
+        json!({ "id": "s", "family": "sdxl" }),
+        json!({ "id": "k", "family": "krea_2" }),
+        json!({ "id": "k", "family": "krea-2" }),
+        json!({ "id": "k", "family": "krea2" }),
+        json!({ "id": "w", "families": ["wan-video"] }),
+        json!({ "id": "c", "compatibleFamilies": ["flux"] }),
+        json!({ "id": "c", "compatibility": { "families": ["ltx-video"] } }),
+        json!({ "id": "bare" }),
+    ] {
+        assert_eq!(preset_lora_weight(&lora, &none), 1.0, "{lora}");
+    }
+
+    // An explicit value still wins, in the web's precedence order:
+    // preset weight -> catalog defaultWeight -> the LoRA's own weight.
+    let krea = json!({ "id": "k", "family": "krea_2" });
+    assert_eq!(preset_lora_weight(&krea, &json!({ "weight": 2.0 })), 2.0);
+    assert_eq!(
+        preset_lora_weight(
+            &json!({ "id": "k", "family": "krea_2", "defaultWeight": 1.3 }),
+            &none
+        ),
+        1.3
+    );
+    assert_eq!(
+        preset_lora_weight(
+            &json!({ "id": "s", "family": "sdxl", "weight": 0.7 }),
+            &none
+        ),
+        0.7
+    );
+}
+
 #[tokio::test]
 async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

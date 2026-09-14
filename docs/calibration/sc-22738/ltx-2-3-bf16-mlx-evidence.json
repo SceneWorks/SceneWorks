@@ -1,0 +1,377 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2",
+      "capturedAt": "2026-09-07T09:37:46Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 2132203316
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 42177775068
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 47246583382
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 21585137844
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 49359952240
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 49660559360
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 40256627942
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 2148649588
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493000
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043536
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 37978194423
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 70711237959
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 47092804666
+          },
+          {
+            "name": "admissionWeightsFloorBytes",
+            "unit": "bytes",
+            "value": 75254702412
+          },
+          {
+            "name": "admissionDecodeWorkingSetBytes",
+            "unit": "bytes",
+            "value": 19476906240
+          },
+          {
+            "name": "admissionPredictedPeakBytes",
+            "unit": "bytes",
+            "value": 94731608652
+          },
+          {
+            "name": "admissionHardwareBytes",
+            "unit": "bytes",
+            "value": 137438953472
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 6144
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileOverlapPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "spatialDecodeTiles",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 72
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 78
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 48382466134
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268098380
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaxFaultPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268098380
+          },
+          {
+            "name": "lifecycleMaxFaultPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaxRecoveryPeak",
+            "unit": "bytes",
+            "value": 48382466134
+          },
+          {
+            "name": "lifecycleMaxRecoveryPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268098380
+          },
+          {
+            "name": "lifecycleMaxRecoveryPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18946",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-480f79e0b28dc695828b",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:bf16+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-177b0e3a7a801c9655e3",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 42177775068,
+          "allocatorBytes": 44291143926,
+          "reclaimableBytes": 2113368858
+        },
+        "decode": {
+          "activeBytes": 21585137844,
+          "allocatorBytes": 21585137844,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 47246583382,
+          "allocatorBytes": 47246583382,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 47246583382,
+          "allocatorBytes": 49359952240,
+          "reclaimableBytes": 2113368858
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 44291850240,
+        "decode": 22682796032,
+        "denoise": 49660559360,
+        "overall": 49660559360
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "0725fe02437fca63c466831c818af05ec004b012e83d39fe851504f1dc14635a",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:59e8f41dee83565fb88e8e9ac2f506f19a8c0995c74301b14e53931106391132",
+          "revision": "37e9e75e3952328dee5baa18f33a352c6c302218"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 49660559360,
+          "name": "exact_fit",
+          "predictedBytes": 49660559360,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "typed cancellation at the selected rung boundary cleaned up and recovered within the clean-warm bounds",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "provider fault injection at the selected rung boundary cleaned up and recovered within the clean-warm bounds",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

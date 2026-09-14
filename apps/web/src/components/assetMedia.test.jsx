@@ -140,7 +140,11 @@ describe("AssetMedia audio rendering (epic 13400 A5)", () => {
     const video = container.querySelector("video");
     expect(video).not.toBeNull();
     expect(video.controls).toBe(true);
-    expect(video.muted).toBe(true);
+    // `playsInline` is the WebKit-safe half; `muted` never was. It used to be hard-set here, which
+    // made every clip in the app play silent — see `assetMedia.audio.test.jsx` (sc-17161), where
+    // the joint audio+video families make that a wrong answer rather than a harmless one. Still
+    // PINNED, in the other direction: a surface that needs a mute passes `muted` explicitly.
+    expect(video.muted).toBe(false);
     expect(video.playsInline).toBe(true);
     expect(video.preload).toBe("metadata");
     expect(video.getAttribute("src")).toContain("clip.mp4");

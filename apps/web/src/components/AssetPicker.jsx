@@ -1,5 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { AssetThumbnail, assetCanRenderAsImage, assetCanRenderAsVideo } from "./assetMedia.jsx";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AssetThumbnail,
+  assetCanRenderAsAudio,
+  assetCanRenderAsImage,
+  assetCanRenderAsVideo,
+} from "./assetMedia.jsx";
 import { assetMatchesCharacter, characterAssetIdIndex } from "../characterMembership.js";
 import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
@@ -379,19 +384,27 @@ function MediaSourcePickerField({
 
 function fileMatchesMediaKind(file, mediaKind) {
   const mime = String(file?.type ?? "").toLowerCase();
-  if (mime.startsWith("image/") || mime.startsWith("video/")) {
+  if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) {
     return mime.startsWith(`${mediaKind}/`);
   }
   const name = String(file?.name ?? "").toLowerCase();
-  return mediaKind === "video"
-    ? /\.(mp4|m4v|mov|webm|mkv|avi|ogv|mpeg|mpg|wmv|flv|3gp|3g2)$/i.test(name)
-    : /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic|heif)$/i.test(name);
+  if (mediaKind === "video") {
+    return /\.(mp4|m4v|mov|webm|mkv|avi|ogv|mpeg|mpg|wmv|flv|3gp|3g2)$/i.test(name);
+  }
+  if (mediaKind === "audio") {
+    return /\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|wma|aiff?)$/i.test(name);
+  }
+  return /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic|heif)$/i.test(name);
 }
 
 function assetMatchesMediaKind(asset, mediaKind) {
-  return mediaKind === "video"
-    ? assetCanRenderAsVideo(asset)
-    : assetCanRenderAsImage(asset) || asset?.type === "frame";
+  if (mediaKind === "video") {
+    return assetCanRenderAsVideo(asset);
+  }
+  if (mediaKind === "audio") {
+    return assetCanRenderAsAudio(asset);
+  }
+  return assetCanRenderAsImage(asset) || asset?.type === "frame";
 }
 
 function MediaSourcePickerModal({
@@ -409,6 +422,8 @@ function MediaSourcePickerModal({
   const [tab, setTab] = useState("assets");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectionVersionRef = useRef(0);
   const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -416,8 +431,19 @@ function MediaSourcePickerModal({
   const mediaLabel = mediaKind === "video" ? "video" : "image";
 
   useEffect(() => {
-    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+    setSelectedIds((ids) => {
+      const nextIds = normalizeSelection(ids, assets, multiple);
+      selectedIdsRef.current = nextIds;
+      return nextIds;
+    });
   }, [assets, multiple]);
+
+  function updateSelectedIds(updater) {
+    const nextIds = updater(selectedIdsRef.current);
+    selectedIdsRef.current = nextIds;
+    setSelectedIds(nextIds);
+    return nextIds;
+  }
 
   useEffect(() => {
     if (characterId && characters.some((character) => character.id === characterId)) {
@@ -469,6 +495,7 @@ function MediaSourcePickerModal({
     }
     setUploading(true);
     setUploadError("");
+    const selectionVersion = selectionVersionRef.current;
     try {
       const outcomes = await Promise.allSettled(
         (multiple ? selectedFiles : selectedFiles.slice(0, 1)).map((file) =>
@@ -479,9 +506,17 @@ function MediaSourcePickerModal({
         .filter((outcome) => outcome.status === "fulfilled" && outcome.value?.id && assetMatchesMediaKind(outcome.value, mediaKind))
         .map((outcome) => outcome.value.id);
       const failureCount = outcomes.length - importedIds.length;
-      const nextIds = multiple ? [...new Set([...selectedIds, ...importedIds])] : importedIds.slice(0, 1);
+      // Uploads settle later than card clicks. Merge into the latest selection rather than
+      // the render-time `selectedIds` captured when the upload began. A manual single-select
+      // made while the import was pending wins over the import's automatic selection.
+      const nextIds = updateSelectedIds((currentIds) =>
+        multiple
+          ? [...new Set([...currentIds, ...importedIds])]
+          : selectionVersion === selectionVersionRef.current
+            ? importedIds.slice(0, 1)
+            : currentIds,
+      );
       if (failureCount) {
-        setSelectedIds(nextIds);
         setUploadError(
           importedIds.length
             ? `Imported ${importedIds.length} ${mediaLabel}${importedIds.length === 1 ? "" : "s"}; ${failureCount} failed.`
@@ -513,7 +548,8 @@ function MediaSourcePickerModal({
 
   function renderAssetGrid(emptyLabel) {
     function toggleAsset(asset) {
-      setSelectedIds((ids) => {
+      selectionVersionRef.current += 1;
+      updateSelectedIds((ids) => {
         if (multiple) {
           return ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id];
         }
@@ -586,7 +622,7 @@ function MediaSourcePickerModal({
           onFiles={handleUpload}
         />
       ) : null}
-      {tab === "upload" && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
+      {uploadError ? <p className="inline-warning">{uploadError}</p> : null}
 
       {tab === "character" ? (
         <div className="dataset-add-character">
@@ -632,6 +668,12 @@ export function AssetPickerField({
   emptyLabel,
   label,
   changeLabel = "Change",
+  // Optional local-file import (sc-17137 review, B3): when the caller passes the app importer
+  // and a mediaKind, the modal grows the same dropzone the image/clip source pickers carry, so
+  // a picker scoped to a kind the project has none of (e.g. reference audio in a project with
+  // no audio assets) is not a dead end. Absent, the picker is byte-identical to before.
+  importAsset = null,
+  mediaKind = null,
   multiple = false,
   onChange,
   // showCategories=false drops the All/Images/Video/Uploads/Renders segmented
@@ -663,7 +705,9 @@ export function AssetPickerField({
       {open ? (
         <AssetPickerModal
           assets={assets}
+          importAsset={importAsset}
           initialSelectedIds={selectedIds}
+          mediaKind={mediaKind}
           multiple={multiple}
           onCancel={() => setOpen(false)}
           onConfirm={confirm}
@@ -677,7 +721,9 @@ export function AssetPickerField({
 
 export function AssetPickerModal({
   assets,
+  importAsset = null,
   initialSelectedIds,
+  mediaKind = null,
   multiple = false,
   onCancel,
   onConfirm,
@@ -687,10 +733,89 @@ export function AssetPickerModal({
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectionVersionRef = useRef(0);
+  const [dragActive, setDragActive] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const canImport = typeof importAsset === "function" && Boolean(mediaKind);
+  const mediaLabel = mediaKind ?? "file";
 
   useEffect(() => {
-    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+    setSelectedIds((ids) => {
+      const nextIds = normalizeSelection(ids, assets, multiple);
+      selectedIdsRef.current = nextIds;
+      return nextIds;
+    });
   }, [assets, multiple]);
+
+  function updateSelectedIds(updater) {
+    const nextIds = updater(selectedIdsRef.current);
+    selectedIdsRef.current = nextIds;
+    setSelectedIds(nextIds);
+    return nextIds;
+  }
+
+  // Mirrors MediaSourcePickerModal's upload path: import each file with `select: false` (a
+  // field-scoped picker must not hijack the app-wide Library selection), keep only imports of
+  // the picker's media kind, then confirm the enlarged selection when every import landed.
+  async function handleUpload(files) {
+    const selectedFiles = Array.from(files ?? []);
+    if (!selectedFiles.length || uploading || !canImport) {
+      return;
+    }
+    if (selectedFiles.some((file) => !fileMatchesMediaKind(file, mediaKind))) {
+      setUploadError(`Choose ${mediaLabel} files only.`);
+      return;
+    }
+    setUploading(true);
+    setUploadError("");
+    const selectionVersion = selectionVersionRef.current;
+    try {
+      const outcomes = await Promise.allSettled(
+        (multiple ? selectedFiles : selectedFiles.slice(0, 1)).map((file) =>
+          importAsset(file, { select: false, throwOnError: true }),
+        ),
+      );
+      const importedIds = outcomes
+        .filter(
+          (outcome) =>
+            outcome.status === "fulfilled" &&
+            outcome.value?.id &&
+            assetMatchesMediaKind(outcome.value, mediaKind),
+        )
+        .map((outcome) => outcome.value.id);
+      const failureCount = outcomes.length - importedIds.length;
+      const nextIds = updateSelectedIds((currentIds) =>
+        multiple
+          ? [...new Set([...currentIds, ...importedIds])]
+          : selectionVersion === selectionVersionRef.current
+            ? importedIds.slice(0, 1)
+            : currentIds,
+      );
+      if (failureCount) {
+        setUploadError(
+          importedIds.length
+            ? `Imported ${importedIds.length} ${mediaLabel} file${importedIds.length === 1 ? "" : "s"}; ${failureCount} failed.`
+            : `Could not import the selected ${mediaLabel} file${outcomes.length === 1 ? "" : "s"}.`,
+        );
+        return;
+      }
+      if (importedIds.length) {
+        onConfirm(nextIds);
+      }
+    } catch (err) {
+      setUploadError(err?.message ?? `Could not import the ${mediaLabel} file.`);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    setDragActive(false);
+    handleUpload(event.dataTransfer?.files);
+  }
 
   const categoryCounts = useMemo(() => {
     return Object.fromEntries(categoryOptions.map(([key]) => [key, assets.filter((asset) => categoryMatches(asset, key)).length]));
@@ -707,7 +832,8 @@ export function AssetPickerModal({
   }, [assets, activeCategory, query, searchIndex]);
 
   function toggleAsset(asset) {
-    setSelectedIds((ids) => {
+    selectionVersionRef.current += 1;
+    updateSelectedIds((ids) => {
       if (multiple) {
         return ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id];
       }
@@ -753,6 +879,24 @@ export function AssetPickerModal({
           onActivate={(asset) => !multiple && onConfirm([asset.id])}
           onSelect={(asset) => toggleAsset(asset)}
         />
+
+        {canImport ? (
+          <FileDropzone
+            accept={`${mediaKind}/*`}
+            active={dragActive}
+            busy={uploading}
+            hint={
+              uploading
+                ? `Importing ${mediaLabel}${multiple ? " files" : ""}...`
+                : `Drop ${multiple ? `${mediaLabel} files` : `a ${mediaLabel} file`} here, or`
+            }
+            multiple={multiple}
+            onActiveChange={setDragActive}
+            onDrop={handleDrop}
+            onFiles={handleUpload}
+          />
+        ) : null}
+        {canImport && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
 
         <footer className="asset-picker-footer">
           <span>{selectedIds.length ? `${selectedIds.length} selected` : "No selection"}</span>

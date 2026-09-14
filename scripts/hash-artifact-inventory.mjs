@@ -2,44 +2,149 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, readdir, stat } from "node:fs/promises";
+import { appendFile, lstat, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-async function fileSha256(file) {
+async function fileSha256(file, signal) {
   // Read every byte even when a Hugging Face snapshot symlink points at a 64-hex blob name. The
   // name is useful cache metadata, but trusting it would let a corrupted or replaced same-size blob
   // retain the old inventory receipt.
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  signal?.throwIfAborted();
+  for await (const chunk of createReadStream(file, { signal })) {
+    hash.update(chunk);
+    signal?.throwIfAborted();
+  }
   return hash.digest("hex");
 }
 
-async function inventoryFiles(root, relative = "") {
+function assertInsideTrustedRoot(resolvedTrustedRoot, resolved, label) {
+  const relation = path.relative(resolvedTrustedRoot, resolved);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    throw new Error(`artifact inventory file escaped its trusted root: ${label}`);
+  }
+}
+
+/**
+ * Whether a directory entry is hidden, and therefore not part of the artifact (sc-22738).
+ *
+ * The engines agree with this, and one of them enforces it: `candle-gen-sdxl`'s `collect_files`
+ * REFUSES to seal a source containing any dot-prefixed file, so a snapshot's `.gitattributes` is
+ * not something the artifact "also has" — it is not loadable content at all. Hashing it made the
+ * receipt depend on how the operator obtained the snapshot (a hub fetch of the whole repo carries
+ * `.gitattributes`; a glob-scoped one does not) rather than on the weights, so two hosts holding
+ * the same artifact minted two different inventories.
+ */
+function isHidden(name) {
+  return name.startsWith(".");
+}
+
+async function inventoryFiles(
+  root,
+  relative = "",
+  signal,
+  excludeDirectories = new Set(),
+  resolvedTrustedRoot = null,
+) {
+  signal?.throwIfAborted();
   const directory = path.join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (isHidden(entry.name)) continue;
     const child = path.join(relative, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await inventoryFiles(root, child));
+      const normalized = child.split(path.sep).join("/");
+      if (!excludeDirectories.has(normalized)) {
+        files.push(...await inventoryFiles(
+          root,
+          child,
+          signal,
+          excludeDirectories,
+          resolvedTrustedRoot,
+        ));
+      }
     } else if (entry.isFile() || entry.isSymbolicLink()) {
       const absolute = path.join(root, child);
-      const resolved = await stat(absolute);
+      const physical = await realpath(absolute);
+      if (resolvedTrustedRoot) assertInsideTrustedRoot(resolvedTrustedRoot, physical, child);
+      const resolved = await stat(physical);
+      if (!resolved.isFile()) {
+        throw new Error(`artifact inventory entry must resolve to a file: ${child}`);
+      }
       files.push({
         path: child.split(path.sep).join("/"),
         bytes: resolved.size,
-        sha256: await fileSha256(absolute),
+        sha256: await fileSha256(physical, signal),
       });
     }
   }
   return files;
 }
 
-export async function hashArtifactInventory(root) {
+export async function hashArtifactInventory(
+  root,
+  { signal, excludeDirectories = [], includeFiles, trustedRoot } = {},
+) {
   const absolute = path.resolve(root);
-  const files = await inventoryFiles(absolute);
+  const excluded = new Set(excludeDirectories.map((directory) => {
+    const normalized = directory.split(/[\\/]/).filter(Boolean).join("/");
+    if (!normalized || path.isAbsolute(directory) || normalized.split("/").includes("..")) {
+      throw new Error(`artifact inventory exclusion must be a confined relative directory: ${directory}`);
+    }
+    return normalized;
+  }));
+  if (includeFiles !== undefined && excludeDirectories.length) {
+    throw new Error("artifact inventory cannot combine includeFiles with excluded directories");
+  }
+  let files;
+  if (includeFiles !== undefined) {
+    if (!Array.isArray(includeFiles) || includeFiles.length === 0) {
+      throw new Error("artifact inventory includeFiles must be a non-empty relative file array");
+    }
+    const normalized = includeFiles.map((file) => {
+      const relative = file.split(/[\\/]/).filter(Boolean).join("/");
+      if (!relative || path.isAbsolute(file) || relative.split("/").includes("..")) {
+        throw new Error(`artifact inventory inclusion must be a confined relative file: ${file}`);
+      }
+      return relative;
+    });
+    if (new Set(normalized).size !== normalized.length) {
+      throw new Error("artifact inventory includeFiles must not contain duplicates");
+    }
+    const resolvedRoot = await realpath(absolute);
+    const resolvedTrustedRoot = trustedRoot ? await realpath(path.resolve(trustedRoot)) : resolvedRoot;
+    files = [];
+    for (const relative of normalized.sort()) {
+      signal?.throwIfAborted();
+      const file = path.join(absolute, ...relative.split("/"));
+      const metadata = await lstat(file);
+      if (!metadata.isFile() && !metadata.isSymbolicLink()) {
+        throw new Error(`artifact inventory inclusion must resolve from a file: ${relative}`);
+      }
+      const resolved = await realpath(file);
+      const relation = path.relative(resolvedTrustedRoot, resolved);
+      if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+        throw new Error(`artifact inventory inclusion escaped its trusted root: ${relative}`);
+      }
+      const resolvedMetadata = await stat(resolved);
+      if (!resolvedMetadata.isFile() || resolvedMetadata.size < 1) {
+        throw new Error(`artifact inventory inclusion is missing or empty: ${relative}`);
+      }
+      files.push({
+        path: relative,
+        bytes: resolvedMetadata.size,
+        sha256: await fileSha256(resolved, signal),
+      });
+    }
+  } else {
+    const resolvedTrustedRoot = trustedRoot
+      ? await realpath(path.resolve(trustedRoot))
+      : null;
+    files = await inventoryFiles(absolute, "", signal, excluded, resolvedTrustedRoot);
+  }
   if (files.length === 0) throw new Error(`artifact inventory is empty: ${absolute}`);
   const bytes = files.reduce((total, file) => total + file.bytes, 0);
   const hash = createHash("sha256");
@@ -52,6 +157,51 @@ export async function hashArtifactInventory(root) {
     hash.update("\n");
   }
   return { root: absolute, files: files.length, bytes, sha256: hash.digest("hex") };
+}
+
+export async function listCachedArtifactFiles(root, trustedRoot) {
+  const absolute = path.resolve(root);
+  const boundary = await realpath(path.resolve(trustedRoot));
+  const resolvedRoot = await realpath(absolute);
+  if (!path.relative(boundary, resolvedRoot)
+    || path.relative(boundary, resolvedRoot).startsWith("..")
+    || path.isAbsolute(path.relative(boundary, resolvedRoot))) {
+    throw new Error("cached artifact root escaped its trusted cache root");
+  }
+  const files = [];
+  async function visit(directory, relative = "") {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      // NOT filtered the way `inventoryFiles` filters (sc-22738), and the difference is deliberate.
+      // This listing is a TAMPER CHECK over a staged authority, and the CUDA harness's own Candle
+      // sidecar obstructions are dot-named files it installs inside the artifact on purpose
+      // (`.candle-device-format-v1`) and then re-verifies here. Hiding them would make the check
+      // stop seeing exactly what it was written to watch.
+      const childRelative = path.join(relative, entry.name);
+      const candidate = path.join(absolute, childRelative);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        const resolved = await realpath(candidate);
+        const relation = path.relative(resolvedRoot, resolved);
+        if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+          throw new Error(`cached artifact directory escaped its selected root: ${childRelative}`);
+        }
+        await visit(resolved, childRelative);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        const resolved = await realpath(candidate);
+        const relation = path.relative(boundary, resolved);
+        const resolvedMetadata = await stat(resolved);
+        if (!relation || relation.startsWith("..") || path.isAbsolute(relation)
+          || !resolvedMetadata.isFile() || resolvedMetadata.size < 1) {
+          throw new Error(`cached artifact file is broken, empty, or escaped: ${childRelative}`);
+        }
+        files.push(childRelative.split(path.sep).join("/"));
+      } else {
+        throw new Error(`cached artifact contains a non-regular entry: ${childRelative}`);
+      }
+    }
+  }
+  await visit(resolvedRoot);
+  return files.sort();
 }
 
 function value(args, flag) {

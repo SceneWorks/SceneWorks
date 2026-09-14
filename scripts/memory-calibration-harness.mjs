@@ -2,19 +2,36 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
+/**
+ * sc-22514: the ANCHOR PLAN schema. One anchor per (modelId, tier, backend lane) is the entire
+ * measurement obligation of epic 22505, and the plan format is where that is made structural — see
+ * the schema's own `$comment`.
+ */
+export const ANCHOR_PLAN_SCHEMA = JSON.parse(
+  readFileSync(path.join(ROOT, "packages/schemas/memory-anchor-plan.schema.json"), "utf8"),
+);
+export const ANCHOR_PLAN_PATH = "config/memory-calibration-plan.json";
 export const HARNESS_VERSION = "sceneworks-memory-v5";
+// sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
+// the measuring instrument, so the bundle schema version moves and the harness version does not.
+export const SCHEMA_VERSION = 6;
+// sc-21715: the record-status universe, READ from the bundle schema rather than transcribed here, so
+// a status added there cannot leave a downstream tally silently partial. Every consumer that
+// partitions a bundle by status (`summary.calibrationRunsByStatus`) derives its keys from this list.
+export const RECORD_STATUSES = Object.freeze([...CALIBRATION_SCHEMA.$defs.record.properties.status.enum]);
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -27,17 +44,42 @@ const RUNG_SET = new Set(RUNGS);
 /// Persisted spellings of `gen_core::LoadShape`. Eager and deferred measurements are not
 /// interchangeable, so this is a receipt axis rather than a fingerprint naming convention.
 export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
-export const RUNG_REUSE_TOLERANCE = Object.freeze({
-  absoluteBytes: 256 * 1024 * 1024,
-  relative: 0.05,
-});
+export const LTX25_TRANSFORMER_VARIANTS = ["distilled", "dev"];
+export const LTX25_DECODERS = ["conv", "diffvae"];
+// The public authority is intentionally fixed here as well as in the native adapter: the harness
+// must reject a merely SHA-shaped snapshot before it hashes hundreds of GiB or starts Metal work.
+// The focused selector test binds these literals back to config/download-pattern-evidence.json.
+export const LTX25_CAPTURE_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+export const LTX25_CAPTURE_REVISION = "081658ce6886cacba20817ce0359bbefef706ff2";
 const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
   "request", "selected_rgb", "reference_rgb",
+]);
+const PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_av", "reference_av",
 ]);
 const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_av", "reference_av",
+]);
+// sc-22738: a video capture is ONE measured render, so a single-render A/V session carries the
+// `selected_av` receipt alone — there is no warm repeat to file as `reference_av`. Sessions that
+// carry both roles were captured under the previous two-render arm and stay valid as they are.
+const PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES = Object.freeze(["request", "selected_av"]);
+const PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES = Object.freeze(["selected_av"]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
+const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
+
+function physicalMlxExpectedRoles(outputs, includeRequest) {
+  const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
+  if (!hasAv) return includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES;
+  const hasReferenceAv = outputs.some((output) => output?.role === "reference_av");
+  if (!hasReferenceAv) {
+    return includeRequest ? PHYSICAL_MLX_SINGLE_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_SINGLE_AV_PROVIDER_OUTPUT_ROLES;
+  }
+  return includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES;
+}
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -91,6 +133,67 @@ function physicalMlxRgbMetadata(output, label) {
   return { logicalCaseId: match[1], width, height };
 }
 
+function physicalMlxAvMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_AV_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, A/V role, geometry, frames, and content digest`);
+  }
+  if (output.sha256 !== match[6]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return {
+    logicalCaseId: match[1],
+    width: Number(match[3]),
+    height: Number(match[4]),
+    frames: Number(match[5]),
+  };
+}
+
+export function parsePhysicalMlxAvContent(bytes, label = "physical MLX A/V output") {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  if (bytes.length < 45 || !bytes.subarray(0, magic.length).equals(magic)) {
+    fail(`${label} must begin with the canonical SCENEWORKS_AV1 header`);
+  }
+  let offset = magic.length;
+  const width = bytes.readUInt32LE(offset); offset += 4;
+  const height = bytes.readUInt32LE(offset); offset += 4;
+  const frames = bytes.readUInt32LE(offset); offset += 4;
+  const fps = bytes.readUInt32LE(offset); offset += 4;
+  const sampleRateHz = bytes.readUInt32LE(offset); offset += 4;
+  const channels = bytes.readUInt16LE(offset); offset += 2;
+  const sampleCount = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+  if (![width, height, frames, fps, sampleRateHz, channels, sampleCount]
+      .every((value) => Number.isSafeInteger(value) && value > 0)) {
+    fail(`${label} canonical A/V header contains a zero or unsafe dimension`);
+  }
+  for (let frame = 0; frame < frames; frame += 1) {
+    if (offset + 16 > bytes.length) fail(`${label} frame ${frame} header is truncated`);
+    const frameWidth = bytes.readUInt32LE(offset); offset += 4;
+    const frameHeight = bytes.readUInt32LE(offset); offset += 4;
+    const pixelLength = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+    const expected = frameWidth * frameHeight * 3;
+    if (frameWidth !== width || frameHeight !== height || !Number.isSafeInteger(expected)
+        || pixelLength !== expected || offset + pixelLength > bytes.length) {
+      fail(`${label} frame ${frame} does not match the canonical RGB geometry`);
+    }
+    offset += pixelLength;
+  }
+  const pcmBytes = sampleCount * 4;
+  if (!Number.isSafeInteger(pcmBytes) || offset + pcmBytes !== bytes.length) {
+    fail(`${label} PCM payload length does not match sampleCount`);
+  }
+  return {
+    width, height, frames, fps, sampleRateHz, channels, sampleCount,
+    pcmSha256: createHash("sha256").update(bytes.subarray(offset)).digest("hex"),
+  };
+}
+
+function physicalMlxOutputMetadata(output, label) {
+  return output.role === "selected_av" || output.role === "reference_av"
+    ? physicalMlxAvMetadata(output, label)
+    : physicalMlxRgbMetadata(output, label);
+}
+
 function validatePhysicalMlxSessionReceipts(session) {
   const sourceDirectory = path.posix.dirname(session.sourcePath);
   if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
@@ -104,18 +207,99 @@ function validatePhysicalMlxSessionReceipts(session) {
     if (path.posix.dirname(output.path) !== sourceDirectory) {
       fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
     }
-    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
   }
 }
 
 function validatePhysicalMlxOutputsAgainstRecord(record, session) {
   for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
-    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    const metadata = physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
     if (metadata.logicalCaseId !== record.logicalCaseId
         || metadata.width !== record.target.geometry.width
-        || metadata.height !== record.target.geometry.height) {
-      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+        || metadata.height !== record.target.geometry.height
+        || (metadata.frames !== undefined && metadata.frames !== record.target.geometry.frames)) {
+      fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
+  }
+  // A typed audio comparison is selected-versus-REFERENCE PCM, so it is coupled to the
+  // `reference_av` receipt, not to the A/V kind as such: a single-render video session (sc-22738)
+  // carries `selected_av` and no audio comparison.
+  const hasReferenceAv = session.outputs.some((output) => output.role === "reference_av");
+  if (hasReferenceAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX reference A/V receipt and typed audio quality must be present together`);
+  }
+  if (hasReferenceAv) validateAudioQuality(record);
+}
+
+function validateAudioQuality(record) {
+  const audio = record.quality.audio;
+  object(audio, `${record.id}.quality.audio`);
+  if (audio.result !== "passed") fail(`${record.id}: A/V audio quality did not pass`);
+  for (const field of ["sampleRateHz", "channels", "sampleCount"]) {
+    if (!Number.isSafeInteger(audio[field]) || audio[field] <= 0) {
+      fail(`${record.id}.quality.audio.${field} must be a positive safe integer`);
+    }
+  }
+  for (const field of ["selectedPcmSha256", "referencePcmSha256"]) {
+    if (!/^[0-9a-f]{64}$/.test(audio[field])) {
+      fail(`${record.id}.quality.audio.${field} must be a lowercase SHA-256 digest`);
+    }
+  }
+  for (const metric of [
+    "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+    "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+  ]) number(audio[metric], `${record.id}.quality.audio.${metric}`);
+  if (audio.maximumAbsoluteError > audio.maximumAbsoluteErrorThreshold
+      || audio.meanAbsoluteError > audio.meanAbsoluteErrorThreshold
+      || audio.rootMeanSquareError > audio.rootMeanSquareErrorThreshold) {
+    fail(`${record.id}: audio quality threshold exceeded`);
+  }
+}
+
+export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
+  if (avContents.size === 0) return;
+  const selected = avContents.get("selected_av");
+  const reference = avContents.get("reference_av");
+  const outputFps = record.diagnostics?.measurements?.find(
+    (measurement) => measurement.name === "outputFps",
+  )?.value;
+  const measurement = (name) => record.diagnostics?.measurements?.find((entry) => entry.name === name)?.value;
+  if (!selected) fail(`${label}: an A/V session must carry the selected_av render`);
+  if (!reference) {
+    // sc-22738: one measured render, no reference. The track's identity is bound to the record's
+    // own `audio*` measurements instead of a selected-versus-reference `quality.audio` block.
+    if (record.quality.audio !== undefined) {
+      fail(`${label}: typed audio quality needs a reference_av render this session did not make`);
+    }
+    if (selected.width !== record.target.geometry.width
+        || selected.height !== record.target.geometry.height
+        || selected.frames !== record.target.geometry.frames
+        || selected.fps !== outputFps
+        || selected.sampleRateHz !== measurement("audioSampleRate")
+        || selected.channels !== measurement("audioChannels")
+        || selected.sampleCount !== measurement("audioSamples")) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+    return;
+  }
+  validateAudioQuality(record);
+  const audio = record.quality.audio;
+  for (const content of [selected, reference]) {
+    if (!content
+        || content.width !== record.target.geometry.width
+        || content.height !== record.target.geometry.height
+        || content.frames !== record.target.geometry.frames
+        || content.fps !== outputFps
+        || content.sampleRateHz !== audio.sampleRateHz
+        || content.channels !== audio.channels
+        || content.sampleCount !== audio.sampleCount) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+  }
+  if (selected.pcmSha256 !== audio.selectedPcmSha256
+      || reference.pcmSha256 !== audio.referencePcmSha256) {
+    fail(`${label}: canonical A/V PCM hashes differ from quality.audio`);
   }
 }
 
@@ -145,8 +329,40 @@ function physicalMlxDerivation(sessionId) {
   };
 }
 
+// sc-18864. The immutable provider-stdout receipts under `docs/calibration/` were emitted by the
+// schema-v4 adapter, which wrote `deviceBytes` and `wiredBytes` as verbatim copies of
+// `allocatorBytes`. The receipts are byte-immutable provenance and must NOT be rewritten, so the
+// v4 -> v5 projection happens here, during reconstruction, and only for a receipt that actually
+// carries the aliasing the adapter is known to have produced. A receipt whose aliases are NOT
+// copies is refused outright rather than normalised: it would mean the adapter measured something
+// the field names claimed, and this projection would be discarding a real reading.
+export function projectPhaseMetricsToSchemaV5(observedMemory, label) {
+  if (!observedMemory || typeof observedMemory !== "object") return observedMemory;
+  const projected = {};
+  for (const [phaseName, values] of Object.entries(observedMemory)) {
+    if (!values || typeof values !== "object" || !("deviceBytes" in values || "wiredBytes" in values)) {
+      projected[phaseName] = values;
+      continue;
+    }
+    const { deviceBytes, wiredBytes, ...rest } = values;
+    for (const [alias, aliasValue] of [["deviceBytes", deviceBytes], ["wiredBytes", wiredBytes]]) {
+      if (aliasValue !== rest.allocatorBytes) {
+        fail(`${label}.${phaseName}.${alias} is ${aliasValue}, not a copy of allocatorBytes ${rest.allocatorBytes}`);
+      }
+    }
+    projected[phaseName] = rest;
+  }
+  return projected;
+}
+
 function recordFromPhysicalMlxResponse(providerResponse, request, session) {
   const { sourceCapture, ...fragment } = providerResponse;
+  if (fragment.observedMemory) {
+    fragment.observedMemory = projectPhaseMetricsToSchemaV5(
+      fragment.observedMemory,
+      `${session.id}.providerResponse.observedMemory`,
+    );
+  }
   const planned = request.planned;
   const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
   const record = {
@@ -299,10 +515,21 @@ function schemaErrors(value, schema, root = schema, location = "$") {
     for (const required of schema.required ?? []) {
       if (!Object.hasOwn(value, required)) errors.push(`${location}.${required}: required property is missing`);
     }
+    if (schema.minProperties !== undefined && Object.keys(value).length < schema.minProperties) {
+      errors.push(`${location}: object has too few properties`);
+    }
     const properties = schema.properties ?? {};
     for (const [key, child] of Object.entries(value)) {
+      // sc-22514: `propertyNames` is what makes the anchor plan's one-per-cell rule structural, so
+      // the runtime validator has to enforce it rather than trust an editor's JSON-Schema plugin.
+      if (schema.propertyNames) {
+        errors.push(...schemaErrors(key, schema.propertyNames, root, `${location}.${key}<key>`));
+      }
       if (properties[key]) errors.push(...schemaErrors(child, properties[key], root, `${location}.${key}`));
       else if (schema.additionalProperties === false) errors.push(`${location}.${key}: unexpected property`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+        errors.push(...schemaErrors(child, schema.additionalProperties, root, `${location}.${key}`));
+      }
     }
   }
   return errors;
@@ -358,6 +585,29 @@ export function recordId(record) {
   }).slice(0, 20)}`;
 }
 
+/**
+ * One exceeded bound's content-derived id (sc-22738). Same construction and same exclusions as
+ * [`recordId`] — the derived `inference.closureDigest` is a pure function of terms already inside
+ * the identity — plus the two figures that ARE the bound's claim. A second hard stop of the same
+ * cell at the same geometry on the same host that reaches a different footprint is a DIFFERENT
+ * bound and gets a different id, because the inequality it states is different.
+ */
+export function exceededBoundId(bound) {
+  return `exc-${digest({
+    harnessVersion: bound.harnessVersion,
+    repositories: repositoriesIdentity(bound.repositories),
+    backend: bound.backend,
+    loadShape: bound.loadShape,
+    hardware: bound.hardware,
+    artifact: bound.artifact,
+    target: bound.target,
+    referenceCount: bound.referenceCount,
+    observedFootprintBytes: bound.observedFootprintBytes,
+    ceilingBytes: bound.ceilingBytes,
+    calibrationFingerprint: bound.calibrationFingerprint,
+  }).slice(0, 20)}`;
+}
+
 function validateEngagedRungs(strategy, label) {
   const engaged = strategy.engagedRungs;
   if (!Array.isArray(engaged) || engaged.length === 0) {
@@ -404,22 +654,26 @@ function validateHardware(record) {
   }
 }
 
+// sc-18864: schema v5 carries the two counters MLX actually exposes plus their documented sum.
+// `deviceBytes`/`wiredBytes` are gone — both adapters emitted them as copies of `allocatorBytes`,
+// which is how every committed MLX record asserted wired residency above its own probed ceiling.
+// `allocatorBytes` is DERIVED, so the rule here is an IDENTITY, not an ordering: an ordering is
+// what let one number wear three names and drift from its own definition.
+export const PHASE_METRICS = Object.freeze(["activeBytes", "allocatorBytes", "reclaimableBytes"]);
+
 function validatePhaseMetrics(metrics, label) {
   object(metrics, label);
   for (const phase of ["conditioning", "denoise", "decode", "overall"]) {
     const values = metrics[phase];
     object(values, `${label}.${phase}`);
-    for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+    for (const metric of PHASE_METRICS) {
       number(values[metric], `${label}.${phase}.${metric}`);
     }
-    if (values.allocatorBytes < values.activeBytes || values.deviceBytes < values.activeBytes) {
-      fail(`${label}.${phase}: allocator/device must cover active bytes`);
-    }
-    if (values.wiredBytes < values.activeBytes || values.reclaimableBytes > values.allocatorBytes) {
-      fail(`${label}.${phase}: wired must cover active and reclaimable cannot exceed allocator bytes`);
+    if (values.allocatorBytes !== values.activeBytes + values.reclaimableBytes) {
+      fail(`${label}.${phase}: allocator bytes must equal active plus reclaimable bytes`);
     }
   }
-  for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+  for (const metric of PHASE_METRICS) {
     const phaseMax = Math.max(metrics.conditioning[metric], metrics.denoise[metric], metrics.decode[metric]);
     if (metrics.overall[metric] < phaseMax) fail(`${label}.overall.${metric} must cover phase peaks`);
   }
@@ -548,12 +802,20 @@ function validateComplete(record) {
   ) fail(`${record.id}: negative mutation did not breach a threshold`);
   if (record.loadability.result !== "passed") fail(`${record.id}: loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
-    ?? record.observedMemory.overall.activeBytes;
-  if (observedDeviceBytes > record.hardware.memoryBytes) {
-    fail(`${record.id}: overall device bytes exceed probed hardware memory`);
+  assertResidencyFitsHardware(record);
+}
+
+// sc-18864. The quantity that must physically fit is the NON-RECLAIMABLE residency — the live-array
+// peak. `allocatorBytes` adds an instantaneous end-of-phase cache reading to a peak-over-window, so
+// it is an upper bound across two instants and legitimately exceeds physical memory on a capture
+// that completed (a real LTX render co-existed 7.46 GiB above recommendedMaxWorkingSetSize). This
+// used to read `deviceBytes`, which was that bound under another name.
+function assertResidencyFitsHardware(record) {
+  const resident = record.observedMemory.overall.activeBytes;
+  if (resident > record.hardware.memoryBytes) {
+    fail(`${record.id}: overall resident bytes exceed probed hardware memory`);
   }
-  if (record.backend === "mlx" && record.observedMemory.overall.wiredBytes > record.hardware.wiredLimitBytes) {
+  if (record.backend === "mlx" && resident > record.hardware.wiredLimitBytes) {
     fail(`${record.id}: overall wired bytes exceed the probed wired ceiling`);
   }
 }
@@ -602,10 +864,18 @@ function validateRuntimeComplete(record) {
   for (const name of ["exact_fit", "unknown_budget", "stale_evidence", "loadability"]) {
     if (scenarios.get(name)?.result !== "passed") fail(`${record.id}: ${name} must pass for runtime activation`);
   }
-  for (const name of ["warm_repeat", "cancel", "error"]) {
-    const scenario = scenarios.get(name);
-    if (scenario?.result !== "not_run") fail(`${record.id}: ${name} must remain explicitly not_run`);
-    text(scenario.reason, `${record.id}.${name}.reason`);
+  const lifecycle = ["warm_repeat", "cancel", "error"].map((name) => scenarios.get(name));
+  const lifecycleNotRun = lifecycle.every((scenario) => scenario?.result === "not_run");
+  const parityOnlyLifecycle = lifecycle[0]?.result === "passed"
+    && lifecycle.slice(1).every((scenario) => scenario?.result === "not_run");
+  const lifecyclePassed = lifecycle.every((scenario) => scenario?.result === "passed")
+    && lifecycle.slice(1).every((scenario) =>
+      scenario.cleanupVerified === true && scenario.warmFollowUpPassed === true);
+  if (!lifecycleNotRun && !parityOnlyLifecycle && !lifecyclePassed) {
+    fail(`${record.id}: runtime lifecycle must be entirely not_run, parity-only, or fully passed with cleanup and recovery`);
+  }
+  for (const [index, name] of ["warm_repeat", "cancel", "error"].entries()) {
+    text(lifecycle[index].reason, `${record.id}.${name}.reason`);
   }
   const exact = scenarios.get("exact_fit");
   number(exact.predictedBytes, `${record.id}.exact_fit.predictedBytes`);
@@ -615,28 +885,69 @@ function validateRuntimeComplete(record) {
   if (overlay?.result !== "not_applicable") fail(`${record.id}: runtime-complete evidence must be base-only`);
   text(overlay.reason, `${record.id}.overlay.reason`);
   if (record.negativeMutation !== null) fail(`${record.id}: unexecuted negative mutation must remain null`);
-  if (
-    record.quality.result !== "passed" ||
-    record.quality.identicalInputs !== true
-  ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
   text(record.quality.contract, `${record.id}.quality.contract`);
-  for (const metric of [
-    "maximumError", "meanError", "rootMeanSquareError",
-    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
-  ]) {
-    number(record.quality[metric], `${record.id}.quality.${metric}`);
+  if (record.quality.warmPasses === 0) {
+    // sc-22738: a single-render video receipt. The determinism comparison was NOT run, so the
+    // record says `not_run` and carries no figure; it degrades to "not measured", never to a
+    // refusal and never to a synthetic number. The thresholds it would be judged by still travel.
+    if (record.quality.result !== "not_run") {
+      fail(`${record.id}: quality.warmPasses 0 declares an unrun comparison, so quality.result must be not_run`);
+    }
+    for (const metric of ["maximumError", "meanError", "rootMeanSquareError"]) {
+      if (record.quality[metric] !== undefined) {
+        fail(`${record.id}: quality.warmPasses 0 cannot carry quality.${metric}`);
+      }
+    }
+    if (record.quality.audio !== undefined) fail(`${record.id}: quality.warmPasses 0 cannot carry typed audio quality`);
+    for (const metric of ["maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold"]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+  } else {
+    if (
+      record.quality.result !== "passed" ||
+      record.quality.identicalInputs !== true
+    ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
+    for (const metric of [
+      "maximumError", "meanError", "rootMeanSquareError",
+      "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
+    ]) {
+      number(record.quality[metric], `${record.id}.quality.${metric}`);
+    }
+    if (
+      record.quality.maximumError > record.quality.maximumErrorThreshold ||
+      record.quality.meanError > record.quality.meanErrorThreshold ||
+      record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
+    ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   }
-  if (
-    record.quality.maximumError > record.quality.maximumErrorThreshold ||
-    record.quality.meanError > record.quality.meanErrorThreshold ||
-    record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
-  ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
-    ?? record.observedMemory.overall.activeBytes;
-  if (observedDeviceBytes > record.hardware.memoryBytes) {
-    fail(`${record.id}: overall device bytes exceed probed hardware memory`);
+  // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
+  // runtime-complete `mlx:flux2_dev` records shipped claiming up to 26.0 GB more wired residency
+  // than the probed limit allows. Both statuses now run the same check.
+  assertResidencyFitsHardware(record);
+}
+
+// sc-18864 review: `diagnostics.measurements.predictedOverallCeiling` is a DIAGNOSTIC COPY of the
+// typed `predictedPeakBytes.overall`. The LTX arm derives both from `predicted_ceiling` over the
+// same `overall.active` peak and says so in its own comment ("Agrees with the emitted
+// predictedPeakBytes.overall by construction"). Nothing compared them, so when this story moved
+// `predictedPeakBytes` onto the resident peak, all 14 committed LTX records kept a diagnostic still
+// computed over the `allocatorBytes` co-existence bound: 2.5-4x the typed field sitting beside it,
+// and `imc-2c064567893ea869006e` publishing 149.79 GB of predicted demand on a 130.57 GB host — the
+// exact impossible figure this story exists to remove. An unchecked copy is a SECOND, UNVERSIONED
+// DEFINITION of one quantity, which is the drift this story closes. The rule is EQUALITY, not an
+// ordering: an ordering is what let the two spellings diverge in the first place.
+function validateDiagnosticCeilingAgreesWithTypedField(record) {
+  const measurements = record.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) return;
+  const declared = measurements.find((entry) => entry?.name === "predictedOverallCeiling");
+  const typed = record.predictedPeakBytes?.overall;
+  if (declared === undefined || typeof typed !== "number") return;
+  if (declared.value !== typed) {
+    fail(
+      `${record.id}: diagnostics predictedOverallCeiling ${declared.value} must equal ` +
+        `predictedPeakBytes.overall ${typed}`,
+    );
   }
 }
 
@@ -644,7 +955,9 @@ export function validateRecord(record) {
   object(record, "record");
   text(record.id, "record.id");
   text(record.logicalCaseId, `${record.id}.logicalCaseId`);
-  if (!["complete", "runtime_complete", "gated", "negative_complete"].includes(record.status)) {
+  // sc-21715: read from the schema (`RECORD_STATUSES`) rather than transcribed, so this check and
+  // every downstream tally admit exactly the same set.
+  if (!RECORD_STATUSES.includes(record.status)) {
     fail(`${record.id}: invalid status`);
   }
   if (!["authoritative", "candidate", "fixture"].includes(record.evidenceScope)) {
@@ -663,6 +976,20 @@ export function validateRecord(record) {
   }
   object(record.target, `${record.id}.target`);
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
+  if (record.target.modelId === "ltx_2_5") {
+    if (!LTX25_TRANSFORMER_VARIANTS.includes(record.target.transformerVariant)) {
+      fail(
+        `${record.id}.target.transformerVariant must identify an LTX-2.5 transformer ` +
+          `(${LTX25_TRANSFORMER_VARIANTS.join("|")})`,
+      );
+    }
+    if (!LTX25_DECODERS.includes(record.target.decoder)) {
+      fail(
+        `${record.id}.target.decoder must identify an LTX-2.5 decoder ` +
+          `(${LTX25_DECODERS.join("|")})`,
+      );
+    }
+  }
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
   object(record.strategy, `${record.id}.strategy`);
   if (!RUNG_SET.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
@@ -677,7 +1004,9 @@ export function validateRecord(record) {
   if (record.id !== recordId(record)) fail(`${record.id}: deterministic identity mismatch`);
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
+  if (record.quality.audio !== undefined) validateAudioQuality(record);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
+  validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
   if (record.status === "runtime_complete") validateRuntimeComplete(record);
   if (record.status === "negative_complete") validateNegative(record);
@@ -687,7 +1016,7 @@ export function validateRecord(record) {
 export function validateBundle(bundle) {
   validateSchema(bundle);
   object(bundle, "bundle");
-  if (bundle.schemaVersion !== 4 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
+  if (bundle.schemaVersion !== SCHEMA_VERSION || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
   const sessions = new Map();
@@ -700,7 +1029,7 @@ export function validateBundle(bundle) {
     if (session.kind === "physical_mlx") {
       validateExactOutputReceipts(
         session.outputs,
-        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        physicalMlxExpectedRoles(session.outputs, true),
         `${session.id}.outputs`,
       );
       validatePhysicalMlxSessionReceipts(session);
@@ -757,10 +1086,14 @@ export function validateBundle(bundle) {
       ? "z_image"
       : requiresQwenMlxDerivation ? "qwen_image" : null;
     const requiresDerivation = provenancePolicy !== null;
+    const requiresAudioDerivation = record.quality.audio !== undefined;
     if (requiresQwenMlxDerivation && !record.artifact.inventorySha256) {
       fail(`${record.id}: authoritative Qwen MLX evidence requires an exact artifact inventory`);
     }
     if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (requiresAudioDerivation && !record.derivation) {
+      fail(`${record.id}: typed audio quality requires physical source-session derivation`);
+    }
     if (record.derivation) {
       const derivationSessionIds = new Set();
       for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
@@ -775,6 +1108,23 @@ export function validateBundle(bundle) {
           }
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
+          }
+          if (record.target.modelId === "ltx_2_5") {
+            if (!session.target) {
+              fail(`${record.id}: ${sessionId} is an LTX derivation source without a target identity`);
+            }
+            for (const [sourceField, recordField] of [
+              ["tier", record.target.tier],
+              ["mode", record.target.mode],
+              ["overlay", record.target.overlay],
+              ["rung", record.strategy.rung],
+              ["transformerVariant", record.target.transformerVariant],
+              ["decoder", record.target.decoder],
+            ]) {
+              if (session.target[sourceField] !== recordField) {
+                fail(`${record.id}: ${sessionId} has the wrong LTX ${sourceField} identity`);
+              }
+            }
           }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
@@ -814,9 +1164,62 @@ export function validateBundle(bundle) {
         const [sessionId] = derivationSessionIds;
         validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
       }
+      if (requiresAudioDerivation) {
+        const audioSourceIds = record.derivation.quality.sourceSessionIds;
+        if (audioSourceIds.length !== 1) {
+          fail(`${record.id}: typed audio quality must bind exactly one physical A/V source session`);
+        }
+        const audioSession = sessions.get(audioSourceIds[0]);
+        if (audioSession?.kind !== "physical_mlx") {
+          fail(`${record.id}: typed audio quality source must be physical_mlx`);
+        }
+        validatePhysicalMlxOutputsAgainstRecord(record, audioSession);
+      }
+      if (record.target.modelId === "ltx_2_5") {
+        for (const sessionId of derivationSessionIds) {
+          const session = sessions.get(sessionId);
+          if (session.kind === "physical_mlx") {
+            validatePhysicalMlxOutputsAgainstRecord(record, session);
+          }
+        }
+      }
     }
   }
+  const boundIds = new Set();
+  for (const bound of bundle.exceededBounds ?? []) {
+    validateExceededBound(bound);
+    if (boundIds.has(bound.id)) fail(`duplicate exceeded bound ${bound.id}`);
+    boundIds.add(bound.id);
+  }
   return bundle;
+}
+
+/**
+ * One exceeded bound's invariants beyond the schema's shape (sc-22738).
+ *
+ * All three are about the inequality being a real one. A footprint under the ceiling did not come
+ * from a hard stop — EQUAL is admissible and is what a `metal_submissions_ignored` bound records,
+ * because a refusal the guard never saw is witnessed only up to the sampler's own peak, and that
+ * peak is then both the reading and the highest line the run is known to have crossed; a footprint
+ * above the whole host is not a reading of that host; and an id that
+ * is not the content digest of the bound's own identity would let two different measurements share
+ * a row. The Rust loader re-checks the first two against this very file, so a bundle that passes
+ * here and a store row that passes there cannot disagree.
+ */
+export function validateExceededBound(bound) {
+  object(bound, "exceeded bound");
+  if (bound.observedFootprintBytes < bound.ceilingBytes) {
+    fail(
+      `${bound.id}: observed footprint ${bound.observedFootprintBytes} is under the hard-stop ` +
+        `ceiling ${bound.ceilingBytes} — that is not a run the guard stopped`,
+    );
+  }
+  if (bound.observedFootprintBytes > bound.hardware.memoryBytes) {
+    fail(`${bound.id}: observed footprint exceeds the whole capture host's memory`);
+  }
+  if (bound.id !== exceededBoundId(bound)) {
+    fail(`${bound.id}: id is not the digest of its own identity (expected ${exceededBoundId(bound)})`);
+  }
 }
 
 function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy) {
@@ -859,7 +1262,8 @@ async function sha256File(file) {
   return hash.digest("hex");
 }
 
-async function resolveReceiptPath(relativePath, roots) {
+/** The receipt's physical path under the first root that holds it, or `null` when none does. */
+async function findReceiptPath(relativePath, roots) {
   for (const root of roots) {
     const physicalRoot = await realpath(root);
     const candidate = path.resolve(physicalRoot, relativePath);
@@ -875,13 +1279,61 @@ async function resolveReceiptPath(relativePath, roots) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
-  fail(`missing immutable source receipt ${relativePath}`);
+  return null;
+}
+
+async function resolveReceiptPath(relativePath, roots) {
+  return (await findReceiptPath(relativePath, roots)) ?? fail(`missing immutable source receipt ${relativePath}`);
+}
+
+/**
+ * sc-22738: a physical MLX session's RENDERED outputs (`selected_*` / `reference_*`) are not part of
+ * the committed evidence tree — the 2026-09-07 LTX-2.5 rerun put six 165–176 MB `.avbin` renders
+ * into three anchor commits and GitHub refused the push. The bundle's `outputs[]` receipt (content
+ * digest, byte length, geometry and frames, all also spelled in the content-addressed filename) and
+ * the quality metrics derived from the bytes ARE the evidence. The bytes are verified against that
+ * receipt at capture (`capturePlannedCase`, against the provider's `localPath`) and again at ingest,
+ * where `--source-root` names the raw capture directory and `requireRenderedOutputs` makes their
+ * absence a failure. Anywhere else they are verified when present and accepted on the receipt when
+ * not. The `request` receipt and the session log are required everywhere.
+ */
+function isRenderedOutput(output) {
+  return output.role !== "request";
+}
+
+/**
+ * A `repositories` block with the DERIVED closure digest removed, for comparing a record against the
+ * immutable receipts it was reconstructed from.
+ *
+ * `repositories.inference.closureDigest` is a pure function of the `revision` beside it and the
+ * `CLOSURE_DIGEST_VERSION` in force, so it carries no capture fact the revision does not already
+ * pin. Comparing it against a receipt made the receipts assert an ALGORITHM rather than a capture,
+ * which is what made a digest-version bump unrepresentable: `--restamp` legitimately re-derives
+ * every record's digest at its own revision, and the equality then read that re-derivation as
+ * tampering. Everything the receipt actually witnesses — revision, dirtiness, hardware, capture
+ * time, and every measurement — is still compared exactly. Whether a digest is the RIGHT function of
+ * its revision is a separate question, answered by `backfill-closure-digests.mjs --verify`, which
+ * re-derives all 109 against a real inference clone rather than trusting a stored copy.
+ */
+function capturedProvenance(repositories) {
+  return {
+    ...repositories,
+    inference: Object.fromEntries(
+      Object.entries(repositories?.inference ?? {}).filter(([key]) => key !== "closureDigest"),
+    ),
+  };
+}
+
+/** A record compared on everything the immutable receipts witness. See [`capturedProvenance`]. */
+function recordAsWitnessed(record) {
+  return { ...record, repositories: capturedProvenance(record.repositories) };
 }
 
 export async function validateSourceSessionFiles(
   bundle,
   extraRoot = null,
   inferenceClosureDigests = null,
+  { requireRenderedOutputs = false } = {},
 ) {
   validateBundle(bundle);
   if (inferenceClosureDigests) {
@@ -905,14 +1357,26 @@ export async function validateSourceSessionFiles(
     }
     const record = boundRecords[0];
     const requestOutput = session.outputs.find((output) => output.role === "request");
+    const avContents = new Map();
     for (const output of session.outputs) {
-      const outputFile = await resolveReceiptPath(output.path, roots);
+      const outputFile = isRenderedOutput(output) && !requireRenderedOutputs
+        ? await findReceiptPath(output.path, roots)
+        : await resolveReceiptPath(output.path, roots);
+      // See `isRenderedOutput`: the render is not in the tree; its receipt is the evidence.
+      if (outputFile === null) continue;
       const outputBytes = await readFile(outputFile);
       if (createHash("sha256").update(outputBytes).digest("hex") !== output.sha256
           || outputBytes.length !== output.bytes) {
         fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
       }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        avContents.set(
+          output.role,
+          parsePhysicalMlxAvContent(outputBytes, `${session.id}.${output.role}`),
+        );
+      }
     }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, session.id);
     const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
     let request;
     try {
@@ -938,10 +1402,14 @@ export async function validateSourceSessionFiles(
       tier: request.planned.target.tier,
       mode: request.planned.target.mode,
       overlay: request.planned.target.overlay,
+      ...(request.planned.target.transformerVariant
+        ? { transformerVariant: request.planned.target.transformerVariant }
+        : {}),
+      ...(request.planned.target.decoder ? { decoder: request.planned.target.decoder } : {}),
       rung: request.planned.strategy.rung,
     };
-    if (!equal(request.repositories, record.repositories)
-        || !equal(session.repositories, record.repositories)
+    if (!equal(capturedProvenance(request.repositories), capturedProvenance(record.repositories))
+        || !equal(capturedProvenance(session.repositories), capturedProvenance(record.repositories))
         || !equal(request.hardware, record.hardware)
         || !equal(session.hardware, record.hardware)
         || session.capturedAt !== record.capturedAt
@@ -964,11 +1432,11 @@ export async function validateSourceSessionFiles(
     }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
-      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      physicalMlxExpectedRoles(providerResponse?.sourceCapture?.outputs, false),
       `${session.id}.providerResponse.sourceCapture.outputs`,
     );
     for (const providerOutput of providerResponse.sourceCapture.outputs) {
-      physicalMlxRgbMetadata(
+      physicalMlxOutputMetadata(
         providerOutput,
         `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
       );
@@ -997,7 +1465,7 @@ export async function validateSourceSessionFiles(
       fail(`${session.id}: physical MLX session id does not match its provider response digest`);
     }
     const reconstructedRecord = recordFromPhysicalMlxResponse(providerResponse, request, session);
-    if (!equal(reconstructedRecord, record)) {
+    if (!equal(recordAsWitnessed(reconstructedRecord), recordAsWitnessed(record))) {
       fail(`${session.id}: provider response measurements do not match the evidence record`);
     }
   }
@@ -1029,237 +1497,522 @@ export function evidenceSemantics(record, revisions) {
   // measurements against the other backend's code.
   const provider = `${record.backend}:${record.target.provider}`;
   const live = revisions.inferenceClosureDigests?.[provider];
-  // Fail closed and LOUDLY. Falling back to pin equality when a digest is missing would silently
-  // restore the policy this replaces, and the fallback would be invisible in a green run.
-  if (!captured) {
-    fail(
-      `${record.id}: no repositories.inference.closureDigest. Every complete record must carry the ` +
-        "provider closure digest it was captured under (sc-17774); re-run the backfill in " +
-        "scripts/backfill-closure-digests.mjs against an inference clone.",
-    );
-  }
-  if (!live) {
-    fail(
-      `${record.id}: provider "${provider}" has no entry in config/inference-provider-closures.json. ` +
-        "Declare its inference crate and regenerate: node scripts/inference-closure-digest.mjs " +
-        "--repo <inference> --write.",
-    );
-  }
+  // sc-22512: fail SAFE, not closed. Both of these used to `fail()` — a record carrying no captured
+  // digest, and a lane carrying no declaration — so the ABSENCE of currency bookkeeping reddened
+  // every consumer of this function, including `npm run check`. Under E8 absence never blocks: it
+  // only withholds an improvement.
+  //
+  // `historical` is that answer, and it is strictly conservative. It is NOT the pin-equality
+  // fallback this replaced (which would have let an unrelated commit decide currency, and could
+  // read `current`): a record with no currency term to compare simply cannot certify a cell, so the
+  // consumer falls back to the analytic estimate. The remedy is still to capture or declare — that
+  // is now an improvement to make rather than a gate to clear.
+  if (!captured || !live) return "historical";
   validateCurrentPhysicalMlxProvenance(record, revisions.inferenceClosureDigests);
   return captured === live ? "current" : "historical";
 }
 
-export function mergeBundles(left, right) {
-  validateBundle(left);
-  validateBundle(right);
-  const records = new Map(left.records.map((record) => [record.id, record]));
-  for (const record of right.records) {
-    const existing = records.get(record.id);
-    if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
-    records.set(record.id, record);
-  }
-  const sourceSessions = new Map((left.sourceSessions ?? []).map((session) => [session.id, session]));
-  for (const session of right.sourceSessions ?? []) {
-    const existing = sourceSessions.get(session.id);
-    if (existing && !equal(existing, session)) fail(`conflicting source session ${session.id}`);
-    sourceSessions.set(session.id, session);
-  }
-  return {
-    schemaVersion: 4,
-    harnessVersion: HARNESS_VERSION,
-    sourceSessions: [...sourceSessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)),
-  };
-}
+/**
+ * The anchor COMPOSITION, fixed per backend lane rather than planned (sc-22514).
+ *
+ * An anchor is the one render a lane's derivation law can price everything else from, so the
+ * composition is a property of the LAW, not an operator choice: `isDerivable` in
+ * scripts/extract-memory-anchors.mjs accepts any MLX composition but accepts a candle anchor ONLY
+ * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
+ * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
+ * story closed.
+ *
+ * ONE ESCAPE, and it is not an operator knob either (sc-22734): a plan row may carry its own
+ * `strategy`, and it exists for a provider whose CONTRACT refuses the lane default. SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes — it is one fused
+ * dual-path transformer with no separable conditioning component, so there is no phase boundary to
+ * release — and `contract.validate_selection` therefore rejects the candle default rung before any
+ * weight is read. The override makes those rows plan the RESIDENT rung, which the contract admits.
+ * It is derived, not chosen: a test in scripts/measure-memory-catalog.test.mjs requires a row's
+ * effective rung to be `resident` exactly when the model's manifest lane block declares a
+ * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
+ * architecture does not force.
+ *
+ * ## Where the values live (sc-22738)
+ *
+ * NOT here. `crates/sceneworks-worker/src/inference_runtime.rs` walks this same plan and asks each
+ * row's contract to `validate_selection` the rung it will be captured at, and it used to RESPELL
+ * these two defaults in Rust (`lane_default_rung`: mlx -> "resident", candle -> "staged_residency")
+ * with nothing binding the two spellings — a lane default changed here would have left the Rust
+ * walk asserting the OLD rung and still green. Both sides now read
+ * `config/anchor-lane-default-strategy.json`, the Rust one through `include_str!`, so a change to
+ * the composition is a change to one file and reds the walk unless the contracts follow.
+ *
+ * Read synchronously at module load and fail-closed: a missing lane, rung or engaged-rung list
+ * throws here rather than degrading to a default composition no law authorized.
+ */
+export const ANCHOR_LANE_DEFAULT_STRATEGY_PATH = "config/anchor-lane-default-strategy.json";
 
-export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
-  validateBundle(fresh);
-  validateBundle(reused);
-  const freshByLogicalId = new Map(fresh.records.map((record) => [record.logicalCaseId, record]));
-  const reusedByLogicalId = new Map(reused.records.map((record) => [record.logicalCaseId, record]));
-  if (freshByLogicalId.size !== fresh.records.length || reusedByLogicalId.size !== reused.records.length) {
-    fail("fresh/reused comparison cannot contain duplicate logical cases");
-  }
-  if (freshByLogicalId.size !== reusedByLogicalId.size) {
-    fail(`fresh/reused comparison cardinality differs: ${freshByLogicalId.size} != ${reusedByLogicalId.size}`);
-  }
-  const comparisons = [];
-  for (const [logicalCaseId, freshRecord] of freshByLogicalId) {
-    const reusedRecord = reusedByLogicalId.get(logicalCaseId);
-    if (!reusedRecord) fail(`reused capture is missing ${logicalCaseId}`);
-    if (freshRecord.id !== reusedRecord.id) {
-      fail(`${logicalCaseId}: fresh/reused comparison domain differs in repository, hardware, or artifact provenance`);
+function loadAnchorStrategy() {
+  const declared = JSON.parse(
+    readFileSync(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  ).lanes;
+  const lanes = {};
+  for (const backend of ["mlx", "candle"]) {
+    const entry = declared?.[backend];
+    if (typeof entry?.rung !== "string" || !Array.isArray(entry.engagedRungs) || entry.engagedRungs.length === 0) {
+      fail(
+        `${ANCHOR_LANE_DEFAULT_STRATEGY_PATH} declares no usable default composition for the ${backend} lane`,
+      );
     }
-    if (!freshRecord.observedMemory || !reusedRecord.observedMemory) {
-      fail(`${logicalCaseId}: fresh/reused comparison requires observedMemory on both records`);
-    }
-    const metrics = [];
-    const overallOnly = Object.keys(freshRecord.observedMemory).length === 1
-      || Object.keys(reusedRecord.observedMemory).length === 1;
-    if (overallOnly && (
-      Object.keys(freshRecord.observedMemory).length !== 1
-      || Object.keys(reusedRecord.observedMemory).length !== 1
-    )) fail(`${logicalCaseId}: fresh/reused observedMemory shapes differ`);
-    const phases = overallOnly ? ["overall"] : ["conditioning", "denoise", "decode", "overall"];
-    const metricNames = overallOnly
-      ? ["activeBytes"]
-      : ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"];
-    for (const phase of phases) {
-      for (const metric of metricNames) {
-        const freshBytes = freshRecord.observedMemory[phase][metric];
-        const reusedBytes = reusedRecord.observedMemory[phase][metric];
-        const differenceBytes = Math.abs(reusedBytes - freshBytes);
-        const allowedBytes = Math.max(tolerance.absoluteBytes, Math.ceil(freshBytes * tolerance.relative));
-        metrics.push({ phase, metric, freshBytes, reusedBytes, differenceBytes, allowedBytes,
-          passed: differenceBytes <= allowedBytes });
-      }
-    }
-    comparisons.push({
-      logicalCaseId,
-      rung: freshRecord.strategy.rung,
-      passed: metrics.every((metric) => metric.passed),
-      metrics,
+    lanes[backend] = Object.freeze({
+      rung: entry.rung,
+      engagedRungs: Object.freeze([...entry.engagedRungs]),
+      parameters: Object.freeze({}),
     });
   }
-  const backend = fresh.records[0]?.backend;
+  return Object.freeze(lanes);
+}
+
+export const ANCHOR_STRATEGY = loadAnchorStrategy();
+
+/** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
+const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
+
+export function parseAnchorKey(key) {
+  const match = ANCHOR_KEY.exec(typeof key === "string" ? key : "");
+  if (!match) fail(`anchor key ${JSON.stringify(key)} must be <modelId>:<tier>:<backend>`);
+  return { modelId: match[1], tier: match[2], backend: match[3] };
+}
+
+/**
+ * Model ids the anchor plan may name, read from the two checked-in artifacts that between them
+ * enumerate every model SceneWorks knows about:
+ *
+ * - `models[].id` in `docs/generated/memory-matrix.json` — the routed catalog, and
+ * - `summary.outOfMatrixEntries[].id` — the models deliberately absent from that catalog (today
+ *   exactly the MiniMax-H3 pair, which has no familyGroup arm and no video-route resolver row).
+ *
+ * The schema's key pattern only constrains the SHAPE of a model id, so without this a plan could
+ * name an INVENTED model — `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of `krea_2_turbo:q4:mlx` —
+ * and buy itself a schema-valid second measurement of one physical cell, which is precisely the
+ * thing the object-keyed plan exists to make inexpressible.
+ *
+ * This is a COHERENCE check between two artifacts that are both present in the tree; it never asks
+ * whether a cell has been measured, so it cannot red on a missing measurement.
+ */
+let matrixModelIdsCache;
+function matrixModelIds() {
+  if (matrixModelIdsCache) return matrixModelIdsCache;
+  let matrix;
+  try {
+    matrix = JSON.parse(readFileSync(path.join(ROOT, "docs/generated/memory-matrix.json"), "utf8"));
+  } catch {
+    // The matrix is the OTHER half of the coherence check. If it is not readable there is no
+    // second artifact to be coherent with, so the check abstains rather than inventing a verdict.
+    return (matrixModelIdsCache = null);
+  }
+  const ids = new Set([
+    ...(matrix.models ?? []).map((model) => model.id),
+    ...(matrix.summary?.outOfMatrixEntries ?? []).map((entry) => entry.id),
+  ].filter((id) => typeof id === "string" && id));
+  return (matrixModelIdsCache = ids.size ? ids : null);
+}
+
+/**
+ * Schema-validate an anchor plan. The plan cannot express a second measurement of one cell, a
+ * geometry or parameter sweep, a rung grid, a negative case or a batch group — see
+ * packages/schemas/memory-anchor-plan.schema.json. Nothing here re-checks those by hand: the
+ * schema is the enforcement, and this is the seam that runs it.
+ *
+ * The one thing the schema CANNOT see is whether a well-shaped model id names a real model, so
+ * that is checked here against `matrixModelIds()`.
+ */
+export function validatePlan(plan) {
+  object(plan, "anchor plan");
+  const errors = schemaErrors(plan, ANCHOR_PLAN_SCHEMA);
+  if (errors.length) fail(`anchor plan is invalid: ${errors.slice(0, 8).join("; ")}`);
+  const knownModelIds = matrixModelIds();
+  for (const [key, anchor] of Object.entries(plan.anchors)) {
+    const { modelId } = parseAnchorKey(key);
+    // Synthetic plans used by the test suites are exempt, and can only be exempt while they are
+    // BOTH named `fixture_*` and scoped `fixture` — a scope that derives no closure digest and can
+    // never become current evidence. An `authoritative` or `candidate` anchor has no such door.
+    const syntheticFixture = modelId.startsWith("fixture_") && anchor.evidenceScope === "fixture";
+    if (knownModelIds && !syntheticFixture && !knownModelIds.has(modelId)) {
+      fail(
+        `${key}: model id ${JSON.stringify(modelId)} is not a docs/generated/memory-matrix.json ` +
+          "model and is not one of its summary.outOfMatrixEntries; an invented model id is a " +
+          "second measurement of an existing cell wearing a new name",
+      );
+    }
+    if (modelId === "ltx_2_5" && (!anchor.transformerVariant || !anchor.decoder)) {
+      fail(`${key}: an LTX-2.5 anchor requires transformerVariant and decoder`);
+    }
+    if (modelId !== "ltx_2_5" && (anchor.transformerVariant || anchor.decoder)) {
+      fail(`${key}: transformerVariant/decoder are LTX-2.5 axes only`);
+    }
+  }
+  return plan;
+}
+
+/** Every planned anchor, in key order. */
+export function planAnchors(plan) {
+  validatePlan(plan);
+  return Object.keys(plan.anchors).sort().map((key) => planAnchor(plan, key));
+}
+
+/**
+ * The ONE planned case for one anchor key.
+ *
+ * The wire shape the adapters consume is unchanged — `expectedResult`, `negative`,
+ * `modelLoadPolicy` and `modelLoadGroup` are still sent — but they are CONSTANTS now rather than
+ * plan fields: an anchor capture is one fresh model load of one passing case, and there is no
+ * spelling of the plan that says otherwise.
+ */
+export function planAnchor(plan, key) {
+  validatePlan(plan);
+  const { modelId, tier, backend } = parseAnchorKey(key);
+  const anchor = plan.anchors[key];
+  if (!anchor) {
+    fail(`unknown anchor ${JSON.stringify(key)}; the plan declares: ${Object.keys(plan.anchors).sort().join(", ")}`);
+  }
+  const spec = {
+    evidenceScope: anchor.evidenceScope,
+    backend,
+    loadShape: anchor.loadShape,
+    target: {
+      provider: anchor.provider,
+      modelId,
+      tier,
+      mode: anchor.mode,
+      ...(anchor.referenceCount !== undefined ? { referenceCount: anchor.referenceCount } : {}),
+      overlay: anchor.overlay,
+      ...(anchor.transformerVariant ? { transformerVariant: anchor.transformerVariant } : {}),
+      ...(anchor.decoder ? { decoder: anchor.decoder } : {}),
+      geometry: anchor.geometry,
+    },
+    strategy: {
+      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
+      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
+      parameters: {},
+    },
+    ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),
+    calibrationFingerprint: anchor.calibrationFingerprint,
+    fixture: anchor.fixture,
+    negative: false,
+  };
+  return {
+    logicalCaseId: logicalCaseId(spec),
+    ...spec,
+    expectedResult: "passed",
+    modelLoadPolicy: "fresh_per_case",
+    modelLoadGroup: null,
+  };
+}
+
+const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+/**
+ * The engine provider each lane's adapter loads LTX-2.5 through — the SAME public snapshot, under
+ * two different engine ids (sc-22725). MLX's arm is `ltx_2_5` (mlx.rs); Candle's is
+ * `ltx_2_5_distilled` (candle.rs `LTX25_ID`, `candle-gen-ltx` `MODEL_25_ID`). The snapshot binding
+ * is therefore a MODEL-level fact, not an MLX-only one, and this table is what keeps the refusal
+ * honest: a lane not listed here, or a plan row naming some other provider on a listed lane, is
+ * still refused rather than silently prepared against the wrong artifact family.
+ */
+export const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
+function ltx25ArtifactKey(planned) {
+  const variant = planned?.target?.transformerVariant;
+  const tier = planned?.target?.tier;
+  if (!LTX25_TRANSFORMER_VARIANTS.includes(variant) || !LTX25_CAPTURE_TIERS.includes(tier)) {
+    fail(`LTX-2.5 capture target requires transformerVariant=${
+      LTX25_TRANSFORMER_VARIANTS.join("|")
+    } and tier=${LTX25_CAPTURE_TIERS.join("|")}`);
+  }
+  return `${variant}/${tier}`;
+}
+
+async function requireLtx25File(file, label) {
+  let metadata;
+  try {
+    metadata = await stat(file);
+  } catch (error) {
+    fail(`${label} is missing at ${file}: ${error.message}`);
+  }
+  if (!metadata.isFile() || metadata.size < 1) fail(`${label} must be one non-empty file at ${file}`);
+  return metadata;
+}
+
+async function hashLtx25File(file, label, trustedRoot) {
+  const metadata = await requireLtx25File(file, label);
+  const physical = await realpath(file);
+  const boundary = await realpath(trustedRoot);
+  const relation = path.relative(boundary, physical);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    fail(`${label} escaped the repository cache boundary at ${file}`);
+  }
+  const hash = createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const chunk of createReadStream(physical)) {
+      bytes += chunk.length;
+      hash.update(chunk);
+    }
+  } catch (error) {
+    fail(`hash ${label} at ${file}: ${error.message}`);
+  }
+  if (bytes !== metadata.size) fail(`${label} changed size while it was being hashed at ${file}`);
+  return { path: file, bytes, sha256: hash.digest("hex") };
+}
+
+export async function prepareLtx25CaptureArtifacts(
+  snapshotRoot,
+  plannedCases,
+  inventoryFor = hashArtifactInventory,
+) {
+  if (typeof snapshotRoot !== "string" || !snapshotRoot || !path.isAbsolute(snapshotRoot)) {
+    fail("--ltx25-snapshot-root must be one absolute path");
+  }
+  if (!Array.isArray(plannedCases) || plannedCases.length === 0) {
+    fail("LTX-2.5 snapshot preparation requires at least one selected case");
+  }
+  if (plannedCases.some((planned) =>
+    planned.target?.modelId !== "ltx_2_5" ||
+    planned.target?.provider !== LTX25_LANE_PROVIDERS[planned.backend])) {
+    fail(
+      "--ltx25-snapshot-root is valid only for the ltx_2_5 plan on a lane that loads its own " +
+        `LTX-2.5 provider (${Object.entries(LTX25_LANE_PROVIDERS)
+          .map(([backend, provider]) => `${backend}:${provider}`)
+          .join(", ")})`,
+    );
+  }
+
+  const requested = path.resolve(snapshotRoot);
+  let resolved;
+  try {
+    resolved = await realpath(requested);
+  } catch (error) {
+    fail(`cannot canonicalize --ltx25-snapshot-root ${requested}: ${error.message}`);
+  }
+  if (resolved !== requested) {
+    fail(`--ltx25-snapshot-root must be the canonical snapshot path, got ${requested} -> ${resolved}`);
+  }
+  const snapshotsDirectory = path.dirname(resolved);
+  const repositoryDirectory = path.dirname(snapshotsDirectory);
+  const expectedRepositoryDirectory = `models--${LTX25_CAPTURE_REPOSITORY.replaceAll("/", "--")}`;
   if (
-    !backend ||
-    fresh.records.some((record) => record.backend !== backend) ||
-    reused.records.some((record) => record.backend !== backend)
+    path.basename(resolved) !== LTX25_CAPTURE_REVISION ||
+    path.basename(snapshotsDirectory) !== "snapshots" ||
+    path.basename(repositoryDirectory) !== expectedRepositoryDirectory
   ) {
-    fail("fresh/reused comparison must contain exactly one backend");
+    fail(
+      `--ltx25-snapshot-root must be ${expectedRepositoryDirectory}/snapshots/${LTX25_CAPTURE_REVISION}`,
+    );
+  }
+
+  const enhancer = path.join(resolved, "enhancer");
+  let enhancerEntries;
+  try {
+    enhancerEntries = await readdir(enhancer);
+  } catch (error) {
+    fail(`LTX-2.5 enhancer directory is missing at ${enhancer}: ${error.message}`);
+  }
+  if (enhancerEntries.length === 0) fail(`LTX-2.5 enhancer directory is empty at ${enhancer}`);
+  const canonicalEnhancer = await realpath(enhancer);
+  if (canonicalEnhancer !== enhancer) fail(`LTX-2.5 enhancer root must be canonical: ${enhancer}`);
+  let enhancerInventory;
+  try {
+    enhancerInventory = await inventoryFor(enhancer, { trustedRoot: repositoryDirectory });
+  } catch (error) {
+    fail(`hash LTX-2.5 enhancer artifact inventory: ${error.message}`);
+  }
+  if (!Number.isSafeInteger(enhancerInventory.bytes) || enhancerInventory.bytes <= 0 ||
+      !/^[0-9a-f]{64}$/.test(enhancerInventory.sha256)) {
+    fail("LTX-2.5 enhancer artifact inventory is malformed");
+  }
+  const enhancerArtifact = {
+    root: enhancer,
+    bytes: enhancerInventory.bytes,
+    sha256: enhancerInventory.sha256,
+  };
+  const needsDevAdapter = plannedCases.some(
+    (planned) => planned.target.transformerVariant === "dev",
+  );
+  const devAdapter = needsDevAdapter
+    ? await hashLtx25File(
+        path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+        "LTX-2.5 dev refinement adapter",
+        repositoryDirectory,
+      )
+    : null;
+
+  const artifacts = new Map();
+  const keys = [...new Set(plannedCases.map(ltx25ArtifactKey))].sort();
+  for (const key of keys) {
+    const root = path.join(resolved, ...key.split("/"));
+    let canonicalRoot;
+    try {
+      canonicalRoot = await realpath(root);
+    } catch (error) {
+      fail(`LTX-2.5 nested artifact root ${key} is missing at ${root}: ${error.message}`);
+    }
+    if (canonicalRoot !== root) fail(`LTX-2.5 nested artifact root ${key} must be canonical: ${root}`);
+    await requireLtx25File(path.join(root, "split_model.json"), `LTX-2.5 ${key} split manifest`);
+    const matching = plannedCases.filter((planned) => ltx25ArtifactKey(planned) === key);
+    if (matching.some((planned) => planned.target.decoder === "conv")) {
+      await requireLtx25File(path.join(root, "vae_decoder.safetensors"), `LTX-2.5 ${key} ConvVAE decoder`);
+    }
+    if (matching.some((planned) => planned.target.decoder === "diffvae")) {
+      await requireLtx25File(
+        path.join(root, "vae_diffusion_decoder.safetensors"),
+        `LTX-2.5 ${key} DiffVAE decoder`,
+      );
+    }
+    let inventory;
+    try {
+      inventory = await inventoryFor(root, { trustedRoot: repositoryDirectory });
+    } catch (error) {
+      fail(`hash LTX-2.5 ${key} artifact inventory: ${error.message}`);
+    }
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0 ||
+        !/^[0-9a-f]{64}$/.test(inventory.sha256)) {
+      fail(`LTX-2.5 ${key} artifact inventory is malformed`);
+    }
+    artifacts.set(key, { root, bytes: inventory.bytes, sha256: inventory.sha256 });
   }
   return {
-    schemaVersion: 1,
-    backend,
-    tolerance,
-    verdict: comparisons.every((comparison) => comparison.passed)
-      ? "amortizable"
-      : "unable_to_amortize",
-    comparisons,
+    snapshotRoot: resolved,
+    repository: LTX25_CAPTURE_REPOSITORY,
+    revision: LTX25_CAPTURE_REVISION,
+    enhancer: enhancerArtifact,
+    devAdapter,
+    artifacts,
   };
 }
 
-function completedLogicalIds(record) {
-  if (record.status === "negative_complete") return [record.logicalCaseId];
-  if (!["complete", "runtime_complete"].includes(record.status)) return [];
-  return record.sweep.cases.filter((item) => item.result === "passed").map((item) =>
-    logicalCaseId({
-      evidenceScope: record.evidenceScope,
-      backend: record.backend,
-      loadShape: record.loadShape,
-      target: record.target,
-      strategy: {
-        rung: record.strategy.rung,
-        engagedRungs: record.strategy.engagedRungs,
-        parameters: item.parameters,
-      },
-      sourceProvenance: record.sourceProvenance,
-      calibrationFingerprint: record.calibrationFingerprint,
-      fixture: record.fixture,
-      negative: item.result === "failed",
-    }),
+async function assertLtx25ArtifactsStable(sealed, plannedCases, inventoryFor = hashArtifactInventory) {
+  const observed = await prepareLtx25CaptureArtifacts(
+    sealed.snapshotRoot,
+    plannedCases,
+    inventoryFor,
   );
-}
-
-function operationallyAttemptedLogicalIds(records, repositories, hardware) {
-  // sc-17935: compared on repository IDENTITY, with the derived closure digest stripped from both
-  // sides — the same argument `recordId` makes. The digest is a pure function of (lane, inference
-  // revision); the revision is compared here, and the lane is fixed by `logicalCaseId`, so it adds
-  // nothing. Comparing it raw would make resume lane-sensitive: the run-level `repositories` no
-  // longer carries any one lane's digest, so every prior record would look foreign and a resumed
-  // capture would repeat GPU work it had already paid for.
-  //
-  // The converse is deliberate and worth stating: resume is now blind to the digest in BOTH
-  // directions, so a record stamped under a wrong declaration stays "already attempted" until the
-  // bundle is discarded. That is the correct trade — this check decides whether to re-run a
-  // multi-hour capture, not whether the evidence is current. Currency is `evidenceSemantics`, which
-  // reads the digest and fails closed.
-  const wanted = repositoriesIdentity(repositories);
-  return new Set(records
-    .filter((record) =>
-      record.harnessVersion === HARNESS_VERSION &&
-      equal(repositoriesIdentity(record.repositories), wanted) &&
-      equal(record.hardware, hardware)
-    )
-    .map((record) => record.logicalCaseId));
-}
-
-export function expandPlan(config, completed = []) {
-  object(config, "plan config");
-  const completedLogical = new Set(
-    completed.flatMap(completedLogicalIds),
-  );
-  const cases = [];
-  for (const provider of config.providers) {
-    if (!["eager_materialization", "deferred_materialization"].includes(provider.loadShape)) {
-      fail(`${provider.name ?? provider.target.provider}: plan provider requires an explicit loadShape`);
-    }
-    for (const candidate of provider.cases) {
-      if (!["passed", "failed"].includes(candidate.expectedResult)) {
-        fail(`${provider.name ?? provider.target.provider}: plan case requires expectedResult`);
-      }
-      if ((candidate.expectedResult === "failed") !== (candidate.negative === true)) {
-        fail(`${provider.name ?? provider.target.provider}: failed cases must be explicitly negative`);
-      }
-      const spec = {
-        evidenceScope: provider.evidenceScope,
-        backend: provider.backend,
-        loadShape: provider.loadShape,
-        target: provider.target,
-        strategy: {
-          rung: provider.rung,
-          engagedRungs: provider.engagedRungs,
-          parameters: candidate.parameters,
-        },
-        ...(provider.sourceProvenance ? { sourceProvenance: provider.sourceProvenance } : {}),
-        calibrationFingerprint: provider.calibrationFingerprint,
-        fixture: provider.fixture,
-        negative: candidate.negative === true,
-      };
-      const id = logicalCaseId(spec);
-      if (!completedLogical.has(id)) cases.push({
-        logicalCaseId: id,
-        ...spec,
-        expectedResult: candidate.expectedResult,
-        modelLoadPolicy: provider.modelLoadPolicy ?? "fresh_per_case",
-        modelLoadGroup: provider.modelLoadGroup ?? null,
-      });
+  for (const field of ["snapshotRoot", "repository", "revision", "enhancer"]) {
+    if (!equal(observed[field], sealed[field])) {
+      fail(`LTX-2.5 ${field} changed after campaign preparation`);
     }
   }
-  return cases.sort((a, b) => a.logicalCaseId.localeCompare(b.logicalCaseId));
+  if (sealed.devAdapter) {
+    const observedDevAdapter = observed.devAdapter ?? await hashLtx25File(
+      sealed.devAdapter.path,
+      "LTX-2.5 dev refinement adapter",
+      path.dirname(path.dirname(sealed.snapshotRoot)),
+    );
+    if (!equal(observedDevAdapter, sealed.devAdapter)) {
+      fail("LTX-2.5 devAdapter changed after campaign preparation");
+    }
+  }
+  for (const key of new Set(plannedCases.map(ltx25ArtifactKey))) {
+    if (!equal(observed.artifacts.get(key), sealed.artifacts.get(key))) {
+      fail(`LTX-2.5 ${key} artifact inventory changed during provider execution`);
+    }
+  }
 }
 
-export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
-  if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
-  const planned = expandPlan(config).filter(
-    (candidate) => candidate.backend === backend && (!fixture || candidate.fixture === fixture),
-  ).sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung));
-  if (planned.length === 0) fail(`reuse assessment selected no ${backend} cases`);
-  const response = JSON.parse(await execute(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "assess_batch", planned }),
-  ));
-  if (!["eligible_for_measurement", "unable_to_amortize"].includes(response.verdict)) {
-    fail(`provider returned invalid reuse-assessment verdict ${JSON.stringify(response.verdict)}`);
+export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  for (const name of [
+    "SCENEWORKS_LTX25_ROOT",
+    "SCENEWORKS_MEMORY_MODEL_BYTES",
+    "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_ENHANCER_BYTES",
+    "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+    "SCENEWORKS_LTX25_DISTILL_LORA_ROOT",
+  ]) delete environment[name];
+  environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
+  environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
+  if (planned) {
+    const key = ltx25ArtifactKey(planned);
+    const artifact = prepared.artifacts.get(key);
+    if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+    environment.SCENEWORKS_LTX25_ROOT = artifact.root;
+    environment.SCENEWORKS_MEMORY_MODEL_BYTES = String(artifact.bytes);
+    environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = artifact.sha256;
+    environment.SCENEWORKS_LTX25_ENHANCER_BYTES = String(prepared.enhancer.bytes);
+    environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256 = prepared.enhancer.sha256;
+    if (planned.target.transformerVariant === "dev") {
+      if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+      // The Candle arm resolves the official stage-two refinement LoRA from the snapshot ROOT
+      // (candle.rs `ltx25_official_dev_adapter` → `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, joined with
+      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest.
+      //
+      // Reachability, stated plainly: NO plan row is served by this line today. The variable is read
+      // only by the Candle arm, and only a `dev` anchor binds it — but every candle plan row is
+      // `distilled` and every mlx plan row is `dev` (where mlx ignores the variable). The binding is
+      // in place so that a future candle `dev` anchor is served by the same prepared, re-hashed
+      // snapshot as the mlx one; adding that plan row is what would first exercise it.
+      environment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT = prepared.snapshotRoot;
+    }
   }
-  text(response.reason, "reuse assessment reason");
+  return environment;
+}
+
+function ltx25ExpectedSourceInputs(prepared, planned) {
+  const key = ltx25ArtifactKey(planned);
+  const artifact = prepared.artifacts.get(key);
+  if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }];
+  if (planned.target.transformerVariant === "dev") {
+    if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+    inputs.push({
+      role: "adapter",
+      path: prepared.devAdapter.path,
+      bytes: prepared.devAdapter.bytes,
+      sha256: prepared.devAdapter.sha256,
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: "dev_refinement_lora",
+    });
+  }
+  return inputs;
+}
+
+/**
+ * Content identity of a source-session input: everything that identifies the bytes, minus the
+ * absolute snapshot `path`, which is machine-layout state rather than artifact identity.
+ */
+function ltx25InputContentIdentity(input) {
   return {
-    schemaVersion: 1,
-    backend,
-    fixture: fixture ?? null,
-    tolerance: RUNG_REUSE_TOLERANCE,
-    ...response,
+    role: input?.role,
+    bytes: input?.bytes,
+    sha256: input?.sha256,
+    repository: input?.repository,
+    resolvedRevision: input?.resolvedRevision,
+    variant: input?.variant,
   };
 }
 
-function execute(command, args, input) {
+function execute(command, args, input, { env } = {}) {
   return new Promise((resolve, reject) => {
     const hasInput = input !== undefined;
     const child = spawn(command, args, {
       stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
     let stdout = "";
     let stderr = "";
@@ -1286,13 +2039,357 @@ function execute(command, args, input) {
   });
 }
 
-export async function runProviderPlan({
-  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
-  onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
-  rawLogDir = null, sourcePathPrefix = null,
-  // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
+/**
+ * Capture ONE anchor: one provider probe, one provider render, one record (sc-22514).
+ *
+ * This replaces `runProviderPlan`, whose job was to drive a campaign — a rung/geometry/parameter
+ * grid, batched model loads, resume against a prior bundle, negative cases and per-invocation
+ * checkpoints. Epic 22505 makes one anchor per (model, tier, lane) the whole measurement
+ * obligation, so there is nothing left for a campaign to schedule: the unit of work IS the unit of
+ * evidence, and a re-run is one more command rather than a resumable state machine.
+ *
+ * The output is a bundle in the same `{records: [...]}` shape the retained corpora use, with
+ * exactly one record, so scripts/extract-memory-anchors.mjs consumes it unchanged.
+ */
+export async function captureAnchor({ plan, anchorKey, ...rest }) {
+  return capturePlannedCase({ planned: planAnchor(plan, anchorKey), ...rest });
+}
+
+/**
+ * The `repositories` block every capture and every bound carries: both HEADs, both dirty flags, and
+ * the SceneWorks matrix source revision. Shared by [`capturePlannedCase`] and
+ * [`recordExceededBound`] so a bound's provenance is assembled by the same code a record's is.
+ */
+async function probeRepositoryState({ sceneWorksRepo, inferenceRepo }) {
+  const gitState = async (repo, sceneWorks = false) => ({
+    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
+    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
+    ...(sceneWorks
+      ? {
+          matrixSourceRevision: JSON.parse(
+            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
+          ).generatedFrom.sceneWorksRevision,
+        }
+      : {}),
+  });
+  return {
+    sceneWorks: await gitState(sceneWorksRepo, true),
+    inference: await gitState(inferenceRepo),
+  };
+}
+
+/** The lane closure digest resolver both capture arms stamp their `repositories.inference` with. */
+function laneClosureDigestFor({ sceneWorksRepo, inferenceRepo }) {
+  return async (laneKey, revision) => {
+    const declarations = JSON.parse(
+      await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
+    );
+    const crateDir = declarations.providers?.[laneKey]?.crate;
+    // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
+    // conservative answer: the record carries no currency term, so it can never read `current`
+    // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
+    // it later.
+    if (!crateDir) return undefined;
+    return providerClosureDigest({ repo: inferenceRepo, revision, provider: laneKey, crateDir })
+      .digest;
+  };
+}
+
+/**
+ * The guard's verdict, read off its own event log (sc-22738).
+ *
+ * The `hard_stop` reason is the authority for BOTH figures — the guard spells them into it as
+ * `physical_footprint_at_or_above_<ceiling>:observed_<footprint>` at the instant it fired — and the
+ * final `sample` is cross-checked against it, so a truncated or interleaved log cannot yield a
+ * bound whose footprint no sample ever saw. A log with no `hard_stop` returns `null`: the capture
+ * failed for some other reason, and inventing a bound from its last sample would state an
+ * inequality nothing measured.
+ */
+export function parseWatchdogHardStop(body) {
+  let stop = null;
+  let lastSample = null;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event === "sample") lastSample = event;
+    if (event.event === "hard_stop" && !stop) stop = event;
+  }
+  if (!stop) return null;
+  const match = /^physical_footprint_at_or_above_(\d+):observed_(\d+)$/.exec(String(stop.reason));
+  if (!match) {
+    // sc-22738: the SECOND guard against a false lower bound, behind the runner's own
+    // (`measure-memory-catalog.mjs` returns `runtime_budget_exceeded` for a wall-clock stop —
+    // whether the guard made it or the runner's backstop did — before it ever calls
+    // `record-exceeded`). A wall-clock stop is the case this is now most likely to see: the
+    // probe ran out of its `--max-runtime-seconds` budget wherever its footprint happened to be,
+    // which is not a line it was witnessed to cross. Anything that is not a footprint stop is
+    // refused here for the same reason, whatever put it in the log.
+    const runtime = /^runtime_at_or_above_(\d+(?:\.\d+)?)s$/.exec(String(stop.reason));
+    fail(
+      `watchdog hard stop ${JSON.stringify(stop.reason)} is not a physical-footprint stop; only a ` +
+        "footprint stop states a lower bound on the render's peak" +
+        (runtime
+          ? `. This is a WALL-CLOCK stop: the probe reached its ${runtime[1]}s budget, which measures ` +
+            "no memory at all — the capture is a failure, not an exceedance"
+          : ""),
+    );
+  }
+  const ceilingBytes = Number(match[1]);
+  const observedFootprintBytes = Number(match[2]);
+  if (!Number.isSafeInteger(ceilingBytes) || !Number.isSafeInteger(observedFootprintBytes)) {
+    fail("watchdog hard stop states figures outside the safe integer range");
+  }
+  if (lastSample && lastSample.physicalFootprintBytes !== observedFootprintBytes) {
+    fail(
+      `watchdog hard stop claims footprint ${observedFootprintBytes} but its last sample read ` +
+        `${lastSample.physicalFootprintBytes}`,
+    );
+  }
+  return { reason: stop.reason, ceilingBytes, observedFootprintBytes };
+}
+
+/**
+ * The two tokens Metal's process-scoped refusal is identified by (sc-22738, measured 2026-09-06).
+ *
+ * BOTH are required. The phrase alone appears in prose — this file, the runbook, a memory note —
+ * and a stderr that merely mentions the failure mode is not one that suffered it; the IOGPU status
+ * code is what the driver itself emits alongside it. Requiring the pair is what keeps a log line
+ * about the hazard from being mistaken for the hazard.
+ */
+export const METAL_SUBMISSIONS_IGNORED_CODE = "00000004";
+export const METAL_SUBMISSIONS_IGNORED_PHRASE = "kIOGPUCommandBufferCallbackErrorSubmissionsIgnored";
+
+/**
+ * Whether a provider's captured stderr carries Metal's submissions-ignored refusal.
+ *
+ * `[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors)
+ * (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)` — the engine surfaces it verbatim
+ * out of mlx-c, so the adapter's exit-1 stderr is the only witness there is. The guard sees nothing:
+ * it never fired, because `phys_footprint` never reached the kill line.
+ */
+export function metalSubmissionsIgnored(stderr) {
+  const text = String(stderr ?? "");
+  return text.includes(METAL_SUBMISSIONS_IGNORED_CODE) && text.includes(METAL_SUBMISSIONS_IGNORED_PHRASE);
+}
+
+/**
+ * How far BELOW the wired limit the last good sample may sit and still be read as a wired-limit
+ * refusal: 2% (sc-22738).
+ *
+ * Derived from the sampler, not chosen for comfort. The guard samples every 2 s, so the reading is
+ * always at least one interval stale by the time Metal refuses. On the `flux2_dev:bf16:mlx` refusal
+ * this rule was written from, the terminal climb was 679,821,816 bytes in 2.22 s (~306 MB/s), so one
+ * interval of lag is ~612 MB — 0.70% of this host's 87,044,670,532-byte wired limit — and the peak
+ * actually landed 56,660,196 bytes (0.065%) under it. 2% is ~2.8 intervals at that rate: loose
+ * enough that a faster terminal climb still classifies, tight enough that a refusal taken WELL below
+ * the limit is not laundered into a memory bound. A refusal outside the band is refused here and
+ * stays a `capture_failed`: it was a GPU fault of some other kind, and nothing measured a ceiling.
+ */
+export const METAL_REFUSAL_TOLERANCE = 0.02;
+
+/**
+ * The peak `phys_footprint` the guard sampled, and the number of samples behind it (sc-22738).
+ *
+ * The PEAK, not the last sample: a refused process is torn down while the sampler is still running,
+ * so the tail of the stream reads the shrinking husk (29 MB on the flux2 refusal) rather than the
+ * render. A stream with no sample states no footprint and is refused rather than defaulted.
+ */
+export function parseWatchdogPeak(body) {
+  let peak = null;
+  let samples = 0;
+  for (const line of String(body).split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event !== "sample") continue;
+    samples += 1;
+    const footprint = event.physicalFootprintBytes;
+    if (!Number.isSafeInteger(footprint) || footprint <= 0) {
+      fail(`watchdog sample states a non-positive physical footprint ${JSON.stringify(footprint)}`);
+    }
+    if (peak === null || footprint > peak) peak = footprint;
+  }
+  if (peak === null) fail("the watchdog event log carries no sample, so it states no footprint at all");
+  return { observedFootprintBytes: peak, samples };
+}
+
+/**
+ * A process-scoped Metal refusal read as a measured bound (sc-22738, measured 2026-09-06).
+ *
+ * WHAT THE RUN PROVED. `flux2_dev:bf16:mlx` rendered for 775 s under the guard, reached a sampled
+ * peak of 86,988,010,336 bytes — 0.065% under this host's 87,044,670,532-byte Metal wired limit —
+ * and the adapter then exited 1 with the driver's own submissions-ignored refusal. The guard never
+ * fired (its kill line is 94,822,600,832), so `parseWatchdogHardStop` reads nothing and the run used
+ * to end as `capture_failed` with the store keeping no trace, while production went on admitting
+ * the identical request at the ladder's bf16 rung.
+ *
+ * WHICH FIGURES THE BOUND CARRIES, AND WHY NOT THE WIRED LIMIT. `observedFootprintBytes` is the peak
+ * the sampler actually read, and `ceilingBytes` is that same figure — the highest line the run is
+ * WITNESSED to have crossed. Recording the wired limit as the ceiling would state that the run got
+ * past a line it was only ever observed 56 MB short of, and `sceneworks_core::memory_anchor`'s
+ * loader refuses exactly that (`observed_footprint_bytes < ceiling_bytes`). The limit is not lost:
+ * it is carried on `hardware.wiredLimitBytes`, named in `reason`, and — as `wiredLimitBytes` — is
+ * the term the tolerance band above is measured against, so a reader sees the whole gap.
+ *
+ * The two quantities are not interchangeable for a further reason `watchdogCeilings` already states:
+ * `phys_footprint` counts every non-Metal page the group owns, the wired limit ceilings Metal
+ * buffers alone. Their near-coincidence here is corroboration that the refusal was memory pressure,
+ * which is all the tolerance band is asked to decide.
+ */
+function metalRefusalBound({ eventBody, providerStderr, wiredLimitBytes, hardware }) {
+  if (!metalSubmissionsIgnored(providerStderr)) {
+    fail(
+      "the captured provider stderr carries no Metal submissions-ignored refusal " +
+        `(${METAL_SUBMISSIONS_IGNORED_CODE}:${METAL_SUBMISSIONS_IGNORED_PHRASE}); a failure that ` +
+        "names no refusal states no bound",
+    );
+  }
+  if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) {
+    fail("--wired-limit-bytes must be a positive safe integer");
+  }
+  // The runner passes the limit its OWN probe read before the capture; the probe above read it
+  // again after. A host whose Metal policy moved between the two is a host neither reading speaks
+  // for, so the bound is refused rather than keyed on whichever figure arrived last.
+  if (hardware.wiredLimitBytes !== wiredLimitBytes) {
+    fail(
+      `--wired-limit-bytes ${wiredLimitBytes} is not the wired limit this adapter probes ` +
+        `(${hardware.wiredLimitBytes}); the host's Metal ceiling moved during the capture`,
+    );
+  }
+  const { observedFootprintBytes } = parseWatchdogPeak(eventBody);
+  if (observedFootprintBytes > hardware.memoryBytes) {
+    fail(`peak footprint ${observedFootprintBytes} exceeds the whole capture host's memory`);
+  }
+  const floor = Math.floor(wiredLimitBytes * (1 - METAL_REFUSAL_TOLERANCE));
+  if (observedFootprintBytes < floor) {
+    fail(
+      `peak footprint ${observedFootprintBytes} is more than ${METAL_REFUSAL_TOLERANCE * 100}% under ` +
+        `the ${wiredLimitBytes}-byte wired limit (floor ${floor}); this refusal was not taken at the ` +
+        "wired limit, so it bounds nothing",
+    );
+  }
+  return {
+    observedFootprintBytes,
+    ceilingBytes: observedFootprintBytes,
+    reason: `metal_submissions_ignored:observed_${observedFootprintBytes}:wired_limit_${wiredLimitBytes}`,
+  };
+}
+
+/**
+ * Turn ONE footprint hard stop into retained evidence (sc-22738, epic 22723 E4/E5).
+ *
+ * Before this arm existed a hard stop stamped NOTHING. The capture process group was killed, the
+ * runner logged `capture_failed`, and the single fact the run had established — that this cell's
+ * peak is at least the footprint the guard saw — was thrown away, leaving production admitting the
+ * request it had just had to kill. The bundle this writes goes through the same `check` → `ingest`
+ * → extract → stamp → matrix path a completed capture does, so a bound is stamped, packaged and
+ * committed by the machinery that already exists rather than by a second one.
+ *
+ * WHAT THIS ARM DOES NOT DO: it does not run the provider's render. It probes the adapter for the
+ * host's hardware — the same `action: "probe"` a capture takes first — reads the guard's event log,
+ * and binds the artifact the runner had set in the environment. There is no fragment to trust,
+ * because there is no completed run; every field is either the plan's, the repositories', the
+ * probe's, the runner's artifact binding, or the guard's.
+ */
+export async function recordExceededBound({
+  plan, anchorKey, providerCommand, sceneWorksRepo, inferenceRepo, watchdogEventFile, artifact,
+  providerStderrFile = null, wiredLimitBytes = null,
+  closureDigestFor = null, executeProvider = execute, now = () => new Date(),
+}) {
+  if (!Array.isArray(providerCommand) || !providerCommand.length) {
+    fail("provider command must be a JSON argv array");
+  }
+  const planned = planAnchor(plan, anchorKey);
+  object(artifact, "artifact");
+  for (const field of ["repository", "resolvedRevision", "variant"]) {
+    text(artifact[field], `artifact.${field}`);
+  }
+  const eventBody = await readFile(watchdogEventFile, "utf8");
+  // TWO admissible sources, in this order. The guard's own hard stop is the authoritative one: it
+  // states both figures itself. A process-scoped Metal refusal is the alternative — the guard never
+  // fired, so the run's only witnesses are the sampler's stream and the adapter's stderr — and it is
+  // consulted ONLY when there is no hard stop to read.
+  const stop = parseWatchdogHardStop(eventBody);
+  const providerStderr = providerStderrFile === null ? null : await readFile(providerStderrFile, "utf8");
+  if (!stop && providerStderr === null) {
+    fail(
+      `${watchdogEventFile} records no watchdog hard stop, and no --provider-stderr was given to ` +
+        "read a process-scoped refusal out of",
+    );
+  }
+  const repositories = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  const probeOutput = await executeProvider(
+    providerCommand[0],
+    providerCommand.slice(1),
+    canonicalJson({ action: "probe", repositories }),
+  );
+  const probe = JSON.parse(probeOutput);
+  const after = await probeRepositoryState({ sceneWorksRepo, inferenceRepo });
+  if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during the probe");
+  const lane = `${planned.backend}:${planned.target.provider}`;
+  const resolveDigest = closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const digestForLane = planned.evidenceScope === "authoritative"
+    ? await resolveDigest(lane, repositories.inference.revision)
+    : undefined;
+  const measured = stop ?? metalRefusalBound({
+    eventBody, providerStderr, wiredLimitBytes, hardware: probe.hardware,
+  });
+  const bound = {
+    logicalCaseId: planned.logicalCaseId,
+    backend: planned.backend,
+    // The plan's declared shape, not a provider attestation: the run was killed before the adapter
+    // could attest anything, and the load shape is what the capture ASKED for. It is stated rather
+    // than omitted because the bound is keyed on it — a deferred-materialization run reaches a
+    // different footprint than an eager one, and neither may borrow the other's inequality.
+    loadShape: planned.loadShape,
+    repositories: digestForLane
+      ? { ...repositories, inference: { ...repositories.inference, closureDigest: digestForLane } }
+      : repositories,
+    hardware: probe.hardware,
+    artifact,
+    target: planned.target,
+    // Preserve the declared conditioning cardinality, including when the capture stops early.
+    // Older plans omit it; new reference probes must not produce reference-free bounds.
+    referenceCount: planned.target.referenceCount ?? 0,
+    observedFootprintBytes: measured.observedFootprintBytes,
+    ceilingBytes: measured.ceilingBytes,
+    reason: measured.reason,
+    eventFileSha256: createHash("sha256").update(eventBody).digest("hex"),
+    // The refusal's own witness, hashed for the same reason the event log is: a bound whose stated
+    // cause cannot be re-read is a claim standing on nothing.
+    ...(stop || providerStderr === null
+      ? {}
+      : { providerStderrSha256: createHash("sha256").update(providerStderr).digest("hex") }),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    capturedAt: now().toISOString(),
+    harnessVersion: HARNESS_VERSION,
+  };
+  const bundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    records: [],
+    exceededBounds: [{ id: exceededBoundId(bound), ...bound }],
+  };
+  return validateBundle(bundle);
+}
+
+/**
+ * The capture primitive: one planned case in, one single-record bundle out.
+ *
+ * `captureAnchor` is the only production caller and derives its `planned` from the anchor plan. This
+ * arm is separate for ONE reason: `scripts/run-ltx-safety-canary.mjs` drives a frozen SC-18946
+ * campaign row — retained historical data in the pre-collapse grid shape, pinned by logical case id
+ * in the runner and the adapter alike — through the same request/record assembly. It is not a way to
+ * express a measurement the anchor plan cannot.
+ */
+export async function capturePlannedCase({
+  planned, providerCommand, sceneWorksRepo, inferenceRepo,
+  onProviderInvocation, rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null,
+  // sc-17774: injectable so this runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
+  // SC-20191 keeps the canonical request/record assembly here while allowing the one contained
+  // campaign entry to transport the provider request through its sealed watchdog wrapper.
+  executeProvider = execute,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   if (Boolean(rawLogDir) !== Boolean(sourcePathPrefix)) {
@@ -1316,53 +2413,16 @@ export async function runProviderPlan({
       }
     }
   }
-  const gitState = async (repo, sceneWorks = false) => ({
-    revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
-    dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
-    ...(sceneWorks
-      ? {
-          matrixSourceRevision: JSON.parse(
-            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
-          ).generatedFrom.sceneWorksRevision,
-        }
-      : {}),
-  });
+  object(planned, "planned case");
   // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
   // live inference checkout, so the captured half of the currency comparison is derived here rather
-  // than backfilled later.
-  //
-  // sc-17935: the LANE decides which closure is measured, and a lane is `<backend>:<provider>` —
-  // exactly the key `config/inference-provider-closures.json` and `evidenceSemantics` use. This used
-  // to pass `providerName`, the `--provider` PLAN-ENTRY name (`candle-krea-q4-fresh-reference-
-  // resident`), which is not a table key and is `undefined` under the `--fixture` selection every
-  // checked-in capture workflow actually uses. Both spellings failed with `provider "…" has no
-  // entry`, so no macOS or Windows capture job could produce replacement evidence — precisely when
-  // a narrowed currency term makes replacement evidence the remedy.
+  // than backfilled later. The LANE decides which closure is measured, and a lane is
+  // `<backend>:<provider>` — the key `config/inference-provider-closures.json` and
+  // `evidenceSemantics` both use.
+  const lane = `${planned.backend}:${planned.target.provider}`;
   const closureDigest =
-    closureDigestFor ??
-    (async (lane, revision) => {
-      const declarations = JSON.parse(
-        await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
-      );
-      const crateDir = declarations.providers?.[lane]?.crate;
-      if (!crateDir) {
-        fail(
-          `lane "${lane}" has no entry in config/inference-provider-closures.json. Declare its ` +
-            "inference crate before capturing evidence, or the record cannot carry a currency term.",
-        );
-      }
-      return providerClosureDigest({
-        repo: inferenceRepo,
-        revision,
-        provider: lane,
-        crateDir,
-      }).digest;
-    });
-  const laneOf = (planned) => `${planned.backend}:${planned.target.provider}`;
-  const probeRepositories = async () => ({
-    sceneWorks: await gitState(sceneWorksRepo, true),
-    inference: await gitState(inferenceRepo),
-  });
+    closureDigestFor ?? laneClosureDigestFor({ sceneWorksRepo, inferenceRepo });
+  const probeRepositories = () => probeRepositoryState({ sceneWorksRepo, inferenceRepo });
   // The stability probe deliberately carries NO closure digest: the digest is a pure function of
   // (lane, inference revision), and the revision is compared here, so hashing it again would only
   // re-derive a value that cannot move while `revision` holds still.
@@ -1371,342 +2431,259 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume
-    ? validateBundle(resume)
-    : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
-  const selectedConfig = {
-    ...config,
-    providers: config.providers.filter(
-      (provider) => (!providerName || provider.name === providerName) && (!fixture || provider.fixture === fixture),
-    ),
-  };
-  if (providerName && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider named ${providerName}`);
+  if (ltx25SnapshotRoot && planned.target.modelId !== "ltx_2_5") {
+    fail("--ltx25-snapshot-root captures an ltx_2_5 anchor only");
   }
-  if (fixture && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider with fixture ${fixture}`);
+  if (planned.target.modelId === "ltx_2_5" && !ltx25SnapshotRoot) {
+    fail("an ltx_2_5 anchor requires --ltx25-snapshot-root for artifact binding");
   }
-  if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
-  const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
-    if (forceFreshPerCase) {
-      return { ...planned, modelLoadPolicy: "fresh_per_case", modelLoadGroup: null };
-    }
-    if (forceBatchRungs) return {
-      ...planned,
-      modelLoadPolicy: "batch_rungs",
-      modelLoadGroup: `forced-${digest({ backend: planned.backend, target: planned.target, fixture: planned.fixture })}`,
-    };
-    return planned;
-  });
-  const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
-  const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(selectedCases.map((planned) => planned.backend));
-  if (backends.size !== 1) {
-    fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
-  }
-  const probe = JSON.parse(await execute(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "probe", repositories }),
-  ));
-  await assertRepositoriesStable();
-  // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
-  // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
-  // proves that its exact logical case was already attempted only when the harness, both repository
-  // receipts (including matrix source identity/dirty state), and hardware probe all match this run.
-  // Stale or foreign receipts therefore remain scheduled, while a failed multi-invocation capture
-  // can continue without repeating expensive GPU work or colliding on a fresh capturedAt value.
-  const attempted = operationallyAttemptedLogicalIds(existing.records, repositories, probe.hardware);
-  const cases = selectedCases.filter((planned) => !attempted.has(planned.logicalCaseId));
-  if (cases.length === 0) return existing;
-
-  // Derive one digest per AUTHORITATIVE lane actually being captured, before the first GPU-bound
-  // invocation. Only an authoritative capture can ever be `current` — `evidenceSemantics`
-  // short-circuits fixture and candidate scopes before the comparison is reached — so a selection
-  // that is entirely fixture/candidate derives nothing and needs neither an inference crate layout
-  // nor a declarations file. That is what lets the schema-mutation suite drive this runner against a
-  // synthetic repo. Deriving EAGERLY is the point of doing it here rather than lazily at stamping
-  // time: an undeclared lane must fail before a 26 GB capture burns, not after.
-  const digestByLane = new Map();
-  for (const lane of new Set(cases.filter((planned) => planned.evidenceScope === "authoritative").map(laneOf))) {
-    digestByLane.set(lane, await closureDigest(lane, repositories.inference.revision));
-  }
-  const repositoriesFor = (planned) => {
-    const digest = digestByLane.get(laneOf(planned));
-    if (!digest) return repositories;
-    return { ...repositories, inference: { ...repositories.inference, closureDigest: digest } };
-  };
-  const incoming = [];
-  const incomingSessions = [];
-  let remaining = cases;
-  const sameBatch = (left, right) =>
-    left.modelLoadPolicy === "batch_rungs" &&
-    right.modelLoadPolicy === "batch_rungs" &&
-    left.modelLoadGroup &&
-    left.modelLoadGroup === right.modelLoadGroup &&
-    left.backend === right.backend &&
-    equal(left.target, right.target) &&
-    left.fixture === right.fixture;
-  const requiredBatchRungs = (planned) => {
-    const rungs = new Set(
-      allExpanded
-        .filter((candidate) => sameBatch(planned, candidate))
-        .map((candidate) => candidate.strategy.rung),
+  const ltx25Artifacts = ltx25SnapshotRoot
+    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, [planned])
+    : null;
+  let probeOutput;
+  try {
+    probeOutput = await executeProvider(
+      providerCommand[0],
+      providerCommand.slice(1),
+      canonicalJson({ action: "probe", repositories }),
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
     );
-    return RUNGS.filter((rung) => rungs.has(rung));
-  };
-  while (remaining.length > 0) {
-    const first = remaining[0];
-    const batchRungs = new Set();
-    const pendingBatch = first.modelLoadPolicy === "batch_rungs"
-      ? remaining
-          .filter((planned) => sameBatch(first, planned))
-          .sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung))
-          .filter((planned) => {
-            if (batchRungs.has(planned.strategy.rung)) return false;
-            batchRungs.add(planned.strategy.rung);
-            return true;
-          })
-      : [first];
-    const pendingRungs = pendingBatch.map((planned) => planned.strategy.rung);
-    // A provider's batch protocol is defined by the complete rung cohort, not by whichever
-    // parameter cases happen to remain. Candidate/gated evidence intentionally cannot retire its
-    // sibling sweep points, so a canonical five-rung Qwen batch leaves decode/window alternatives
-    // pending. Sending those two rungs as a second `run_batch` violates the adapter contract and
-    // used to discard the first successful batch. Measure an incomplete remainder serially instead;
-    // this preserves gated semantics while ensuring every parameter point is still executed.
-    const invocation = first.modelLoadPolicy === "batch_rungs" &&
-        !equal(pendingRungs, requiredBatchRungs(first))
-      ? [first]
-      : pendingBatch;
-    const uniqueRungs = new Set(invocation.map((planned) => planned.strategy.rung));
-    if (first.modelLoadPolicy === "batch_rungs" && uniqueRungs.size !== invocation.length) {
-      fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
-    }
-    const action = invocation.length > 1 ? "run_batch" : "run";
-    onProviderInvocation?.({ action, cases: invocation });
-    const providerRequest = canonicalJson({
-      action,
-      ...(action === "run" ? { planned: first } : { planned: invocation }),
-      repositories: repositoriesFor(first),
-      repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
-      hardware: probe.hardware,
-    });
-    const providerOutput = await execute(
+  } finally {
+    if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
+  }
+  const probe = JSON.parse(probeOutput);
+  await assertRepositoriesStable();
+  // Only an authoritative capture can ever be `current` — `evidenceSemantics` short-circuits
+  // fixture and candidate scopes before the comparison is reached — so a non-authoritative anchor
+  // derives nothing and needs neither an inference crate layout nor a declarations file. That is
+  // what lets the schema-mutation suite drive this runner against a synthetic repo.
+  const digestForLane = planned.evidenceScope === "authoritative"
+    ? await closureDigest(lane, repositories.inference.revision)
+    : undefined;
+  const stampedRepositories = digestForLane
+    ? { ...repositories, inference: { ...repositories.inference, closureDigest: digestForLane } }
+    : repositories;
+  const providerRequest = canonicalJson({
+    action: "run",
+    planned,
+    repositories: stampedRepositories,
+    repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
+    hardware: probe.hardware,
+  });
+  if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
+  onProviderInvocation?.({ action: "run", cases: [planned] });
+  let providerOutput;
+  try {
+    providerOutput = await executeProvider(
       providerCommand[0],
       providerCommand.slice(1),
       providerRequest,
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, planned) } : undefined,
     );
-    await assertRepositoriesStable();
-    const response = JSON.parse(providerOutput);
-    const fragments = action === "run_batch" ? response.fragments : [response];
-    if (!Array.isArray(fragments) || fragments.length !== invocation.length) {
-      fail(`${first.modelLoadGroup ?? first.logicalCaseId}: provider returned ${
-        Array.isArray(fragments) ? fragments.length : "a non-array"
-      } fragments for ${invocation.length} planned cases`);
-    }
-    if (action === "run_batch" && response.modelLoads !== 1) {
-      fail(`${first.modelLoadGroup}: batched provider must attest exactly one model load`);
-    }
-    for (const [index, fragment] of fragments.entries()) {
-      const planned = invocation[index];
-      const sourceCapture = fragment.sourceCapture;
-      delete fragment.sourceCapture;
-      if (rawLogDir && !sourceCapture) {
-        fail(`${planned.logicalCaseId}: configured raw-log provenance requires provider sourceCapture`);
-      }
-      if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
-        fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
-      }
-      validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
-      if (!equal(fragment.strategy, planned.strategy)) {
-        fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
-      }
-      // The materialization shape is a RECEIPT field: the adapter attests what its run actually
-      // loaded under, and the plan only declares what that rung is expected to select. Taking
-      // `planned.loadShape` here would stamp every record with the plan's claim and make the field
-      // unfalsifiable — the same backfill sc-16482 forbids for historical receipts, applied
-      // silently to new ones. Cross-check instead, and fail closed on divergence.
-      if (!LOAD_SHAPES.includes(fragment.loadShape)) {
-        fail(
-          `${planned.logicalCaseId}: provider fragment must attest a loadShape (${LOAD_SHAPES.join("|")})`,
-        );
-      }
-      if (fragment.loadShape !== planned.loadShape) {
-        fail(
-          `${planned.logicalCaseId}: adapter measured loadShape ${fragment.loadShape} but the plan ` +
-            `declared ${planned.loadShape}`,
-        );
-      }
-      const record = {
-        ...fragment,
-        logicalCaseId: planned.logicalCaseId,
-        evidenceScope: planned.evidenceScope,
-        backend: planned.backend,
-        loadShape: fragment.loadShape,
-        // Per-lane, not per-run: a `--backend candle` run with no `--fixture` selects several
-        // providers, and stamping them all with one lane's digest would compare each against the
-        // wrong code path forever.
-        repositories: repositoriesFor(planned),
-        hardware: probe.hardware,
-        target: planned.target,
-        strategy: fragment.strategy,
-        ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
-        calibrationFingerprint: planned.calibrationFingerprint,
-        fixture: planned.fixture,
-        harnessVersion: HARNESS_VERSION,
-      };
-      if (sourceCapture) {
-        if (!rawLogDir || !sourcePathPrefix) {
-          fail(`${planned.logicalCaseId}: provider returned sourceCapture without configured raw-log provenance`);
-        }
-        if (action !== "run") {
-          fail(`${planned.logicalCaseId}: physical source capture must run fresh per case`);
-        }
-        object(sourceCapture, `${planned.logicalCaseId}.sourceCapture`);
-        if (sourceCapture.kind !== "physical_mlx") {
-          fail(`${planned.logicalCaseId}: unsupported source capture kind ${JSON.stringify(sourceCapture.kind)}`);
-        }
-        if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
-          fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
-        }
-        validateExactOutputReceipts(
-          sourceCapture.outputs,
-          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
-          `${planned.logicalCaseId}.sourceCapture.outputs`,
-        );
-        if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
-          fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
-        }
-        const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
-        if (!baseInput || baseInput.repository !== fragment.artifact?.repository
-            || baseInput.resolvedRevision !== fragment.artifact?.resolvedRevision
-            || baseInput.variant !== fragment.artifact?.variant) {
-          fail(`${planned.logicalCaseId}: physical MLX source input must match the measured artifact exactly`);
-        }
-        if (record.artifact.inventorySha256 !== undefined
-            && record.artifact.inventorySha256 !== baseInput.sha256) {
-          fail(`${planned.logicalCaseId}: provider artifact inventory disagrees with sourceCapture`);
-        }
-        record.artifact.inventorySha256 = baseInput.sha256;
-        const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
-        const sessionId = physicalMlxSessionId({
-          kind: sourceCapture.kind,
-          logicalCaseId: planned.logicalCaseId,
-          capturedAt: fragment.capturedAt,
-          repositories: repositoriesFor(planned),
-          hardware: probe.hardware,
-          stdoutSha256,
-        });
-        const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
-        const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
-        await mkdir(receiptDir, { recursive: true });
-        await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
-        const requestFileName = `${sessionId}.request.json`;
-        await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
-        const outputs = [{
-          role: "request",
-          path: `${sourcePathPrefix}/${requestFileName}`,
-          sha256: createHash("sha256").update(providerRequest).digest("hex"),
-          bytes: Buffer.byteLength(providerRequest),
-        }];
-        for (const output of sourceCapture.outputs) {
-          object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
-          text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
-          text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
-          text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
-          const metadata = physicalMlxRgbMetadata(
-            output,
-            `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
-          );
-          if (metadata.logicalCaseId !== planned.logicalCaseId
-              || metadata.width !== planned.target.geometry.width
-              || metadata.height !== planned.target.geometry.height) {
-            fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
-          }
-          const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
-          if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
-            fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
-          }
-          if (!path.isAbsolute(output.localPath)) {
-            fail(`${planned.logicalCaseId}: physical MLX local output path must be absolute`);
-          }
-          const physicalOutputPath = await realpath(output.localPath);
-          const localRelative = path.relative(rawLogDir, physicalOutputPath);
-          if (!localRelative || localRelative.startsWith(`..${path.sep}`) || path.isAbsolute(localRelative)) {
-            fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
-          }
-          const bytes = await readFile(physicalOutputPath);
-          const actualSha256 = createHash("sha256").update(bytes).digest("hex");
-          if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
-            fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
-          }
-          outputs.push({
-            role: output.role,
-            path: output.path,
-            sha256: output.sha256,
-            bytes: output.bytes,
-          });
-        }
-        validateExactOutputReceipts(
-          outputs,
-          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
-          `${sessionId}.outputs`,
-        );
-        record.derivation = physicalMlxDerivation(sessionId);
-        incomingSessions.push({
-          id: sessionId,
-          kind: sourceCapture.kind,
-          command: JSON.stringify(providerCommand),
-          sourcePath,
-          capturedAt: fragment.capturedAt,
-          repositories: repositoriesFor(planned),
-          hardware: probe.hardware,
-          target: {
-            tier: planned.target.tier,
-            mode: planned.target.mode,
-            overlay: planned.target.overlay,
-            rung: planned.strategy.rung,
-          },
-          stdoutSha256,
-          inputs: sourceCapture.inputs,
-          outputs,
-          claims: sourceCapture.claims,
-          result: "passed",
-        });
-      }
-      if (planned.expectedResult === "failed" && record.status !== "negative_complete") {
-        fail(`${planned.logicalCaseId}: negative plan case must return status=negative_complete`);
-      }
-      if (planned.expectedResult === "passed" && record.status === "negative_complete") {
-        fail(`${planned.logicalCaseId}: passing plan case returned a negative result`);
-      }
-      record.id = recordId(record);
-      validateRecord(record);
-      incoming.push(record);
-    }
-    const completed = new Set([...existing.records, ...incoming].flatMap(completedLogicalIds));
-    const invoked = new Set(invocation.map((planned) => planned.logicalCaseId));
-    remaining = remaining.filter(
-      (planned) => !invoked.has(planned.logicalCaseId) && !completed.has(planned.logicalCaseId),
-    );
-    if (onProviderCheckpoint) {
-      await onProviderCheckpoint(mergeBundles(existing, {
-        schemaVersion: 4,
-        harnessVersion: HARNESS_VERSION,
-        sourceSessions: incomingSessions,
-        records: incoming,
-      }));
-    }
+  } finally {
+    if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
   }
-  return mergeBundles(existing, {
-    schemaVersion: 4,
+  await assertRepositoriesStable();
+  const fragment = JSON.parse(providerOutput);
+  const sourceCapture = fragment.sourceCapture;
+  delete fragment.sourceCapture;
+  if (rawLogDir && !sourceCapture) {
+    fail(`${planned.logicalCaseId}: configured raw-log provenance requires provider sourceCapture`);
+  }
+  if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
+    fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
+  }
+  validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
+  if (!equal(fragment.strategy, planned.strategy)) {
+    fail(`${planned.logicalCaseId}: adapter measured strategy does not match the anchor composition`);
+  }
+  // The materialization shape is a RECEIPT field: the adapter attests what its run actually loaded
+  // under, and the plan only declares what that anchor is expected to select. Taking
+  // `planned.loadShape` here would stamp the record with the plan's claim and make the field
+  // unfalsifiable. Cross-check instead, and fail closed on divergence.
+  if (!LOAD_SHAPES.includes(fragment.loadShape)) {
+    fail(`${planned.logicalCaseId}: provider fragment must attest a loadShape (${LOAD_SHAPES.join("|")})`);
+  }
+  if (fragment.loadShape !== planned.loadShape) {
+    fail(
+      `${planned.logicalCaseId}: adapter measured loadShape ${fragment.loadShape} but the plan ` +
+        `declared ${planned.loadShape}`,
+    );
+  }
+  const record = {
+    ...fragment,
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: fragment.loadShape,
+    repositories: stampedRepositories,
+    hardware: probe.hardware,
+    target: planned.target,
+    strategy: fragment.strategy,
+    ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    fixture: planned.fixture,
     harnessVersion: HARNESS_VERSION,
-    sourceSessions: incomingSessions,
-    records: incoming,
-  });
+  };
+  const sourceSessions = [];
+  if (sourceCapture) {
+    if (!rawLogDir || !sourcePathPrefix) {
+      fail(`${planned.logicalCaseId}: provider returned sourceCapture without configured raw-log provenance`);
+    }
+    object(sourceCapture, `${planned.logicalCaseId}.sourceCapture`);
+    if (sourceCapture.kind !== "physical_mlx") {
+      fail(`${planned.logicalCaseId}: unsupported source capture kind ${JSON.stringify(sourceCapture.kind)}`);
+    }
+    if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
+      fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
+    }
+    if (ltx25Artifacts && !equal(
+      sourceCapture.inputs,
+      ltx25ExpectedSourceInputs(ltx25Artifacts, planned),
+    )) {
+      fail(`${planned.logicalCaseId}: LTX-2.5 source inputs do not match the sealed artifact inventories`);
+    }
+    validateExactOutputReceipts(
+      sourceCapture.outputs,
+      physicalMlxExpectedRoles(sourceCapture.outputs, false),
+      `${planned.logicalCaseId}.sourceCapture.outputs`,
+    );
+    if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
+      fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
+    }
+    const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
+    if (!baseInput || baseInput.repository !== fragment.artifact?.repository
+        || baseInput.resolvedRevision !== fragment.artifact?.resolvedRevision
+        || baseInput.variant !== fragment.artifact?.variant) {
+      fail(`${planned.logicalCaseId}: physical MLX source input must match the measured artifact exactly`);
+    }
+    if (record.artifact.inventorySha256 !== undefined
+        && record.artifact.inventorySha256 !== baseInput.sha256) {
+      fail(`${planned.logicalCaseId}: provider artifact inventory disagrees with sourceCapture`);
+    }
+    record.artifact.inventorySha256 = baseInput.sha256;
+    const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
+    const sessionId = physicalMlxSessionId({
+      kind: sourceCapture.kind,
+      logicalCaseId: planned.logicalCaseId,
+      capturedAt: fragment.capturedAt,
+      repositories: stampedRepositories,
+      hardware: probe.hardware,
+      stdoutSha256,
+    });
+    const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
+    const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
+    await mkdir(receiptDir, { recursive: true });
+    await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
+    const requestFileName = `${sessionId}.request.json`;
+    await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
+    const outputs = [{
+      role: "request",
+      path: `${sourcePathPrefix}/${requestFileName}`,
+      sha256: createHash("sha256").update(providerRequest).digest("hex"),
+      bytes: Buffer.byteLength(providerRequest),
+    }];
+    const avContents = new Map();
+    for (const output of sourceCapture.outputs) {
+      object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
+      text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
+      text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
+      text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
+      const metadata = physicalMlxOutputMetadata(
+        output,
+        `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+      );
+      if (metadata.logicalCaseId !== planned.logicalCaseId
+          || metadata.width !== planned.target.geometry.width
+          || metadata.height !== planned.target.geometry.height
+          || (metadata.frames !== undefined && metadata.frames !== planned.target.geometry.frames)) {
+        fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
+      }
+      const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
+      if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
+        fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
+      }
+      if (!path.isAbsolute(output.localPath)) {
+        fail(`${planned.logicalCaseId}: physical MLX local output path must be absolute`);
+      }
+      const physicalOutputPath = await realpath(output.localPath);
+      const localRelative = path.relative(rawLogDir, physicalOutputPath);
+      if (!localRelative || localRelative.startsWith(`..${path.sep}`) || path.isAbsolute(localRelative)) {
+        fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
+      }
+      const bytes = await readFile(physicalOutputPath);
+      const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+      if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
+        fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
+      }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        const content = parsePhysicalMlxAvContent(
+          bytes,
+          `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+        );
+        const outputFps = record.diagnostics?.measurements?.find(
+          (measurement) => measurement.name === "outputFps",
+        )?.value;
+        if (content.width !== planned.target.geometry.width
+            || content.height !== planned.target.geometry.height
+            || content.frames !== planned.target.geometry.frames
+            || content.fps !== outputFps) {
+          fail(`${planned.logicalCaseId}: canonical A/V header differs from measured geometry/FPS`);
+        }
+        avContents.set(output.role, content);
+      }
+      outputs.push({
+        role: output.role,
+        path: output.path,
+        sha256: output.sha256,
+        bytes: output.bytes,
+      });
+    }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, planned.logicalCaseId);
+    validateExactOutputReceipts(
+      outputs,
+      physicalMlxExpectedRoles(outputs, true),
+      `${sessionId}.outputs`,
+    );
+    record.derivation = physicalMlxDerivation(sessionId);
+    sourceSessions.push({
+      id: sessionId,
+      kind: sourceCapture.kind,
+      command: JSON.stringify(providerCommand),
+      sourcePath,
+      capturedAt: fragment.capturedAt,
+      repositories: stampedRepositories,
+      hardware: probe.hardware,
+      target: {
+        tier: planned.target.tier,
+        mode: planned.target.mode,
+        overlay: planned.target.overlay,
+        ...(planned.target.transformerVariant
+          ? { transformerVariant: planned.target.transformerVariant }
+          : {}),
+        ...(planned.target.decoder ? { decoder: planned.target.decoder } : {}),
+        rung: planned.strategy.rung,
+      },
+      stdoutSha256,
+      inputs: sourceCapture.inputs,
+      outputs,
+      claims: sourceCapture.claims,
+      result: "passed",
+    });
+  }
+  if (record.status === "negative_complete") {
+    fail(`${planned.logicalCaseId}: an anchor capture cannot return a negative result`);
+  }
+  record.id = recordId(record);
+  validateRecord(record);
+  const bundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    ...(sourceSessions.length ? { sourceSessions } : {}),
+    records: [record],
+  };
+  validateBundle(bundle);
+  return bundle;
 }
 
 async function readJson(file) {
@@ -1731,71 +2708,72 @@ export async function atomicWrite(file, value) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   const value = (flag) => {
-    const index = args.indexOf(flag);
-    return index < 0 ? undefined : args[index + 1];
+    const indexes = args.flatMap((arg, index) => arg === flag ? [index] : []);
+    if (indexes.length > 1) fail(`${flag} may be supplied only once`);
+    if (indexes.length === 0) return undefined;
+    const selected = args[indexes[0] + 1];
+    if (!selected || selected.startsWith("--")) fail(`${flag} requires one value`);
+    return selected;
   };
+  // Every writing arm destinations through `atomicWrite`, which resolves its argument against ROOT
+  // — so an omitted `--output` used to surface as a raw `TypeError` from `path.resolve` rather than
+  // as the usage error it is.
+  const outputPath = () => value("--output") ?? fail("--output is required");
   if (command === "check") {
     const closureDigests = await liveInferenceClosureDigests();
     return void await validateSourceSessionFiles(
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
+      // A raw capture directory must still hold every render it attested (sc-22738).
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
     );
   }
   if (command === "plan") {
-    const resume = value("--resume") ? validateBundle(await readJson(value("--resume"))).records : [];
-    return void await atomicWrite(value("--output"), { harnessVersion: HARNESS_VERSION, cases: expandPlan(await readJson(value("--config")), resume) });
+    // Print the anchor obligation. There is nothing to expand: the plan IS the case list.
+    const plan = validatePlan(await readJson(value("--plan") ?? ANCHOR_PLAN_PATH));
+    return void await atomicWrite(outputPath(), {
+      harnessVersion: HARNESS_VERSION,
+      anchors: planAnchors(plan),
+    });
   }
   if (command === "ingest") {
-    const sourceRoot = value("--source-root") ? path.resolve(value("--source-root")) : null;
     const closureDigests = await liveInferenceClosureDigests();
-    const incoming = await validateSourceSessionFiles(
+    return void await atomicWrite(outputPath(), await validateSourceSessionFiles(
       await readJson(value("--input")),
-      sourceRoot,
+      value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
-    );
-    const output = value("--resume")
-      ? mergeBundles(
-          await validateSourceSessionFiles(await readJson(value("--resume")), null, closureDigests),
-          incoming,
-        )
-      : incoming;
-    return void await atomicWrite(value("--output"), output);
+      { requireRenderedOutputs: Boolean(value("--source-root")) },
+    ));
   }
-  if (command === "compare-reuse") {
-    return void await atomicWrite(
-      value("--output"),
-      compareRungReuse(await readJson(value("--fresh")), await readJson(value("--reused"))),
-    );
-  }
-  if (command === "assess-reuse") {
-    return void await atomicWrite(value("--output"), await assessProviderReuse({
-      config: await readJson(value("--config")),
-      providerCommand: JSON.parse(value("--provider-command")),
-      backend: value("--backend"),
-      fixture: value("--fixture"),
-    }));
-  }
-  if (command === "run") {
-    const outputPath = value("--output");
-    const output = await runProviderPlan({
-      config: await readJson(value("--config")),
+  if (command === "capture") {
+    return void await atomicWrite(outputPath(), await captureAnchor({
+      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+      anchorKey: value("--anchor"),
       providerCommand: JSON.parse(value("--provider-command")),
       sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
       inferenceRepo: path.resolve(value("--inference-repo")),
-      resume: value("--resume") ? await readJson(value("--resume")) : undefined,
-      backend: value("--backend"),
-      providerName: value("--provider"),
-      fixture: value("--fixture"),
-      forceFreshPerCase: args.includes("--fresh-per-case"),
-      forceBatchRungs: args.includes("--batch-rungs"),
       rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
       sourcePathPrefix: value("--source-path-prefix"),
-      onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
-    });
-    return void await atomicWrite(outputPath, output);
+      ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
+    }));
   }
-  fail("usage: check|plan|ingest|assess-reuse|compare-reuse|run (see docs/memory-calibration-harness.md)");
+  if (command === "record-exceeded") {
+    return void await atomicWrite(outputPath(), await recordExceededBound({
+      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+      anchorKey: value("--anchor"),
+      providerCommand: JSON.parse(value("--provider-command")),
+      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
+      inferenceRepo: path.resolve(value("--inference-repo")),
+      watchdogEventFile: path.resolve(value("--watchdog-events") ?? fail("--watchdog-events is required")),
+      artifact: JSON.parse(value("--artifact") ?? fail("--artifact is required")),
+      // Both optional and both only consulted when the guard's log carries no hard stop: the
+      // process-scoped Metal refusal arm (sc-22738).
+      providerStderrFile: value("--provider-stderr") ? path.resolve(value("--provider-stderr")) : null,
+      wiredLimitBytes: value("--wired-limit-bytes") ? Number(value("--wired-limit-bytes")) : null,
+    }));
+  }
+  fail("usage: capture|record-exceeded|check|ingest|plan (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

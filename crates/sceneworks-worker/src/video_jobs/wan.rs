@@ -127,6 +127,21 @@ pub(crate) fn ensure_video_engine_weights(
     request: &VideoRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
+    // Plan-backed entries (epic 20398). Defense in depth for the MLX lane, mirroring the placement
+    // of `candle::plan_backed_wan_video_route` on the other side: there is NO macOS video lane that
+    // loads a checkpoint plan — every arm of `resolve_video_route` matches a builtin engine id, and
+    // a plan-backed entry carries none of them — so such a request reaches `VideoRoute::Stub` and,
+    // without this, COMPLETES with procedural video. The same silent-fake-clip hole sc-4176 opened
+    // this gate for, arriving through a new door. Same `[checkpoint-plan:no-video-lane]` tag the
+    // candle refusal uses, because it is the same verdict.
+    if let Some(checkpoint_id) =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: no macOS video engine \
+             loads a checkpoint plan, and a plan-backed entry never renders procedural stub output"
+        )));
+    }
     if let Some(engine_id) = wan_engine_id(&request.model) {
         resolve_wan_model_dir(settings, &request.model, engine_id)?;
     }
@@ -164,6 +179,25 @@ pub(crate) fn ensure_video_engine_weights(
     if krea_realtime_engine_id(&request.model).is_some() {
         resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     }
+    // MiniMax-H3 (epic 17137 / sc-19508). Without an arm here a MiniMax-H3 job whose engine or
+    // weights are absent falls to `VideoRoute::Stub` and the user is handed a PROCEDURAL FAKE CLIP
+    // — silently, since a generated-looking mp4 at the requested geometry is indistinguishable from
+    // a real render until watched. That is the degradation sc-4176 added this gate to prevent, and
+    // the same arm Mochi and Krea each needed.
+    //
+    // sc-17159 filled this slot with an UNCONDITIONAL refusal carrying a hard-coded "not in the
+    // pinned inference revision" string, because at that commit there was no dispatch arm to fall
+    // through to. sc-19508 substitutes the real gate rather than deleting the guard: it now asks
+    // the REGISTRY whether the engine is linked, checks the conditioning shape against the entry's
+    // DiT partition, and then runs the real tier + shared-component resolver — so a job still fails
+    // loudly at the current pin, an unprovisioned install still fails loudly after the pin bump,
+    // and each failure names its own cause instead of one string covering all three.
+    //
+    // `crates/sceneworks-worker/src/pinned_engine_geometry.rs` still carries the two mechanisms
+    // that force the GEOMETRY tie-in to be revisited on a pin move: `REV_WITHOUT_MINIMAX_H3` and
+    // `minimax_h3_arrival_tripwire`. Neither is touched here — this arm no longer depends on the
+    // pin being any particular revision, which is the point.
+    super::minimax_h3::ensure_minimax_h3_renderable(request, settings)?;
     Ok(())
 }
 
@@ -1256,6 +1290,11 @@ pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
+    /// Explicit fitted-memory pipeline axes. `None` is not inferred from execution knobs and
+    /// therefore cannot match an LTX curve.
+    pub(super) memory_transformer_variant:
+        Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
+    pub(super) memory_decoder: Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
     pub(super) adapters: Vec<AdapterSpec>,
     pub(super) conditioning: Vec<Conditioning>,
     pub(super) prompt: String,
@@ -1264,6 +1303,13 @@ pub(super) struct VideoGenInput {
     pub(super) height: u32,
     pub(super) frames: u32,
     pub(super) fps: u32,
+    /// LTX-2.5's opt-in duration predictor. `Some` makes the provider own the frame count, while
+    /// `frames` remains the conservative max-window planning count used by admission.
+    pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
+    /// LTX-2.5 DFR temporal x2 refinement rounds. `None`/0 is the established plain pipeline.
+    pub(super) temporal_upsample_rounds: Option<u32>,
+    /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
+    pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
     pub(super) guidance: Option<f32>,
     /// Flow-matching scheduler shift (`req.scheduler_shift`); `None` ⇒ the engine default. Set by the
@@ -1308,6 +1354,29 @@ pub(super) struct VideoGenInput {
     /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
     /// snapshot; `None` on every other job.
     pub(super) comfyui: Option<ComfyuiWanExperts>,
+    /// MiniMax-H3's tiered DiT directory (epic 17137, sc-19508) — staged in
+    /// `LoadSpec::components["transformer"]`. `None` on every other model.
+    ///
+    /// MiniMax-H3 is the first video family whose tiered weights live in a DIFFERENT repo from its
+    /// shared components: the pre-quantized DiT partitions come from `SceneWorks/minimax-h3-mlx`
+    /// while the text encoder, tokenizer and both VAEs come from the upstream `MiniMaxAI/MiniMax-H3`
+    /// snapshot. `model_dir` (⇒ `spec.weights`) can only name one root, so the other has to ride the
+    /// components map — the same mechanism LTX's optional `uncensored_enhancer` uses.
+    pub(super) dit_component_dir: Option<PathBuf>,
+    /// MiniMax-H3's PER-TIER PACKED text encoder (epic 17137, sc-19120 / sc-19506) — staged in
+    /// `LoadSpec::components["text_encoder"]`. `None` on every other model, and `None` for H3 when
+    /// the selected tier ships no packed text encoder (the dense bf16 tier, or a q4/q8 install
+    /// predating the packed co-requisite).
+    ///
+    /// NOT the same field as [`Self::text_encoder_dir`], and the distinction is load-bearing rather
+    /// than stylistic: that one rides `LoadSpec::text_encoder`, which is what the LTX provider
+    /// reads. `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads
+    /// `spec.components["text_encoder"]` and falls back to `<weights>/text_encoder` — the UPSTREAM
+    /// DENSE bf16 Qwen3-VL-32B — when the key is absent. sc-19120 published q4/q8 packed text
+    /// encoders and wired them into the manifest as per-tier co-requisites, but nothing staged them,
+    /// so a q4 render loaded a 53 GB dense conditioner and the tier bought nothing on the largest
+    /// component in the family. This field is that staging.
+    pub(super) text_encoder_component_dir: Option<PathBuf>,
     /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
     /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
     /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
@@ -1316,6 +1385,17 @@ pub(super) struct VideoGenInput {
     /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
+    /// Per-request memory-rung knobs selected by the video memory gate (sc-18814), or `None` for
+    /// the provider's own defaults. Set ONLY by [`generate_video_using`], from
+    /// `crate::video_admission::admit_video_generation`; every handler leaves it at the
+    /// `Default` so a route the gate makes no decision on is byte-identical to before the gate
+    /// existed. The image lane's equivalent is `mlx_fit_gate::evaluate_request`'s
+    /// `MlxRequestEvaluation::memory`.
+    pub(super) memory: Option<gen_core::GenerationMemory>,
+    /// Contract/evidence handshake for provider safety and the request-scoped lifecycle. Kept
+    /// separate from `memory`: a Resident selection still carries context while preserving the
+    /// provider's request defaults with `memory == None`.
+    pub(super) memory_context: Option<gen_core::MemoryRunContext>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1332,9 +1412,13 @@ pub(super) struct VideoGenInput {
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
+            memory: None,
+            memory_context: None,
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
+            memory_transformer_variant: None,
+            memory_decoder: None,
             adapters: Vec::new(),
             conditioning: Vec::new(),
             prompt: String::new(),
@@ -1343,6 +1427,9 @@ impl Default for VideoGenInput {
             height: 0,
             frames: 0,
             fps: 0,
+            auto_duration: None,
+            temporal_upsample_rounds: None,
+            use_diffusion_decoder: false,
             steps: None,
             guidance: None,
             scheduler_shift: None,
@@ -1363,6 +1450,8 @@ impl Default for VideoGenInput {
             text_encoder_dir: None,
             uncensored_enhancer_dir: None,
             comfyui: None,
+            dit_component_dir: None,
+            text_encoder_component_dir: None,
             offload_policy: OffloadPolicy::Resident,
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             cold_load_admission: None,
@@ -1375,44 +1464,637 @@ impl Default for VideoGenInput {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
-    LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir.clone()),
-        quantize: input.quant,
-        precision: Precision::Bf16,
-        control: None,
-        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
-        extra_controls: Vec::new(),
-        ip_adapter: None,
-        adapters: input.adapters.clone(),
-        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
-        // providers have no PiD backbone, so never request it.
-        pid: None,
-        // Video providers are not face-ID models — no identity sub-model weights.
-        identity: None,
-        // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
-        // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
-        text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
-        // Residency policy (sc-12631). `Resident` for every path historically; the candle A14B flips it
-        // to `Sequential` (`generate_candle_video_using` → `candle_video_offload_policy`) so the two
-        // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
-        // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
-        offload_policy: input.offload_policy,
-        // Video providers retain their historical eager materialization. Deferred block streaming
-        // is currently an explicit Z-Image load shape, independent of phase residency (SC-15998).
-        load_shape: Default::default(),
-        // Named model components (epic 13657). Video providers advertise no `required_components`, so the
-        // map is empty by default. The one exception is LTX-2.3's OPTIONAL `uncensored_enhancer` (sc-2845
-        // / sc-13664): when a `useUncensoredEnhancer` job resolved the amoral 4-bit Gemma snapshot, stage
-        // it here so the provider loads it on demand instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` /
-        // HF-cache scan. Absent ⇒ empty map, the video load path unchanged.
-        components: input
+    let mut spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()));
+    spec.quantize = input.quant;
+    spec.precision = Precision::Bf16;
+    spec.adapters = input.adapters.clone();
+    // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` retains the provider's
+    // legacy fallback. Video providers otherwise have no image-only control/PiD/identity sources.
+    spec.text_encoder = input.text_encoder_dir.clone().map(WeightsSource::Dir);
+    // Never downgrade a Sequential policy selected by the candle A14B route.
+    spec.offload_policy = input.offload_policy;
+    // Named model components (epic 13657). Video providers advertise no `required_components`, so
+    // the map is empty by default. Four OPTIONAL components ride it:
+    //
+    // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
+    //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
+    //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+    // * LTX-2.5's stock `enhancer` (sc-18764/sc-18780): the selected weights root is nested at
+    //   `<snapshot>/<variant>/<tier>`, while the separately licensed offline enhancer is the
+    //   snapshot-level `<snapshot>/enhancer`. Stage the exact sibling root so the provider never
+    //   falls back to the nonexistent `<tier>/enhancer`. Candle does not advertise this MLX-only
+    //   capability, so its distinct engine id deliberately receives no component.
+    // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
+    //   different repo from its shared components, and `weights` can only name one root.
+    // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
+    //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
+    //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
+    //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
+    //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in
+    //   the whole engine crate, so staging there would resolve nothing and hard-error inside
+    //   the engine at the `config.json` probe.
+    //
+    // * LTX-2.5's alternate DiffVAE (`"diffusion_video_vae"`): the provider deliberately selects
+    //   it only when this explicit component is staged; omission keeps the faster Conv decoder.
+    //
+    // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
+    // branched so adding another cannot silently drop one.
+    let ltx25_stock_enhancer = (input.engine_id == "ltx_2_5")
+        .then(|| {
+            input
+                .model_dir
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("enhancer"))
+        })
+        .flatten();
+    spec.components = [
+        input
             .uncensored_enhancer_dir
             .clone()
-            .map(|dir| {
-                BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))])
-            })
-            .unwrap_or_default(),
+            .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+        ltx25_stock_enhancer.map(|dir| ("enhancer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .dit_component_dir
+            .clone()
+            .map(|dir| ("transformer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .text_encoder_component_dir
+            .clone()
+            .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
+        input.use_diffusion_decoder.then(|| {
+            (
+                "diffusion_video_vae".to_owned(),
+                WeightsSource::File(input.model_dir.join("vae_diffusion_decoder.safetensors")),
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<BTreeMap<_, _>>();
+    // LTX-2.5's split checkpoints can stage the Gemma encoder and DiT sequentially on every load.
+    // Adapter-free loads also satisfy the providers' exact rung-4 prerequisite: their 48-block
+    // transformer source can be reopened under the shared deferred-materialization contract.
+    // Dev always carries its required refinement adapter, and user adapter loads do too; keeping
+    // those eager prevents a block rebuild from silently dropping forward-time residuals.
+    if matches!(input.engine_id, "ltx_2_5" | "ltx_2_5_distilled") {
+        spec.offload_policy = OffloadPolicy::Sequential;
+        if spec.adapters.is_empty() {
+            spec = spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        }
     }
+    spec
+}
+
+/// Provider-only request modifiers share the overlay evidence axis with adapters and enhancers.
+/// A catalog `text_to_video` request can still select a different provider workload (LTX's
+/// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
+/// no-overlay curve until a receipt names this exact carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_overlay(
+    input: &VideoGenInput,
+    mode: &str,
+    contract: Option<&gen_core::MemoryProviderContract>,
+) -> WorkerResult<Option<String>> {
+    let mut overlays = Vec::new();
+    if !input.adapters.is_empty() {
+        if input.engine_id == "bernini" {
+            // The provider contract seals the exact files the loader opened, after its stability
+            // read, and prices them according to dense-folded versus packed-additive residency.
+            // Re-reading paths or formatting f32s here would create a second, weaker receipt.
+            let loaded_receipt = contract.and_then(|contract| {
+                contract
+                    .resident_components()
+                    .iter()
+                    .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
+                    .map(|component| {
+                        crate::video_admission::bernini_adapter_receipt_axis(&component.id)
+                    })
+            });
+            overlays
+                .push(loaded_receipt.unwrap_or_else(|| "bernini-adapter-unverified".to_owned()));
+        } else if input.engine_id == "scail2_14b" {
+            // SCAIL-2's step-distill recipe is one fixed advertised stack; the seam spells its
+            // overlay as the literal `adapter`, so keying anything else here can never match a
+            // real record. The per-request carrier is sealed separately below.
+            overlays.push("adapter".to_owned());
+        } else if let Some(identity) = gen_core::adapter_stack_identity(&input.adapters) {
+            // sc-20799: `adapters:{N}` was cardinality only — two different LoRA stacks of the
+            // same length shared one admission identity. `adapter_stack_identity` is the exact
+            // ordered content receipt (`adapters:<sha256>` over path, kind and scale) that the
+            // Wan seam already requires, so this is the real spelling, not a parallel one.
+            overlays.push(identity);
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} carries adapters with no exact ordered stack identity",
+                input.engine_id
+            )));
+        }
+    }
+    if input.use_uncensored_enhancer || input.uncensored_enhancer_dir.is_some() {
+        overlays.push("enhancer:uncensored".to_owned());
+    } else if input.enhance_prompt {
+        overlays.push("enhancer:standard".to_owned());
+    }
+    if let Some(video_mode) = input.video_mode.as_deref() {
+        overlays.push(format!("provider_video_mode:{video_mode}"));
+    }
+    if input.use_diffusion_decoder {
+        overlays.push("decoder:diffusion_vae".to_owned());
+    }
+    if let Some(range) = input.auto_duration {
+        overlays.push(format!(
+            "auto_duration:min:{:08x}:max:{:08x}",
+            range.min_seconds.to_bits(),
+            range.max_seconds.to_bits()
+        ));
+    }
+    if let Some(rounds) = input.temporal_upsample_rounds.filter(|rounds| *rounds > 0) {
+        overlays.push(format!("temporal_upsample_rounds:{rounds}"));
+    }
+    if input.engine_id == "bernini" && matches!(input.video_mode.as_deref(), Some("r2v" | "rv2v")) {
+        overlays.push(
+            crate::video_admission::bernini_r2v_reference_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("mv2v") {
+        overlays.push(
+            crate::video_admission::bernini_mv2v_clip_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("ads2v") {
+        overlays.push(
+            crate::video_admission::bernini_ads2v_source_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    // sc-20799: seal the carriers that were keyed shape-`other` + `conditioning.len()` before any
+    // curve exists for them. Each fails CLOSED on a shape it cannot price exactly, exactly as the
+    // Bernini receipts do — an unpriceable carrier is a refusal, never an "unknown" token another
+    // request could also mint.
+    if input.engine_id == "scail2_14b" && matches!(mode, "animate_character" | "replace_person") {
+        overlays.push(
+            crate::video_admission::scail2_carrier_receipt(
+                crate::video_admission::LANE,
+                mode,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if mode == "replace_person"
+        && !input.conditioning.is_empty()
+        && !matches!(
+            input.engine_id,
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+        )
+    {
+        overlays.push(
+            crate::video_admission::wan_vace_replace_person_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if input.engine_id == "krea_realtime_14b" && mode == "video_to_video" {
+        overlays.push(
+            crate::video_admission::krea_v2v_clip_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if matches!(
+        input.engine_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
+        let mut references = input.conditioning.iter().filter_map(|conditioning| {
+            let Conditioning::Reference { image, strength } = conditioning else {
+                return None;
+            };
+            Some((image, strength.unwrap_or(1.0)))
+        });
+        if let (Some((image, strength)), None) = (references.next(), references.next()) {
+            overlays.push(format!(
+                "reference:image:{}x{}:strength:{:08x}",
+                image.width,
+                image.height,
+                strength.to_bits()
+            ));
+        }
+        // SC-20776: native LTX replacement has a different physical carrier than I2V. Its exact
+        // `ControlClip + MultiReference` request becomes a deterministic ordered contact sheet at
+        // frame zero plus masked IC-LoRA clip tokens. Include every observable request fact in the
+        // admission key so it cannot borrow an I2V/clip curve or silently erase a reference order.
+        let controls = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::ControlClip {
+                    frames,
+                    mask,
+                    masking_strength,
+                    start_frame,
+                    mode,
+                } => Some((
+                    frames.as_slice(),
+                    mask.as_slice(),
+                    *masking_strength,
+                    *start_frame,
+                    mode,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let multi_references = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::MultiReference { images } => Some(images.as_slice()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let ([(frames, masks, masking_strength, start_frame, mode)], [references]) =
+            (controls.as_slice(), multi_references.as_slice())
+        {
+            if (1..=4).contains(&references.len())
+                && frames.len() == masks.len()
+                && *start_frame == 0
+            {
+                let reference_shapes = references
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, image)| format!("{ordinal}:{}x{}", image.width, image.height))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let control_shapes = frames
+                    .iter()
+                    .zip(masks.iter())
+                    .enumerate()
+                    .map(|(ordinal, (frame, mask))| {
+                        format!(
+                            "{ordinal}:{}x{}@{}x{}",
+                            frame.width, frame.height, mask.width, mask.height
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let grid = match references.len() {
+                    1 => "1x1",
+                    2 => "2x1",
+                    3 | 4 => "2x2",
+                    _ => unreachable!("the cardinality guard is closed above"),
+                };
+                overlays.push(format!(
+                    "replace_person:control:frames:{}:shapes:{}:frame:0:mode:{mode:?}:strength:{:08x}:references:ordered_grid:{}:count:{}:shapes:{}:composite:{}x{}",
+                    frames.len(),
+                    control_shapes,
+                    masking_strength.to_bits(),
+                    grid,
+                    references.len(),
+                    reference_shapes,
+                    input.width,
+                    input.height,
+                ));
+            }
+        }
+        let keyframes = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::Keyframe {
+                    image,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((image, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(first, 0, first_strength), (last, -1, last_strength)] = keyframes.as_slice() {
+            overlays.push(format!(
+                "keyframe:first:image:{}x{}:frame:0:strength:{:08x}",
+                first.width,
+                first.height,
+                first_strength.to_bits()
+            ));
+            overlays.push(format!(
+                "keyframe:last:image:{}x{}:frame:-1:strength:{:08x}",
+                last.width,
+                last.height,
+                last_strength.to_bits()
+            ));
+        }
+        let clips = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::VideoClip {
+                    frames,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((frames, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(frames, 0, strength)] = clips.as_slice() {
+            if let Some(image) = frames.first() {
+                if frames
+                    .iter()
+                    .all(|frame| frame.width == image.width && frame.height == image.height)
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        frames.len(),
+                        image.width,
+                        image.height,
+                        strength.to_bits()
+                    ));
+                }
+            }
+        }
+        if let [(left, 0, left_strength), (right, -1, right_strength)] = clips.as_slice() {
+            if let (Some(first), Some(last)) = (left.first(), right.first()) {
+                if left
+                    .iter()
+                    .chain(right.iter())
+                    .all(|frame| frame.width == first.width && frame.height == first.height)
+                    && first.width == last.width
+                    && first.height == last.height
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        left.len(),
+                        first.width,
+                        first.height,
+                        left_strength.to_bits()
+                    ));
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:-1:strength:{:08x}",
+                        right.len(),
+                        last.width,
+                        last.height,
+                        right_strength.to_bits()
+                    ));
+                }
+            }
+        }
+    }
+    Ok((!overlays.is_empty()).then(|| overlays.join("+")))
+}
+
+/// Bernini v2v carries one normalized [`Conditioning::VideoClip`]. A count-only identity would
+/// let another temporal carrier borrow the same evidence, so admission records the resolved
+/// carrier shape explicitly.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_reference_shape(
+    model_id: &str,
+    mode: &str,
+    conditioning: &[Conditioning],
+) -> &'static str {
+    if conditioning.is_empty() {
+        return "none";
+    }
+    if model_id == "bernini"
+        && mode == "video_to_video"
+        && matches!(conditioning, [Conditioning::VideoClip { .. }])
+    {
+        return "video";
+    }
+    if model_id == "bernini"
+        && mode == "reference_to_video"
+        && matches!(conditioning, [Conditioning::MultiReference { images }] if (1..=8).contains(&images.len()))
+    {
+        return "multi_image";
+    }
+    if model_id == "bernini"
+        && mode == "reference_video_to_video"
+        && matches!(
+            conditioning,
+            [
+                Conditioning::VideoClip { .. },
+                Conditioning::MultiReference { images }
+            ] if (1..=8).contains(&images.len())
+        )
+    {
+        return "video+multi_image";
+    }
+    if model_id == "bernini"
+        && mode == "multi_video_to_video"
+        && matches!(
+            conditioning,
+            [
+                Conditioning::VideoClip { .. },
+                Conditioning::VideoClip { .. },
+                ..
+            ]
+        )
+        && conditioning.len() <= 8
+    {
+        return "multi_video";
+    }
+    if model_id == "bernini"
+        && mode == "ads2v"
+        && matches!(conditioning,
+        [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }]
+        if (1..=8).contains(&images.len()))
+    {
+        return "ads2v";
+    }
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
+        return match mode {
+            "image_to_video" => "image",
+            "first_last_frame" => "keyframe",
+            // The LTX IC-LoRA clips are temporal carriers, not image references.
+            "extend_clip" | "video_bridge" => "none",
+            // sc-20799 round 2: `"other"` was a dead key here too — no evidence emitter ever
+            // serializes the literal string, so an LTX mode that landed on it could match no
+            // record. Every remaining LTX mode carries no image reference, which is exactly what
+            // `"none"` names, so it binds to real evidence instead of an unmatchable label.
+            _ => "none",
+        };
+    }
+    // sc-20799: `"other"` was a DEAD key. The evidence emitters serialize a reference shape as
+    // "none"/"image"/"video"/"mask" or the raw `Other(..)` payload — they never produce the literal
+    // string "other" — so every carrier that landed here could match no real record while still
+    // sharing one admission identity with every other such carrier. Name the resolved carrier
+    // instead, per engine and mode.
+    if model_id == "scail2_14b" {
+        return match mode {
+            // One physical assembly (identity still + painted mask + driving clip) under two
+            // engine tasks with different working sets, so the task stays part of the shape.
+            "animate_character" => "reference+mask+driving_video:animation",
+            "replace_person" => "reference+mask+driving_video:replacement",
+            _ => "none",
+        };
+    }
+    if model_id == "krea_realtime_14b" {
+        return match conditioning {
+            [Conditioning::VideoClip { .. }] => "video",
+            [Conditioning::Reference { .. }] => "image",
+            _ => "none",
+        };
+    }
+    if mode == "replace_person" {
+        // Single-expert Wan-VACE: one driving ControlClip plus N ordered character references. The
+        // reference cardinality is the axis a bare `"other"` erased.
+        if let [Conditioning::ControlClip { .. }, references @ ..] = conditioning {
+            if references
+                .iter()
+                .all(|entry| matches!(entry, Conditioning::Reference { .. }))
+            {
+                return if references.is_empty() {
+                    "control_video"
+                } else {
+                    "control_video+references"
+                };
+            }
+        }
+        return "none";
+    }
+    match mode {
+        "image_to_video" => "image",
+        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+        // No carrier this admission can name exactly. `"none"` is the emitters' own spelling for
+        // an absent reference surface and cannot be confused with a measured carrier.
+        _ => "none",
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_reference_count(
+    model_id: &str,
+    mode: &str,
+    conditioning: &[Conditioning],
+) -> u32 {
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
+        return u32::try_from(
+            conditioning
+                .iter()
+                .filter(|conditioning| {
+                    matches!(
+                        conditioning,
+                        Conditioning::Reference { .. } | Conditioning::Keyframe { .. }
+                    )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+    }
+    if model_id == "bernini" && mode == "reference_to_video" {
+        if let [Conditioning::MultiReference { images }] = conditioning {
+            return u32::try_from(images.len()).unwrap_or(u32::MAX);
+        }
+    }
+    if model_id == "bernini" && mode == "reference_video_to_video" {
+        if let [Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }] =
+            conditioning
+        {
+            return u32::try_from(images.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
+        }
+    }
+    if model_id == "bernini"
+        && mode == "multi_video_to_video"
+        && (2..=8).contains(&conditioning.len())
+        && conditioning
+            .iter()
+            .all(|entry| matches!(entry, Conditioning::VideoClip { .. }))
+    {
+        return u32::try_from(conditioning.len()).unwrap_or(u32::MAX);
+    }
+    if model_id == "bernini" && mode == "ads2v" {
+        if let [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }] =
+            conditioning
+        {
+            return u32::try_from(images.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(2);
+        }
+    }
+    // sc-20799: `conditioning.len()` collapses a MultiReference of ONE image and a MultiReference
+    // of EIGHT into the same count — one entry either way — so two very different working sets
+    // shared an admission identity. Count the images a MultiReference actually carries.
+    conditioning
+        .iter()
+        .map(|entry| match entry {
+            Conditioning::MultiReference { images } => {
+                u32::try_from(images.len()).unwrap_or(u32::MAX)
+            }
+            _ => 1,
+        })
+        .fold(0_u32, u32::saturating_add)
+}
+
+/// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
+/// This check runs before the live-budget probe and before contract selection, so unsupported
+/// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
+/// historical direct-generate path instead of reaching provider safety with invented coverage.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+/// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
+/// lifecycle context in one operation makes it impossible for the generation request to carry an
+/// optimized rung while silently bypassing its safety/begin/configure/finish contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn apply_video_admission_outcome(
+    input: &mut VideoGenInput,
+    outcome: crate::video_admission::VideoAdmissionOutcome,
+) -> WorkerResult<()> {
+    if let Some(refusal) = outcome.refusal {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    input.memory = outcome.memory;
+    input.memory_context = outcome.context;
+    Ok(())
 }
 
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
@@ -1428,13 +2110,18 @@ pub(super) fn run_loaded_video_generation(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<DecodedVideo> {
-    let req = GenerationRequest {
+    let memory_context = input.memory_context;
+    let mut req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
         height: input.height,
-        frames: Some(input.frames),
+        // An explicit frame count wins over auto-duration in gen-core. Leave it absent only for an
+        // opted-in LTX-2.5 request so the duration head is actually reached.
+        frames: input.auto_duration.is_none().then_some(input.frames),
         fps: Some(input.fps),
+        auto_duration: input.auto_duration,
+        temporal_upsample_rounds: input.temporal_upsample_rounds,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
@@ -1456,12 +2143,19 @@ pub(super) fn run_loaded_video_generation(
         decode_chunk_size: input.decode_chunk_size,
         conditioning_fps: input.conditioning_fps,
         softness: input.softness,
+        // The video memory gate's selection (sc-18814). `None` — every route the gate does not
+        // decide, plus a selected resident rung — leaves the provider's own defaults in place.
+        memory: input.memory,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&req, on_progress)
-        .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut req,
+        memory_context.as_ref(),
+        on_progress,
+    )
+    .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -1508,17 +2202,33 @@ pub(super) fn run_video_generation(
     run_loaded_video_generation(generator.as_ref(), input, cancel, on_progress)
 }
 
-/// Forward-progress watchdog: if the engine emits no progress event (no denoise `Step`, no
-/// `Decoding`) for this long — covering both the silent cold model-load phase and the gap
-/// between steps — the generation is treated as wedged and the job is failed with a clear
-/// error instead of heartbeating indefinitely. Tuned well above any legitimate single load or
-/// step on the current video models; override via `SCENEWORKS_VIDEO_STALL_SECS` for an
-/// unusually large/slow model or disk.
+/// Default forward-progress watchdog: if the engine emits no progress event (no denoise `Step`, no
+/// `Decoding`) for this long — covering both the silent cold model-load phase and the gap between
+/// steps — the generation is treated as wedged and the job is failed with a clear error instead of
+/// heartbeating indefinitely.
+///
+/// MiniMax-H3 is the one request-aware exception: one legitimate step grows with packed
+/// pixel-frames and can exceed this default on a legal long, full-canvas clip. See
+/// [`video_stall_timeout_policy`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
+/// override for every engine.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The timeout policy and its receipt-facing basis. Keeping the basis next to the duration makes a
+/// request-aware watchdog observable instead of leaving an unexplained, model-specific number in a
+/// later stall event.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VideoStallTimeoutPolicy {
+    pub(super) timeout: Duration,
+    pub(super) basis: &'static str,
+}
 
 /// Grace period granted after a stall is detected and engine cancellation is requested, before
 /// the still-running blocking task is abandoned. A cooperative engine bails between steps well
@@ -1531,27 +2241,82 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 ))]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
-/// The effective forward-progress stall timeout: `SCENEWORKS_VIDEO_STALL_SECS` (a positive
-/// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
+/// The effective forward-progress stall timeout for one resolved engine input.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn video_stall_timeout() -> Duration {
-    parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
+fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
+    video_stall_timeout_policy(
+        std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok().as_deref(),
+        input.engine_id,
+        input.width,
+        input.height,
+        input.frames,
+    )
 }
 
-/// Parse the `SCENEWORKS_VIDEO_STALL_SECS` override (a positive integer number of seconds),
-/// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
+/// Resolve the forward-progress timeout without reading process-global state (the test seam).
+///
+/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every existing engine
+/// retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
+/// workload exceeds the measured shortest/full-canvas baseline: `768 * 1344 * 124`. The scale is
+/// linear, rounded up, and bounded at the engine's largest legal workload (`768 * 1344 * 345`).
+/// Small canvases and the shortest full-canvas request therefore retain the existing watchdog,
+/// while a legal 243-frame full-canvas step is not misclassified as the Metal wedge this watchdog
+/// was introduced to catch.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn parse_stall_timeout(raw: Option<String>) -> Duration {
-    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+pub(super) fn video_stall_timeout_policy(
+    raw_override: Option<&str>,
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> VideoStallTimeoutPolicy {
+    if let Some(seconds) = raw_override
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(VIDEO_STALL_TIMEOUT)
+    {
+        return VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(seconds),
+            basis: "operator_override",
+        };
+    }
+
+    if engine_id != "minimax_h3" {
+        return VideoStallTimeoutPolicy {
+            timeout: VIDEO_STALL_TIMEOUT,
+            basis: "default",
+        };
+    }
+
+    let legal_frames = sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
+    let min_frames = u64::from(legal_frames[0]);
+    let max_frames = u64::from(legal_frames[legal_frames.len() - 1]);
+    let max_pixels = u64::from(super::minimax_h3::MINIMAX_H3_CANVAS_MAX_PIXELS);
+    let pixels = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .min(max_pixels);
+    let effective_frames = u64::from(frames).clamp(min_frames, max_frames);
+    let baseline_work = max_pixels.saturating_mul(min_frames);
+    let max_work = max_pixels.saturating_mul(max_frames);
+    let bounded_work = pixels
+        .saturating_mul(effective_frames)
+        .clamp(baseline_work, max_work);
+    let numerator = VIDEO_STALL_TIMEOUT.as_secs().saturating_mul(bounded_work);
+    let seconds = numerator.div_ceil(baseline_work);
+
+    VideoStallTimeoutPolicy {
+        timeout: Duration::from_secs(seconds),
+        basis: if bounded_work == baseline_work {
+            "minimax_h3_baseline"
+        } else {
+            "minimax_h3_pixel_frames"
+        },
+    }
 }
 
 /// First-detection handling for the in-loop video cancel poller (sc-5516): trip the engine
@@ -1821,9 +2586,52 @@ pub(super) async fn generate_video_using(
             input.scheduler_shift = raw_shift;
         }
     }
+    // The video memory gate (sc-18814, epic 18803). Resolved here — the ONE funnel every video
+    // family on both lanes passes through — so no per-family edit is needed and neither lane can
+    // silently miss it. The budget probe is async on the candle lane, so it happens before the
+    // blocking task is spawned; the selection itself runs inside `run`, where the loaded
+    // generator (and therefore the provider's memory contract) is in scope. That is the same
+    // position the image lane calls `mlx_fit_gate::evaluate_request` from: after the load, before
+    // `generate`.
+    // The catalog model id, read straight off the payload rather than by re-parsing the whole
+    // request into a throwaway `VideoRequest` (F-118, the same reason `advanced` arrives by
+    // reference). Read through the SAME function `VideoRequest::from_payload` resolves `model`
+    // with, so the two cannot diverge: a bare `.unwrap_or("ltx_2_3")` kept a present-but-empty
+    // `model` as `""` while the parse resolved it to `ltx_2_3`, and the two ids grade different
+    // families through `video_admission_surface`.
+    let admission_model_id = sceneworks_core::video_request::payload_model_id(&job.payload);
+    // The fitted-curve identity uses the catalog family, not the provider descriptor's internal
+    // family. Resolve it exactly like the asset path's `resolve_family`, without re-parsing the
+    // entire payload into another `VideoRequest` merely for this admission-only key.
+    let admission_manifest_entry = job
+        .payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let admission_model_family =
+        super::resolve_catalog_video_family(&admission_model_id, &admission_manifest_entry);
+    // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
+    // promoted LTX curve is T2V; every other mode falls back until its own curve exists.
+    let admission_mode = sceneworks_core::video_request::payload_video_mode(&job.payload);
+    // No closure lookup here (sc-22738): a packaged curve or anchor matches this request on its
+    // identity alone, whether or not the provider's compile closure has moved since capture.
+
     let cancel = CancelFlag::new();
-    let stall_timeout = video_stall_timeout();
+    let stall_policy = video_stall_timeout(&input);
+    let stall_timeout = stall_policy.timeout;
     let log_engine_id = input.engine_id;
+    tracing::info!(
+        event = "rust_worker_video_stall_budget_selected",
+        jobId = %job.id,
+        engine = %log_engine_id,
+        width = input.width,
+        height = input.height,
+        frames = input.frames,
+        stallSeconds = stall_timeout.as_secs(),
+        basis = stall_policy.basis,
+        "selected the request's forward-progress watchdog budget"
+    );
     // Snapshot the effective settings before `input` moves into the blocking task
     // (sc-10418), so the completion-time metrics POST reports exactly what reached
     // the engine (resolved quant / sampler / scheduler / guidance / dims / seed).
@@ -1849,10 +2657,113 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
+        // The admission tier/headroom read the model DIRECTORY (`spec_component_bytes` sums the
+        // snapshot's safetensors and asks the registry for a footprint), so they are filesystem
+        // work and must not run on a reactor thread. The clone is cheap (`LoadSpec` is `Clone`;
+        // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
+        // executes on the generator cache thread — the same position the image lane derives its
+        // own from, inside the blocking closure.
+        let admission_spec = spec.clone();
+        let admission_geometry = (
+            input.width,
+            input.height,
+            input.frames,
+            input.decode_chunk_size,
+        );
         tokio::spawn(async move {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
-            let run = move |generator: &dyn Generator| {
+            let run = move |generator: &dyn Generator,
+                            cache_state: gen_core::MemoryCacheState,
+                            loaded_policy: crate::generator_cache::ExecutionPolicy,
+                            warm_policy: crate::execution_planner::WarmPolicyProposal,
+                            _external_committed_bytes: u64,
+                            provider_resident_bytes: u64| {
+                // The video lane has no request-scoped memory block for a policy switch to act
+                // through; admission below keeps using the LOADED policy. Decline truthfully.
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+                let load_policy = loaded_policy.offload_policy;
+                let mut input = input;
+                let admission_tier =
+                    crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
+                let spec_headroom_bytes =
+                    crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
+                let reference_count = video_admission_reference_count(
+                    &admission_model_id,
+                    &admission_mode,
+                    &input.conditioning,
+                );
+                // This is the provider-facing carrier, not a synonym for the user-visible mode:
+                // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
+                // reference-image encoder. A future measured row must name that real residency
+                // surface before request-scoped selection can use it.
+                let admission_reference_shape = video_admission_reference_shape(
+                    &admission_model_id,
+                    &admission_mode,
+                    &input.conditioning,
+                );
+                let admission_overlay = video_admission_overlay(
+                    &input,
+                    &admission_mode,
+                    generator.memory_strategy_contract(),
+                )?;
+                let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    model_id: &admission_model_id,
+                    model_family: &admission_model_family,
+                    route: engine_id,
+                    mode: &admission_mode,
+                    reference_count,
+                    reference_shape: admission_reference_shape,
+                    overlay: admission_overlay.as_deref(),
+                    lane: crate::video_admission::LANE,
+                    tier: admission_tier,
+                    transformer_variant: input.memory_transformer_variant,
+                    decoder: input.memory_decoder,
+                    width: admission_geometry.0,
+                    height: admission_geometry.1,
+                    frames: admission_geometry.2,
+                    decode_chunk_size: admission_geometry.3,
+                    fps: input.fps,
+                    runtime: None,
+                    headroom_bytes: spec_headroom_bytes,
+                };
+                // Evidence is the preflight: an unsupported request stays direct generation without
+                // attempting a platform memory probe that could fail independently of admission.
+                let admission_runtime =
+                    if crate::video_admission::packaged_video_evidence_covers_request(
+                        generator,
+                        &admission_inputs,
+                    ) {
+                        crate::video_admission::live_video_runtime_state(
+                            engine_id,
+                            cache_state,
+                            load_policy,
+                            provider_resident_bytes,
+                        )?
+                    } else {
+                        None
+                    };
+                let admission_headroom_bytes = match admission_runtime {
+                    Some(runtime) => spec_headroom_bytes
+                        .checked_sub(runtime.budget.reserved_headroom_bytes)
+                        .ok_or_else(|| {
+                            WorkerError::InvalidPayload(format!(
+                                "{engine_id} live memory reserve {} exceeds fallback headroom {}; \
+                                 refusing an inconsistent video budget",
+                                runtime.budget.reserved_headroom_bytes, spec_headroom_bytes,
+                            ))
+                        })?,
+                    // Unsupported surfaces and lanes without a canonical post-load snapshot fail
+                    // open before selection, so this value is observationally inert there.
+                    None => spec_headroom_bytes,
+                };
+                admission_inputs.runtime = admission_runtime;
+                admission_inputs.headroom_bytes = admission_headroom_bytes;
+                let outcome =
+                    crate::video_admission::admit_video_generation(generator, admission_inputs);
+                apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
@@ -1882,13 +2793,30 @@ pub(super) async fn generate_video_using(
                                 crate::classify_engine_error("video load failed", error)
                             })
                         },
-                        run,
+                        // The uncached in-place route loads eagerly under the hardcoded policy and
+                        // has no request-scoped planner seam, so the loaded policy is synthesized
+                        // here and the proposal is inert (the run closure declines it regardless).
+                        move |generator, cache_state, load_policy, external, provider| {
+                            run(
+                                generator,
+                                cache_state,
+                                crate::generator_cache::ExecutionPolicy {
+                                    offload_policy: load_policy,
+                                    load_shape: gen_core::LoadShape::EagerMaterialization,
+                                    load_shape_declaration_result:
+                                        gen_core::LoadShapeDeclarationResult::NotEvaluated,
+                                },
+                                crate::execution_planner::WarmPolicyProposal::inert(engine_id),
+                                external,
+                                provider,
+                            )
+                        },
                     )
                     .await
                 }
                 None => match cold_load_admission {
                     Some(admission) => {
-                        crate::generator_cache::with_cached_generator_using_cold_admission(
+                        crate::generator_cache::with_cached_generator_for_request_using_cold_admission(
                             engine_id,
                             spec,
                             "video load failed",
@@ -1900,7 +2828,7 @@ pub(super) async fn generate_video_using(
                         .await
                     }
                     None => {
-                        crate::generator_cache::with_cached_generator_using(
+                        crate::generator_cache::with_cached_generator_for_request_using(
                             engine_id,
                             spec,
                             "video load failed",
@@ -1914,7 +2842,7 @@ pub(super) async fn generate_video_using(
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {
                 let _ = comfyui_load;
-                crate::generator_cache::with_cached_generator_using(
+                crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
                     spec,
                     "video load failed",

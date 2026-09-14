@@ -43,6 +43,83 @@ pub(crate) const CUDA_VRAM_CAP_ENV: &str = "SCENEWORKS_CUDA_VRAM_CAP_GB";
 /// meanings or values to the same dedicated pool.
 pub(crate) const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
+/// The named margin the candle ladder's operational reserve carries ABOVE the measured idle
+/// baseline (sc-22664, epic 22657 E4). The baseline is what the box holds before this load — the
+/// CUDA context(s) and WDDM residency `nvidia-smi` reports as used — and this margin is the growth
+/// of that residency the pre-load probe cannot yet see: the cuBLAS/cuDNN workspaces and module
+/// images a first kernel launch materializes inside the context, which a cold worker pays once on
+/// top of the modelled phase peaks. It is NOT allocator slack (candle's counted allocations carry
+/// none — `ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`) and NOT activation headroom (the law
+/// prices activations); it is only the context's own post-probe growth.
+pub(crate) const LADDER_RESERVE_MARGIN_GB: f64 = 0.25;
+
+// The margin is a fraction of the slack it replaces, by construction: a margin at or above the
+// legacy reserve would make the ceiling in `ladder_reserve_gb` the whole answer.
+const _: () = assert!(LADDER_RESERVE_MARGIN_GB > 0.0 && LADDER_RESERVE_MARGIN_GB < HEADROOM_GB);
+
+/// The pre-load device residency a candle worker process MEASURABLY carries on this box, in bytes
+/// (sc-22664 review, D3): the `preLoadDeviceUsed` diagnostic of the retained candle calibration
+/// record `imc-06fbd2ff6dcba95f8555` (`docs/generated/memory-calibration-evidence.json`; Krea 2
+/// Turbo q4, `memory-candle-adapter:krea-turbo-certifying`, RTX PRO 6000 Blackwell, captured
+/// 2026-08-28) — the device's used bytes the harness read immediately before its load, i.e. the
+/// CUDA context, module images and WDDM residency the process pays before the first weight lands.
+/// The retained anchors measure every phase peak as a device DELTA above exactly this residency,
+/// so it is the one term no derived peak contains.
+///
+/// It is the FLOOR of [`ladder_reserve_gb`]'s idle baseline rather than its whole answer because
+/// the live probe can only see this process's context AFTER the context exists: on a cold worker
+/// `total − free` is the card's residency before this process created its context, which on a
+/// headless card is ~0, and a reserve derived from that alone would collapse to the bare margin
+/// and under-charge the residency the record shows the process will carry.
+///
+/// `ladder_reserve_reads_the_measured_pre_load_residency_off_the_retained_record` reads this
+/// constant back against the record, so it cannot drift from the evidence it cites.
+pub(crate) const MEASURED_PRELOAD_RESIDENCY_BYTES: u64 = 1_045_430_272;
+
+/// [`MEASURED_PRELOAD_RESIDENCY_BYTES`] in the budget's unit (GiB, what `nvidia-smi`'s MiB
+/// reading divides down to): ~0.97.
+pub(crate) const MEASURED_PRELOAD_RESIDENCY_GB: f64 =
+    MEASURED_PRELOAD_RESIDENCY_BYTES as f64 / BYTES_PER_GIB;
+
+// The measured residency plus the margin sits under the ceiling, so the ceiling is a genuine cap
+// on foreign residency and not the answer on every idle card.
+const _: () = assert!(MEASURED_PRELOAD_RESIDENCY_GB + LADDER_RESERVE_MARGIN_GB < HEADROOM_GB);
+
+/// The operational reserve the candle memory-strategy ladder charges EXACTLY ONCE per candidate
+/// (sc-22664, epic 22657 E4) — against the selector budget for a candidate priced from a measured
+/// device delta, and never ALSO against a candidate whose peak already carries the structural pad;
+/// `crate::memory_strategy::ReserveCharge` states that rule once.
+///
+/// `reserve = max(total − free, MEASURED_PRELOAD_RESIDENCY_GB) + LADDER_RESERVE_MARGIN_GB`, capped
+/// at `HEADROOM_GB`:
+///
+/// * `total − free` is the idle baseline of the selected card as probed before the load — the
+///   CUDA context(s) and WDDM residency the box actually carries — and it MUST be the RAW probe,
+///   never the reclaimable-credited budget (`with_reclaimable`), which predicts the free the
+///   imminent evict will produce and so reads a warm card as nearly idle (review D2).
+/// * [`MEASURED_PRELOAD_RESIDENCY_GB`] floors it at the residency the retained record shows this
+///   process carrying before its load, because a cold probe cannot see its own context (D3).
+/// * [`LADDER_RESERVE_MARGIN_GB`] is the context's post-probe growth.
+/// * The legacy [`HEADROOM_GB`] stays the CEILING: on a card whose reported used bytes exceed it,
+///   the "idle" reading is foreign residency (another process's model, a second worker on the
+///   same GPU, or on a warm run this process's own resident model about to be evicted), which is
+///   already excluded from `free` and says nothing about this process's context, so the reserve
+///   falls back to the legacy allocator slack rather than charging those bytes a second time. A
+///   budget with more free than total (a capped emulation) reads as a zero baseline and lands on
+///   the measured floor.
+///
+/// The retained candle anchors measure every phase peak as a device DELTA above the pre-load
+/// residency, so this baseline is the one term an anchor-derived peak does not contain; charging
+/// it against the budget once for such a candidate, rather than folding a fixed 2 GB into the
+/// derivation AND subtracting 2 GB from the budget, is what lets an 8 GB card admit a 4.5 GB
+/// fully-engaged composition once a packaged anchor prices the cell.
+pub(crate) fn ladder_reserve_gb(budget: VramBudget) -> f64 {
+    let idle_baseline_gb = (budget.total_gb - budget.free_gb)
+        .max(0.0)
+        .max(MEASURED_PRELOAD_RESIDENCY_GB);
+    (idle_baseline_gb + LADDER_RESERVE_MARGIN_GB).min(HEADROOM_GB)
+}
+
 /// A live (or capped) VRAM budget for the selected GPU, in GB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VramBudget {
@@ -192,6 +269,29 @@ pub(crate) fn requested_tier_key(
 /// [`requested_tier_key`] returned `"q8"` for it. So the sizing is no less conservative than the
 /// status quo, and a missing row can only ever cost a spurious `TooBig`/`Offload`, never an OOM.
 pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> Option<f64> {
+    if let Some(gb) = measured_resident_peak_gb(manifest_entry, tier_key) {
+        return Some(gb + HEADROOM_GB);
+    }
+    // Spelled exactly so: the manifest constraint-contract registry anchors the `candle.minMemoryGb`
+    // reader on this expression (`tests/test_builtin_manifest_audit.py`).
+    let candle = manifest_entry.get("candle")?;
+    candle.get("minMemoryGb").and_then(json_f64)
+}
+
+/// The RAW measured resident row, `candle.vramGbByTier[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier, exactly as [`predicted_peak_gb`] degrades), with NO headroom folded
+/// in. `None` where the tier has no measured row — [`predicted_peak_gb`] then lands on
+/// `minMemoryGb`, which the manifest pads itself.
+///
+/// This is the row the memory-strategy ladder prices its resident candidate from (sc-22664): the
+/// ladder charges its operational reserve once against the selector budget
+/// ([`ladder_reserve_gb`]), so a candidate that also carried [`HEADROOM_GB`] would pay twice. The
+/// legacy fit gate keeps consuming the padded [`predicted_peak_gb`] because it charges no reserve
+/// against its budget.
+pub(crate) fn measured_resident_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let candle = manifest_entry.get("candle")?;
     let measured = |key: &str| {
         candle
@@ -199,16 +299,9 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
             .and_then(|tiers| tiers.get(key))
             .and_then(json_f64)
     };
-    if let Some(gb) = measured(tier_key) {
-        return Some(gb + HEADROOM_GB);
-    }
-    // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
-    if tier_key == NVFP4_TIER {
-        if let Some(gb) = measured("q8") {
-            return Some(gb + HEADROOM_GB);
-        }
-    }
-    candle.get("minMemoryGb").and_then(json_f64)
+    measured(tier_key)
+        // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
+        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Resident prediction with a load-exact independently resident adapter stack. Callers pass zero
@@ -235,11 +328,20 @@ pub(crate) fn predicted_sequential_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
+    measured_sequential_peak_gb(manifest_entry, tier_key).map(|gb| gb + HEADROOM_GB)
+}
+
+/// The RAW measured sequential row, `candle.sequentialPeakGb[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier), with NO headroom folded in — the staged working set the ladder's
+/// manifest-row floor prices (sc-22664; see [`measured_resident_peak_gb`] for why the ladder's
+/// candidates carry no headroom).
+pub(crate) fn measured_sequential_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let sequential = manifest_entry.get("candle")?.get("sequentialPeakGb")?;
     let measured = |key: &str| sequential.get(key).and_then(json_f64);
-    measured(tier_key)
-        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
-        .map(|gb| gb + HEADROOM_GB)
+    measured(tier_key).or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Sequential prediction with the same adapter residency charged in every lifecycle policy.
@@ -316,6 +418,41 @@ fn krea_turbo_manifest_key(strategy: gen_core::MemoryStrategy) -> &'static str {
     }
 }
 
+/// The geometry a phase curve is evaluated at (sc-18812).
+///
+/// `frames` is the temporal axis the image lane never had. It is a separate type rather than a
+/// second `u32` argument because the two axes are not interchangeable and a transposed call site
+/// would otherwise compile: `pixels` is an AREA (already multiplied out) while `frames` is a count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CurveGeometry {
+    pub pixels: u64,
+    pub frames: u32,
+}
+
+/// Which phase carries the peak of a phase triple at one geometry (sc-18812).
+///
+/// Typed because the binding phase FLIPS inside a single model's envelope — on measured q8 LTX,
+/// decode overtakes text between 11,904 and 14,080 latent tokens — so "which phase binds" is a
+/// per-geometry question, not a per-model constant. sc-18829 needs to ask it of a geometry it has
+/// no record for, which is exactly what a curve can answer and a record cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindingPhase {
+    Text,
+    Denoise,
+    Decode,
+}
+
+impl BindingPhase {
+    /// The phase index (0 text, 1 denoise, 2 decode) the sc-18097 comparison seam is written in.
+    pub(crate) fn index(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Denoise => 1,
+            Self::Decode => 2,
+        }
+    }
+}
+
 /// Per-phase prediction for one Krea Turbo rung at the requested geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct KreaTurboPhasePeaks {
@@ -328,20 +465,66 @@ impl KreaTurboPhasePeaks {
     pub(crate) fn peak_gb(self) -> f64 {
         self.text_gb.max(self.denoise_gb).max(self.decode_gb)
     }
+
+    /// The phase carrying the peak. Ties resolve to the LATER phase deterministically, mirroring
+    /// the MLX gate's `binding_phase` (sc-18096).
+    ///
+    /// This is why sc-18810 put the temporal term on each phase curve rather than on the
+    /// aggregate: `peak_gb` is a `max` over three curves, and a max of linear pieces is not
+    /// linear. Fitting one temporal coefficient to the aggregate missed it by >= 10.26 GiB on
+    /// held-out geometries — about 94x the measured noise floor — while the ADOPTED per-phase
+    /// form stays inside 0.44 GiB: 0.0185 decode, 0.1741 denoise, 0.4438 text. Keeping the curves
+    /// per phase is what makes both `peak_gb` and this question answerable at an unmeasured
+    /// geometry.
+    ///
+    /// That per-phase band is 0.019-0.44 GiB, not the tighter 0.30 an earlier revision of this
+    /// comment quoted: 0.30 is `area_only`'s TEXT residual, and no cross-form phase equals it.
+    /// The distinction matters because the win is not uniform. On text the rejected additive form
+    /// scores 0.3445 against cross's 0.4438, so **cross is 1.29x worse there**. Cross is still the
+    /// correct adoption: it beats additive 355x on decode and 15.4x on denoise — the phases that
+    /// actually carry the temporal response and decide admission at scale — it strictly contains
+    /// the constrained candidates sharing its regressors (`area_only`, `output_voxels`), and the
+    /// 0.0993 GiB it concedes on text is under that phase's own 0.1095 GiB replicate floor, the
+    /// largest of the three by orders of magnitude. Every figure here is graded from the committed
+    /// artifact rather than from this comment, by the test
+    /// `the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`.
+    pub(crate) fn binding_phase(self) -> BindingPhase {
+        let mut phase = BindingPhase::Text;
+        let mut peak = self.text_gb;
+        if self.denoise_gb >= peak {
+            phase = BindingPhase::Denoise;
+            peak = self.denoise_gb;
+        }
+        if self.decode_gb >= peak {
+            phase = BindingPhase::Decode;
+        }
+        phase
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum KreaTurboFit {
     Resident {
         peak_gb: f64,
+        /// The admitted peak plus the operational reserve the selector charged once against the
+        /// budget (`ladder_reserve_gb`, sc-22667) — what the lane quotes as its need.
         needed_gb: f64,
         selection: gen_core::MemorySelection,
+        /// The selector's own admission figures (sc-22667, E7 telemetry).
+        admitted: crate::candle_memory_strategy::AdmittedBudget,
     },
     Fits {
         phases: KreaTurboPhasePeaks,
+        /// The admitted peak plus the operational reserve (see `Resident::needed_gb`).
         needed_gb: f64,
         selection: gen_core::MemorySelection,
         memory: gen_core::GenerationMemory,
+        /// What priced the selected rung (sc-22667, E7): a measured record of this cell, the
+        /// tier's fitted curve, or the anchor derivation through the image law.
+        basis: crate::memory_strategy::CandidateBasis,
+        /// The selector's own admission figures, so the telemetry agrees with the selector by
+        /// construction.
+        admitted: crate::candle_memory_strategy::AdmittedBudget,
         /// The rung was carried by a synthesized fitted-curve ESTIMATE, not by an exact measured
         /// record of this cell (sc-18097). True exactly when the request geometry has no
         /// `exact_request` record: a rung's measured candidates come only from that record, and a
@@ -359,6 +542,75 @@ pub(crate) enum KreaTurboFit {
     Unverified {
         reason: gen_core::MemoryEvidenceVerdict,
     },
+}
+
+impl KreaTurboFit {
+    /// The `image_memory_strategy_selected` telemetry payload for a selection this lane made
+    /// (sc-22667, epic 22657 E7) — the same shape the shared candle ladder emits
+    /// (`candle_memory_strategy::CandleMemoryEvaluation::selection_telemetry`): the selected rung
+    /// and its parameters, the basis that priced it, the three phase peaks where a phase
+    /// decomposition priced it (every optimized rung: the measured curves, the fitted curves and
+    /// the anchor derivation are all per phase), and the selector's admission figures. `None`
+    /// for a refusal or an unverified result, which select nothing.
+    pub(crate) fn selection_telemetry(&self, tier: &str, width: u32, height: u32) -> Option<Value> {
+        let (selection, basis, phases, admitted, predicted_peak_gb) = match self {
+            Self::Resident {
+                peak_gb,
+                selection,
+                admitted,
+                ..
+            } => (
+                selection,
+                crate::memory_strategy::CandidateBasis::Measured,
+                None,
+                admitted,
+                *peak_gb,
+            ),
+            Self::Fits {
+                phases,
+                selection,
+                basis,
+                admitted,
+                ..
+            } => (selection, *basis, Some(*phases), admitted, phases.peak_gb()),
+            Self::Reject { .. } | Self::Unverified { .. } => return None,
+        };
+        let bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
+        let parameters = selection.parameters;
+        Some(serde_json::json!({
+            "backend": "candle",
+            "route": "krea_2_turbo",
+            "actualTier": tier,
+            "mode": "text_to_image",
+            "geometry": {
+                "width": width,
+                "height": height,
+                "batch": 1,
+                "frames": KREA_LANE_FRAMES,
+            },
+            "referenceCount": 0,
+            "overlay": Value::Null,
+            "strategy": crate::candle_memory_strategy::strategy_label(selection.strategy),
+            "parameters": {
+                "decodeTileEdge": parameters.decode_tile_edge,
+                "decodeOverlap": parameters.decode_overlap,
+                "attentionChunkSize": parameters.attention_chunk_size,
+                "transformerWindowSize": parameters.transformer_window_size,
+            },
+            "basis": basis.as_key(),
+            "authority": if basis.is_estimate() { "estimated" } else { "calibrated" },
+            "predictedPeakBytes": bytes(predicted_peak_gb),
+            "phasePeakBytes": phases.map(|phases| serde_json::json!({
+                "conditioning": bytes(phases.text_gb),
+                "denoise": bytes(phases.denoise_gb),
+                "decode": bytes(phases.decode_gb),
+            })),
+            "admittedPeakGb": admitted.needed_gb,
+            "availableGb": admitted.available_gb,
+            "reserveGb": admitted.reserve_gb,
+            "evidenceRevision": KREA_TURBO_SCENEWORKS_REVISION,
+        }))
+    }
 }
 
 pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
@@ -383,7 +635,7 @@ pub(crate) struct KreaRuntimeEvidenceContext {
     artifact_repository: String,
     resolved_revision: String,
     tier_root: String,
-    resolved_artifact_root: std::path::PathBuf,
+    provider_contract: Option<gen_core::MemoryProviderContract>,
 }
 
 impl KreaRuntimeEvidenceContext {
@@ -401,6 +653,74 @@ impl KreaRuntimeEvidenceContext {
         pinned_snapshot_root: &std::path::Path,
     ) -> Option<Self> {
         let compute_capability = compute_capability?;
+        Self::inspect_artifact_structure(tier_root, resolved_artifact_root, pinned_snapshot_root)?;
+        Some(Self {
+            resolved_route: resolved_route.to_owned(),
+            backend: backend.to_owned(),
+            gpu_id: gpu_id.to_owned(),
+            compute_capability,
+            artifact_provider: artifact_provider.to_owned(),
+            artifact_repository: artifact_repository.to_owned(),
+            resolved_revision: resolved_revision.to_owned(),
+            tier_root: tier_root.to_owned(),
+            provider_contract: None,
+        })
+    }
+
+    /// Inspect the stock Turbo artifact and acquire its full registered provider contract once.
+    ///
+    /// Krea Control also uses [`Self::inspect`] for structural base-snapshot validation, but its
+    /// execution contract is different. Keep that path metadata-only; only the Turbo fit ladder
+    /// needs this sealed, reusable provider contract.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn inspect_turbo_fit(
+        resolved_route: &str,
+        backend: &str,
+        gpu_id: &str,
+        compute_capability: Option<f32>,
+        artifact_provider: &str,
+        artifact_repository: &str,
+        resolved_revision: &str,
+        tier_root: &str,
+        resolved_artifact_root: &std::path::Path,
+        pinned_snapshot_root: &std::path::Path,
+    ) -> Option<Self> {
+        let mut context = Self::inspect(
+            resolved_route,
+            backend,
+            gpu_id,
+            compute_capability,
+            artifact_provider,
+            artifact_repository,
+            resolved_revision,
+            tier_root,
+            resolved_artifact_root,
+            pinned_snapshot_root,
+        )?;
+        // The registered lookup performs complete production load-source validation, including
+        // encoder ArtifactSeal acquisition. The path-free result is safe to reuse for every fit
+        // against this inspected request-local artifact; the eventual provider load independently
+        // validates its retained seals before opening model bytes.
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                    resolved_artifact_root.to_owned(),
+                )),
+            )
+            .ok()
+            .flatten()?;
+        context.provider_contract = Some(provider_contract);
+        Some(context)
+    }
+
+    /// Cheap snapshot-layout validation kept separate from the provider's full sealed-source
+    /// validation so its missing-shard behavior can be exercised with a tiny structural fixture.
+    fn inspect_artifact_structure(
+        tier_root: &str,
+        resolved_artifact_root: &std::path::Path,
+        pinned_snapshot_root: &std::path::Path,
+    ) -> Option<()> {
         let expected = pinned_snapshot_root.join(tier_root);
         if resolved_artifact_root.canonicalize().ok()? != expected.canonicalize().ok()? {
             return None;
@@ -461,17 +781,7 @@ impl KreaRuntimeEvidenceContext {
         {
             return None;
         }
-        Some(Self {
-            resolved_route: resolved_route.to_owned(),
-            backend: backend.to_owned(),
-            gpu_id: gpu_id.to_owned(),
-            compute_capability,
-            artifact_provider: artifact_provider.to_owned(),
-            artifact_repository: artifact_repository.to_owned(),
-            resolved_revision: resolved_revision.to_owned(),
-            tier_root: tier_root.to_owned(),
-            resolved_artifact_root: resolved_artifact_root.to_owned(),
-        })
+        Some(())
     }
 
     #[cfg(test)]
@@ -485,15 +795,159 @@ impl KreaRuntimeEvidenceContext {
             artifact_repository: "SceneWorks/krea-2-turbo-mlx".into(),
             resolved_revision: "d009674080cc1bccf2b629d834c34bf5eccdb723".into(),
             tier_root: tier_root.into(),
-            resolved_artifact_root: std::path::PathBuf::new(),
+            provider_contract: Some(krea_test_provider_contract(tier_root).clone()),
         }
     }
 }
 
-/// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
-/// allocator residency separately from the geometry-dependent activation slope. Invalid or
-/// incomplete evidence fails closed to `None`; callers retain the established sequential gate
-/// instead of inventing a fit.
+/// Sparse, weights-free Krea source used by the Candle-only memory-contract tests.
+///
+/// The provider's memory lookup now shares its complete production load-spec validation, including
+/// the encoder and tokenizer contracts. An empty path therefore no longer represents a valid source.
+/// Keep the tests on the real lookup seam with a structurally truthful fixture; no model tensor is
+/// materialized and no memory evidence is measured or rewritten here.
+///
+/// ## Windows disk discipline (StorageFull incident, 2026-08-20)
+///
+/// "Sparse" above was only true on APFS/ext4. `gen_core_testkit::write_encoder_contract_fixture`
+/// ends with a multi-gigabyte `set_len` — the encoder's dense logical size, which must stay because
+/// the weight-bytes gates read it — and on NTFS that allocates in FULL. This fixture was measured
+/// costing 21.84 GB of `C:` per test process, and because it lives in a `static` (never dropped)
+/// every process left that behind permanently. Two mitigations, both load-bearing:
+///
+/// 1. Each tier's `.safetensors` tail is released right after the tier is written
+///    ([`crate::test_fixture_disk::sparsify_written_safetensors`]). Logical size and every written
+///    header byte are unchanged, so the gates read exactly the same numbers.
+/// 2. Initialization sweeps prior runs' leftovers, which a `static`'s guard can never do for
+///    itself. The directory name carries this process's PID so the sweep can tell its own from
+///    another concurrent run's.
+#[cfg(test)]
+fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+    }
+
+    /// Distinctive enough that the sweep can match nothing else under the shared temp root.
+    const FIXTURE_FAMILY: &str = "sceneworks-krea-memfix-";
+
+    static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        crate::test_fixture_disk::sweep_stale_fixtures(FIXTURE_FAMILY);
+        let temp = tempfile::Builder::new()
+            .prefix(&crate::test_fixture_disk::process_keyed_prefix(
+                FIXTURE_FAMILY,
+            ))
+            .tempdir()
+            .expect("Krea memory-contract fixture root");
+        let root = temp.path().to_path_buf();
+        let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
+            .expect("Krea encoder contract");
+        for (tier, bits) in [("q4", Some(4)), ("q8", Some(8)), ("bf16", None)] {
+            let tier_root = root.join(tier);
+            // AT THE TIER'S QUANTIZATION, not dense (sc-22667). The `bits` this loop already uses
+            // for the transformer's `config.json` describe the whole tier's snapshot: a q4 Krea
+            // store holds a q4 text encoder too. Writing a dense encoder for every tier was
+            // invisible while the pinned contract published `MemoryAssetFacts::default()`, but the
+            // sc-22657 contract prices `conditioning_bytes` from this fixture's safetensors
+            // HEADERS — dense made q4's encoder 15.69 GB, four times the packaged anchor's whole
+            // 3.83 GB measured conditioning peak, so the derivation law correctly refused a
+            // conditioning residency the measurement contradicts and every Krea derivation test
+            // below went unpriceable. At the tier's own width it is 3.76 GB, i.e. the anchor's
+            // measured peak less ~64 MB of activation — the composition that measurement saw.
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                &tier_root.join("text_encoder"),
+                contract,
+                bits,
+            )
+            .expect("write sparse Krea encoder fixture");
+            // Per tier, not once at the end: the moment between the testkit's `set_len` and the
+            // release is the only fully-allocated one, and this bounds it to ONE tier's file.
+            crate::test_fixture_disk::sparsify_written_safetensors(&tier_root.join("text_encoder"));
+            if let Some(bits) = bits {
+                let transformer = tier_root.join("transformer");
+                std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
+                std::fs::write(
+                    transformer.join("config.json"),
+                    serde_json::to_vec(&serde_json::json!({
+                        "quantization": { "bits": bits, "group_size": 64 }
+                    }))
+                    .expect("Krea transformer fixture config"),
+                )
+                .expect("write Krea transformer fixture config");
+            }
+        }
+        Fixture { _temp: temp, root }
+    });
+    assert!(
+        matches!(tier, "q4" | "q8" | "bf16"),
+        "unsupported Krea fixture tier {tier}"
+    );
+    fixture.root.join(tier)
+}
+
+#[cfg(test)]
+fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
+    gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(krea_test_artifact_root(tier)))
+}
+
+/// One complete provider validation per immutable test tier.
+///
+/// ArtifactSeal acquisition deliberately hashes the full logical encoder payload. The shared
+/// Krea fixture is process-lifetime immutable, so reacquiring that same seal on every fit only
+/// repeats multi-gigabyte I/O without testing another state. Production contexts acquire their
+/// contract in [`KreaRuntimeEvidenceContext::inspect_turbo_fit`]; this cache is the test equivalent.
+#[cfg(test)]
+fn krea_test_provider_contract(tier: &str) -> &'static gen_core::MemoryProviderContract {
+    static CONTRACTS: std::sync::OnceLock<[gen_core::MemoryProviderContract; 3]> =
+        std::sync::OnceLock::new();
+    let contracts = CONTRACTS.get_or_init(|| {
+        ["q4", "q8", "bf16"].map(|fixture_tier| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec(fixture_tier))
+                .expect("Krea contract lookup succeeds")
+                .expect("Krea contract exists")
+        })
+    });
+    match tier {
+        "q4" => &contracts[0],
+        "q8" => &contracts[1],
+        "bf16" => &contracts[2],
+        _ => panic!("unsupported Krea fixture tier {tier}"),
+    }
+}
+
+/// Read a measured phase curve `fixedGb + perMpxGb * megapixels + perMpxFrameGb * megapixels *
+/// frames`. The manifest stores fixed weight / allocator residency separately from the
+/// geometry-dependent activation slopes. Invalid or incomplete evidence fails closed to `None`;
+/// callers retain the established sequential gate instead of inventing a fit.
+///
+/// ## The temporal term (sc-18812, form chosen by sc-18810)
+///
+/// `perMpxFrameGb` is OPTIONAL and absent on every committed image curve. Absent is read as
+/// `0.0`, and the sum is deliberately written so that the absent case reduces to the pre-sc-18812
+/// expression **bit for bit** — the area term keeps its original association
+/// (`per_mpx * pixels as f64 / 1_000_000.0`, not `per_mpx * (pixels as f64 / 1_000_000.0)`, which
+/// is a DIFFERENT f64 in general), and `x + 0.0` is bitwise `x` for every finite `x` EXCEPT
+/// `x == -0.0`, where IEEE-754 round-to-nearest gives `+0.0` — a different bit pattern for the
+/// same numeric value. Reaching that here takes a curve declaring BOTH `fixedGb` and `perMpxGb`
+/// as `-0.0` (either one alone leaves the pre-term sum at `+0.0`); such a curve validates, since
+/// JSON Schema `minimum: 0` accepts `-0.0`, and clears the `< 0.0` guards below. No committed
+/// curve declares one. It is documented rather than guarded: a signed-zero branch would exist
+/// only to preserve the sign bit of a zero-valued phase prediction, which no consumer can
+/// observe. The identity itself is pinned bitwise over the real committed curves, not asserted
+/// against a default.
+///
+/// A PRESENT `perMpxFrameGb` that `json_f64` cannot read still fails closed, and so does a
+/// negative or non-finite one. Only true absence is zero; a malformed value must not silently
+/// degrade a video curve into an image curve. "Unreadable" is `json_f64`'s notion, not JSON's:
+/// it accepts a NUMERIC STRING, so `"0.3"` evaluates exactly as `0.3` would — deliberately, and
+/// identically to `fixedGb`/`perMpxGb`, which have always been read the same way. Rejecting a
+/// string-typed coefficient is the SCHEMA's job (`model-manifest.schema.json`
+/// `#/$defs/phaseVramCurve` types all three as `number`), and
+/// `test_schema_admits_the_temporal_coefficient_additively` is where that rejection is pinned.
+/// The string case is carried here as an explicitly-ACCEPTED control so the fail-closed set below
+/// is not read as broader than it is.
 ///
 /// SC-16514 recovered the q8/bf16 768² captures from SC-15205 activity 15272 and SC-15206 activity
 /// 15314 into `turboFit.evidenceRecords`. Every tier now carries 768² and 1024² phase cells, and every
@@ -505,13 +959,31 @@ impl KreaRuntimeEvidenceContext {
 /// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
 /// attention shapes have not been validated, so the curve is fitted within that bound rather than
 /// extrapolated beyond it.
-fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
+fn krea_phase_curve(phase: &JsonObject, geometry: CurveGeometry) -> Option<f64> {
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
-    if !fixed.is_finite() || !per_mpx.is_finite() || fixed < 0.0 || per_mpx < 0.0 {
+    let per_mpx_frame = match phase.get("perMpxFrameGb") {
+        None => 0.0,
+        Some(value) => json_f64(value)?,
+    };
+    if !fixed.is_finite()
+        || !per_mpx.is_finite()
+        || !per_mpx_frame.is_finite()
+        || fixed < 0.0
+        || per_mpx < 0.0
+        || per_mpx_frame < 0.0
+    {
         return None;
     }
-    Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
+    // A zero-frame request is not a still image, it is a nonsense geometry. Fail closed rather
+    // than silently pricing it as the intercept.
+    if geometry.frames == 0 {
+        return None;
+    }
+    let area_term = per_mpx * geometry.pixels as f64 / 1_000_000.0;
+    let temporal_term =
+        per_mpx_frame * geometry.pixels as f64 / 1_000_000.0 * f64::from(geometry.frames);
+    Some(fixed + area_term + temporal_term)
 }
 
 /// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
@@ -526,12 +998,42 @@ pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadS
     }
 }
 
+/// The largest output VOXEL count (pixels x frames) a fit block's curves were measured across
+/// (sc-18812). Absent is read as `pixels`, i.e. one output frame — which is what every image-lane
+/// fit is, so omitting the key refuses exactly the multi-frame requests that lane never measured.
+///
+/// ## Why voxels and not a frame count
+///
+/// 1. Voxels are the regressor `perMpxFrameGb` multiplies, so this bounds the extrapolation of
+///    the term it governs rather than a loosely correlated proxy.
+/// 2. **The tiling discontinuity is itself a constant-voxel surface.** At the pinned revision
+///    `VaeTiling::writable_frame_cap(out_h, out_w)` is `MAX_WRITABLE_ELEMS / (full_res_channels *
+///    out_h * out_w)` with `MAX_WRITABLE_ELEMS = i32::MAX`, so a single pass is legal exactly
+///    while `out_voxels <= i32::MAX / full_res_channels` — 268,435,455 for LTX's 8 full-res
+///    channels. That one surface is the 297-output-frame cap quoted at 0.90 MP and 682 at
+///    0.39 MP. A scalar frame bound would admit a small-area request and refuse an
+///    identically-priced large-area one, which is the wrong shape of guard.
+///
+/// The bound is not politeness about unvalidated territory — past it the affine form is KNOWN
+/// wrong. Single-pass decode climbs to ~94.3 GB at the cap and tiled decode drops it to ~63.8 GB
+/// on this 128 GiB host; no affine curve represents that step, so the fit is refused across it
+/// rather than extrapolated through it. Note the cap is only ONE-SIDED machine-independent: no
+/// host exceeds it single-pass, but a smaller host tiles EARLIER via the memory bound, and tiled
+/// cost RISES with host memory because the selector keeps the largest tile that fits.
+fn max_measured_voxels(fit: &Value, pixels: u64) -> Option<u64> {
+    match fit.get("maxMeasuredVoxels") {
+        None => Some(pixels),
+        Some(value) => value.as_u64().filter(|max| *max >= 1),
+    }
+}
+
 fn krea_rung_phase_peaks(
     manifest_entry: &JsonObject,
     tier: &str,
     strategy: gen_core::MemoryStrategy,
     width: u32,
     height: u32,
+    frames: u32,
 ) -> Option<KreaTurboPhasePeaks> {
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
@@ -539,15 +1041,23 @@ fn krea_rung_phase_peaks(
     if pixels > max_measured_pixels {
         return None;
     }
+    // `frames == 0` needs no check here: `pixels * 0` clears any bound, and `krea_phase_curve`
+    // refuses the geometry outright a few lines later. A second check would be a guard no test
+    // could kill.
+    let voxels = pixels.checked_mul(u64::from(frames))?;
+    if voxels > max_measured_voxels(turbo_fit, pixels)? {
+        return None;
+    }
     let rung = turbo_fit
         .get("phaseCurvesByTier")?
         .get(tier)?
         .get(krea_turbo_manifest_key(strategy))?
         .as_object()?;
+    let geometry = CurveGeometry { pixels, frames };
     let phase = |name: &str| {
         rung.get(name)
             .and_then(Value::as_object)
-            .and_then(|curve| krea_phase_curve(curve, pixels))
+            .and_then(|curve| krea_phase_curve(curve, geometry))
     };
     Some(KreaTurboPhasePeaks {
         text_gb: phase("text")?,
@@ -572,17 +1082,12 @@ fn krea_record_phase_peaks(record: &Value, manifest_rung: &str) -> Option<KreaTu
 /// Ties resolve to the LATER phase deterministically, mirroring the MLX gate's `binding_phase`
 /// (sc-18096); the comparison below only ever contrasts two triples produced by the same per-phase
 /// curves, so tie handling cannot manufacture a flip on its own.
+///
+/// sc-18812 moved the rule onto [`KreaTurboPhasePeaks::binding_phase`] so that the same question
+/// can be asked of a CURVE-predicted triple at an arbitrary geometry, not only of a recorded one.
+/// This wrapper keeps the index vocabulary the sc-18097 comparison seam below is written in.
 fn krea_binding_phase(peaks: KreaTurboPhasePeaks) -> u8 {
-    let mut phase = 0_u8;
-    let mut peak = peaks.text_gb;
-    if peaks.denoise_gb >= peak {
-        phase = 1;
-        peak = peaks.denoise_gb;
-    }
-    if peaks.decode_gb >= peak {
-        phase = 2;
-    }
-    phase
+    peaks.binding_phase().index()
 }
 
 fn krea_rung_parameters(
@@ -624,6 +1129,64 @@ fn krea_rung_parameters(
     })
 }
 
+/// Krea Turbo is a text-to-IMAGE route: every request and every measured record on it produces one
+/// output frame. Named rather than repeated as a literal `1` so the curve evaluation and the
+/// `MemoryGeometry` it is graded against cannot drift apart — sc-18810 found four of six MLX
+/// capture arms hardcoding `frames: 1` into their admission context while reading only width and
+/// height, which is exactly how a geometry gets attested that was never asked for.
+const KREA_LANE_FRAMES: u32 = 1;
+
+/// The packaged measured memory anchor for one Krea Turbo candle tier (sc-22509, epic 22505), with
+/// every identity conjunct that can be answered without the loaded provider contract.
+///
+/// Fail-closed and deliberately narrow: the anchor was measured on ONE catalog model, route,
+/// provider and mode, overlay-free and reference-free. The remaining conjunct (materialization
+/// shape) is applied by the caller once the contract is available.
+///
+/// Currency is NOT a conjunct (sc-22738). The anchor's loader-closure digest (sc-22511) is what
+/// the probe tooling re-captures on; the calibration fingerprint and ABI are PROVENANCE bound to
+/// the source record by `validate_anchor`. None of them can demote the anchor here: it prices the
+/// request whether or not the loader has moved since it was measured.
+/// The anchor store this lane reads. Production has exactly one — the packaged, validated store.
+///
+/// The `cfg(test)` override lets a test grade the derivation ITSELF on a store whose contents it
+/// states — the same shape `candle_memory_strategy::synthesize_estimate_floors` already takes as
+/// a parameter, and the same test-seam precedent as
+/// `video_admission::admit_video_generation_with_curves`.
+fn krea_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+    #[cfg(test)]
+    if let Some(store) = tests::injected_anchor_store() {
+        return Some(store);
+    }
+    sceneworks_core::memory_anchor::packaged_memory_anchors()
+}
+
+fn krea_store_anchor(
+    tier: &str,
+    allow_streamed_blocks: bool,
+) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchor> {
+    // A job carrying load-time adapters is exactly the case this lane keeps on its resident/staged
+    // paths, and the anchor render carried no overlay at all.
+    if !allow_streamed_blocks {
+        return None;
+    }
+    krea_anchor_store()
+        .and_then(|store| {
+            store.image_anchor_for(
+                "krea_2_turbo",
+                sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                tier,
+            )
+        })
+        .filter(|anchor| {
+            anchor.route == "krea_2_turbo"
+                && anchor.provider == "krea_2_turbo"
+                && anchor.mode == "text_to_image"
+                && anchor.overlay.is_none()
+                && anchor.reference_count == 0
+        })
+}
+
 /// Select the least-cost measured Krea Turbo fit rung for this tier, geometry, and live budget.
 /// `allow_streamed_blocks` is false when the job carries load-time adapters: the provider preserves
 /// those jobs on its existing resident/staged paths rather than silently omitting their residuals.
@@ -636,14 +1199,66 @@ fn krea_rung_parameters(
 /// candidate anchored to a verified measured record, graded by the shared selector behind the
 /// candle estimate margin — see the synthesis block below for the anchoring and binding-phase
 /// rules.
+///
+/// Since sc-22667 (epic 22657 feature-end round, E3/E4/E7) the lane is on the same law and the
+/// same reserve as the shared candle ladder:
+///
+/// * an OUT-OF-ENVELOPE rung — one the fitted `turboFit` curves cannot price — is derived through
+///   `MemoryAnchor::derive_phase_peaks` with the rung's OWN regime
+///   (`candle_memory_strategy::request_regime` over the manifest's `strategyParameters`: the
+///   decode tile, the attention score budget, the transformer window) and the contract's
+///   architecture facts (`video_admission::architecture_facts_from_contract`), so rung 3 and
+///   rung 4 price their bounded working sets rather than every rung repeating the shallow staged
+///   derivation. In-envelope rungs keep the fitted curves: they are measured evidence.
+/// * `reserve_gb` is the operational reserve — `ladder_reserve_gb` of the caller's RAW probe,
+///   handed in explicitly so a reclaimable-credited `budget` can never derive it — charged
+///   EXACTLY ONCE, on the budget side, against every candidate
+///   (`memory_strategy::ReserveCharge::EveryCandidate`): every candidate this lane grades is a
+///   device delta above the pre-load residency (the measured records, the curves fitted over
+///   them, and the anchor derivation alike), so none carries the reserve inside its peak. The
+///   quoted `needed_gb` is the admitted peak plus that reserve.
+/// * the selection reports its basis and admission figures, so the caller can emit the
+///   `image_memory_strategy_selected` event with the three phase peaks
+///   ([`KreaTurboFit::selection_telemetry`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn krea_turbo_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
+) -> Option<KreaTurboFit> {
+    krea_turbo_fit_priced(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        reserve_gb,
+        allow_streamed_blocks,
+        runtime,
+        None,
+    )
+}
+
+/// [`krea_turbo_fit_with_runtime`] with the architecture facts the derivation scales by as an
+/// explicit input: `None` reads them off the loaded contract (production — the contract's own
+/// `architecture_facts` block through `architecture_facts_from_contract`, sc-22667), `Some` lets
+/// a fixture grade the rung ratios with facts it states directly.
+#[allow(clippy::too_many_arguments)]
+fn krea_turbo_fit_priced(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
+    facts_override: Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
 ) -> Option<KreaTurboFit> {
     use crate::memory_strategy::{self, Budget, Candidate, RequestScope, Selection};
     use gen_core::{
@@ -654,7 +1269,14 @@ pub(crate) fn krea_turbo_fit_with_runtime(
 
     let budget = budget?;
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
-    let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
+    // sc-22735: the identity the LOADED contract publishes is keyed on the artifact-proven tier, so
+    // the fingerprint this fit is graded against has to be read per tier. The scalar remains the
+    // measured q4 string and is the fallback for a manifest that declares no per-tier map.
+    let calibration_fingerprint = turbo_fit
+        .get("calibrationFingerprintByTier")
+        .and_then(|by_tier| by_tier.get(tier))
+        .or_else(|| turbo_fit.get("calibrationFingerprint"))?
+        .as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
     // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
     // worker took the shape from the provider alone, so the axis could not detect drift here. The
@@ -668,25 +1290,32 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         width,
         height,
         batch: 1,
-        frames: 1,
+        frames: KREA_LANE_FRAMES,
         reference_count: 0,
     };
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
-    if pixels > max_pixels {
+    // sc-22509 (epic 22505): a geometry the campaign never measured is no longer a refusal on its
+    // own. The measured memory ANCHOR for this `(model, tier, candle lane)` prices it analytically,
+    // so the hull only refuses when there is no anchor to derive from. The identity guards this
+    // lookup cannot answer yet (contract load shape, live calibration identity) are applied once
+    // `provider_contract` is resolved, and the hull refusal is re-asserted there if they fail.
+    let store_anchor = krea_store_anchor(tier, allow_streamed_blocks);
+    let out_of_envelope = pixels > max_pixels;
+    if out_of_envelope && store_anchor.is_none() {
         return Some(KreaTurboFit::Unverified {
             reason: MemoryEvidenceVerdict::OutOfEnvelope,
         });
     }
-    let load_root = runtime
-        .map(|runtime| runtime.resolved_artifact_root.clone())
-        .unwrap_or_default();
-    let provider_contract = crate::inference_runtime::media()
-        .memory_strategy_contract(
-            "krea_2_turbo",
-            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(load_root)),
-        )
-        .ok()
-        .flatten()?;
+    // Runtime artifact identity is a required evidence dimension. Preserve the explicit unverified
+    // result when it is unavailable instead of attempting provider source validation against an
+    // empty path and collapsing to `None`; callers keep the same resident-or-reject fallback, while
+    // diagnostics retain the truthful reason.
+    if runtime.is_none() {
+        return Some(KreaTurboFit::Unverified {
+            reason: MemoryEvidenceVerdict::Unverified,
+        });
+    }
+    let provider_contract = runtime.and_then(|runtime| runtime.provider_contract.as_ref())?;
     let numeric_tier = gen_core::MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: match tier {
@@ -697,14 +1326,35 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         },
         component_precision_floors: &[],
     };
-    let measured_closure_digest = turbo_fit
-        .get("inferenceClosureDigest")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let live_closure_digest =
-        sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
-            .unwrap_or_default();
+    // The remaining anchor identity conjunct, now that the loaded contract is available: the anchor
+    // was measured under one materialization shape, and eager and deferred are not interchangeable.
+    // Currency was already graded in `krea_store_anchor` on the loader closure and is deliberately
+    // not re-asked here against the calibration campaign (sc-22511: provenance, not currency).
+    let anchor = store_anchor.filter(|anchor| {
+        let anchor_load_shape = match anchor.load_shape {
+            sceneworks_core::memory_anchor::AnchorLoadShape::EagerMaterialization => {
+                gen_core::LoadShape::EagerMaterialization
+            }
+            sceneworks_core::memory_anchor::AnchorLoadShape::DeferredMaterialization => {
+                gen_core::LoadShape::DeferredMaterialization
+            }
+        };
+        anchor_load_shape == provider_contract.load_shape
+    });
+    if out_of_envelope && anchor.is_none() {
+        return Some(KreaTurboFit::Unverified {
+            reason: MemoryEvidenceVerdict::OutOfEnvelope,
+        });
+    }
+    if !reserve_gb.is_finite() || reserve_gb < 0.0 {
+        return None;
+    }
+    // The law's inputs for the out-of-envelope rungs (sc-22667): the component bytes of the
+    // loaded tier and the model's architecture facts, both off the contract.
+    let components = crate::video_admission::anchor_component_bytes(provider_contract.asset_facts);
+    let facts = facts_override.unwrap_or_else(|| {
+        crate::video_admission::architecture_facts_from_contract(provider_contract)
+    });
     let request = RequestScope {
         resolved_route: "krea_2_turbo",
         backend: "candle",
@@ -712,8 +1362,6 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         mode: "text_to_image",
         overlay: (!allow_streamed_blocks).then_some("adapter"),
         geometry,
-        // sc-17774: one mechanism, read not frozen.
-        expected_closure_digest: &live_closure_digest,
     };
     let resident_peak_gb = manifest_entry
         .get("candle")?
@@ -847,19 +1495,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         let expected_compute_capability = loadability
             .and_then(|loadability| loadability.get("computeCapability"))
             .and_then(json_f64);
-        // sc-17774: the lane's own compile closure, not a frozen inference SHA. `inference_revision`
-        // stays parsed above as capture provenance for the receipt.
+        // `inference_revision` stays parsed above as capture provenance for the receipt, and since
+        // sc-22738 so does `turboFit.inferenceClosureDigest`: the lane's compile closure is a
+        // re-capture signal for the probe tooling, never a conjunct that can un-verify this
+        // dimension at runtime.
         let current_environment = scene_works_revision == KREA_TURBO_SCENEWORKS_REVISION
-            && turbo_fit
-                .get("inferenceClosureDigest")
-                .and_then(Value::as_str)
-                .is_some_and(|declared| {
-                    sceneworks_core::memory_calibration::packaged_closure_digest(
-                        "candle",
-                        "krea_2_turbo",
-                    )
-                    .is_some_and(|live| live == declared)
-                })
             && turbo_fit.get("measured").and_then(Value::as_bool) == Some(true)
             && runtime.is_some_and(|runtime| {
                 !runtime.gpu_id.trim().is_empty()
@@ -983,14 +1623,17 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         });
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "krea_2_turbo".to_owned(),
                 resolved_route: "krea_2_turbo".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: provider_contract.load_shape,
                 mode: gen_core::MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 // The existing measurements cover ordinary T2I only.
                 overlay: None,
                 geometry: at_geometry,
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition,
                 parameters: selection.parameters,
@@ -1028,27 +1671,156 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         MemoryStrategy::BoundedAttention,
         MemoryStrategy::BoundedTransformerResidency,
     ];
-    let mut evidence = vec![make_evidence(
-        resident_selection,
-        None,
-        resident_peak_gb,
-        None,
-        evidence_record,
-        geometry,
-    )];
-    let mut selections = vec![resident_selection];
+    // sc-22509 review (blocker): the resident rung is priced by `candle.vramGbByTier[tier]`, a
+    // SCALAR measured at `vramMeasuredPixels` that does not scale with geometry at all. Inside the
+    // measured hull that is the row the lane has always quoted; OUTSIDE it the row is simply not a
+    // price for the request, and the anchor cannot supply one either — the derivation refuses
+    // `staged_residency: false`, because the shallow staged anchor does not price a whole-model
+    // resident working set. So an out-of-envelope request emits NO resident candidate: a rung with
+    // no priced basis is honestly Missing, not `Measured` at a 1024x1024 number. Without this the
+    // hull-refusal bypass above would admit e.g. a 2048x2048 q4 request as `Resident` at 25.7 GiB
+    // on a 32 GB card, which previously returned `OutOfEnvelope`.
+    let mut evidence = Vec::new();
+    let mut selections = Vec::new();
+    if !out_of_envelope {
+        evidence.push(make_evidence(
+            resident_selection,
+            None,
+            resident_peak_gb,
+            None,
+            evidence_record,
+            geometry,
+        ));
+        selections.push(resident_selection);
+    }
     let mut measured = Vec::new();
+    // sc-22509: rungs the manifest curves cannot price at this geometry, derived from the anchor.
+    // They are candidates in their own right — never `Measured` — so they are collected apart from
+    // the curve-priced evidence above.
+    let mut anchor_derived: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
     for strategy in optimized_strategies {
-        let phases = krea_rung_phase_peaks(manifest_entry, tier, strategy, width, height)?;
-        let phase_peak_gb = phases.peak_gb();
-        let needed_gb = phase_peak_gb + HEADROOM_GB;
         let parameters = krea_rung_parameters(turbo_fit, strategy)?;
         let selection = MemorySelection {
             strategy,
             parameters,
             tier: numeric_tier,
         };
-        measured.push((strategy, phases, needed_gb, selection));
+        let curve_phases = krea_rung_phase_peaks(
+            manifest_entry,
+            tier,
+            strategy,
+            width,
+            height,
+            geometry.frames,
+        );
+        let Some(phases) = curve_phases else {
+            // No measured curve reaches this cell. Derive it from the anchor for the exact rung
+            // composition the provider would execute. A rung the anchor cannot price — no anchor at
+            // all, or a composition running whole-model resident, which the shallow staged anchor
+            // does not cover — is SKIPPED, never propagated out of the function (sc-22509 review):
+            // `?` here would collapse every other rung's candidate and destroy the selector's own
+            // Missing/Reject verdict, turning a truthful `Unverified { OutOfEnvelope }` into a bare
+            // `None`.
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            if anchor.underived_reason.is_some()
+                || anchor.backend != sceneworks_core::memory_anchor::AnchorBackend::Candle
+            {
+                continue;
+            }
+            let engaged = provider_contract.engaged_composition(strategy);
+            // sc-22667: the rung's OWN regime — its engaged composition and the parameters the
+            // manifest selects for it — through the one law, with the contract's facts. Rungs 3
+            // and 4 therefore price their chunk and window where the shallow shim priced every
+            // rung at the staged working set. A rung whose parameters are incomplete cannot be
+            // executed as selected and is skipped, like a rung the law refuses.
+            let Some(regime) = crate::candle_memory_strategy::request_regime(&engaged, &parameters)
+            else {
+                continue;
+            };
+            let Some(derived) = anchor.derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
+                    width,
+                    height,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
+                },
+                components,
+                facts,
+            ) else {
+                continue;
+            };
+            let phases = KreaTurboPhasePeaks {
+                text_gb: derived.conditioning as f64 / BYTES_PER_GIB,
+                denoise_gb: derived.denoise as f64 / BYTES_PER_GIB,
+                decode_gb: derived.decode as f64 / BYTES_PER_GIB,
+            };
+            let predicted_peak_bytes = bytes(phases.peak_gb());
+            tracing::info!(
+                route = "krea_2_turbo",
+                backend = "candle",
+                ?strategy,
+                anchor = anchor.id.as_str(),
+                anchor_geometry = format!("{}x{}", anchor.geometry.width, anchor.geometry.height),
+                conditioning_peak_bytes = derived.conditioning,
+                denoise_peak_bytes = derived.denoise,
+                decode_peak_bytes = derived.decode,
+                raw_peak_bytes = predicted_peak_bytes,
+                "synthesized anchor-derived estimate candidate for a geometry outside the \
+                 measured curve envelope"
+            );
+            measured.push((
+                strategy,
+                phases,
+                phases.peak_gb() + reserve_gb,
+                selection,
+                true,
+            ));
+            anchor_derived.push((
+                selection,
+                MemoryEvidence {
+                    key: MemoryEvidenceKey {
+                        model_family: "krea_2_turbo".to_owned(),
+                        resolved_route: "krea_2_turbo".to_owned(),
+                        backend: gen_core::MemoryBackend::Candle,
+                        tier: numeric_tier,
+                        load_shape: provider_contract.load_shape,
+                        mode: gen_core::MemoryMode::TextToImage,
+                        reference_shape: gen_core::MemoryReferenceShape::None,
+                        overlay: None,
+                        geometry,
+                        frames_per_second: None,
+                        strategy,
+                        engaged_composition: engaged,
+                        parameters,
+                    },
+                    conformance: MemoryConformanceState::ImplementedUnverified,
+                    dimensions: MemoryEvidenceDimensions {
+                        static_implementation: MemoryEvidenceVerdict::Satisfied,
+                        declared_calibration: MemoryEvidenceVerdict::Missing,
+                        historical_verification: MemoryEvidenceVerdict::Missing,
+                        current_environment_verification: MemoryEvidenceVerdict::Missing,
+                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+                    },
+                    calibration_abi,
+                    calibration_fingerprint: calibration_fingerprint.to_owned(),
+                    sceneworks_revision: scene_works_revision.to_owned(),
+                    inference_revision: inference_revision.to_owned(),
+                    harness_version: String::new(),
+                    predicted_peak_bytes,
+                    observed_peak_bytes: None,
+                    parity: MemoryParityContract::Exact,
+                    parity_result: MemoryParityResult::NotRun,
+                },
+            ));
+            continue;
+        };
+        let phase_peak_gb = phases.peak_gb();
+        let needed_gb = phase_peak_gb + reserve_gb;
+        measured.push((strategy, phases, needed_gb, selection, false));
         evidence.push(make_evidence(
             selection,
             Some(krea_turbo_manifest_key(strategy)),
@@ -1065,7 +1837,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     // per-phase curves ARE the fitted model over this tier's measured cells, so an in-envelope
     // request geometry nobody measured gets an estimate candidate per optimized rung at the
     // curve-predicted peak, graded by the shared selector behind the candle ESTIMATE margin
-    // (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`). Where the exact request cell has a
+    // (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`). Where the exact request cell has a
     // verified record, the selector's measured-supersedes-estimate rule keeps admission
     // byte-for-byte unchanged.
     //
@@ -1090,20 +1862,30 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     // always has a curve, and a floor from the resident row could never admit deeper than the
     // resident baseline it equals, so a suppressed rung honestly falls out of estimate admission.
     let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
-    for (strategy, phases, _, selection) in &measured {
+    for (strategy, phases, _, selection, from_anchor) in &measured {
+        if *from_anchor {
+            // Priced by the anchor derivation, not by the tier's curves: the fitted-estimate
+            // synthesis below has nothing to say about it and must not relabel it `fitted`.
+            continue;
+        }
         let manifest_rung = krea_turbo_manifest_key(*strategy);
         let record_is_eligible = |record: &Value, record_width: u32, record_height: u32| {
-            let Some(anchor_phases) =
-                krea_rung_phase_peaks(manifest_entry, tier, *strategy, record_width, record_height)
-            else {
-                return false;
-            };
             let anchor_geometry = MemoryGeometry {
                 width: record_width,
                 height: record_height,
                 batch: 1,
-                frames: 1,
+                frames: KREA_LANE_FRAMES,
                 reference_count: 0,
+            };
+            let Some(anchor_phases) = krea_rung_phase_peaks(
+                manifest_entry,
+                tier,
+                *strategy,
+                record_width,
+                record_height,
+                anchor_geometry.frames,
+            ) else {
+                return false;
             };
             // The FULL measured-eligibility predicate, not just `Verified` conformance: it
             // additionally requires the record's measured composition to agree with the loaded
@@ -1117,7 +1899,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 Some(record),
                 anchor_geometry,
             )
-            .optimized_eligibility(&provider_contract)
+            .optimized_eligibility(provider_contract)
             .is_ok()
         };
         // FAIL CLOSED ON THE WHOLE TIER (sc-18097 review, major finding). The tier's phase curves
@@ -1190,13 +1972,16 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             *selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    model_family: "krea_2_turbo".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
                     tier: numeric_tier,
                     load_shape: provider_contract.load_shape,
                     mode: gen_core::MemoryMode::TextToImage,
+                    reference_shape: gen_core::MemoryReferenceShape::None,
                     overlay: None,
                     geometry,
+                    frames_per_second: None,
                     strategy: selection.strategy,
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,
@@ -1228,29 +2013,58 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         .map(|(selection, evidence)| Candidate {
             selection: *selection,
             evidence,
-            closure_digest: &measured_closure_digest,
             basis: memory_strategy::CandidateBasis::Measured,
+            unmodeled_activation_bytes: None,
         })
         .collect::<Vec<_>>();
-    // Synthesized under (and anchored to) the live closure — there is nothing for currency to
-    // invalidate, exactly like the MLX gate's synthesized candidates (sc-18096).
     candidates.extend(estimates.iter().map(|(selection, evidence)| Candidate {
         selection: *selection,
         evidence,
-        closure_digest: &live_closure_digest,
         basis: memory_strategy::CandidateBasis::EstimateFittedCurve,
+        // A fitted per-phase curve carries no weights/activation split (sc-22508); its remaining
+        // uncertainty is the same-cell recapture spread the policy charges on the whole peak.
+        unmodeled_activation_bytes: None,
     }));
-    let selection = memory_strategy::select_strategy(
+    // sc-22509: anchor-derived rungs.
+    candidates.extend(
+        anchor_derived
+            .iter()
+            .map(|(selection, evidence)| Candidate {
+                selection: *selection,
+                evidence,
+                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: memory_strategy::AnchorDerivationLane::Image,
+                },
+                // No weights/activation split (sc-22508), for the same reason the fitted-curve
+                // candidate above has none: the anchor derivation decomposes its peak by PHASE
+                // (conditioning/denoise/decode), not into counted weights plus an activation
+                // remainder. Only the manifest-row FLOOR declares that split, so the allowance is
+                // charged on the whole peak here.
+                unmodeled_activation_bytes: None,
+            }),
+    );
+    // sc-22667: the operational reserve is charged ONCE, on the budget side, against every
+    // candidate (`ReserveCharge::EveryCandidate`): none of this lane's candidates carries a pad
+    // inside its peak — see the function doc. The legacy fixed `HEADROOM_GB` is gone from both
+    // sides of the comparison.
+    let selection = memory_strategy::select_strategy_charging(
         request,
-        &provider_contract,
+        provider_contract,
         Some(Budget {
             available_gb: budget.free_gb,
             reclaimable_gb: 0.0,
             total_gb: budget.total_gb,
-            reserved_headroom_gb: HEADROOM_GB,
+            reserved_headroom_gb: reserve_gb,
         }),
         &candidates,
+        memory_strategy::ReserveCharge::EveryCandidate,
     );
+    let admitted =
+        |needed_gb: f64, available_gb: f64| crate::candle_memory_strategy::AdmittedBudget {
+            needed_gb,
+            available_gb,
+            reserve_gb,
+        };
     match selection {
         Selection::Selected {
             selection:
@@ -1259,20 +2073,33 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     ..
                 },
             needed_gb,
-            ..
+            available_gb,
         } => Some(KreaTurboFit::Resident {
             peak_gb: resident_peak_gb,
-            needed_gb: needed_gb + HEADROOM_GB,
+            needed_gb: needed_gb + reserve_gb,
             selection: selected,
+            admitted: admitted(needed_gb, available_gb),
         }),
         Selection::Selected {
             selection: selected,
             needed_gb,
-            ..
+            available_gb,
         } => {
-            let (_, phases, _, _) = measured
+            let (_, phases, _, _, from_anchor) = measured
                 .into_iter()
-                .find(|(_, _, _, selection)| selection.strategy == selected.strategy)?;
+                .find(|(_, _, _, selection, _)| selection.strategy == selected.strategy)?;
+            // What priced the rung: the anchor derivation, else the request cell's own measured
+            // record, else the tier's fitted curve (the only estimate an in-envelope cell without
+            // a record can be carried by — see `Fits::estimate_scoped`).
+            let basis = if from_anchor {
+                memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: memory_strategy::AnchorDerivationLane::Image,
+                }
+            } else if evidence_record.is_some() {
+                memory_strategy::CandidateBasis::Measured
+            } else {
+                memory_strategy::CandidateBasis::EstimateFittedCurve
+            };
             let memory = gen_core::GenerationMemory {
                 tile_vae_decode: provider_contract
                     .engages(selected.strategy, MemoryStrategy::BoundedDecode),
@@ -1286,9 +2113,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             };
             Some(KreaTurboFit::Fits {
                 phases,
-                needed_gb: needed_gb + HEADROOM_GB,
+                needed_gb: needed_gb + reserve_gb,
                 selection: selected,
                 memory,
+                basis,
+                admitted: admitted(needed_gb, available_gb),
                 // See the field doc: with no `exact_request` record at this geometry the rung's
                 // measured candidates are structurally excluded, so only a synthesized estimate
                 // can have carried it.
@@ -1296,10 +2125,10 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             })
         }
         Selection::Reject { needed_gb, .. } => {
-            let (_, phases, _, _) = measured.last().copied()?;
+            let (_, phases, _, _, _) = measured.last().copied()?;
             Some(KreaTurboFit::Reject {
                 phases,
-                needed_gb: needed_gb + HEADROOM_GB,
+                needed_gb: needed_gb + reserve_gb,
             })
         }
         // sc-18097 narrowed this arm's meaning: an in-envelope unmeasured geometry now carries a
@@ -1311,6 +2140,17 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         Selection::Unverified { reason } => Some(KreaTurboFit::Unverified { reason }),
     }
 }
+
+/// The reserve the threshold fixtures below were calibrated against: the legacy 2 GB, which is
+/// exactly what [`ladder_reserve_gb`] produces for a card whose idle baseline is at or above
+/// `HEADROOM_GB - LADDER_RESERVE_MARGIN_GB` (the ceiling arm). The reserve is an INPUT of the lane
+/// since sc-22667 — production derives it from the raw probe — so the fixtures state it rather
+/// than re-deriving a different number from their `free == total` budgets, which would move
+/// every calibrated admission threshold for no reason connected to what they grade. The
+/// derivation itself is graded by the `ladder_reserve_*` tests and by
+/// `an_out_of_envelope_krea_request_charges_the_ladder_reserve_once`.
+#[cfg(test)]
+const KREA_FIXTURE_RESERVE_GB: f64 = HEADROOM_GB;
 
 #[cfg(test)]
 fn krea_turbo_fit(
@@ -1328,6 +2168,7 @@ fn krea_turbo_fit(
         width,
         height,
         budget,
+        KREA_FIXTURE_RESERVE_GB,
         allow_streamed_blocks,
         Some(&runtime),
     )
@@ -1344,12 +2185,14 @@ fn krea_turbo_fit(
 /// a second refusal at the geometry the user was just told to switch to. `Resident` keeps its
 /// pre-sc-18097 acceptance: that verdict is the manifest's geometry-independent `vramGbByTier`
 /// row, which this helper has always been allowed to quote.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn krea_turbo_smaller_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<(u32, u32)> {
@@ -1374,6 +2217,7 @@ pub(crate) fn krea_turbo_smaller_fit_with_runtime(
                 *w,
                 *h,
                 budget,
+                reserve_gb,
                 allow_streamed_blocks,
                 runtime,
             ),
@@ -1404,6 +2248,7 @@ fn krea_turbo_smaller_fit(
         width,
         height,
         budget,
+        KREA_FIXTURE_RESERVE_GB,
         allow_streamed_blocks,
         Some(&runtime),
     )
@@ -1881,6 +2726,59 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
+/// Fail-closed admission for the MiniMax-H3 Candle lane. Every user-selectable tier has a
+/// real-weight whole-render peak measured at the shipped 1344x768 geometry; admitting without the
+/// exact tier row (or without a live free-VRAM reading) would make the catalog flip an unproved OOM
+/// path. User LoRA bytes are independently resident and are charged above that baseline.
+pub(crate) fn minimax_h3_fit_error(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    const MEASURED_PIXELS: u64 = 1_032_192;
+    let candle = manifest_entry.get("candle");
+    let measured = candle
+        .and_then(|value| value.get("measured"))
+        .and_then(Value::as_bool);
+    let measured_pixels = candle
+        .and_then(|value| value.get("vramMeasuredPixels"))
+        .and_then(Value::as_u64);
+    let peak_gb = candle
+        .and_then(|value| value.get("vramGbByTier"))
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(json_f64)
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let (true, Some(MEASURED_PIXELS), Some(peak_gb)) =
+        (measured == Some(true), measured_pixels, peak_gb)
+    else {
+        return Some(WorkerError::InvalidPayload(format!(
+            "MiniMax-H3 Candle admission is unavailable because the installed catalog has no \
+             complete measured {tier_key} CUDA row at 1344x768. Refusing to load unproved \
+             weights; update SceneWorks before retrying."
+        )));
+    };
+    let Some(budget) = budget else {
+        return Some(WorkerError::InvalidPayload(
+            "MiniMax-H3 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing \
+             to load the measured tier without proving that it fits; verify the NVIDIA \
+             driver/runtime and retry."
+                .to_owned(),
+        ));
+    };
+    let needed_gb = peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB;
+    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+        WorkerError::InvalidPayload(format!(
+            "MiniMax-H3 needs ~{needed} GB of free GPU VRAM for its measured {tier_key} render \
+             peak plus CUDA reserve, but GPU {gpu_id} has ~{available} GB available. Select a \
+             smaller quant tier or use a GPU with more free VRAM.",
+            needed = needed_gb.ceil() as u64,
+            available = budget.free_gb.round() as u64,
+        ))
+    })
+}
+
 /// Fail-closed admission for the shared SCAIL-2 Candle bf16 package. Unlike the generic Wan gate,
 /// SCAIL has no lower-memory Candle tier and no sequential/offload lifecycle, so falling back to
 /// on-disk bytes or admitting an absent row would turn an incomplete catalog into a real OOM. The
@@ -1892,11 +2790,12 @@ pub(crate) fn scail2_video_fit_error(
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, gpu_id, budget)
+    scail2_video_fit_error_with_adapter_bytes(manifest_entry, "bf16", 0, gpu_id, budget)
 }
 
 pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     manifest_entry: &JsonObject,
+    tier_key: &str,
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
@@ -1908,7 +2807,7 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         .and_then(Value::as_bool);
     let peak_gb = candle
         .and_then(|value| value.get("vramGbByTier"))
-        .and_then(|tiers| tiers.get("bf16"))
+        .and_then(|tiers| tiers.get(tier_key))
         .and_then(json_f64)
         .filter(|value| value.is_finite() && *value > 0.0);
     let min_memory_gb = candle
@@ -1924,36 +2823,37 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         measured_pixels,
     ) else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
-             measured bf16 CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
-             Refusing to load the 47.2 GB shared package; update SceneWorks before retrying."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
+                 measured {tier_key} CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
+                 Refusing to load the selected {tier_key} package; update SceneWorks before retrying."
+            ),
         ));
     };
     let base_needed_gb = peak_gb + HEADROOM_GB;
     if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
         return Some(WorkerError::InvalidPayload(format!(
             "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
-             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
-             47.2 GB shared package; update SceneWorks before retrying.",
+             is below the measured {tier_key} CUDA peak plus reserve (~{} GB). Refusing to load the \
+             selected {tier_key} package; update SceneWorks before retrying.",
             base_needed_gb.ceil() as u64,
         )));
     }
     let needed_gb = base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
-             load the 47.2 GB shared package without proving that the measured bf16 render peak \
-             fits; verify the NVIDIA driver/runtime and retry."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
+                 load the selected {tier_key} package without proving that its measured render peak \
+                 fits; verify the NVIDIA driver/runtime and retry."
+            ),
         ));
     };
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         WorkerError::InvalidPayload(format!(
-            "SCAIL-2 shared bf16 needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
+            "SCAIL-2 shared {tier_key} needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
              81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \
-             available. Its Candle provider has no lower-memory tier or sequential offload; use a \
-             GPU with more free VRAM, or use the MLX q4/q8 tiers on macOS.",
+             available. Select a measured SCAIL-2 tier that fits, or use a GPU with more free VRAM.",
             needed = needed_gb.ceil() as i64,
             available = budget.free_gb.round() as i64,
         ))
@@ -2195,12 +3095,10 @@ mod tests {
 
     /// The shipped Krea entry with its `turboFit` closure digest overridden to the LIVE one.
     ///
-    /// sc-17774: the shipped ladder declares the digest it was actually measured under, and that is
-    /// currently behind the pin — `candle-gen-krea` itself has not moved, but `gen-core` has, so the
-    /// currency gate (correctly, for a source-level unit) reports it stale. Every test below is about
-    /// which RUNG the ladder selects, which is a different axis; leaving them to trip over currency
-    /// would stop them testing the ladder at all. Currency itself is covered by
-    /// `krea_control_fit::tests::a_stale_control_closure_falls_back_instead_of_reporting_a_fit`.
+    /// The override was load-bearing before sc-22738, when the shipped ladder's measured-under
+    /// digest sat behind the pin and the currency gate refused it. Currency no longer gates
+    /// anything at runtime, so this now only keeps the fixture's declared provenance honest and
+    /// every test below reads exactly the rung selection it means to.
     ///
     /// Read, never frozen — a literal would go stale on the next pin bump.
     fn builtin_krea_turbo_manifest_at_live_closure() -> JsonObject {
@@ -2245,6 +3143,600 @@ mod tests {
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
         manifest
+    }
+
+    /// Every `(tier, rung, phase)` curve object actually committed to the builtin manifest, paired
+    /// with a label naming its coordinate. Read from the SHIPPED file, so a curve added or removed
+    /// downstream is covered without anybody remembering to extend the pin.
+    fn committed_phase_curves() -> Vec<(String, JsonObject)> {
+        let manifest = builtin_krea_turbo_manifest();
+        let tiers = manifest["candle"]["turboFit"]["phaseCurvesByTier"]
+            .as_object()
+            .expect("phaseCurvesByTier")
+            .clone();
+        let mut curves = Vec::new();
+        for (tier, rungs) in tiers {
+            for (rung, phases) in rungs.as_object().expect("rung map") {
+                for (phase, curve) in phases.as_object().expect("phase map") {
+                    curves.push((
+                        format!("{tier}.{rung}.{phase}"),
+                        curve.as_object().expect("curve object").clone(),
+                    ));
+                }
+            }
+        }
+        curves.sort_by(|left, right| left.0.cmp(&right.0));
+        curves
+    }
+
+    /// sc-18812 MIGRATION PIN. The temporal term is additive, so every curve that omits
+    /// `perMpxFrameGb` must evaluate to the SAME f64 it did before the term existed — not "within
+    /// a tolerance", the same bit pattern.
+    ///
+    /// This is graded over the real committed coefficients rather than a fixture, and the expected
+    /// value is spelled here as the pre-sc-18812 expression **with its original association**.
+    /// That association is the whole point: `per_mpx * pixels as f64 / 1_000_000.0` and
+    /// `per_mpx * (pixels as f64 / 1_000_000.0)` are different f64s in general, so a rewrite that
+    /// factored out a `mpx` local while "obviously" preserving the formula would silently move
+    /// every shipped image prediction. Asserting a DEFAULT here would prove nothing; asserting the
+    /// arithmetic over real values is what makes it load-bearing.
+    #[test]
+    fn committed_image_curves_evaluate_bit_identically_to_the_two_coefficient_form() {
+        let curves = committed_phase_curves();
+        assert_eq!(
+            curves.len(),
+            36,
+            "3 tiers x 4 rungs x 3 phases of shipped curves must all be graded; \
+             a changed population means this pin is covering something else"
+        );
+        for (label, curve) in &curves {
+            assert!(
+                !curve.contains_key("perMpxFrameGb"),
+                "{label}: the image lane must carry no temporal coefficient — \
+                 the migration claim is that every shipped curve is still two-coefficient"
+            );
+            let fixed = curve["fixedGb"].as_f64().expect("fixedGb");
+            let per_mpx = curve["perMpxGb"].as_f64().expect("perMpxGb");
+            for pixels in [512 * 512_u64, 768 * 768, 1024 * 1024, 1_000_001, 3] {
+                let expected = fixed + per_mpx * pixels as f64 / 1_000_000.0;
+                let actual = krea_phase_curve(curve, CurveGeometry { pixels, frames: 1 })
+                    .expect("a shipped curve evaluates");
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} at {pixels}px: {actual} is not bit-identical to the \
+                     pre-sc-18812 value {expected}"
+                );
+                // ...and the temporal axis must be inert on a curve that declares no temporal
+                // coefficient, at every frame count, not merely at 1.
+                for frames in [1_u32, 2, 121, 297, 450] {
+                    let temporal = krea_phase_curve(curve, CurveGeometry { pixels, frames })
+                        .expect("a shipped curve evaluates at any frame count");
+                    assert_eq!(
+                        temporal.to_bits(),
+                        expected.to_bits(),
+                        "{label} at {pixels}px x {frames}f: an absent perMpxFrameGb moved the value"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The cross term is real arithmetic, not a decorative key: a curve that declares it must
+    /// price frames. Synthetic, because no committed curve carries the coefficient yet — a
+    /// discriminating case has to be constructed rather than borrowed.
+    #[test]
+    fn a_declared_temporal_coefficient_prices_frames() {
+        let curve = obj(json!({
+            "fixedGb": 2.5151564578656265,
+            "perMpxGb": 0.12442967585020881,
+            "perMpxFrameGb": 0.2998482076533136
+        }));
+        let pixels = 1280 * 704_u64;
+        let at = |frames: u32| {
+            krea_phase_curve(&curve, CurveGeometry { pixels, frames }).expect("curve evaluates")
+        };
+        let expected = |frames: u32| {
+            2.5151564578656265
+                + 0.12442967585020881 * pixels as f64 / 1_000_000.0
+                + 0.2998482076533136 * pixels as f64 / 1_000_000.0 * f64::from(frames)
+        };
+        for frames in [1_u32, 121, 177, 241] {
+            assert_eq!(
+                at(frames).to_bits(),
+                expected(frames).to_bits(),
+                "{frames}f"
+            );
+        }
+        assert!(
+            at(241) > at(121) + 30.0,
+            "241 frames must cost materially more than 121: {} vs {}",
+            at(241),
+            at(121)
+        );
+    }
+
+    /// A PRESENT but unreadable temporal coefficient fails the whole curve closed. Absence is the
+    /// only thing that means zero: silently degrading a malformed video curve into a valid image
+    /// curve would hand admission a number nobody measured.
+    ///
+    /// The set below is NOT "everything a schema would reject", and the second control says so out
+    /// loud: `json_f64` reads a numeric STRING, so `"0.3"` evaluates exactly as `0.3` does. That is
+    /// deliberate and long-standing — `fixedGb` and `perMpxGb` are read through the same helper —
+    /// and rejecting a string-typed coefficient belongs to `#/$defs/phaseVramCurve`, which types
+    /// all three as `number` (pinned by `test_schema_admits_the_temporal_coefficient_additively`).
+    /// Asserting the accepted case here is what stops this test from being read as covering type
+    /// enforcement it does not perform.
+    #[test]
+    fn a_malformed_temporal_coefficient_fails_the_curve_closed() {
+        let with =
+            |value: Value| obj(json!({ "fixedGb": 1.0, "perMpxGb": 2.0, "perMpxFrameGb": value }));
+        for bad in [
+            json!(-0.5),
+            json!("not a number"),
+            json!(null),
+            json!([1.0]),
+        ] {
+            assert_eq!(
+                krea_phase_curve(
+                    &with(bad.clone()),
+                    CurveGeometry {
+                        pixels: 1_000_000,
+                        frames: 1
+                    }
+                ),
+                None,
+                "a curve carrying perMpxFrameGb {bad} must not evaluate"
+            );
+        }
+        // The control: the SAME curve shape with a readable coefficient does evaluate, so the
+        // rejections above are attributable to the value and not to the key's presence.
+        assert_eq!(
+            krea_phase_curve(
+                &with(json!(0.25)),
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
+            Some(1.0 + 2.0 + 0.25)
+        );
+        // The BOUNDARY control, stated rather than left to be discovered: a numeric string is
+        // READABLE, not malformed. `json_f64` parses it, so the curve evaluates and the temporal
+        // term is genuinely 0.25 — asserted against the literal sum, not against the bare-number
+        // call, so a reader that stopped honouring the coefficient at all cannot satisfy both.
+        // Type enforcement is the schema's job, not this reader's.
+        assert_eq!(
+            krea_phase_curve(
+                &with(json!("0.25")),
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
+            Some(1.0 + 2.0 + 0.25),
+            "a numeric string is readable, not malformed: the schema rejects the type, not this reader"
+        );
+    }
+
+    /// A zero-frame geometry is nonsense, not a still. Pricing it as the bare intercept would
+    /// under-quote every phase.
+    #[test]
+    fn a_zero_frame_geometry_is_refused_rather_than_priced_as_the_intercept() {
+        let curve = obj(json!({ "fixedGb": 4.0, "perMpxGb": 1.0 }));
+        assert_eq!(
+            krea_phase_curve(
+                &curve,
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 0
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            krea_phase_curve(
+                &curve,
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1
+                }
+            ),
+            Some(5.0)
+        );
+    }
+
+    /// sc-18812: the temporal extrapolation bound. An image fit declares no `maxMeasuredVoxels`,
+    /// which is read as one output frame, so it refuses multi-frame requests instead of
+    /// extrapolating a curve fitted at a single temporal point.
+    #[test]
+    fn an_image_fit_refuses_multi_frame_geometry_it_never_measured() {
+        let manifest = builtin_krea_turbo_manifest();
+        assert!(
+            manifest["candle"]["turboFit"]
+                .get("maxMeasuredVoxels")
+                .is_none(),
+            "the shipped image fit must declare no temporal bound — this test's premise"
+        );
+        let peaks = |frames: u32| {
+            krea_rung_phase_peaks(
+                &manifest,
+                "q8",
+                MemoryStrategy::StagedResidency,
+                1024,
+                1024,
+                frames,
+            )
+        };
+        assert!(peaks(1).is_some(), "the measured still geometry admits");
+        for frames in [0_u32, 2, 121] {
+            assert_eq!(
+                peaks(frames),
+                None,
+                "{frames} output frames were never measured on the image lane"
+            );
+        }
+    }
+
+    /// A declared voxel bound admits inside itself and refuses outside, and it is a VOXEL bound:
+    /// the same frame count passes at a small area and fails at a large one.
+    ///
+    /// That shape is not a preference. `VaeTiling::writable_frame_cap` is
+    /// `i32::MAX / (full_res_channels * out_h * out_w)`, so the tiling discontinuity the affine
+    /// curve cannot represent is a constant-VOXEL surface; a scalar frame bound would sit at a
+    /// different angle to it and admit geometry on the far side.
+    #[test]
+    fn the_temporal_bound_is_a_voxel_surface_not_a_frame_count() {
+        let mut manifest = builtin_krea_turbo_manifest();
+        // 1024x1024 x 100 frames of measured coverage, declared on the shipped image fit.
+        manifest["candle"]["turboFit"]["maxMeasuredVoxels"] = json!(1024 * 1024 * 100_u64);
+        let peaks = |width: u32, height: u32, frames: u32| {
+            krea_rung_phase_peaks(
+                &manifest,
+                "q8",
+                MemoryStrategy::StagedResidency,
+                width,
+                height,
+                frames,
+            )
+        };
+        assert!(
+            peaks(1024, 1024, 100).is_some(),
+            "exactly at the bound admits"
+        );
+        assert_eq!(
+            peaks(1024, 1024, 101),
+            None,
+            "one voxel past the bound refuses"
+        );
+        // The discriminating pair: ONE frame count, two areas, opposite verdicts. A frame bound
+        // could not tell these apart.
+        assert!(
+            peaks(512, 512, 400).is_some(),
+            "400 frames at a quarter of the area is inside the same voxel bound"
+        );
+        assert_eq!(
+            peaks(1024, 1024, 400),
+            None,
+            "400 frames at full area is outside it"
+        );
+    }
+
+    /// The committed sc-18810 fit report: 13 real q8 LTX records and the fitted `cross`
+    /// coefficients, read from the shipped artifact rather than transcribed.
+    fn ltx_temporal_fit() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../docs/generated/ltx-temporal-form-fit-sc-18810.json"
+        ))
+        .expect("the sc-18810 fit report parses")
+    }
+
+    /// The q8 phase-fit block, resolved by SELECTION rather than by a fixed path.
+    ///
+    /// The report used to expose one tier-indexed slice per phase at `fits[phase].q8`. Since the
+    /// output-FPS axis entered the selector key, q8 maps to TWO complete selectors — fps30 with 11
+    /// records across six geometries, and fps24 with 2 records at a single geometry, which is under
+    /// `fit-ltx-temporal-form.mjs`'s three-geometry floor and therefore carries no fit at all. The
+    /// fitter refuses to pool records across selectors, so for an ambiguous tier it omits the
+    /// tier-indexed view (declaring the tier in `legacyFitsOmittedForTiers`) and carries the fit
+    /// inline on the selector entry instead. That drop is the truthful behaviour, not a regression:
+    /// there is no q8 slice that spans both selectors.
+    ///
+    /// This reader handles BOTH shapes and pins the invariant that makes either one unambiguous —
+    /// exactly one q8 selector may carry a fit, so the coefficients a runtime curve is promoted
+    /// from can never be silently swapped for another selector's.
+    fn ltx_q8_phase_fit<'a>(fit: &'a Value, phase: &str) -> &'a Value {
+        let omitted = fit["legacyFitsOmittedForTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q8"));
+        if !omitted {
+            return &fit["fits"][phase]["q8"];
+        }
+        let fitted: Vec<&Value> = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| entry["selector"]["tier"] == "q8")
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .collect();
+        assert_eq!(
+            fitted.len(),
+            1,
+            "exactly one q8 selector may carry a fit, or `cross` has no single promotable source"
+        );
+        &fitted[0]["fits"][phase]
+    }
+
+    /// The `cross` coefficients for one phase, in MANIFEST WIRE SHAPE — exactly the object a
+    /// `phaseVramCurve` is, with no adaptation.
+    ///
+    /// Note that the per-phase `chosen` is the per-series RMSE winner and is NOT uniformly
+    /// `cross` (text ranks `area_only` first, denoise ranks `latent_tokens` first). The schema
+    /// form adopted by this story is `cross` regardless, and
+    /// [`the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`] pins why.
+    fn ltx_cross_curve(fit: &Value, phase: &str) -> JsonObject {
+        let coefficients = ltx_q8_phase_fit(fit, phase)["candidates"]["cross"]["coefficients"]
+            .as_object()
+            .expect("cross coefficients")
+            .clone();
+        let declared: Vec<&str> = coefficients.keys().map(String::as_str).collect();
+        assert_eq!(
+            declared,
+            ["fixedGb", "perMpxGb", "perMpxFrameGb"],
+            "{phase}: the fitted coefficient set must BE a phaseVramCurve, not merely resemble one"
+        );
+        coefficients
+    }
+
+    /// WHY `cross` and not one of the four rivals, graded from the committed fit report rather
+    /// than from prose. Two independent filters, and only `cross` survives both.
+    ///
+    /// **Filter 1 — the migration must be additive.** `latent_tokens` and `output_voxels` REPLACE
+    /// `perMpxGb` with a different regressor. Adopting either would have rewritten all 36 shipped
+    /// image curves, which is a breaking migration, not an added optional key. Only `additive`
+    /// and `cross` extend `{fixedGb, perMpxGb}`.
+    ///
+    /// **Filter 2 — accuracy where the peak actually lives.** Between those two, `cross` beats
+    /// `additive` by more than 15x on denoise and more than 300x on decode. `additive` is
+    /// nominally better on TEXT, by 1.29x on a phase where both sit inside 0.45 GiB and the
+    /// temporal response is smallest — that is the one place the tidier candidate wins, and it is
+    /// not where admission is decided.
+    #[test]
+    fn the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve() {
+        let fit = ltx_temporal_fit();
+        let shipped = ["fixedGb", "perMpxGb"];
+        let mut extends = Vec::new();
+        let candidates = ltx_q8_phase_fit(&fit, "decode")["candidates"]
+            .as_object()
+            .expect("candidate set");
+        assert_eq!(candidates.len(), 5, "all five fitted forms must be graded");
+        for (name, candidate) in candidates {
+            let keys: Vec<&str> = candidate["coefficients"]
+                .as_object()
+                .expect("coefficients")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            // STRICTLY extends: it keeps both shipped coefficients AND adds a temporal one.
+            // `area_only` is the shipped set itself and adds no temporal axis, so it is not a
+            // candidate for the change being made here.
+            if shipped.iter().all(|key| keys.contains(key)) && keys.len() > shipped.len() {
+                extends.push(name.as_str());
+            }
+        }
+        extends.sort_unstable();
+        assert_eq!(
+            extends,
+            ["additive", "cross"],
+            "only these forms can be an ADDITIVE schema change; the rest replace `perMpxGb`"
+        );
+        let held = |phase: &str, form: &str| {
+            ltx_q8_phase_fit(&fit, phase)["candidates"][form]["heldOut"]["maxAbsGib"]
+                .as_f64()
+                .expect("held-out residual")
+        };
+        for (phase, factor) in [("denoise", 15.0), ("decode", 300.0)] {
+            let (cross, additive) = (held(phase, "cross"), held(phase, "additive"));
+            assert!(
+                cross * factor < additive,
+                "{phase}: cross {cross:.4} must beat additive {additive:.4} by more than {factor}x"
+            );
+        }
+        // Stated rather than hidden: the one phase where the rejected form scores better.
+        assert!(
+            held("text", "additive") < held("text", "cross"),
+            "text is where `additive` wins; if that stops being true this comment is stale"
+        );
+        assert!(
+            held("text", "cross") < 0.45,
+            "...and it only matters if cross is still small there in absolute terms"
+        );
+        // Against the SHIPPED area-only form, which is what the temporal term has to justify
+        // replacing, `cross` is better by orders of magnitude on both geometry-sensitive phases.
+        for phase in ["denoise", "decode"] {
+            assert!(
+                held(phase, "cross") * 50.0 < held(phase, "area_only"),
+                "{phase}: the temporal term must earn its place against the two-coefficient form"
+            );
+        }
+    }
+
+    /// sc-18812 success criterion 3: LTX's fitted curve round-trips
+    /// manifest shape -> production reader -> evaluation -> the sweep's real measured peaks,
+    /// inside the margin sc-18810 itself states.
+    ///
+    /// Nothing here is transcribed: the coefficients, the geometries, the observed peaks and the
+    /// margin all come out of the committed fit report, and the arithmetic is the SHIPPED
+    /// `krea_phase_curve` rather than a re-implementation. If the reader stopped honouring
+    /// `perMpxFrameGb` this fails by ~28 GiB on decode, not by a rounding digit.
+    ///
+    /// The margin is the fit's own worst reported absolute residual across its fit and held-out
+    /// splits. It is deliberately per phase: the whole finding of sc-18810 is that no single
+    /// aggregate margin exists, because the aggregate is a `max` over three curves and misses by
+    /// >= 10.26 GiB under every candidate form.
+    #[test]
+    fn the_ltx_fitted_curve_round_trips_through_the_shipped_reader() {
+        let fit = ltx_temporal_fit();
+        let observations = fit["observations"].as_array().expect("observations");
+        assert_eq!(
+            observations.len(),
+            13,
+            "the sweep's full record set must be graded, not a subset"
+        );
+        // The fitted selector covers 11 of those 13. The other two are the fps24 pair, which sits
+        // at one geometry and so carries no fit of its own — they are graded here as OUT-OF-SAMPLE
+        // points, and the margin below is the fitted selector's own worst residual, never widened
+        // for them. Stated rather than hidden: a reader must be able to see that two of the graded
+        // records never entered the fit.
+        let fitted_records = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .flat_map(|entry| entry["recordIds"].as_array().expect("record ids"))
+            .count();
+        assert_eq!(
+            fitted_records, 11,
+            "the fitted q8 selector's own record count, with the remaining two graded out of sample"
+        );
+        let mut graded = 0_usize;
+        for phase in ["text", "denoise", "decode"] {
+            let curve = ltx_cross_curve(&fit, phase);
+            let candidate = &ltx_q8_phase_fit(&fit, phase)["candidates"]["cross"];
+            let margin = candidate["fit"]["maxAbsGib"]
+                .as_f64()
+                .expect("fit residual")
+                .max(
+                    candidate["heldOut"]["maxAbsGib"]
+                        .as_f64()
+                        .expect("held-out residual"),
+                );
+            assert!(
+                margin > 0.0 && margin < 0.5,
+                "{phase}: a stated margin of {margin} GiB is not a margin this test can grade against"
+            );
+            for observation in observations {
+                let geometry = &observation["geometry"];
+                let width = geometry["width"].as_u64().expect("width");
+                let height = geometry["height"].as_u64().expect("height");
+                let frames = u32::try_from(geometry["frames"].as_u64().expect("frames"))
+                    .expect("frame count fits u32");
+                // Every measured point is single-pass decode, which is what makes an affine
+                // temporal form applicable at all. A tiled record would belong to a different
+                // regime and must not be graded against this curve.
+                assert_eq!(
+                    observation["decodeTilingEngaged"].as_bool(),
+                    Some(false),
+                    "the fit's applicability rests on every point being single-pass"
+                );
+                let predicted = krea_phase_curve(
+                    &curve,
+                    CurveGeometry {
+                        pixels: width * height,
+                        frames,
+                    },
+                )
+                .expect("the fitted LTX curve evaluates through the shipped reader");
+                let observed = observation["activeGib"][phase]
+                    .as_f64()
+                    .expect("observed peak");
+                let residual = (predicted - observed).abs();
+                assert!(
+                    residual <= margin,
+                    "{phase} at {width}x{height}x{frames}f: predicted {predicted:.6} vs \
+                     measured {observed:.6} is {residual:.6} GiB, past the stated {margin:.6}"
+                );
+                graded += 1;
+            }
+        }
+        assert_eq!(
+            graded, 39,
+            "3 phases x 13 records must all have been graded"
+        );
+    }
+
+    /// sc-18829 handoff: "which phase binds at this geometry?" must be answerable from the CURVES,
+    /// at a geometry with no record — and the answer must actually vary, or the question is
+    /// decorative.
+    ///
+    /// Both geometries below are inside LTX's own declared envelope and inside the measured set,
+    /// and the binding phase differs between them: text carries the peak at 11,904 latent tokens
+    /// and decode carries it at 14,080. A per-model constant binding phase would be wrong for one
+    /// of these two.
+    #[test]
+    fn the_binding_phase_flips_within_one_models_envelope() {
+        let fit = ltx_temporal_fit();
+        let curves: Vec<(&str, JsonObject)> = ["text", "denoise", "decode"]
+            .into_iter()
+            .map(|phase| (phase, ltx_cross_curve(&fit, phase)))
+            .collect();
+        let peaks_at = |width: u64, height: u64, frames: u32| {
+            let geometry = CurveGeometry {
+                pixels: width * height,
+                frames,
+            };
+            let value = |name: &str| {
+                krea_phase_curve(
+                    &curves
+                        .iter()
+                        .find(|(phase, _)| *phase == name)
+                        .expect("phase")
+                        .1,
+                    geometry,
+                )
+                .expect("the fitted curve evaluates")
+            };
+            KreaTurboPhasePeaks {
+                text_gb: value("text"),
+                denoise_gb: value("denoise"),
+                decode_gb: value("decode"),
+            }
+        };
+        // 768x512 x 241 output frames = 11,904 latent tokens.
+        assert_eq!(peaks_at(768, 512, 241).binding_phase(), BindingPhase::Text);
+        // 1280x704 x 121 output frames = 14,080 latent tokens.
+        assert_eq!(
+            peaks_at(1280, 704, 121).binding_phase(),
+            BindingPhase::Decode
+        );
+        // ...and the flip is a property of the curves, not of the tie rule: the two triples are
+        // separated well beyond the sweep's worst per-phase residual.
+        let low = peaks_at(768, 512, 241);
+        let high = peaks_at(1280, 704, 121);
+        assert!(low.text_gb - low.decode_gb > 2.0, "{low:?}");
+        assert!(high.decode_gb - high.text_gb > 1.5, "{high:?}");
+    }
+
+    /// The tie rule the sc-18097 comparison seam depends on, stated where a reader can find it.
+    /// Ties resolve to the LATER phase; the index vocabulary is the one that seam is written in.
+    #[test]
+    fn the_binding_phase_resolves_ties_to_the_later_phase() {
+        let peaks = |text: f64, denoise: f64, decode: f64| KreaTurboPhasePeaks {
+            text_gb: text,
+            denoise_gb: denoise,
+            decode_gb: decode,
+        };
+        assert_eq!(peaks(9.0, 1.0, 1.0).binding_phase(), BindingPhase::Text);
+        assert_eq!(peaks(1.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
+        assert_eq!(peaks(1.0, 1.0, 9.0).binding_phase(), BindingPhase::Decode);
+        assert_eq!(peaks(9.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
+        assert_eq!(peaks(9.0, 9.0, 9.0).binding_phase(), BindingPhase::Decode);
+        assert_eq!(
+            [
+                BindingPhase::Text.index(),
+                BindingPhase::Denoise.index(),
+                BindingPhase::Decode.index()
+            ],
+            [0, 1, 2]
+        );
     }
 
     /// sc-17097: NO shipped route may carry a `calibrationAbi` stamp the pinned gen-core has moved
@@ -2358,13 +3850,7 @@ mod tests {
         let turbo_fit = manifest["candle"]["turboFit"]
             .as_object()
             .expect("Krea turbo fit");
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         let identity = provider_contract
             .calibration
             .as_ref()
@@ -2392,6 +3878,7 @@ mod tests {
         // Field-for-field the context `image_jobs::base` builds for a plain Krea Turbo t2i.
         let context = gen_core::MemoryRunContext {
             selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             calibration_abi: u32::try_from(
                 turbo_fit["calibrationAbi"]
                     .as_u64()
@@ -2438,7 +3925,7 @@ mod tests {
         };
 
         let decision = gen_core::standard_memory_strategy_safety_check(
-            &provider_contract,
+            provider_contract,
             &context,
             None,
             None,
@@ -2450,6 +3937,121 @@ mod tests {
              (manifest ABI {}, provider ABI {})",
             context.calibration_abi,
             identity.abi
+        );
+    }
+
+    /// sc-22664 (epic 22657 E4): the ladder's operational reserve is the idle baseline — the
+    /// probe's `total − free`, floored at the measured pre-load residency — plus its named
+    /// margin, capped at the legacy allocator slack: never the fixed 2 GB on a card whose baseline
+    /// is below it, never MORE than it on a card carrying foreign residency, and never below what
+    /// the retained record shows the process carrying.
+    ///
+    /// MUTATION: dropping the `MEASURED_PRELOAD_RESIDENCY_GB` floor from `ladder_reserve_gb`
+    /// reds the fixture, capped and credited arms (each collapses to a baseline below the record).
+    #[test]
+    fn ladder_reserve_is_the_idle_baseline_plus_the_margin_capped_at_the_legacy_slack() {
+        let floor = MEASURED_PRELOAD_RESIDENCY_GB;
+        assert!(floor > 0.9 && floor < 1.0, "{floor}");
+        // The AC fixture: total 8.0, free 7.3 → 0.7 GB probed idle, BELOW the measured residency,
+        // so the record's residency is the baseline (D3): a cold probe cannot see its own context.
+        let fixture = ladder_reserve_gb(VramBudget {
+            free_gb: 7.3,
+            total_gb: 8.0,
+        });
+        assert!(
+            (fixture - (floor + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9,
+            "{fixture}"
+        );
+        assert!(fixture > 0.7 + LADDER_RESERVE_MARGIN_GB);
+        assert!(fixture < HEADROOM_GB);
+        // A dedicated card at rest with its context already up: ~1.2 GB of context + WDDM
+        // residency probed, above the floor, charged once.
+        let dedicated = ladder_reserve_gb(VramBudget {
+            free_gb: 94.8,
+            total_gb: 96.0,
+        });
+        assert!((dedicated - (1.2 + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9);
+        // Foreign residency far above the slack (another process holds most of the card): the
+        // idle reading says nothing about this process's context and is already out of `free`,
+        // so the legacy slack is the ceiling — the reserve never charges those bytes twice.
+        let foreign = ladder_reserve_gb(VramBudget {
+            free_gb: 7.0,
+            total_gb: 96.0,
+        });
+        assert_eq!(foreign, HEADROOM_GB);
+        // A capped emulation with free == total probes no baseline at all — a headless card reads
+        // the same — and lands on the measured floor, not on the bare margin.
+        let capped = ladder_reserve_gb(VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        });
+        assert_eq!(capped, floor + LADDER_RESERVE_MARGIN_GB);
+        // A reclaimable-credited budget can read free above total; that is a zero baseline too
+        // (and the reason the reserve is derived from the RAW probe — see
+        // `candle_memory_strategy::tests::the_reserve_is_derived_from_the_raw_probe_not_the_credited_budget`).
+        let credited = ladder_reserve_gb(VramBudget {
+            free_gb: 10.5,
+            total_gb: 10.0,
+        });
+        assert_eq!(credited, floor + LADDER_RESERVE_MARGIN_GB);
+    }
+
+    /// sc-22664 review D3: `MEASURED_PRELOAD_RESIDENCY_BYTES` is read back off the retained
+    /// candle record it cites — the `preLoadDeviceUsed` diagnostic of
+    /// `imc-06fbd2ff6dcba95f8555` in the packaged calibration evidence — so the floor is measured
+    /// evidence, not an asserted number. MUTATION: changing the constant by one byte, or pointing
+    /// the doc at a record without that diagnostic, reds this.
+    #[test]
+    fn ladder_reserve_reads_the_measured_pre_load_residency_off_the_retained_record() {
+        let bundle: Value = serde_json::from_str(
+            sceneworks_core::memory_calibration::PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        )
+        .expect("packaged calibration evidence parses");
+        let records = bundle["records"]
+            .as_array()
+            .expect("the evidence bundle carries records");
+        let record = records
+            .iter()
+            .find(|record| record["id"] == "imc-06fbd2ff6dcba95f8555")
+            .expect("the cited candle record is retained");
+        assert_eq!(record["backend"], "candle");
+        let measurements = record["diagnostics"]["measurements"]
+            .as_array()
+            .expect("the record carries harness diagnostics");
+        let pre_load = measurements
+            .iter()
+            .find(|measurement| measurement["name"] == "preLoadDeviceUsed")
+            .expect("the record measured the pre-load device residency");
+        assert_eq!(pre_load["unit"], "bytes");
+        assert_eq!(
+            pre_load["value"].as_u64(),
+            Some(MEASURED_PRELOAD_RESIDENCY_BYTES),
+            "the reserve floor must be the record's own pre-load residency"
+        );
+        // Every candle record that measured a pre-load residency agrees with the floor — a later
+        // capture on this box that reads higher must move the constant, not silently under-charge.
+        for record in records
+            .iter()
+            .filter(|record| record["backend"] == "candle")
+        {
+            let Some(measurements) = record["diagnostics"]["measurements"].as_array() else {
+                continue;
+            };
+            for measurement in measurements
+                .iter()
+                .filter(|measurement| measurement["name"] == "preLoadDeviceUsed")
+            {
+                assert!(
+                    measurement["value"].as_u64().unwrap_or(u64::MAX)
+                        <= MEASURED_PRELOAD_RESIDENCY_BYTES,
+                    "{} measured a pre-load residency above the floor",
+                    record["id"]
+                );
+            }
+        }
+        assert_eq!(
+            MEASURED_PRELOAD_RESIDENCY_GB,
+            MEASURED_PRELOAD_RESIDENCY_BYTES as f64 / BYTES_PER_GIB
         );
     }
 
@@ -2649,16 +4251,25 @@ mod tests {
             )
         };
 
-        // sc-17774: mutate the term that DECIDES currency. This used to set
-        // `compatibleInferenceRevision`, which is deleted — leaving the mutation inert and the
-        // fail-closed assertion passing vacuously.
-        let mut stale = krea_fit_manifest();
-        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
+        // sc-22738 — "the App Runtime should ALWAYS continue behaving as if the measurement were
+        // valid". `turboFit.inferenceClosureDigest` is a re-capture signal for the JS probe
+        // tooling and is read by no production path on this lane any more, so moving it must be
+        // INERT rather than fail-closed. Kept as an arm (rather than deleted) because it is the
+        // mutation that would red if a closure conjunct were reintroduced into
+        // `current_environment` or into the estimate-basis eligibility predicate.
+        let baseline = fit(&krea_fit_manifest());
+        assert!(
+            matches!(baseline, Some(KreaTurboFit::Fits { .. })),
+            "control point: the unmutated fixture must admit this cell, or the closure arm below \
+             proves nothing: {baseline:?}"
+        );
+        let mut moved_closure = krea_fit_manifest();
+        moved_closure["candle"]["turboFit"]["inferenceClosureDigest"] =
+            Value::String("1".repeat(64));
         assert_eq!(
-            fit(&stale),
-            Some(KreaTurboFit::Unverified {
-                reason: gen_core::MemoryEvidenceVerdict::Stale,
-            })
+            fit(&moved_closure),
+            baseline,
+            "a moved lane closure must not change what a live request gets (sc-22738)"
         );
 
         let mut unloadable = krea_fit_manifest();
@@ -2697,13 +4308,29 @@ mod tests {
 
     #[test]
     fn krea_runtime_context_is_required_and_hardware_and_artifact_bound() {
+        assert!(
+            std::ptr::eq(
+                krea_test_provider_contract("q4"),
+                krea_test_provider_contract("q4")
+            ),
+            "the immutable fixture tier must reuse one fully validated provider contract"
+        );
         let manifest = krea_fit_manifest();
         let budget = Some(VramBudget {
             free_gb: 20.0,
             total_gb: 20.0,
         });
         let run = |runtime: Option<&KreaRuntimeEvidenceContext>| {
-            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, runtime)
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                budget,
+                KREA_FIXTURE_RESERVE_GB,
+                true,
+                runtime,
+            )
         };
         assert!(matches!(run(None), Some(KreaTurboFit::Unverified { .. })));
 
@@ -2724,6 +4351,28 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::Unverified,
             })
         ));
+
+        let mut wrong_contract = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        wrong_contract
+            .provider_contract
+            .as_mut()
+            .and_then(|contract| contract.calibration.as_mut())
+            .expect("Krea provider calibration")
+            .fingerprint = "krea-turbo-cuda-phase-curves-v2".into();
+        assert!(
+            wrong_contract
+                .provider_contract
+                .as_ref()
+                .is_some_and(|contract| contract.conformance_errors().is_empty()),
+            "the mutation must remain a valid contract so it isolates identity mismatch"
+        );
+        assert_eq!(
+            run(Some(&wrong_contract)),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "fit must consume the artifact-scoped contract instead of repeating registry lookup"
+        );
     }
 
     #[test]
@@ -2843,10 +4492,13 @@ mod tests {
     ///
     /// Fixture arithmetic at 896² (0.802816 Mpx; fixture curves in [`krea_fit_manifest`]), all
     /// binding phases matching the 1024² anchor record's:
-    ///   threeStage  peak 15.817 (decode-bound) → widened ×1.04 ≈ 16.450
-    ///   tiledVae    peak 15.606 (denoise)      → ≈ 16.230
-    ///   chunkedAttention peak 13.606 (denoise) → ≈ 14.150
-    ///   streamedBlocks   peak 10.606 (decode)  → ≈ 11.030
+    ///   threeStage  peak 15.817 (decode-bound) → widened ×1.02 ≈ 16.133
+    ///   tiledVae    peak 15.606 (denoise)      → ≈ 15.918
+    ///   chunkedAttention peak 13.606 (denoise) → ≈ 13.878
+    ///   streamedBlocks   peak 10.606 (decode)  → ≈ 10.818
+    ///
+    /// The ×1.02 is `ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`, the `SameCellRecaptureSpread`
+    /// allowance a fitted-curve candidate carries on the candle lane (sc-22508).
     #[test]
     fn krea_turbo_unmeasured_geometry_admits_by_fitted_estimate_and_refuses_below_margin() {
         let manifest = krea_fit_manifest();
@@ -2872,7 +4524,7 @@ mod tests {
             other => panic!("896² must admit by the staged fitted estimate, got {other:?}"),
         }
 
-        // 13.2 GiB free (11.2 effective): only the deep rung's widened estimate (~11.03) fits —
+        // 13.2 GiB free (11.2 effective): only the deep rung's widened estimate (~10.82) fits —
         // and the selection must carry the measured sweep parameters and translate to the engine
         // knobs the engaged composition names.
         match fit(13.2) {
@@ -2894,21 +4546,24 @@ mod tests {
             other => panic!("only the deep estimate rung fits 11.2 GiB effective, got {other:?}"),
         }
 
-        // Margin mutation arm: at 12.9 GiB free (10.9 effective) the RAW deep-rung peak (10.606)
-        // fits but the widened one (~11.03) does not — a selector whose estimate margin is zeroed
-        // admits here and flips this arm red. The refusal quotes the widened requirement plus the
-        // 2 GiB admission headroom, recomputed from the POLICY constant so a narrower margin
-        // cannot sneak in.
-        match fit(12.9) {
+        // Margin mutation arm: a budget strictly BETWEEN the RAW deep-rung requirement (10.606 + 2)
+        // and the allowance-widened one (~10.818 + 2) — the raw peak fits there and the widened one
+        // does not, so a selector whose allowance is zeroed admits here and flips this arm red. Both
+        // the window and the quoted refusal are recomputed from the POLICY constant, so neither a
+        // narrower allowance nor a re-derivation of the constant can leave this arm silently
+        // non-discriminating (a literal budget picked for the retired blanket margin did exactly
+        // that once the per-term policy landed).
+        let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
+        let widened_needed_gb = streamed_peak_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
+            + HEADROOM_GB;
+        let raw_needed_gb = streamed_peak_gb + HEADROOM_GB;
+        match fit((raw_needed_gb + widened_needed_gb) / 2.0) {
             Some(KreaTurboFit::Reject { needed_gb, .. }) => {
-                let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
-                let expected = streamed_peak_gb
-                    * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
-                    + HEADROOM_GB;
                 assert!(
-                    (needed_gb - expected).abs() < 1e-3,
-                    "the refusal must quote the margin-widened deep-rung estimate: needed \
-                     {needed_gb}, expected {expected}"
+                    (needed_gb - widened_needed_gb).abs() < 1e-3,
+                    "the refusal must quote the allowance-widened deep-rung estimate: needed \
+                     {needed_gb}, expected {widened_needed_gb}"
                 );
             }
             other => panic!("below every widened estimate the request must reject, got {other:?}"),
@@ -3021,17 +4676,21 @@ mod tests {
         }
     }
 
-    /// sc-18097: the estimate bases obey the sc-18096 restrictions — a stale-closure manifest may
-    /// not seed fitted extrapolation (its measured cells keep serving their OWN geometry behind
-    /// the stale margin, but the estimate margin was derived over same-closure re-capture variance
-    /// and cannot also absorb closure drift), and a calibration fingerprint that drifted from the
-    /// loaded provider's identity loses the bases entirely. Both mutations are WELL-FORMED (the
-    /// digest is a valid 64-hex string, the fingerprint keeps the shipped token grammar), so the
-    /// refusals below are the anchor-eligibility gate's work, not a parse failure — and the
-    /// registered contract is asserted conformance-CLEAN so the fingerprint arm cannot pass by a
-    /// grammar-conformance accident (the sc-18096 finding).
+    /// The estimate bases obey ONE of the two sc-18096 restrictions now.
+    ///
+    /// * **Calibration identity — still a gate.** A fingerprint drifted from the loaded provider's
+    ///   identity loses the fitted bases entirely. The mutation keeps the shipped token grammar
+    ///   and the registered contract is asserted conformance-CLEAN, so the refusal is the
+    ///   anchor-eligibility gate's work and not a format rejection (the sc-18096 finding).
+    /// * **Lane closure — no longer a gate (sc-22738).** "The App Runtime should ALWAYS continue
+    ///   behaving as if the measurement were valid": `turboFit.inferenceClosureDigest` is a
+    ///   re-capture signal for the JS probe tooling and is read by no production path, so a
+    ///   record whose closure moved seeds the fitted extrapolation exactly as a matching one does.
+    ///   The mutation stays WELL-FORMED (a valid 64-hex string) so this arm keeps its power as the
+    ///   mutation check: reintroduce a closure conjunct anywhere in the estimate-basis eligibility
+    ///   predicate and the equality below turns red.
     #[test]
-    fn krea_turbo_estimate_bases_require_current_closure_and_loaded_identity() {
+    fn krea_turbo_estimate_bases_ignore_the_lane_closure_and_require_the_loaded_identity() {
         let admit = |manifest: &JsonObject| {
             krea_turbo_fit(
                 manifest,
@@ -3046,25 +4705,23 @@ mod tests {
             )
         };
         // Control point: the unmutated manifest admits this cell by fitted estimate.
+        let baseline = admit(&krea_fit_manifest());
         assert!(
-            matches!(admit(&krea_fit_manifest()), Some(KreaTurboFit::Fits { .. })),
+            matches!(baseline, Some(KreaTurboFit::Fits { .. })),
             "the unmutated fixture must admit 896² by estimate, or the arms below prove nothing"
         );
 
-        let mut stale = krea_fit_manifest();
-        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
-        assert!(
-            matches!(admit(&stale), Some(KreaTurboFit::Unverified { .. })),
-            "a stale-closure record must not seed a fitted extrapolation"
+        let mut moved_closure = krea_fit_manifest();
+        moved_closure["candle"]["turboFit"]["inferenceClosureDigest"] =
+            Value::String("1".repeat(64));
+        assert_eq!(
+            admit(&moved_closure),
+            baseline,
+            "sc-22738: a record whose lane closure moved seeds the fitted extrapolation exactly \
+             as a matching one does — same rung, same phases, same quoted need"
         );
 
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         assert!(
             provider_contract.conformance_errors().is_empty(),
             "the loaded contract must be conformance-clean so the fingerprint arm exercises the \
@@ -3082,6 +4739,129 @@ mod tests {
         );
     }
 
+    /// sc-22735. The turbo fit is graded against the identity for the tier it is PRICING, read out
+    /// of `turboFit.calibrationFingerprintByTier`, not against the single scalar three times.
+    ///
+    /// The engine keys `krea_2_turbo`'s calibration identity on the artifact-proven tier now, so a
+    /// bf16 or q8 fit graded against the measured q4 string would compare two different cells: it
+    /// would either refuse every non-q4 admission or — the direction that actually costs something —
+    /// accept a bf16 load whose curves were measured at q4. The scalar is deliberately still the
+    /// measured q4 identity and is still the fallback, so a manifest that declares no map keeps its
+    /// previous meaning exactly.
+    ///
+    /// Graded through the real `krea_turbo_fit` against the real loaded contract per tier: a drifted
+    /// entry for the tier under test must lose the fitted bases, and a drifted entry for a DIFFERENT
+    /// tier must not — that second half is what fails if the lookup ignores the tier and reads any
+    /// entry, or the scalar, regardless.
+    #[test]
+    fn the_turbo_fit_grades_each_tier_against_its_own_declared_identity() {
+        // (a) The cross-source binding, over the SHIPPED manifest: at every tier the declared
+        // per-tier identity is exactly the one the pinned contract publishes for that tier. This is
+        // the claim a capture cannot re-derive, and it needs no fit to state.
+        let shipped = builtin_krea_turbo_manifest_at_live_closure();
+        let by_tier = shipped["candle"]["turboFit"]["calibrationFingerprintByTier"]
+            .as_object()
+            .expect("the shipped turbo fit declares a per-tier identity map");
+        let mut declared_identities = std::collections::BTreeSet::new();
+        for tier in ["q4", "q8", "bf16"] {
+            let declared = by_tier
+                .get(tier)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{tier}: no declared per-tier identity"));
+            let loaded = krea_test_provider_contract(tier)
+                .calibration
+                .as_ref()
+                .unwrap_or_else(|| panic!("{tier}: the loaded contract declares no calibration"))
+                .fingerprint
+                .as_str();
+            assert_eq!(
+                declared, loaded,
+                "{tier}: the manifest must declare the identity the pinned contract publishes"
+            );
+            assert!(
+                declared_identities.insert(declared.to_owned()),
+                "{tier}: reuses another tier's identity ({declared})"
+            );
+        }
+        // The scalar stays the MEASURED q4 cell, so a manifest with no map keeps its old meaning.
+        assert_eq!(
+            shipped["candle"]["turboFit"]["calibrationFingerprint"].as_str(),
+            Some("krea-turbo-cuda-phase-curves-v1")
+        );
+
+        // (b) The lookup semantics, over the synthetic q4 ladder fixture: the entry read is the one
+        // for the tier being priced, and the scalar is the fallback.
+        let admit = |manifest: &JsonObject| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                896,
+                896,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            )
+        };
+        let mut mapped = krea_fit_manifest();
+        mapped["candle"]["turboFit"]["calibrationFingerprintByTier"] = json!({
+            "bf16": "krea-2-turbo-bf16-cuda-phase-curves-v1",
+            "q4": "krea-turbo-cuda-phase-curves-v1",
+            "q8": "krea-2-turbo-q8-cuda-phase-curves-v1",
+        });
+        assert!(
+            matches!(admit(&mapped), Some(KreaTurboFit::Fits { .. })),
+            "the mapped fixture must admit q4, or the arms below prove nothing"
+        );
+
+        // Drifting the q4 entry — the tier being priced — loses the fitted bases.
+        let mut drifted_q4 = mapped.clone();
+        drifted_q4["candle"]["turboFit"]["calibrationFingerprintByTier"]["q4"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&drifted_q4),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "a q4 identity drifted from the loaded contract must lose the fitted bases"
+        );
+
+        // Drifting the OTHER tiers' entries does not disturb the q4 fit. A lookup that ignored the
+        // tier and took any entry would refuse here.
+        for other in ["q8", "bf16"] {
+            let mut crossed = mapped.clone();
+            crossed["candle"]["turboFit"]["calibrationFingerprintByTier"][other] =
+                Value::String(format!("krea-2-turbo-{other}-cuda-phase-curves-v99"));
+            assert!(
+                matches!(admit(&crossed), Some(KreaTurboFit::Fits { .. })),
+                "a drifted {other} identity must not disturb the q4 fit"
+            );
+        }
+
+        // With no map at all the scalar is the fallback, so the pre-sc-22735 manifest shape keeps
+        // grading exactly as it did.
+        let mut unmapped = mapped.clone();
+        unmapped["candle"]["turboFit"]
+            .as_object_mut()
+            .expect("turbo fit")
+            .remove("calibrationFingerprintByTier");
+        assert!(
+            matches!(admit(&unmapped), Some(KreaTurboFit::Fits { .. })),
+            "a manifest declaring no per-tier map must fall back to the scalar"
+        );
+        let mut unmapped_drifted = unmapped.clone();
+        unmapped_drifted["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&unmapped_drifted),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "the scalar fallback is still graded, not merely accepted"
+        );
+    }
+
     #[test]
     fn builtin_krea_evidence_is_keyed_by_the_measured_engaged_composition() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
@@ -3093,13 +4873,7 @@ mod tests {
             .expect("manifest calibration fingerprint");
         assert_eq!(manifest_fingerprint, "krea-turbo-cuda-phase-curves-v1");
 
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
-            )
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         let provider_fingerprint = provider_contract
             .calibration
             .as_ref()
@@ -3184,7 +4958,7 @@ mod tests {
             ("q8", MemoryStrategy::BoundedAttention),
             ("bf16", MemoryStrategy::BoundedAttention),
         ] {
-            let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024)
+            let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024, 1)
                 .expect("probed rung phase peaks");
             let required = phases.peak_gb() + HEADROOM_GB + 0.01;
             match krea_turbo_fit(
@@ -3446,12 +5220,24 @@ mod tests {
             })
         ));
 
-        let three_stage =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
-                .expect("Q8 three-stage evidence");
-        let tiled =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
-                .expect("Q8 tiled-VAE evidence");
+        let three_stage = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::StagedResidency,
+            1024,
+            1024,
+            1,
+        )
+        .expect("Q8 three-stage evidence");
+        let tiled = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::BoundedDecode,
+            1024,
+            1024,
+            1,
+        )
+        .expect("Q8 tiled-VAE evidence");
         // sc-17097 INVERTS this assertion, and the inversion is the finding. Under the ABI-1
         // capture the Q8 decode peak was identical with and without tiling (16.514 -> 16.514), so
         // tiled VAE was a measured no-op that had to be prevented from displacing the cheaper
@@ -3539,7 +5325,7 @@ mod tests {
             ),
         ];
         for (rung, edge, measured) in samples {
-            let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge)
+            let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge, 1)
                 .expect("every published Q8 matrix cell has a curve");
             for (phase, predicted_gb, measured_gb) in [
                 ("text", predicted.text_gb, measured[0]),
@@ -3590,7 +5376,7 @@ mod tests {
         };
 
         // q8 at 12 GiB free (10 GiB effective): the streamed-blocks fitted estimate (~5.01 GiB
-        // text-bound peak, widened ~5.21) is the only rung that fits, and it must carry the
+        // text-bound peak, widened ×1.02 ≈ 5.11) is the only rung that fits, and it must carry the
         // measured strategy parameters.
         match fit("q8", 12.0) {
             Some(KreaTurboFit::Fits {
@@ -3608,12 +5394,28 @@ mod tests {
             }
             other => panic!("q8 768² must admit by fitted estimate, got {other:?}"),
         }
-        // Margin mutation arm (q8): at 7.15 GiB free (5.15 effective) the RAW streamed peak
-        // (~5.01) fits but the widened one (~5.21) does not — a selector whose estimate margin is
-        // zeroed admits here and flips this arm red. Every rung carries an eligible estimate, so
-        // the refusal is the honest margins-based `Reject`, not `Unverified`.
+        // Margin mutation arm (q8): a budget strictly BETWEEN the RAW streamed requirement and its
+        // allowance-widened one — the raw peak fits there and the widened one does not, so a
+        // selector whose allowance is zeroed admits here and flips this arm red. Every rung carries
+        // an eligible estimate, so the refusal is the honest allowance-based `Reject`, not
+        // `Unverified`. The window is read off the shipped curve and the policy constant rather
+        // than written as a literal, which is what let the retired blanket margin's budget stop
+        // discriminating when the per-term policy narrowed the widening.
+        let q8_streamed_peak_gb = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::BoundedTransformerResidency,
+            768,
+            768,
+            1,
+        )
+        .expect("the shipped q8 streamed rung has a curve")
+        .peak_gb();
+        let q8_between_gb = q8_streamed_peak_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD / 2.0)
+            + HEADROOM_GB;
         assert!(
-            matches!(fit("q8", 7.15), Some(KreaTurboFit::Reject { .. })),
+            matches!(fit("q8", q8_between_gb), Some(KreaTurboFit::Reject { .. })),
             "below the widened deep-rung estimate the q8 768² request must reject"
         );
 
@@ -3672,9 +5474,9 @@ mod tests {
             };
             let measured_768 = record(768);
             let measured_1024 = record(1024);
-            let predicted_768 = krea_rung_phase_peaks(&manifest, tier, rung, 768, 768)
+            let predicted_768 = krea_rung_phase_peaks(&manifest, tier, rung, 768, 768, 1)
                 .expect("768² fitted phase vector");
-            let predicted_1024 = krea_rung_phase_peaks(&manifest, tier, rung, 1024, 1024)
+            let predicted_1024 = krea_rung_phase_peaks(&manifest, tier, rung, 1024, 1024, 1)
                 .expect("1024² fitted phase vector");
             for (phase, lower_prediction, upper_prediction, lower_measured, upper_measured) in [
                 (
@@ -3777,11 +5579,18 @@ mod tests {
             MemoryStrategy::StagedResidency,
             1024,
             1024,
+            1,
         )
         .expect("BF16 three-stage evidence");
-        let tiled =
-            krea_rung_phase_peaks(&manifest, "bf16", MemoryStrategy::BoundedDecode, 1024, 1024)
-                .expect("BF16 tiled-VAE evidence");
+        let tiled = krea_rung_phase_peaks(
+            &manifest,
+            "bf16",
+            MemoryStrategy::BoundedDecode,
+            1024,
+            1024,
+            1,
+        )
+        .expect("BF16 tiled-VAE evidence");
         // sc-17097 inverts this for the same reason as the Q8 sibling: the ABI-1 BF16 decode peak
         // was flat across tiling (26.446 -> 26.446), so tiled VAE measured as a no-op. Re-measured
         // it is a real saving - three-stage 36.73 GiB against tiled VAE 29.86.
@@ -3856,7 +5665,7 @@ mod tests {
             ),
         ];
         for (rung, edge, measured) in samples {
-            let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge)
+            let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge, 1)
                 .expect("every published BF16 matrix cell has a curve");
             for (phase, predicted_gb, measured_gb) in [
                 ("text", predicted.text_gb, measured[0]),
@@ -4665,11 +6474,9 @@ mod tests {
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::File::create(&path)
-                    .unwrap()
-                    .set_len(5_000_000_000)
-                    .unwrap();
+                // 8 x 5 GB. Sparse, or this one test allocates 40 GB of NTFS (see
+                // `crate::test_fixture_disk`); the gate reads the length, not the bytes.
+                crate::test_fixture_disk::create_sparse_weights(&path, 5_000_000_000);
             }
         }
 
@@ -4722,10 +6529,9 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("no lower-memory tier or sequential offload"),
+            message.contains("Select a measured SCAIL-2 tier"),
             "{message}"
         );
-        assert!(message.contains("MLX q4/q8"), "{message}");
 
         let high = apply_vram_cap(None, Some(105.0));
         assert!(
@@ -4734,6 +6540,7 @@ mod tests {
         );
         let adapter_message = scail2_video_fit_error_with_adapter_bytes(
             &entry,
+            "bf16",
             BYTES_PER_GIB as u64,
             "0",
             apply_vram_cap(None, Some(105.0)),
@@ -4820,6 +6627,37 @@ mod tests {
         assert!(message.contains("minMemoryGb=104"), "{message}");
         assert!(message.contains("~105 GB"), "{message}");
         assert!(message.contains("Refusing to load"), "{message}");
+    }
+
+    #[test]
+    fn scail2_source_ready_packed_tier_stays_closed_without_its_measured_fact_row() {
+        // Artifact availability is deliberately not enough to load q4/q8. This branch retains the
+        // current bf16-only catalog fact while the resolver and descriptor/pin promotion land in
+        // lockstep, so an off-Mac q4 directory can never be budgeted as dense or admitted by bytes.
+        let bf16_only = obj(json!({
+            "candle": {
+                "minMemoryGb": 105,
+                "measured": true,
+                "vramGbByTier": { "bf16": 102.115 },
+                "vramMeasuredPixels": 399360
+            }
+        }));
+        for tier in ["q4", "q8"] {
+            let message = scail2_video_fit_error_with_adapter_bytes(
+                &bf16_only,
+                tier,
+                0,
+                "0",
+                apply_vram_cap(None, Some(500.0)),
+            )
+            .expect("a source-ready packed tier needs its own measured catalog fact")
+            .to_string();
+            assert!(
+                message.contains(&format!("measured {tier} CUDA row")),
+                "{message}"
+            );
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
     }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped
@@ -5074,6 +6912,145 @@ mod tests {
         );
     }
 
+    #[test]
+    fn minimax_h3_fit_uses_each_measured_tier_and_fails_closed_without_evidence() {
+        let manifest = obj(json!({
+            "candle": {
+                "measured": true,
+                "vramMeasuredPixels": 1_032_192,
+                "vramGbByTier": { "q4": 40.068, "q8": 74.696, "bf16": 67.012 }
+            }
+        }));
+        let budget = |free_gb| {
+            Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            })
+        };
+
+        for (tier, boundary) in [("q4", 42.068), ("q8", 76.696), ("bf16", 69.012)] {
+            assert!(
+                minimax_h3_fit_error(&manifest, tier, 0, "0", budget(boundary)).is_none(),
+                "{tier} admits at its exact measured peak plus reserve"
+            );
+            let message = minimax_h3_fit_error(&manifest, tier, 0, "0", budget(boundary - 0.001))
+                .expect("one MiB-equivalent below the exact boundary rejects")
+                .to_string();
+            assert!(
+                message.contains(tier),
+                "the rejection names {tier}: {message}"
+            );
+        }
+
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", None).is_some());
+        for (label, invalid, tier) in [
+            (
+                "measured false",
+                obj(json!({
+                    "candle": {
+                        "measured": false,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "wrong measured geometry",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_000_000,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "missing selected tier",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q8": 74.696 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "unknown tier",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "fp8",
+            ),
+            (
+                "zero peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 0.0 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "negative peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": -1.0 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "non-numeric peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": "NaN" }
+                    }
+                })),
+                "q4",
+            ),
+        ] {
+            assert!(
+                minimax_h3_fit_error(&invalid, tier, 0, "0", budget(96.0)).is_some(),
+                "{label} must fail closed"
+            );
+        }
+        assert!(
+            serde_json::Number::from_f64(f64::NAN).is_none()
+                && serde_json::Number::from_f64(f64::INFINITY).is_none(),
+            "non-finite peaks cannot enter a serde_json catalog; the runtime finite guard is defense in depth"
+        );
+    }
+
+    #[test]
+    fn minimax_h3_fit_charges_additive_lora_bytes() {
+        let manifest = obj(json!({
+            "candle": {
+                "measured": true,
+                "vramMeasuredPixels": 1_032_192,
+                "vramGbByTier": { "q4": 40.068 }
+            }
+        }));
+        let budget = Some(VramBudget {
+            free_gb: 42.5,
+            total_gb: 96.0,
+        });
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", budget).is_none());
+        assert!(minimax_h3_fit_error(&manifest, "q4", 1024 * 1024 * 1024, "0", budget,).is_some());
+    }
+
     /// GPU repro of the sc-11023 warm-swap false reject: occupy REAL VRAM on GPU 0 to mimic a
     /// resident model (nvidia-smi `free` drops the way a cached model makes it), then show that the
     /// SAME live budget REJECTS the incoming bf16 tier on raw `free` (the bug) but FITS once the
@@ -5152,5 +7129,807 @@ mod tests {
         );
         // Keep the hog alive to the end so the warm reading isn't reclaimed early.
         drop(hogs);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // sc-22509 (epic 22505): anchor-derived admission on the candle lane.
+    // -------------------------------------------------------------------------------------
+
+    thread_local! {
+        static INJECTED_ANCHOR_STORE: std::cell::Cell<
+            Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore>,
+        > = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn injected_anchor_store(
+    ) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+        INJECTED_ANCHOR_STORE.with(std::cell::Cell::get)
+    }
+
+    /// Run `body` with `store` standing in for the packaged anchor store. The store is leaked
+    /// because the lane hands out `&'static` anchors; a test-only leak of one small struct is the
+    /// price of not widening the production lifetime to satisfy a test.
+    fn with_injected_anchor_store<T>(
+        store: sceneworks_core::memory_anchor::MemoryAnchorStore,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let leaked: &'static _ = Box::leak(Box::new(store));
+        INJECTED_ANCHOR_STORE.with(|cell| cell.set(Some(leaked)));
+        let outcome = body();
+        INJECTED_ANCHOR_STORE.with(|cell| cell.set(None));
+        outcome
+    }
+
+    /// The PACKAGED store, unmodified, with its Krea candle q4 row asserted PRESENT.
+    ///
+    /// This used to additionally assert the row current through the retired currency seam, on the
+    /// grounds that `krea_store_anchor` refused a row whose recorded loader-closure digest was not
+    /// the pin's. sc-22738 removed that conjunct: the runtime always behaves as if the measurement
+    /// were valid, so a row's recorded closure no longer decides whether it prices anything and
+    /// the only precondition these tests need is that the row exists.
+    fn krea_packaged_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store");
+        assert!(
+            store
+                .image_anchor_for(
+                    "krea_2_turbo",
+                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                    "q4",
+                )
+                .is_some(),
+            "the packaged krea_2_turbo:candle:q4 row must exist, or these tests grade nothing"
+        );
+        store.clone()
+    }
+
+    /// The packaged Krea candle q4 anchor, as the gate reads it.
+    fn krea_packaged_q4_anchor() -> &'static sceneworks_core::memory_anchor::MemoryAnchor {
+        sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .and_then(|store| {
+                store.image_anchor_for(
+                    "krea_2_turbo",
+                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                    "q4",
+                )
+            })
+            .expect("the packaged Krea candle q4 anchor")
+    }
+
+    /// The ladder reserve a fixture budget produces, as production derives it from the raw probe.
+    fn reserve_for(budget: Option<VramBudget>) -> f64 {
+        budget.map_or(0.0, ladder_reserve_gb)
+    }
+
+    /// One rung's derived phase peaks for a geometry, straight from the packaged anchor through
+    /// the law with the rung's OWN regime (the manifest's `strategyParameters`) and the given
+    /// facts — the same call the gate makes since sc-22667, so the expectations below are not a
+    /// second transcription of the coefficients.
+    fn krea_anchor_derived_phases(
+        manifest: &JsonObject,
+        strategy: MemoryStrategy,
+        width: u32,
+        height: u32,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    ) -> sceneworks_core::memory_anchor::AnchorDerivedPhases {
+        krea_anchor_derived_phases_with(
+            manifest,
+            strategy,
+            width,
+            height,
+            facts,
+            // The same component bytes the gate reads off the fixture runtime's contract.
+            crate::video_admission::anchor_component_bytes(
+                krea_test_provider_contract("q4").asset_facts,
+            ),
+        )
+    }
+
+    /// [`krea_anchor_derived_phases`] with the component bytes stated explicitly.
+    fn krea_anchor_derived_phases_with(
+        manifest: &JsonObject,
+        strategy: MemoryStrategy,
+        width: u32,
+        height: u32,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+        components: sceneworks_core::memory_anchor::ComponentBytes,
+    ) -> sceneworks_core::memory_anchor::AnchorDerivedPhases {
+        let contract = krea_test_provider_contract("q4");
+        let parameters = krea_rung_parameters(&manifest["candle"]["turboFit"], strategy)
+            .expect("the fixture declares every rung's parameters");
+        let regime = crate::candle_memory_strategy::request_regime(
+            &contract.engaged_composition(strategy),
+            &parameters,
+        )
+        .expect("a complete regime");
+        krea_packaged_q4_anchor()
+            .derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
+                    width,
+                    height,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
+                },
+                components,
+                facts,
+            )
+            .expect("the derivation prices this geometry")
+    }
+
+    /// The derived peak of the staged rung under the facts the loaded contract states — read
+    /// through the production seam (`architecture_facts_from_contract`, sc-22667) so the number
+    /// the admission tests below grade against is the one the gate itself prices with, whatever
+    /// the pinned provider declares. The staged rung is the least-cost rung the selector can
+    /// admit out of the envelope, so it is the one an ample budget selects.
+    fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
+        krea_anchor_derived_phases(
+            &krea_fit_manifest(),
+            MemoryStrategy::StagedResidency,
+            width,
+            height,
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4",
+            )),
+        )
+        .peak_bytes() as f64
+            / BYTES_PER_GIB
+    }
+
+    /// Krea 2 Turbo's architecture facts as the candle provider publishes them off its resolved
+    /// snapshot's DiT config (`candle-gen-krea::architecture_facts`, `Krea2Config::from_snapshot`):
+    /// 48 attention heads of 128, 28 single-stream blocks, patch 2, 16 latent channels behind a
+    /// x8 VAE, bf16 activations, and NO temporal scale — the reused Qwen-Image VAE decodes one
+    /// frame per image, so the axis is structurally absent and declared absent, never `1`. The
+    /// fixture contract carries exactly these (sc-22667 —
+    /// `an_unmeasured_krea_geometry_admits_on_the_anchor_derivation` asserts the seam reads them);
+    /// the explicit-facts fixtures below state them directly to grade the ratios themselves.
+    const KREA_2_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(48),
+            head_dim: Some(128),
+            transformer_blocks: Some(28),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: None,
+            activation_dtype_width: Some(2),
+        };
+
+    /// The fixture with a resident row too large to fit, so an admission can only come from an
+    /// optimized rung. Without this the selector answers `Resident` and the rung under test is
+    /// never exercised.
+    fn krea_fit_manifest_with_unfittable_resident() -> JsonObject {
+        let mut manifest = krea_fit_manifest();
+        manifest["candle"]["vramGbByTier"]["q4"] = json!(200.0);
+        manifest
+    }
+
+    /// AC 2: a geometry the campaign never measured — above `maxMeasuredPixels`, so there is no
+    /// curve and no record — admits on the derived estimate when it fits, instead of being refused
+    /// for measurement absence.
+    #[test]
+    fn an_unmeasured_krea_geometry_admits_on_the_anchor_derivation() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let max_pixels = manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+            .as_u64()
+            .expect("maxMeasuredPixels");
+        let (width, height) = (1280u32, 1280u32);
+        assert!(
+            u64::from(width) * u64::from(height) > max_pixels,
+            "the request geometry must sit outside the measured curve envelope"
+        );
+        // The facts the gate prices with are the contract's own, read through the production
+        // seam (sc-22667) — Krea 2 Turbo's real architecture, not the default facts.
+        assert_eq!(
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4"
+            )),
+            KREA_2_FACTS,
+            "the Krea contract's architecture facts must reach the gate through the seam"
+        );
+        let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
+        // Generous enough that the estimate margin the shared selector applies cannot be what
+        // decides the outcome, and far below the resident row. The reserve is the ladder's, as
+        // production charges it (sc-22667), not the retired fixed 2 GB.
+        let free_gb = derived_peak_gb * 1.25 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        let reserve_gb = reserve_for(budget);
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            needed_gb,
+            estimate_scoped,
+            ..
+        }) = fit
+        else {
+            panic!("an unmeasured geometry must admit on the derived estimate, got {fit:?}");
+        };
+        assert!(
+            estimate_scoped,
+            "an anchor-derived admission is estimate-scoped, never measured evidence"
+        );
+        assert!(
+            (phases.peak_gb() - derived_peak_gb).abs() < 0.001,
+            "the admitted rung must be priced by the derivation ({derived_peak_gb} GiB), got \
+             {phases:?}"
+        );
+        // Re-based by sc-22667: the lane charges `ladder_reserve_gb` of the probe once, so the
+        // quoted need is the derived peak plus THAT reserve, not plus the legacy 2 GB.
+        assert!(
+            needed_gb >= derived_peak_gb + reserve_gb
+                && needed_gb <= derived_peak_gb * 1.10 + reserve_gb,
+            "the derived need must be the derived peak plus the ladder reserve and at most the \
+             selector's estimate margin above it, got {needed_gb} against {derived_peak_gb} + \
+             {reserve_gb}"
+        );
+    }
+
+    /// The differential control for the test above: with no usable anchor the SAME unmeasured
+    /// geometry under the SAME budget goes back to refusing for measurement absence. Without this
+    /// the test above could pass on a curve that quietly grew an envelope.
+    ///
+    /// The one arm that still refuses is the adapter arm: `allow_streamed_blocks: false` is
+    /// deliberately over-determined (it also sets the request overlay and drops a rung), so it is
+    /// scoped to the coarser claim it can actually support — adapter-bearing jobs stay off the
+    /// anchor path entirely.
+    ///
+    /// sc-22738 — "the App Runtime should ALWAYS continue behaving as if the measurement were
+    /// valid" — turned the former SECOND control (a moved loader closure) into its opposite, and
+    /// it is kept here in that inverted form because it is still the sharpest single-axis probe of
+    /// the anchor path. `krea_store_anchor` no longer has a currency conjunct, so a row whose
+    /// recorded `loader_closure_digest` is nothing like the pin's prices the request through the
+    /// identical derivation. MUTATION that reds it: restore any comparison of
+    /// `anchor.source.loader_closure_digest` against the pin's declared closure inside
+    /// `krea_store_anchor` — the moved store then falls back to the manifest floor, whose resident
+    /// row this fixture makes unfittable, and the arm lands on `OutOfEnvelope` instead.
+    #[test]
+    fn without_a_usable_anchor_the_same_unmeasured_geometry_is_still_out_of_envelope() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1280, 1280);
+        let free_gb = derived_peak_gb * 1.25 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        assert_eq!(
+            with_injected_anchor_store(krea_packaged_anchor_store(), || {
+                krea_turbo_fit_with_runtime(
+                    &manifest,
+                    "q4",
+                    1280,
+                    1280,
+                    budget,
+                    reserve_for(budget),
+                    false,
+                    Some(&runtime),
+                )
+            }),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
+            }),
+            "adapter-bearing jobs stay off the anchor path"
+        );
+
+        // sc-22738: the single-axis probe, now asserting the opposite outcome. The model's own
+        // loader closure is driven to a value that cannot be any pin's, and the request must be
+        // priced by exactly the same anchor derivation as the unmodified store — same variant,
+        // same phases, same quoted need.
+        let unmodified = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
+        });
+        assert!(
+            matches!(unmodified, Some(KreaTurboFit::Fits { .. })),
+            "control point: the unmodified store must price this geometry from the anchor, or the \
+             equality below proves nothing: {unmodified:?}"
+        );
+        let mut moved = krea_packaged_anchor_store();
+        for anchor in &mut moved.anchors {
+            if anchor.model_id == "krea_2_turbo"
+                && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
+            {
+                anchor.source.loader_closure_digest = "f".repeat(64);
+            }
+        }
+        assert_eq!(
+            with_injected_anchor_store(moved, || {
+                krea_turbo_fit_with_runtime(
+                    &manifest,
+                    "q4",
+                    1280,
+                    1280,
+                    budget,
+                    reserve_for(budget),
+                    true,
+                    Some(&runtime),
+                )
+            }),
+            unmodified,
+            "sc-22738: a moved loader closure is a re-capture signal for the probe tooling only — \
+             the anchor must price the request identically"
+        );
+
+        // The SHIPPED state, asserted rather than assumed. `krea_store_anchor` now selects on
+        // route/provider/mode/overlay/reference-count alone, so the packaged row is usable and the
+        // uninjected call must reach the same admitted fit as the injected control above.
+        assert!(
+            krea_store_anchor("q4", true).is_some(),
+            "the shipped Krea candle q4 row must be selectable by the production seam"
+        );
+        assert_eq!(
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime)
+            ),
+            unmodified,
+            "the shipped anchor prices this geometry the same way the injected packaged store does"
+        );
+    }
+
+    /// sc-22509 review (blocker): the hull-refusal bypass is narrowed to ANCHOR-DERIVED rungs. The
+    /// resident rung is priced by `candle.vramGbByTier[tier]` — a scalar measured at 1024x1024 that
+    /// does not scale with geometry — and the anchor cannot re-price it (the derivation refuses a
+    /// whole-model-resident composition). So outside the measured hull the resident candidate is not
+    /// emitted at all.
+    ///
+    /// The card is sized BETWEEN the resident row (25.7 GiB + reserve) and the true 2048x2048 need,
+    /// which is the only band where the two answers differ: before the fix this request admitted
+    /// `Resident` at the 1024x1024 row; it must now refuse.
+    #[test]
+    fn an_out_of_envelope_request_does_not_admit_resident_on_the_geometry_free_row() {
+        let manifest = krea_fit_manifest();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let (width, height) = (2048u32, 2048u32);
+        let max_pixels = manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+            .as_u64()
+            .expect("maxMeasuredPixels");
+        assert!(u64::from(width) * u64::from(height) > max_pixels);
+        let resident_row_gb = manifest["candle"]["vramGbByTier"]["q4"]
+            .as_f64()
+            .expect("the resident row");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
+        // A card that would host the geometry-free resident row and nothing near the real need.
+        let free_gb = resident_row_gb + HEADROOM_GB + 2.0;
+        assert!(
+            free_gb < derived_peak_gb,
+            "the card must sit between the resident row ({resident_row_gb}) and the true \
+             2048x2048 need ({derived_peak_gb}) for this test to discriminate"
+        );
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        // CONTROL, or the assertion below is vacuous: at an IN-ENVELOPE geometry this same card and
+        // manifest DO admit on the geometry-free resident row. So the refusal that follows is about
+        // the row not pricing the request, not about the budget.
+        let control = krea_turbo_fit_with_runtime(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            budget,
+            reserve_for(budget),
+            true,
+            Some(&runtime),
+        );
+        assert!(
+            matches!(
+                control,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "the control arm must admit at this budget, or the refusal below proves nothing about \
+             the row rather than the card, got {control:?}"
+        );
+
+        // Graded against a CURRENT anchor: the claim is that the anchor declines to re-price a
+        // whole-model-resident composition, which a stale (absent) anchor would satisfy vacuously.
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
+        });
+        assert!(
+            !matches!(
+                fit,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "an out-of-envelope request has no priced resident basis — the row is a 1024x1024 \
+             scalar and the anchor refuses to price a whole-model-resident composition — so it must \
+             not admit at all on a card this size, got {fit:?}"
+        );
+    }
+
+    /// A measured geometry keeps its measured admission: the anchor path is reached only where the
+    /// curves cannot answer, so in-envelope admission does not move onto the derivation.
+    #[test]
+    fn a_measured_krea_geometry_still_admits_on_its_measured_curve() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let budget = Some(VramBudget {
+            free_gb: 64.0,
+            total_gb: 64.0,
+        });
+        // A CURRENT anchor is present throughout: the claim is that the curves answer FIRST, which
+        // is only tested if the derivation was actually available to be preferred.
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits { phases, .. }) = fit else {
+            panic!("the measured geometry must still admit, got {fit:?}");
+        };
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1024, 1024);
+        assert!(
+            (phases.peak_gb() - derived_peak_gb).abs() > 0.001,
+            "in-envelope admission must stay on the measured curve ({}), not fall through to the \
+             derivation ({derived_peak_gb})",
+            phases.peak_gb()
+        );
+    }
+    /// sc-22667 (epic 22657 feature-end round, E3/E4): OUT of the measured envelope the Krea lane
+    /// prices every rung through the law with the rung's OWN regime and the contract's facts. With
+    /// Krea 2 Turbo's real facts at 2048x2048 the chunked rung (3) prices its 128 Mi-score budget
+    /// where the staged rung (2) prices the whole 48-head score tensor, and the windowed rung (4)
+    /// keeps the window share resident wherever the contract engages the window — so 3 and 4
+    /// price strictly below 2, and the gate's selection carries exactly the law's per-rung
+    /// phases: a card that cannot host rung 2 admits on rung 3 at the law's rung-3 peak.
+    ///
+    /// MUTATION: replacing the rung regime in `krea_turbo_fit_priced` with
+    /// `RequestRegime::staged()` (the retired shim's composition) makes every rung price at the
+    /// staged derivation — the `<` assertions and the rung-3 admission below go red. Passing
+    /// `ArchitectureFacts::default()` instead of `facts` reds the same way (every ratio inert).
+    #[test]
+    fn an_out_of_envelope_krea_request_prices_the_bounded_rungs_below_the_staged_one() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let (width, height) = (2048u32, 2048u32);
+        assert!(
+            u64::from(width) * u64::from(height)
+                > manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+                    .as_u64()
+                    .expect("maxMeasuredPixels")
+        );
+        let derived =
+            |strategy| krea_anchor_derived_phases(&manifest, strategy, width, height, KREA_2_FACTS);
+        let staged = derived(MemoryStrategy::StagedResidency);
+        let tiled = derived(MemoryStrategy::BoundedDecode);
+        let chunked = derived(MemoryStrategy::BoundedAttention);
+        let windowed = derived(MemoryStrategy::BoundedTransformerResidency);
+        assert!(
+            chunked.denoise < staged.denoise && chunked.peak_bytes() < staged.peak_bytes(),
+            "rung 3 (chunk) must price below rung 2: {chunked:?} against {staged:?}"
+        );
+        // Rung 4 is priced from the composition the CONTRACT says it executes and the component
+        // bytes it states. The weights-free test contract (`krea_test_load_spec`) states a ZERO
+        // transformer, so on the gate's own inputs the window has nothing to shrink and rung 4
+        // equals rung 3's working set; the window share is graded below on the same anchor with
+        // a stated transformer, through the same regime the gate builds.
+        let contract = krea_test_provider_contract("q4");
+        let gate_components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
+        assert!(
+            contract
+                .engaged_composition(MemoryStrategy::BoundedTransformerResidency)
+                .contains(&MemoryStrategy::BoundedTransformerResidency),
+            "the pinned Krea contract executes the window on rung 4"
+        );
+        if gate_components.transformer > 0 {
+            assert!(
+                windowed.denoise < chunked.denoise,
+                "rung 4 (window) must price below rung 3: {windowed:?} against {chunked:?}"
+            );
+        } else {
+            assert_eq!(
+                windowed, chunked,
+                "with no transformer bytes to window, rung 4 is rung 3's working set"
+            );
+        }
+        let with_transformer = sceneworks_core::memory_anchor::ComponentBytes {
+            transformer: 4_000_000_000,
+            ..gate_components
+        };
+        let derived_with = |strategy| {
+            krea_anchor_derived_phases_with(
+                &manifest,
+                strategy,
+                width,
+                height,
+                KREA_2_FACTS,
+                with_transformer,
+            )
+        };
+        let chunked_with = derived_with(MemoryStrategy::BoundedAttention);
+        let windowed_with = derived_with(MemoryStrategy::BoundedTransformerResidency);
+        assert!(
+            windowed_with.denoise < chunked_with.denoise
+                && chunked_with.denoise - windowed_with.denoise
+                    >= 4_000_000_000 - 4_000_000_000_u64.div_ceil(28),
+            "with a 4 GB transformer the window keeps one of 28 blocks resident:              {windowed_with:?} against {chunked_with:?}"
+        );
+        assert!(
+            windowed.peak_bytes() < staged.peak_bytes(),
+            "rung 4 must price below rung 2: {windowed:?} against {staged:?}"
+        );
+        assert!(
+            tiled.decode < staged.decode && windowed.peak_bytes() <= tiled.peak_bytes(),
+            "the tile moves decode and the deeper rungs never price above the tiled one: \
+             {tiled:?} / {windowed:?}"
+        );
+
+        // A card between rung 2 and rung 3 (with room for the estimate margin and the reserve):
+        // rung 2 cannot fit, rung 3 does — and it is priced at the law's rung-3 phases.
+        let chunked_peak_gb = chunked.peak_bytes() as f64 / BYTES_PER_GIB;
+        let staged_peak_gb = staged.peak_bytes() as f64 / BYTES_PER_GIB;
+        let free_gb = chunked_peak_gb * 1.25 + HEADROOM_GB;
+        assert!(
+            free_gb < staged_peak_gb,
+            "the card must sit below rung 2 ({staged_peak_gb}) for the admission to discriminate"
+        );
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_priced(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+                Some(KREA_2_FACTS),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            selection,
+            basis,
+            ..
+        }) = fit
+        else {
+            panic!("rung 3 must admit on the law's derivation, got {fit:?}");
+        };
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedAttention);
+        assert_eq!(
+            basis,
+            crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+            }
+        );
+        let gib = |bytes: u64| bytes as f64 / BYTES_PER_GIB;
+        assert!(
+            (phases.text_gb - gib(chunked.conditioning)).abs() < 1e-6
+                && (phases.denoise_gb - gib(chunked.denoise)).abs() < 1e-6
+                && (phases.decode_gb - gib(chunked.decode)).abs() < 1e-6,
+            "the admitted rung carries the law's rung-3 phases: {phases:?} against {chunked:?}"
+        );
+    }
+
+    /// sc-22667 (E4): the operational reserve is charged EXACTLY ONCE, on the budget side, as
+    /// `ladder_reserve_gb` of the probe — never the retired fixed 2 GB, and never also inside a
+    /// candidate's peak. Graded on an out-of-envelope anchor-derived admission, where the lane
+    /// used to fold `HEADROOM_GB` into the derivation AND subtract it from the budget.
+    ///
+    /// MUTATION: `reserved_headroom_gb: HEADROOM_GB` (or `+ HEADROOM_GB` on the quoted need) reds
+    /// the equality on the reserve; adding the reserve to the candidate peak as well reds the
+    /// `needed_gb` identity; charging `ReserveCharge::ExceptPadCarrying` naming the anchor
+    /// candidate reds the `available_gb` identity.
+    #[test]
+    fn an_out_of_envelope_krea_request_charges_the_ladder_reserve_once() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1280, 1280);
+        // A warm-looking probe: 30 GB card with 3 GB already resident, so the ladder reserve is
+        // the ceiling (`HEADROOM_GB`) and differs from the bare margin a `free == total` fixture
+        // would produce — both arms of `ladder_reserve_gb` are therefore visible here.
+        let total_gb = derived_peak_gb * 1.25 + 3.0 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb: total_gb - 3.0,
+            total_gb,
+        });
+        let reserve_gb = reserve_for(budget);
+        assert!(
+            (reserve_gb - HEADROOM_GB).abs() < 1e-9,
+            "a 3 GB idle baseline caps the reserve at the legacy ceiling"
+        );
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_gb,
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            needed_gb,
+            admitted,
+            ..
+        }) = fit
+        else {
+            panic!("the derived estimate must admit, got {fit:?}");
+        };
+        assert!((admitted.reserve_gb - reserve_gb).abs() < 1e-9);
+        assert!(
+            (needed_gb - (admitted.needed_gb + reserve_gb)).abs() < 1e-9,
+            "the quoted need is the admitted peak plus the reserve, once: {needed_gb} against \
+             {admitted:?}"
+        );
+        assert!(
+            admitted.needed_gb >= phases.peak_gb() && admitted.needed_gb <= phases.peak_gb() * 1.10,
+            "the admitted peak is the derived peak plus the estimate allowance and NO reserve: \
+             {admitted:?} against {}",
+            phases.peak_gb()
+        );
+        assert!(
+            (admitted.available_gb - (total_gb - 3.0 - reserve_gb)).abs() < 1e-9,
+            "the selector pool is free minus the reserve, subtracted once: {admitted:?}"
+        );
+
+        // The same request on a bare fixture budget (`free == total`) charges the measured
+        // pre-load residency plus the margin — a different, smaller reserve — which is the other
+        // arm of `ladder_reserve_gb` reaching this lane.
+        let bare = Some(VramBudget {
+            free_gb: derived_peak_gb * 1.25 + HEADROOM_GB,
+            total_gb: derived_peak_gb * 1.25 + HEADROOM_GB,
+        });
+        let bare_reserve = reserve_for(bare);
+        assert!(bare_reserve < HEADROOM_GB);
+        let bare_fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                bare,
+                bare_reserve,
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits { admitted, .. }) = bare_fit else {
+            panic!("{bare_fit:?}");
+        };
+        assert!((admitted.reserve_gb - bare_reserve).abs() < 1e-9);
+        // The SELECTOR charged that smaller reserve — its pool is free minus it, not minus the
+        // legacy ceiling — which is the arm a `reserved_headroom_gb: HEADROOM_GB` mutation
+        // cannot pass.
+        assert!(
+            (admitted.available_gb - (derived_peak_gb * 1.25 + HEADROOM_GB - bare_reserve)).abs()
+                < 1e-9,
+            "the selector pool is free minus the ladder reserve: {admitted:?}"
+        );
+    }
+
+    /// sc-22667 (E7): the Krea selection's `image_memory_strategy_selected` payload carries the
+    /// selected rung, its parameters, the basis and the THREE phase peaks the selector graded, in
+    /// the shared ladder's spelling. `generate_candle_stream` emits it in the `Fits` arm
+    /// (`candle_stream_emits_the_krea_ladder_selection` in `image_jobs::tests` reads the source).
+    ///
+    /// MUTATION: dropping `phasePeakBytes` (or any one of its three keys) from
+    /// `selection_telemetry` reds this; spelling the strategy or basis differently from the
+    /// shared ladder reds the label assertions.
+    #[test]
+    fn the_krea_selection_telemetry_carries_the_three_phase_peaks() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let fit = krea_turbo_fit(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            Some(VramBudget {
+                free_gb: 19.0,
+                total_gb: 19.0,
+            }),
+            true,
+        )
+        .expect("a graded result");
+        let Some(KreaTurboFit::Fits {
+            phases,
+            selection,
+            admitted,
+            ..
+        }) = Some(fit)
+        else {
+            panic!("the fixture admits on an optimized rung, got {fit:?}");
+        };
+        let telemetry = fit
+            .selection_telemetry("q4", 1024, 1024)
+            .expect("a selection emits telemetry");
+        assert_eq!(telemetry["backend"], "candle");
+        assert_eq!(telemetry["route"], "krea_2_turbo");
+        assert_eq!(telemetry["actualTier"], "q4");
+        assert_eq!(telemetry["geometry"]["width"], 1024);
+        assert_eq!(
+            telemetry["strategy"],
+            crate::candle_memory_strategy::strategy_label(selection.strategy)
+        );
+        assert_eq!(telemetry["basis"], "measured");
+        let bytes = |gb: f64| (gb * BYTES_PER_GIB).round() as u64;
+        assert_eq!(
+            telemetry["phasePeakBytes"]["conditioning"],
+            bytes(phases.text_gb)
+        );
+        assert_eq!(
+            telemetry["phasePeakBytes"]["denoise"],
+            bytes(phases.denoise_gb)
+        );
+        assert_eq!(
+            telemetry["phasePeakBytes"]["decode"],
+            bytes(phases.decode_gb)
+        );
+        assert_eq!(telemetry["predictedPeakBytes"], bytes(phases.peak_gb()));
+        assert_eq!(telemetry["admittedPeakGb"], admitted.needed_gb);
+        assert_eq!(telemetry["availableGb"], admitted.available_gb);
+        assert_eq!(telemetry["reserveGb"], admitted.reserve_gb);
+        assert_eq!(
+            telemetry["parameters"]["decodeTileEdge"],
+            serde_json::json!(selection.parameters.decode_tile_edge)
+        );
+        assert!(
+            KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::Missing,
+            }
+            .selection_telemetry("q4", 1024, 1024)
+            .is_none()
+                && KreaTurboFit::Reject {
+                    phases,
+                    needed_gb: 0.0,
+                }
+                .selection_telemetry("q4", 1024, 1024)
+                .is_none(),
+            "only a selection emits"
+        );
     }
 }

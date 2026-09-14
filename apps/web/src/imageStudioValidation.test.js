@@ -72,6 +72,20 @@ describe("imageGenerateValidation", () => {
     expect(rolled.surfaced.map((i) => i.message)).toContain(msg);
   });
 
+  it("blocks a restored alternate decoder until engine capabilities are authoritative", () => {
+    const summary = summarize(
+      imageGenerateValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced).toEqual([
+      expect.objectContaining({
+        field: "decoder",
+        kind: "error",
+        message: "Waiting for engine capabilities before using the restored decoder.",
+      }),
+    ]);
+  });
+
   it("requires caption content on a structured model, silently", () => {
     const issues = imageGenerateValidation({ ...whole, structuredActive: true, captionHasContent: false, prompt: "" });
     expect(kinds(issues, "caption")).toEqual(["requirement"]);
@@ -243,6 +257,18 @@ describe("imageBatchValidation", () => {
     expect(summarize(issues).ready).toBe(false);
   });
 
+  it("blocks a batch while a restored alternate decoder waits for engine capabilities", () => {
+    const summary = summarize(
+      imageBatchValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0]).toMatchObject({
+      field: "decoder",
+      kind: "error",
+      message: "Waiting for engine capabilities before using the restored decoder.",
+    });
+  });
+
   it("surfaces missing template keys as an error", () => {
     const summary = summarize(imageBatchValidation({ ...whole, missingKeys: ["color", "size"] }));
     expect(summary.surfaced[0].kind).toBe("error");
@@ -304,6 +330,17 @@ describe("imageBatchValidation", () => {
     expect(summary.surfaced[0].message).toBe(
       "Batch prompts 2 (4001/4000), 4 (4002/4000) exceed the character limit — shorten the prompt or pick a shorter style.",
     );
+  });
+
+  it("stops a streaming budget preflight after the first actionable overage", () => {
+    function* prompts() {
+      yield "x".repeat(PROMPT_MAX_CHARS + 1);
+      throw new Error("the preflight must not retain or inspect later violations");
+    }
+
+    expect(batchPromptBudgetOverages(prompts(), 1)).toEqual([
+      { item: 1, length: 4001, max: 4000, remaining: -1, over: true },
+    ]);
   });
 
   it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {

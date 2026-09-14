@@ -3,7 +3,7 @@ use super::*;
 
 use std::io::Write as _;
 
-use fs2::FileExt as _;
+use sceneworks_core::file_lock::FileLock;
 
 /// Max time to block waiting for the cross-process manifest lock before giving up
 /// with a clear error. Manifest RMW is a few KB of JSON, so a real hold is sub-ms;
@@ -47,18 +47,54 @@ pub(crate) async fn upsert_manifest_entry(
     let collection_key = collection_key.to_owned();
     // The critical section is blocking (fs2 advisory lock + sync read/write) so it
     // runs on a blocking thread rather than stalling the async runtime.
-    tokio::task::spawn_blocking(move || upsert_manifest_entry_locked(&path, &collection_key, entry))
-        .await
-        .map_err(|error| task_join_error("manifest upsert", error))?
+    tokio::task::spawn_blocking(move || {
+        merge_manifest_entry_locked(&path, &collection_key, entry, true).map(|_| ())
+    })
+    .await
+    .map_err(|error| task_join_error("manifest upsert", error))?
+}
+
+/// Merge `entry` into an entry that ALREADY EXISTS in `collection_key`, and write
+/// nothing at all when its id is absent. Returns whether the merge landed.
+///
+/// The update-only counterpart of [`upsert_manifest_entry`], for a writer that holds
+/// a value derived from an entry it read minutes ago: the checkpoint-catalog
+/// migration compiles for four full passes over a multi-gigabyte checkpoint before
+/// stamping, and an upsert would RESURRECT a model the user deleted in the meantime
+/// as a stub row carrying only `id` and `importPlan` — no name, no paths, no type
+/// (sc-20651). The absence check is made by the same read the merge writes from,
+/// INSIDE the same cross-process lock the write takes, so there is no window
+/// between deciding and writing.
+pub(crate) async fn update_manifest_entry_if_present(
+    path: &Path,
+    collection_key: &str,
+    entry: serde_json::Map<String, Value>,
+) -> WorkerResult<bool> {
+    if entry.get("id").and_then(Value::as_str).is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{collection_key} manifest entry requires id"
+        )));
+    }
+    let path = path.to_path_buf();
+    let collection_key = collection_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        merge_manifest_entry_locked(&path, &collection_key, entry, false)
+    })
+    .await
+    .map_err(|error| task_join_error("manifest update", error))?
 }
 
 /// Blocking read→merge→write of `path`, run under a cross-process exclusive lock on
 /// the `<manifest>.lock` sibling. Callers must invoke this off the async runtime.
-fn upsert_manifest_entry_locked(
+///
+/// `insert_missing` decides what an absent id means: appending a new member (upsert)
+/// or writing nothing and reporting `false` (update-only).
+fn merge_manifest_entry_locked(
     path: &Path,
     collection_key: &str,
     entry: serde_json::Map<String, Value>,
-) -> WorkerResult<()> {
+    insert_missing: bool,
+) -> WorkerResult<bool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -66,6 +102,11 @@ fn upsert_manifest_entry_locked(
 
     let mut manifest = match std::fs::read_to_string(path) {
         Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
+        // No manifest at all: the id is absent, so an update-only write is a no-op
+        // rather than a fresh catalog holding one stub entry.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !insert_missing => {
+            return Ok(false);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut object = serde_json::Map::new();
             object.insert("schemaVersion".to_owned(), json!(1));
@@ -108,22 +149,30 @@ fn upsert_manifest_entry_locked(
         }
     }
     if !found {
+        if !insert_missing {
+            // Nothing is written, so the file the caller read stays exactly as the
+            // deletion left it.
+            return Ok(false);
+        }
         collection.push(Value::Object(entry));
     }
-    write_json_value_blocking(path, &manifest)
+    write_json_value_blocking(path, &manifest)?;
+    Ok(true)
     // `_guard` (and the advisory lock) drops here, after the atomic rename lands.
 }
 
 /// RAII holder for a cross-process advisory exclusive lock on a `<manifest>.lock`
-/// sibling file. The lock is released when the underlying file handle drops.
+/// sibling file. Released with an explicit `LOCK_UN`, not by `close(2)` alone, which
+/// leaves the lock held while any forked child still references the same open file
+/// description (sc-22738).
 struct ManifestLock {
-    _file: std::fs::File,
+    _lock: FileLock,
 }
 
 impl ManifestLock {
     fn acquire(manifest_path: &Path) -> WorkerResult<Self> {
         let lock_path = manifest_lock_path(manifest_path);
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -138,9 +187,10 @@ impl ManifestLock {
         // which is correct on every platform.
         let contended = fs2::lock_contended_error().raw_os_error();
         loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(error) if error.raw_os_error() == contended => {
+            match FileLock::try_exclusive_retryable(file) {
+                Ok(lock) => return Ok(Self { _lock: lock }),
+                Err((handle, error)) if error.raw_os_error() == contended => {
+                    file = handle;
                     if std::time::Instant::now() >= deadline {
                         return Err(WorkerError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -153,7 +203,7 @@ impl ManifestLock {
                     }
                     std::thread::sleep(MANIFEST_LOCK_POLL);
                 }
-                Err(error) => return Err(error.into()),
+                Err((_handle, error)) => return Err(error.into()),
             }
         }
     }
@@ -214,6 +264,40 @@ pub(crate) async fn write_json_value(path: &Path, value: &Value) -> WorkerResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-22738: a released manifest lock must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every
+    /// such reference is gone — and this process forks (ffmpeg, converters) throughout a manifest
+    /// merge. The assertion uses the non-blocking primitive so the failure is an assertion rather
+    /// than a 30-second spin-wait.
+    #[test]
+    fn a_released_manifest_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        use fs2::FileExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("user.loras.jsonc");
+
+        let held = ManifestLock::acquire(&manifest).expect("manifest lock acquires");
+        let inherited = held
+            ._lock
+            .inherited_descriptor()
+            .expect("descriptor duplicates");
+        drop(held);
+
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(manifest_lock_path(&manifest))
+            .expect("probe opens lock file");
+        assert!(
+            probe.try_lock_exclusive().is_ok(),
+            "a manifest lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
+    }
 
     fn entry(id: &str) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();
