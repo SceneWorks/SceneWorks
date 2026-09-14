@@ -8,6 +8,8 @@ step. No new UI, no parallel renderer and no second LLM stack: every take is pro
 GPU worker claims the job, and every token by the `prompt_refine` worker that already ships.
 
 ```text
+references.spec.jsonc ─ film-harness make-references ──> references.jsonc (TEST FIXTURES ONLY)
+                                                              │
 brief.jsonc ─┐
              ├─ film-harness plan ──> plan.json ──(you edit it)──┐
 references ──┘                          │                        │
@@ -40,8 +42,9 @@ fixed; and a **revise** recommendation with its reasoning.
 | Document | Schema | Fixture |
 | --- | --- | --- |
 | Brief | `sceneworks_core::film_planner::ProductionBrief` | `config/film-harness/courier-workshop/brief.jsonc` |
-| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots) |
+| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots), `plan.ref.jsonc` (two shots on two MiniMax-H3 partitions) |
 | Reference pack | `sceneworks_core::film_plan::ReferencePack` | `config/film-harness/courier-workshop/references.jsonc` |
+| Reference spec (fixtures only) | `sceneworks_core::film_plan::ReferenceSpec` | `config/film-harness/courier-workshop/references.spec.jsonc` |
 | Compiled requests | `sceneworks_core::film_compile::CompiledPlan` | written to `--out/compiled.json` |
 | Review plan | `sceneworks_core::film_review::ReviewPlan` | `config/film-harness/courier-workshop/review.jsonc` |
 | Run record | `sceneworks_core::film_plan::RunRecord` | written to `--out/run.json` and `<project>/film-harness/<run_id>/run.json` |
@@ -67,6 +70,140 @@ A pack entry with `"approved": false` is still imported (so a human can review i
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
 a `[A-Za-z0-9._-]` basename: it is sent as a multipart filename, so a CR/LF in it would inject
 headers.
+
+## Generating the reference plates (`make-references`, sc-23403)
+
+**TEST FIXTURES ONLY.** In the product the user supplies the reference images: a pack is a
+human-approved document, and nothing here changes that. `make-references` exists so the harness can
+produce its OWN courier/workshop fixtures on this machine instead of shipping flat placeholder
+plates forever, and so that every plate it produces says where it came from.
+
+```bash
+film-harness make-references \
+  --spec config/film-harness/courier-workshop/references.spec.jsonc \
+  --out  /tmp/courier-refs \
+  --api  http://127.0.0.1:8000
+```
+
+It drives the ordinary image route — `POST /api/v1/image/jobs`, `mode: "text_to_image"`, Krea 2 on
+the MLX lane by default — once per declared role, waits for each job under the spec's own declared
+limits, downloads the result through `GET /api/v1/projects/:id/files/*path` into the pack directory,
+and writes a `references.jsonc`. No new job type, no new model, no new route.
+
+### The spec
+
+| Field | Meaning |
+| --- | --- |
+| `model.id` / `model.tier` | Catalog model and quant tier (`krea_2_turbo` q8 by default; `krea_2_raw` is the undistilled 52-step base). `--model` / `--tier` override them. The tier must be one the catalog entry declares, checked whether or not the install gate is on. |
+| `model.mode` | `text_to_image`, the only mode a spec generates from — an edit needs a source asset a spec has not got. |
+| `model.resolution` | `"WxH"` for every role, defaulting to the model's own declared default. Refused unless the model's declared resolution menu admits it. |
+| `model.negativePrompt` | Optional, per-spec. **Refused** for a model whose entry declares `image.supportsNegativePrompt: false` — Krea 2 Turbo is CFG-free and the engine never forwards one, so a spec that declares one is stopped rather than rendered against text the model never saw. |
+| `limits.maxJobSeconds` | Wall clock for ONE job, 1–86400. The first job of a run also pays for loading the weights. |
+| `limits.maxAttemptsPerRole` | Attempts per role, counting the first (1–5). |
+| `limits.maxMemoryGb` | Checked before dispatch against the host's reported memory **and** against the model's declared `<lane>.minMemoryGb`, and against each job's `peakMemoryBytes` (the metrics route, the same signal a video run reads) after it. Over budget stops the run — a retry would re-render at the same cost. |
+| `seedBase` | Role `n` renders at `seedBase + n`, so re-running a spec asks for the same images. A role may name its own `seed`. |
+| `references[]` | `role`, `kind`, `file`, `description` and the **required** `prompt` (plus optional `negativePrompt`, `seed`, `resolution`). A role with no prompt is refused by name before anything is dispatched. |
+| `inherit` | Roles copied verbatim from an existing pack (`pack`, `references[]`), plus its `sound` — so the written pack validates against the same plan the source pack did. |
+
+The shipped courier spec generates five roles (`courier`, `recipient`, `red_parcel`,
+`workshop_location`, `workbench_table`) and inherits two (`house_style`, `workshop_plate`) and the
+four sound clips. Its prompts are written for **cross-image consistency**: the same workshop
+description appears verbatim in every prompt, each character is one figure in a neutral
+three-quarter pose, the parcel sits alone on a plain surface, and the location plate is the wide
+shot that establishes the bench. Editing one prompt without editing the shared clause in the others
+is how a pack stops looking like one place.
+
+### What it writes
+
+Every generated entry carries `approved: true`, `generated: true` and a `generation` block — model,
+tier, backend, mode, prompt, negative prompt (absent when the model takes none), seed, geometry, job
+id, asset id, sha256 and the timestamp:
+
+```jsonc
+{
+  "role": "courier", "kind": "character", "file": "references/courier.png",
+  "description": "The courier: blue jacket, carries the parcel.",
+  "approved": true, "generated": true,
+  "generation": {
+    "model": "krea_2_turbo", "tier": "q8", "backend": "mlx", "mode": "text_to_image",
+    "prompt": "Full-length character reference photograph of a courier …",
+    "seed": 4200, "width": 1024, "height": 1024,
+    "jobId": "job_…", "assetId": "asset_…", "sha256": "…", "createdAt": "…"
+  }
+}
+```
+
+`generated` is provenance and nothing else. A generated reference is imported, tagged and resolved
+into a shot's conditioning exactly like a supplied one — `approved` remains the only gate — and the
+flag plus the `generation` block ride onto the imported asset's `filmHarness` provenance so the
+answer survives the pack document. An inherited plate keeps its own flag: a supplied plate stays
+supplied. The pack schema refuses the two incoherent states (`generated` with no provenance,
+provenance with no flag).
+
+### Refusals, and why `--out` is never half-written
+
+Every file is written into a hidden sibling of `--out`
+(`.<name>.make-references-pending.<runId>`) and the directory is renamed into place only once the
+last plate has landed and the document has been written and re-validated against its own files. A
+refusal, a failed job, a timeout, an over-budget peak or a Ctrl-C removes it, so `--out` either
+holds a complete pack or does not exist. The pending directory is named after **this run**, so two
+runs against the same `--out` write into different directories instead of destroying each other's
+in-flight work.
+
+Publishing replaces a pack by **renaming**, never by removing one and hoping:
+
+1. the pack already at `--out` (if any) is renamed aside to `.<name>.make-references-replaced.<runId>`,
+2. the pending directory is renamed onto `--out`,
+3. the displaced pack is removed.
+
+A failure at step 2 renames the displaced pack back, so a publish that cannot complete does not
+cost you the pack it was replacing. The window in which `--out` does not name a complete pack is the
+one rename between steps 1 and 2.
+
+An existing non-empty `--out` is refused unless `--force` is passed — and `--force` replaces a
+**pack**, not whatever `--out` happens to name. It is refused unless the directory holds a readable
+`references.jsonc` and every other top-level entry is one that pack's own `file` paths declare
+(`references/`, `sound/`); the refusal names the stray entry and removes nothing. Pointed at a plan
+directory — `--out config/film-harness/courier-workshop --force` — it refuses rather than taking
+`plan.jsonc`, `brief.jsonc`, `review.jsonc` and the spec it is reading with it.
+
+Refused before the first render: a spec that does not validate (a role with no prompt names the
+role; `maxJobSeconds` must be 1–86400 and `maxAttemptsPerRole` 1–5), an inherited role the source
+pack does not hold, a model that is not in the catalog / not an image model / does not declare the
+mode / is not installed (`--skip-install-check` turns the last one off), a tier the catalog entry
+does not declare (`--tier q6` would otherwise render q4 and record `"q6"`), a negative prompt the
+model does not take, a geometry the model does not declare, a memory budget over the host's memory
+**or below the model's own declared `<lane>.minMemoryGb`** (krea_2_turbo declares 48 GB on `mlx`; a
+budget under it clears every other gate, pays a full render and only then refuses on the observed
+peak), and no live worker advertising `image_generate`.
+
+Refused during: a job that fails, a job that overruns `maxJobSeconds` (cancelled through the API),
+a job whose asset the API never publishes, and a peak over `maxMemoryGb`. Each names the role. A job
+that overruns and whose **cancel is not honoured** — still running after the grace — stops the run
+outright rather than retrying: the render is still on the GPU, and the spec declared one memory
+budget, so no second plate may be dispatched beside it. That is the same halt the video run takes
+(`cancel_not_honoured`).
+
+### The real GPU run (the courier fixtures)
+
+Serial on the dev Mac's GPU. With the API and a GPU worker already running, and Krea 2 Turbo q8
+installed (~20.6 GB):
+
+```bash
+film-harness make-references \
+  --spec config/film-harness/courier-workshop/references.spec.jsonc \
+  --out  film-harness-evidence/sc-23403/courier-refs \
+  --api  http://127.0.0.1:8000
+film-harness validate \
+  --plan       config/film-harness/courier-workshop/plan.jsonc \
+  --references film-harness-evidence/sc-23403/courier-refs/references.jsonc
+```
+
+Expect roughly 10–20 minutes for the five plates: the first job pays the weight load (several
+minutes), the remaining four are an 8-step 1024² render each on a warm engine. `--model krea_2_raw`
+is the undistilled 52-step alternative and takes substantially longer per plate. The evidence is the
+`--out` directory itself: five PNGs under `references/`, the two inherited plates, the four sound
+clips and the `references.jsonc` with its provenance.
 
 ## Sound (sc-22712)
 
@@ -320,6 +457,81 @@ reference pack.
 `compiled.json` also carries the planner's cost (`planner`, sc-22715) whenever an LLM produced or
 refined it — see *Planning from a brief*. A `--no-refine` compile of a hand-authored plan ran no
 LLM and records none.
+
+### Partition resolution (sc-23402)
+
+Some model families ship their reference conditioning as a **separate catalog entry**. MiniMax-H3 is
+two 18.78 GB DiT checkpoints: `minimax_h3` serves `text_to_video | image_to_video |
+first_last_frame` and declares `limits.maxReferenceAssets: 0`, while `minimax_h3_ref` serves
+`reference_to_video` only and declares 9 reference images, 3 source clips and 3 reference audio
+clips. Routing a text-to-video request at the reference entry loads the wrong checkpoint, so the
+route refuses every other pairing.
+
+A plan still declares the **family once** (`model.id: "minimax_h3"`). The compiler resolves the
+partition **per shot**:
+
+| the shot's `conditioning.referenceRoles` | it compiles to |
+| --- | --- |
+| non-empty | `minimax_h3_ref`, with `referenceAssetIds` in the plan's role order |
+| empty | `minimax_h3`, with its declared mode and no reference field at all |
+
+References are **optional input**. A shot that binds none is never refused for it — it simply stays
+on the plan's model. (A shot that declares `reference_to_video` and binds nothing is a
+contradiction, and is refused naming the shot and the requirement.) A family with no reference
+partition keeps the old behaviour exactly: the declared model's own `limits.maxReferenceAssets` is
+what refuses a shot that binds too many.
+
+Three documents carry the outcome, and they cannot disagree because all three read one string:
+
+- the compiled request's `model` is the **resolved** id, with `partitionReason` beside it saying why;
+- the dispatched body's `model` is that same id (`to_job_body` writes it), and
+  `advanced.filmHarness.partitionReason` carries the reason;
+- the attempt record's `resolvedModelId` / `partitionReason`, and the take's `model`.
+
+Validation follows the resolution: each shot is checked against the **resolved** partition's
+declared capabilities, menus and caps. A reference shot whose partition is not in the catalog is
+refused **by name, with the shot**, never dispatched at the base checkpoint.
+
+The **install/reachability gate follows the SELECTION**, not the document. `validate`/`run` check
+catalog presence, install state and platform reachability for the reference partition only when a
+**selected** shot resolves to it, so `--shots SH020` on `plan.ref.jsonc` runs on a host that never
+downloaded the 18.78 GB reference DiT, and a `resume` gates what the record's
+`selectedShotIds` names. Plan-level validation of the document is unchanged: `--shots SH020` is
+still refused for a malformed SH010, and SH010's declared caps are still judged against the
+reference entry. `film-harness plan` gates the **base partition only** — references are optional
+input, the planner's envelope is built from the base entry alone (it cannot generate a
+reference-binding shot at all; see below), and a brief that will produce a text-only film must plan
+on a host with no reference weights.
+
+The run's memory preflight uses the largest `minMemoryGb` among the partitions the plan actually
+uses. `maxMemoryGb` bounds **one job's** observed peak and shots dispatch one job at a time, so
+both partitions are never resident together: each must fit on its own, and the largest declared
+minimum is therefore the binding one — it is a max, not a sum.
+
+`run.json`'s `model.partitionWeights` records the manifest download row behind **each** partition
+the run dispatches on, keyed by catalog model id, so a mixed run's record names the
+`transformer_ref` files that produced its reference takes as well as the base checkpoint's.
+`model.weights` remains the declared model's own row.
+
+There are no per-shot model overrides across families: the only id resolution can ever produce is
+the declared model's own reference partition.
+
+**The planner does not generate reference shots.** `film-harness plan` builds its capability
+envelope from the base entry alone — `modes` omits `reference_to_video` and `maxReferenceImages` is
+0 — so an LLM-generated draft can never bind reference roles. Mixed-partition plans are authored by
+hand today (`plan.ref.jsonc`); teaching the planner to produce them is **sc-23405 (S4)**, not this
+story. `film-harness compile` and `film-harness run` resolve and validate hand-authored reference
+shots fully.
+
+`compiled.json` is **schema version 2** (sc-23402): its `model` field is the RESOLVED partition id
+rather than the plan's declared family model, with `partitionReason` beside it. A v1 document is
+refused by version — `unsupported compiled plan schema version 1` — and the remedy is `film-harness
+compile`, which rewrites it.
+
+`config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
+`courier` + `workshop_plate`, SH020 binds nothing — and
+`PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh` renders it
+end to end. Budget it longer than the base two-shot smoke: the run loads both DiTs.
 
 ### Dependencies (plan schema 2)
 
@@ -911,6 +1123,60 @@ eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
 export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
 scripts/film-harness-smoke.sh
 ```
+
+**Mixed partitions (sc-23402).** `config/film-harness/courier-workshop/plan.ref.jsonc` is two shots
+that resolve to two different MiniMax-H3 checkpoints out of one plan — SH010 binds `courier` +
+`workshop_plate` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
+renders on `minimax_h3` / `text_to_video`. It is the same `SH010,SH020` selection the script
+defaults to, so the plan is the only thing that changes:
+
+```sh
+eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
+export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
+PLAN=config/film-harness/courier-workshop/plan.ref.jsonc \
+  SCENEWORKS_SMOKE_DIR=~/SceneWorks/film-harness-evidence/sc-23402/mixed-smoke \
+  scripts/film-harness-smoke.sh
+```
+
+Budget it longer than the base two-shot smoke: the run loads BOTH 18.78 GB DiTs (the reference one
+for SH010, the base one for SH020), so there is an extra checkpoint load between the shots. Read
+`run.json`'s `shots[].attempts[].resolvedModelId` to confirm which checkpoint rendered each take —
+see *Partition resolution* above.
+
+**What the 2026-09-14 runs measured (sc-23402), and the engine defect they hit.** Two runs on the
+dev Mac — **`run_cd7fc4be2398`** (first) and **`run_a7f6af80e28f`** (second) — with their run
+records, worker logs and `compiled.json` under
+**`~/SceneWorks/film-harness-evidence/sc-23402/`**. Both dispatched SH010 as `minimax_h3_ref` /
+`reference_to_video` through the real route and the MLX worker loaded the reference checkpoint for
+it — the resolution, the payload and the record all agree. The RENDER is a different story, and it
+is inference-side, not harness-side:
+
+- **The reference partition is far slower per denoise step.** SH020 on the base checkpoint ran at
+  ~17 s/step (50 steps in ~17 min at 576x320, matching the entry's own `durationHint`). SH010 on
+  the reference partition ran at roughly **110 s/step** — about 6x — on top of a **~21 minute** cold
+  load of the `transformer_ref` DiT plus the staged text encoder. Both numbers are from
+  `run_cd7fc4be2398` (`~/SceneWorks/film-harness-evidence/sc-23402/`; step timings in the worker
+  log, the load in the gap between dispatch and the first progress event).
+  `plan.ref.jsonc`'s limits are sized for that; `plan.jsonc`'s 2700 s per-shot budget cuts the
+  reference shot mid-render.
+- **The reference conditioning intermittently arrives degenerate.** `run_a7f6af80e28f`'s SH010 was
+  refused by the engine before denoising: *"minimax-h3 te (ref2va token embedding): refusing to
+  render from a degenerate conditioning tensor — every element is exactly zero at shape
+  [1, 14801, 5120]"* (the engine's own guard, citing sc-23053, originally sc-17153). The first run
+  did NOT hit it — the same plan, the same weights, the same host, denoising past step 14 — so it
+  is intermittent.
+
+  **Cause: hypothesis, not a conclusion.** Intermittency on identical inputs is consistent with the
+  fresh-Metal-buffer zero-read class (see `mlx_load_eval_gpu_unimplemented_first_read_can_return_zeros`),
+  but nothing here has isolated it to that, and two runs are not a sample. It is **under
+  investigation on the inference side** on the paired branch
+  `feature/sc-23401-film-harness-phase-2`. What IS established is that the refusal comes from the
+  engine's own guard after the harness handed it a correct payload: nothing in SceneWorks can work
+  around it, and no harness change is pending on it.
+
+The harness behaved correctly through both: the first run stopped on its declared per-shot budget
+and refused to dispatch a second render beside the one still in flight, the second recorded the
+engine's refusal against SH010, rendered SH020 and exported the timeline.
 
 The script sets `SCENEWORKS_GPU_ID` for the render worker (`mlx` on macOS): the worker binary
 defaults that to `cpu`, and a cpu worker spawns the utility pool and advertises no

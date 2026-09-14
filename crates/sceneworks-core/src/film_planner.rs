@@ -27,9 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::film_plan::{
-    parse_resolution, validate_all, ModelLane, PlanDiagnostic, PlanLimits, PlanModel, PlanSound,
-    ProductionPlan, ReferencePack, Shot, ShotConditioning, ShotDependency, PLAN_SCHEMA_VERSION,
-    SHOT_CONDITIONING_MODES,
+    parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits, PlanModel,
+    PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning, ShotDependency,
+    PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{default_fps, default_resolution, reference_caps};
@@ -951,7 +951,7 @@ pub fn validate_generated_plan(
     plan: &ProductionPlan,
     pack: &ReferencePack,
     pack_dir: Option<&Path>,
-    model_entry: Option<(&Map<String, Value>, ModelLane)>,
+    model_entry: Option<(&ModelEntries<'_>, ModelLane)>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = coverage_findings(brief, draft);
     findings.extend(role_coverage_findings(brief, plan));
@@ -1222,6 +1222,11 @@ mod tests {
         .expect("pack parses")
     }
 
+    /// The single-entry view of a catalog entry, for the tests whose plans use one partition.
+    fn single_entries(entry: &Map<String, Value>) -> ModelEntries<'_> {
+        ModelEntries::single("minimax_h3", entry)
+    }
+
     fn model_entry() -> Map<String, Value> {
         json!({
             "id": "minimax_h3",
@@ -1290,7 +1295,7 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         );
         assert!(findings.is_empty(), "{:?}", messages(&findings));
         // 3 x 14.375 = 43.125s, inside the 30-60s window.
@@ -1581,7 +1586,7 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         ));
         assert!(
             findings
@@ -1625,19 +1630,17 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         ));
-        assert!(
-            findings.iter().any(
-                |m| m.contains("[SH020] conditioning.mode") && m.contains("reference_to_video")
-            ),
-            "{findings:?}"
-        );
+        // The reference shot resolves to the family's reference partition (sc-23402), and only the
+        // base entry is installed here — so it is refused by name rather than dispatched at the
+        // base checkpoint, which serves no reference conditioning at all.
         assert!(
             findings
                 .iter()
                 .any(|m| m.contains("[SH020] conditioning.referenceRoles")
-                    && m.contains("maxReferenceAssets")),
+                    && m.contains("minimax_h3_ref")
+                    && m.contains("not in this API's model catalog")),
             "{findings:?}"
         );
         assert!(
@@ -1664,7 +1667,7 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         ));
         assert!(
             findings.iter().any(|m| m.contains("not approved")),

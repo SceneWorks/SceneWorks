@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::film_harness::{
-    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, ResumeOptions,
-    RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
+    self, ApiRequest, ApiResponse, ApiTransport, BytesResponse, BytesTransportFuture, HarnessError,
+    RequestBody, ResumeOptions, RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
 };
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
@@ -71,6 +71,29 @@ impl ApiTransport for RouterTransport {
                 serde_json::from_slice(&bytes).unwrap_or(Value::Null)
             };
             Ok(ApiResponse { status, body })
+        })
+    }
+
+    /// The bytes half (sc-23403): the same `oneshot` driver, without the JSON parse — what
+    /// `make-references` downloads a rendered plate through.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .expect("request builds");
+            let response = app
+                .oneshot(request)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?;
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
         })
     }
 }
@@ -138,6 +161,10 @@ impl ApiTransport for ScriptedTransport {
             Ok(response)
         })
     }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
+    }
 }
 
 /// How the fake worker treats one video job, keyed by the shot id the harness stamps into
@@ -189,6 +216,18 @@ pub(crate) struct WorkerScript {
     pub(crate) vqa_answers: std::collections::BTreeMap<String, String>,
     /// Fail every `image_vqa` job, for the "the backend answered nothing at all" path.
     pub(crate) vqa_fails: bool,
+    /// sc-23403: roles (`advanced.filmHarness.role`) whose `image_generate` job fails outright.
+    pub(crate) image_fails: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs until it is cancelled, so a test can spend
+    /// the spec's own `maxJobSeconds` on one.
+    pub(crate) image_hangs: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs and IGNORES `cancelRequested` — the image
+    /// lane's [`VideoBehavior::HangIgnoringCancel`]. A render still on the GPU after the cancel
+    /// grace is the one state in which no further plate may be dispatched beside it.
+    pub(crate) image_ignores_cancel: Vec<String>,
+    /// sc-23403: peak the fake image worker reports in its metrics block, as a percentage of host
+    /// memory. `None` reports the ordinary small peak.
+    pub(crate) image_peak_pct: Option<f64>,
     /// Questions the fake worker has been asked, in order: (tag, question).
     pub(crate) vqa_asked: Vec<(String, String)>,
     /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
@@ -241,6 +280,9 @@ pub(crate) const FAKE_CAPABILITIES: &[&str] = &[
     "frame_extract",
     "image_vqa",
     "prompt_refine",
+    // sc-23403: the generation seam `make-references` drives. A real image worker advertises the
+    // same capability and answers with the same `assetWrites` fact shape.
+    "image_generate",
 ];
 
 async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
@@ -322,6 +364,8 @@ fn spawn_fake_worker(
                 "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
                 "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
+                // sc-23403: the image-generation seam the reference-fixture generator drives.
+                "image_generate" => run_fake_image_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -541,6 +585,162 @@ async fn run_fake_video_job(
             "backend": "mlx",
             "totalMs": 1_000,
             "peakMemoryBytes": peak_memory_bytes,
+            "peakMemoryPct": peak_pct,
+        }),
+    )
+    .await;
+}
+
+/// The `image_generate` job, faked (sc-23403): write a deterministic plate at the REQUESTED
+/// geometry where the GPU worker would write its render, and report it as an `assetWrites` fact in
+/// the shape `build_image_sidecar_parts` reads. Asset persistence, the sidecar, the recipe, the
+/// index, the two-phase result rewrite and the file route the plate is downloaded back through are
+/// all production code paths.
+async fn run_fake_image_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let role = payload["advanced"]["filmHarness"]["role"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let (fails, hangs, ignores_cancel, peak_pct) = {
+        let script = script.lock();
+        (
+            script.image_fails.contains(&role),
+            script.image_hangs.contains(&role),
+            script.image_ignores_cancel.contains(&role),
+            script.image_peak_pct,
+        )
+    };
+    if fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake image engine fault", "error": "fake image engine fault",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    if ignores_cancel {
+        // A render that keeps the GPU past the cancel grace — the image lane's
+        // `VideoBehavior::HangIgnoringCancel`. The job stays `running` forever, so the generator
+        // must refuse rather than dispatch a second plate beside a render it cannot stop.
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "running", "stage": "generating", "progress": 0.2,
+                "message": "fake plate, wedged", "workerId": WORKER_ID, "backend": "mlx"
+            }),
+        )
+        .await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if hangs {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let width = payload["width"].as_u64().unwrap_or(1024) as u32;
+    let height = payload["height"].as_u64().unwrap_or(1024) as u32;
+    let seed = payload["seed"]
+        .as_i64()
+        .or_else(|| payload["seeds"][0].as_i64())
+        .unwrap_or(1);
+    let asset_id = format!("asset_{}", &job_id.replace('-', "")[..16]);
+    let genset_id = format!("genset_{}", &job_id.replace('-', "")[..16]);
+    let media_rel = format!("assets/images/{genset_id}/{asset_id}.png");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join(format!("assets/images/{genset_id}")))
+        .expect("images dir");
+    // A real PNG at the geometry the job asked for: the pack the generator publishes has to hold
+    // something a later `validate` and a later import can actually read.
+    let tint = [
+        (seed.unsigned_abs() % 251) as u8,
+        (role.len() as u8).wrapping_mul(17),
+        180,
+    ];
+    std::fs::write(
+        project_dir.join(&media_rel),
+        film_harness::fixture_plate_png_sized(&role, tint, width, height).expect("plate encodes"),
+    )
+    .expect("fake plate");
+    let fact = json!({
+        "type": "image",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "width": width, "height": height,
+        "normalizedWidth": width, "normalizedHeight": height,
+        "count": 1,
+        "index": 0,
+        "seed": seed,
+        "family": "krea-2",
+        "displayName": format!("fake plate {role}"),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": payload["mode"], "model": payload["model"], "adapter": "fake_mlx_krea",
+        "prompt": payload["prompt"], "negativePrompt": payload["negativePrompt"], "loras": [],
+        "rawAdapterSettings": { "advanced": payload["advanced"] }
+    });
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake plate done", "workerId": WORKER_ID, "backend": "mlx",
+            "result": {
+                "generationSetId": genset_id,
+                "expectedCount": 1,
+                "adapter": "fake_mlx_krea",
+                "model": payload["model"],
+                "generationSet": {
+                    "id": genset_id, "mode": payload["mode"], "model": payload["model"],
+                    "prompt": payload["prompt"], "negativePrompt": "", "count": 1,
+                    "createdAt": sceneworks_core::time::utc_now()
+                },
+                "assetWrites": [fact]
+            }
+        }),
+    )
+    .await;
+    let peak_pct = peak_pct.unwrap_or(12.0);
+    post_generation_metrics(
+        app,
+        job_id,
+        json!({
+            "backend": "mlx",
+            "totalMs": 1_000,
+            "peakMemoryBytes": (HOST_MEMORY_MB as f64 * 1024.0 * 1024.0 * peak_pct / 100.0) as u64,
             "peakMemoryPct": peak_pct,
         }),
     )
@@ -1175,6 +1375,21 @@ impl Harness {
         path
     }
 
+    /// The shipped MIXED-PARTITION fixture (sc-23402) copied into the temp dir with `edit`
+    /// applied: SH010 binds `courier` + `workshop_plate`, SH020 binds nothing. Its sound block is
+    /// already absent, so it needs no ffmpeg.
+    pub(crate) fn mixed_partition_plan(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+        let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("plan.ref.jsonc"))
+            .expect("mixed fixture plan");
+        let mut plan: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("mixed fixture plan parses");
+        edit(&mut plan);
+        let path = self.temp_dir.path().join("plan-ref.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    }
+
     pub(crate) fn run_record(&self) -> Value {
         let text = std::fs::read_to_string(self.temp_dir.path().join("run-out/run.json"))
             .expect("run.json written");
@@ -1571,10 +1786,9 @@ async fn missing_reference_files_and_dangling_roles_are_refused_before_dispatch(
 async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_catalog() {
     let harness = Harness::start(true, vec![]).await;
     let plan = harness.edited_plan(|plan| {
-        // References on the base MiniMax-H3 checkpoint (limits.maxReferenceAssets = 0).
-        plan["shots"][0]["conditioning"] =
-            json!({ "mode": "reference_to_video", "referenceRoles": ["courier", "red_parcel"] });
-        // A negative prompt the model has no axis for.
+        // A negative prompt the model has no axis for. (A shot that binds reference roles is NOT a
+        // refusal any more: it resolves to `minimax_h3_ref`, which declares nine — sc-23402, and
+        // `a_mixed_plan_dispatches_each_shot_on_its_own_partition` owns that case.)
         plan["shots"][0]["negativePrompt"] = json!("blurry, low quality");
         // Off the fourteen-length menu, and an undeclared canvas.
         plan["shots"][1]["targetDurationSeconds"] = json!(6.0);
@@ -1590,17 +1804,6 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
         panic!("expected a validation refusal, got {error}");
     };
     let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
-    assert!(
-        text.iter().any(|m| m.contains("[SH010] conditioning.mode")
-            && m.contains("does not declare reference_to_video")),
-        "{text:?}"
-    );
-    assert!(
-        text.iter()
-            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
-                && m.contains("maxReferenceAssets")),
-        "{text:?}"
-    );
     assert!(
         text.iter().any(|m| m.contains("[SH010] negativePrompt")),
         "{text:?}"
@@ -1624,6 +1827,377 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
     );
     assert!(harness.jobs().await.is_empty());
     assert_eq!(harness.run_record()["outcome"], "rejected");
+}
+
+/// sc-23402 AC1/AC2. One plan, two checkpoints of one family: the shot that binds reference roles
+/// dispatches as `minimax_h3_ref` / `reference_to_video`, the shot that binds none as `minimax_h3`
+/// / `text_to_video` with no reference field at all — through the REAL
+/// `POST /api/v1/video/jobs` route, with the shipped catalog deciding what each partition declares.
+#[tokio::test]
+async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan_path = harness.mixed_partition_plan(|_| {});
+    let pack_path = harness.fixture_pack_without_sound();
+
+    // `film-harness compile --no-refine` writes the document a reviewer reads and the run
+    // dispatches. Doing it here rather than compiling in memory is the point: `compiled.json` is
+    // where per-shot partition resolution has to be visible.
+    let mut compile_options = planner_options(&harness, "compile-mixed");
+    compile_options.reference_pack_path = pack_path.clone();
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &compile_options,
+        &plan_path,
+    )
+    .await
+    .expect("the mixed plan compiles");
+    let compiled: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
+    )
+    .expect("compiled.json parses");
+
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.compiled_path = Some(artifacts.compiled_path.clone());
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(
+        compiled["model"]["id"], "minimax_h3",
+        "the plan declares the family once"
+    );
+    let request = |shot_id: &str| -> Value {
+        compiled["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .find(|request| request["shotId"] == shot_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no compiled request for {shot_id}"))
+    };
+    let referenced = request("SH010");
+    assert_eq!(referenced["model"], "minimax_h3_ref");
+    assert_eq!(referenced["mode"], "reference_to_video");
+    assert_eq!(
+        referenced["referenceRoles"],
+        json!(["courier", "workshop_plate"]),
+        "role ORDER is the plan's"
+    );
+    assert!(referenced["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+    let plain = request("SH020");
+    assert_eq!(plain["model"], "minimax_h3");
+    assert_eq!(plain["mode"], "text_to_video");
+    assert_eq!(plain["referenceRoles"], json!([]));
+
+    // What the route received, and what the record says about it.
+    let plate = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported");
+    let courier = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "courier")
+        .expect("courier imported");
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3_ref");
+                assert_eq!(job["payload"]["mode"], "reference_to_video");
+                assert_eq!(
+                    job["payload"]["referenceAssetIds"],
+                    json!([courier.asset_id, plate.asset_id]),
+                    "the reference assets ride the payload in role order"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
+                assert_eq!(
+                    shot.conditioning_assets.reference_asset_ids,
+                    vec![courier.asset_id.clone(), plate.asset_id.clone()]
+                );
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3_ref",
+                    "the route resolved the reference partition's entry for this shot"
+                );
+                assert_eq!(
+                    attempt.take.as_ref().expect("take").model,
+                    "minimax_h3_ref",
+                    "the take names the checkpoint that rendered it"
+                );
+            }
+            "SH020" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3");
+                assert_eq!(job["payload"]["mode"], "text_to_video");
+                // The route normalises an absent list to `[]`; the SENT body carries no
+                // `referenceAssetIds` key at all (asserted on the compiled request in
+                // `film_compile`'s own tests).
+                assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3",
+                    "the route resolved the base entry for this shot"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3");
+                assert_eq!(attempt.take.as_ref().expect("take").model, "minimax_h3");
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+        assert!(
+            !attempt.partition_reason.is_empty(),
+            "{} has no partition reason",
+            shot.shot_id
+        );
+        assert_eq!(
+            job["payload"]["advanced"]["filmHarness"]["partitionReason"],
+            json!(attempt.partition_reason),
+            "the payload and the record carry the same reason"
+        );
+    }
+
+    // And on disk, where a later reader finds it.
+    let on_disk = harness.run_record();
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .and_then(|shot| shot["attempts"][0].as_object())
+            .map(|attempt| Value::Object(attempt.clone()))
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(attempt("SH010")["resolvedModelId"], "minimax_h3_ref");
+    assert_eq!(attempt("SH020")["resolvedModelId"], "minimax_h3");
+    assert!(attempt("SH010")["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+
+    // sc-23402 review: the record names the WEIGHTS behind each partition it dispatched on, not
+    // only the declared model's row — a mixed run loads a second 18.78 GB `transformer_ref`
+    // download and nothing recorded which files produced the reference take.
+    let weights = &on_disk["model"]["partitionWeights"];
+    let partitions: Vec<&str> = weights
+        .as_object()
+        .expect("partitionWeights")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        partitions,
+        vec!["minimax_h3", "minimax_h3_ref"],
+        "both partitions this run loaded: {weights}"
+    );
+    let files = |partition: &str| -> String { weights[partition]["files"].to_string() };
+    assert!(files("minimax_h3").contains("q4/transformer/"), "{weights}");
+    assert!(
+        files("minimax_h3_ref").contains("q4/transformer_ref/"),
+        "the reference partition's own rows, not a copy of the base's: {weights}"
+    );
+    assert_eq!(
+        on_disk["model"]["weights"], weights["minimax_h3"],
+        "`weights` stays the DECLARED model's row"
+    );
+}
+
+/// sc-23402 AC1, the refusals: too many roles for the RESOLVED partition, and a
+/// `reference_to_video` shot binding none.
+#[tokio::test]
+async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
+    let harness = Harness::start(true, vec![]).await;
+    // Ten roles against `minimax_h3_ref`'s declared nine. The pack approves ten so the count is
+    // the only thing wrong with the plan.
+    let roles: Vec<String> = (0..10).map(|index| format!("plate_{index}")).collect();
+    let pack = harness.edited_pack(|pack| {
+        let references = pack["references"].as_array_mut().expect("references");
+        for role in 0..10 {
+            references.push(json!({
+                "role": format!("plate_{role}"),
+                "kind": "plate",
+                "file": "references/workshop_plate.png"
+            }));
+        }
+    });
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"]["referenceRoles"] = json!(roles);
+    });
+    let mut options = harness.options(plan, pack.clone(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-too-many-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("over the cap");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("minimax_h3_ref")
+                && m.contains("maxReferenceAssets")
+                && m.contains('9')),
+        "{text:?}"
+    );
+
+    // A reference_to_video shot binding nothing: a contradiction, named with the shot.
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"] = json!({ "mode": "reference_to_video" });
+    });
+    let mut options = harness.options(plan, pack, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-no-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("no references on a reference shot");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("at least one reference role")),
+        "{text:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// A catalog rewrite that reports `minimax_h3` INSTALLED and leaves `minimax_h3_ref` exactly as
+/// the host serves it — missing, since no weights are on disk under the test's data dir.
+///
+/// That split is the whole subject of the install-gate tests below: the base checkpoint downloaded,
+/// the separate 18.78 GB reference DiT not. Without the rewrite both partitions read `missing` and
+/// the base's own refusal would mask whatever the reference partition's gate did.
+fn only_the_base_partition_is_installed(body: &mut Value) {
+    let Some(entries) = body.as_array_mut() else {
+        return;
+    };
+    for entry in entries {
+        if entry.get("id").and_then(Value::as_str) != Some("minimax_h3") {
+            continue;
+        }
+        entry["installState"] = json!("installed");
+        if let Some(variants) = entry.get_mut("variants").and_then(Value::as_array_mut) {
+            for variant in variants {
+                variant["installed"] = json!(true);
+                variant["installState"] = json!("installed");
+            }
+        }
+    }
+}
+
+/// sc-23402 review. The install/reachability gate runs on the RESOLVED reference partition too, and
+/// names it: `plan.ref.jsonc`'s SH010 needs `minimax_h3_ref`, which is a second download with its
+/// own install state. Shaped like the base install-gate assertion in
+/// `a_plan_is_refused_when_the_host_cannot_run_it`, but driven from the mixed fixture.
+#[tokio::test]
+async fn the_reference_partitions_install_state_is_gated_and_named() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-ref-install-gate");
+    options.require_installed = true;
+
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the reference partition is not installed");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "the refusal must NAME the partition that is missing: {findings:?}"
+    );
+    // And it must not blame the base checkpoint, which this host does have.
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.message.contains("minimax_h3 tier")),
+        "{findings:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// sc-23402 review, the scope gap. The install gate follows the SELECTION: `--shots SH020` on the
+/// mixed fixture dispatches only the base checkpoint, so it must run on a host that never
+/// downloaded the reference DiT — even with `--require-installed`. The plan DOCUMENT is still
+/// validated whole (SH010's reference entry is still resolved and its caps still judged); only the
+/// weights-on-disk demand narrows.
+#[tokio::test]
+async fn a_shot_filtered_run_does_not_demand_an_unselected_partitions_weights() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH020"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-base-only");
+    options.require_installed = true;
+
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("a base-only selection runs with the reference DiT absent");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(record.selected_shot_ids, vec!["SH020".to_owned()]);
+    let selected = record
+        .shots
+        .iter()
+        .find(|shot| shot.shot_id == "SH020")
+        .expect("SH020 has a shot record");
+    assert_eq!(selected.attempts[0].resolved_model_id, "minimax_h3");
+
+    // Only the partition it actually loaded is priced into the record's weights.
+    let model = record.model.as_ref().expect("a model record");
+    let partitions: Vec<&String> = model.partition_weights.keys().collect();
+    assert_eq!(partitions, vec!["minimax_h3"], "{partitions:?}");
+
+    // Selecting the reference shot instead DOES demand it — same plan, same host, same gate.
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH010"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-reference");
+    options.require_installed = true;
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the selected shot needs the reference partition");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "{findings:?}"
+    );
+}
+
+/// `GET /api/v1/jobs/{id}`, for the assertions above.
+async fn request_job(harness: &Harness, job_id: &str) -> (axum::http::StatusCode, Value) {
+    request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -2363,6 +2937,15 @@ impl ApiTransport for FaultTransport {
                 "simulated controller death".to_owned(),
             ))
         })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        if self.fired() {
+            return Box::pin(async {
+                Err(HarnessError::Transport("controller is gone".to_owned()))
+            });
+        }
+        self.inner.get_bytes(path)
     }
 }
 
@@ -3781,6 +4364,79 @@ async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
         harness.api_video_job_count().await,
         1,
         "the resume dispatched a second render anyway"
+    );
+}
+
+/// sc-23402 review. A run record written by a PRE-STORY build carries no `resolvedModelId` and no
+/// `partitionReason`; `#[serde(default)]` reads them back as `""`.
+///
+/// The reconcile/adopt paths cloned that empty string straight onto the take they imported, so a
+/// phase-1 run directory resumed on this build recorded its adopted take with `model: ""` — losing
+/// the only statement of which checkpoint produced the clip. The fallback is the shot's own
+/// resolved partition (what the first controller would have written), and the attempt row is
+/// backfilled so the record self-heals on the resume that touched it. The mixed fixture is the
+/// fixture that can tell the fix apart from `plan.model.id`: SH010 resolves to `minimax_h3_ref`.
+#[tokio::test]
+async fn an_adopted_attempt_without_a_recorded_partition_falls_back_and_backfills() {
+    let harness = Harness::start(true, vec![]).await;
+    // Die right after the video job POST: the API holds the job, the record does not know its id,
+    // so the resume ADOPTS it through `reconcile_shot` rather than polling one it dispatched.
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+        .on_post_route("/api/v1/video/jobs");
+    let options = harness.options(
+        harness.mixed_partition_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+
+    // Rewrite the record the way a pre-story build wrote it: the two keys absent entirely.
+    let path = harness.out_dir().join("run.json");
+    let mut on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("record on disk"))
+            .expect("record parses");
+    for shot in on_disk["shots"].as_array_mut().expect("shots") {
+        for attempt in shot["attempts"].as_array_mut().expect("attempts") {
+            let attempt = attempt.as_object_mut().expect("attempt");
+            attempt.remove("resolvedModelId");
+            attempt.remove("partitionReason");
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&on_disk).unwrap()).unwrap();
+    let stripped = film_harness::read_run_record(&harness.out_dir()).expect("record re-reads");
+    let attempt = &stripped.shot("SH010").expect("SH010").attempts[0];
+    assert!(
+        attempt.resolved_model_id.is_empty() && attempt.job_id.is_none(),
+        "the fields really are absent and the job id was never recorded: {attempt:?}"
+    );
+
+    // Let the render settle so the resume adopts a COMPLETED job and imports its take.
+    wait_for_settled_shot(&harness.app, "SH010").await;
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("the resume adopts the in-flight job");
+    let attempt = &resumed.shot("SH010").expect("SH010").attempts[0];
+    let take = attempt.take.as_ref().unwrap_or_else(|| {
+        panic!("the adopted attempt has no take\n{}", summary(&resumed));
+    });
+    // `take_from_result` prefers the asset recipe's own `model` and falls back to the string the
+    // adopt path hands it, so this asserts the two agree — the fake worker's recipe carries the id.
+    // The ATTEMPT ROW below is the assertion that pins the fallback: it is written from nothing but
+    // the adopt path's value, and it is what a reader (and the next resume) reads.
+    assert_eq!(
+        take.model, "minimax_h3_ref",
+        "the adopted take must name the partition that rendered it, not \"\""
+    );
+    assert_eq!(
+        attempt.resolved_model_id, "minimax_h3_ref",
+        "and the attempt row is backfilled"
+    );
+    assert!(
+        attempt.partition_reason.contains("minimax_h3_ref"),
+        "{}",
+        attempt.partition_reason
     );
 }
 
@@ -5257,7 +5913,11 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
     )
     .expect("compiled.json parses");
-    assert_eq!(compiled["schemaVersion"], 1);
+    assert_eq!(
+        compiled["schemaVersion"],
+        sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
+        "sc-23402 bumped this to 2: `model` is the RESOLVED partition id"
+    );
     assert_eq!(compiled["planId"], "courier-workshop-planned");
     assert_eq!(compiled["model"]["fps"], 24);
     let requests = compiled["requests"].as_array().expect("requests");
@@ -5330,6 +5990,71 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         assert!(request.contains(beat), "{beat} missing from the request");
     }
     assert!(request.contains("workshop_plate (plate)"), "{request}");
+}
+
+/// sc-23402 review, E1. `film-harness plan` gates the BASE partition only.
+///
+/// The story's first cut resolved the reference partition AND ran the entry-level gate on it for
+/// every `plan`, so with the CLI's default `--require-installed` a brief that produces a text-only
+/// film refused with "minimax_h3_ref tier q4 is not installed on this host" — demanding an 18.78 GB
+/// download the resulting plan could never load. References are OPTIONAL input, and the planner's
+/// envelope is built from the base entry alone, so it cannot even generate a shot that would need
+/// them (that is sc-23405 / S4). The dispatch path still gates it when a plan's shots resolve to it.
+#[tokio::test]
+async fn planning_a_text_only_film_does_not_demand_the_reference_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The base checkpoint installed, the reference DiT not — the state the gate has to tolerate.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let mut options = planner_options(&harness, "planned-require-installed");
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a text-only film plans with the reference partition absent");
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "the planner's envelope cannot produce a reference-binding shot (sc-23405 owns that)"
+    );
+    // Every compiled request stays on the base partition, so nothing here would load the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The base partition's own install state is still gated: uninstall it and the SAME planner
+    // call refuses, naming it. The gate did not go away, it narrowed to what a plan can load.
+    let strict = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |_| {});
+    let mut options = planner_options(&harness, "planned-base-missing");
+    options.require_installed = true;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let error = film_planner::generate(&strict, &planner_llm(&harness), &options)
+        .await
+        .expect_err("the base checkpoint is not installed either");
+    let findings = findings_of(error);
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("minimax_h3") && m.contains("not installed")),
+        "{findings:?}"
+    );
 }
 
 #[tokio::test]
@@ -5417,9 +6142,11 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
     unknown_field["shots"][0]["cameraLens"] = json!("35mm");
     let mut off_menu = full_draft();
     off_menu["shots"][1]["targetDurationSeconds"] = json!(6.0);
+    // A reference mode with nothing bound to it. Since sc-23402 a draft that BINDS reference roles
+    // is legitimate — it resolves to the family's reference partition and dispatches there — but a
+    // reference shot with no references is still a contradiction the validator names.
     let mut unsupported = full_draft();
-    unsupported["shots"][2]["conditioning"] =
-        json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+    unsupported["shots"][2]["conditioning"] = json!({ "mode": "reference_to_video" });
     let mut unanchored = full_draft();
     unanchored["shots"][3]["continuityRoles"] = json!([]);
     unanchored["shots"][3]["conditioning"] =
@@ -5439,7 +6166,7 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
         (
             "unsupported conditioning",
             draft_text(&unsupported),
-            "does not declare reference_to_video",
+            "requires at least one reference role",
         ),
         (
             "chain as the only anchor",
