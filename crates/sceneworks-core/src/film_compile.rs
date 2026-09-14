@@ -390,8 +390,16 @@ impl CompiledRequest {
         if let Some(negative) = self.negative_prompt.as_deref() {
             body["negativePrompt"] = json!(negative);
         }
+        // Attempt `n` renders at `seed + (n - 1)` (sc-22715). The MLX render is deterministic for
+        // a seed — two runs of the fixture's SH010 at seed 22710 were pixel-identical — so a
+        // replacement that kept the plan's seed would re-render the very take it rejects. The
+        // plan's seed is still attempt 1, the derivation is recorded (`filmHarness.seed`, and the
+        // take's recipe), and it is the only thing about the dispatched request that varies by
+        // attempt: the prompt, the geometry and the conditioning are the compiled request's.
         if let Some(seed) = self.seed {
-            body["seed"] = json!(seed);
+            let attempt_seed = seed.wrapping_add(i64::from(context.attempt.saturating_sub(1)));
+            body["seed"] = json!(attempt_seed);
+            body["advanced"]["filmHarness"]["seed"] = json!(attempt_seed);
         }
         if let Some(first) = &assets.first_frame_asset_id {
             body["sourceAssetId"] = json!(first);
@@ -771,6 +779,61 @@ mod tests {
         let text = serde_json::to_string(&compiled).unwrap();
         let back: CompiledPlan = serde_json::from_str(&text).unwrap();
         assert_eq!(back, compiled);
+    }
+
+    #[test]
+    fn a_later_attempt_renders_at_the_plans_seed_offset_by_its_attempt_number() {
+        let compiled = compiled(BTreeMap::new());
+        let assets = role_assets();
+        let body_for = |attempt: u32| {
+            let context = DispatchContext {
+                project_id: "proj_1",
+                run_id: "run_abc",
+                plan_id: "courier-workshop",
+                plan_version: 2,
+                attempt,
+                tier: Some("q4"),
+                idempotency_key: None,
+                role_assets: &assets,
+            };
+            compiled
+                .request("SH010")
+                .unwrap()
+                .to_job_body(&context)
+                .unwrap()
+        };
+        // Attempt 1 is the plan's own seed; the replacement (attempt 2) must not be the same
+        // render, because the MLX pipeline is deterministic for a seed.
+        assert_eq!(body_for(1)["seed"], 7);
+        assert_eq!(body_for(1)["advanced"]["filmHarness"]["seed"], 7);
+        assert_eq!(body_for(2)["seed"], 8);
+        assert_eq!(body_for(2)["advanced"]["filmHarness"]["seed"], 8);
+        assert_eq!(body_for(5)["seed"], 11);
+        // Nothing else about the request varies by attempt.
+        let (one, two) = (body_for(1), body_for(2));
+        for key in ["prompt", "mode", "duration", "fps", "width", "height"] {
+            assert_eq!(one[key], two[key], "{key} must not vary by attempt");
+        }
+        // A request with no seed leaves the field out at every attempt.
+        let mut unseeded = compiled.clone();
+        unseeded.requests[0].seed = None;
+        let context = DispatchContext {
+            project_id: "proj_1",
+            run_id: "run_abc",
+            plan_id: "courier-workshop",
+            plan_version: 2,
+            attempt: 3,
+            tier: Some("q4"),
+            idempotency_key: None,
+            role_assets: &assets,
+        };
+        let body = unseeded
+            .request("SH010")
+            .unwrap()
+            .to_job_body(&context)
+            .unwrap();
+        assert!(body.get("seed").is_none());
+        assert!(body["advanced"]["filmHarness"].get("seed").is_none());
     }
 
     #[test]

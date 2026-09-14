@@ -435,6 +435,14 @@ replacement is `humanRequested`, so it neither spends nor respects the plan's au
 it does not loop, and a failed replacement stops with `replacement_failed` rather than trying again.
 Every other shot's takes, jobs and assets are untouched.
 
+**Attempt `n` renders at the plan's seed plus `n − 1`** (sc-22715 evaluation). The MLX render is
+deterministic for a seed — two runs of the fixture's SH010 at seed 22710, four hours apart, were
+pixel-identical frame for frame — so a replacement that kept the plan's seed would re-render the
+very take it had just rejected. The plan's seed is attempt 1 exactly as before; the seed actually
+dispatched is stamped into the job's `advanced.filmHarness.seed` and comes back in the take's
+recipe, and it is the only thing about a later attempt's request that differs from the compiled
+one: prompt, geometry, duration and conditioning are the compiled request's, unchanged.
+
 A replacement runs **outside the run's automatic budgets** (sc-22715): the attempt is bounded by
 `limits.maxShotSeconds`, its `--export` by the export's own per-job budget, and neither is charged
 to `elapsedSeconds` — their wall-clock goes to `humanRequestedElapsedSeconds`. Before sc-22715 the
