@@ -43,6 +43,9 @@ function vectorModel(overrides = {}) {
     cacheState: "complete",
     vector: {
       acceptsTextGuidance: false,
+      maxNewTokens: 7933,
+      maxSvgBytes: 262144,
+      maxWallTimeMs: 120000,
       providers: { mlx: { id: "mlx-starvector", available: true }, candle: { id: "candle-starvector", available: true } },
     },
     downloads: [{ revision: VECTOR_REVISION }],
@@ -67,6 +70,24 @@ describe("Vector Studio source boundary", () => {
       expect(preset.maxSvgBytes).toBeGreaterThan(0);
       expect(preset.maxWallTimeMs).toBeGreaterThan(0);
     }
+  });
+
+  it("uses each selected model's declared context-derived detailed token cap", () => {
+    expect(
+      vectorDetailBudget(
+        VECTOR_DETAIL_PRESETS.detailed,
+        vectorModel({ vector: { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 } }),
+      ),
+    ).toMatchObject({ maxNewTokens: 7933 });
+    expect(
+      vectorDetailBudget(
+        VECTOR_DETAIL_PRESETS.detailed,
+        vectorModel({
+          id: "starvector_8b",
+          vector: { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 120000 },
+        }),
+      ),
+    ).toMatchObject({ maxNewTokens: 15422 });
   });
 });
 
@@ -205,7 +226,7 @@ describe("Create from Prompt disclosure", () => {
     const convert = vi.fn(async () => ({}));
     for (const recipe of [
       { model: "missing", detailBudget: budget },
-      { model: "starvector_1b", detailBudget: { ...budget, maxNewTokens: 5000 } },
+      { model: "starvector_1b", detailBudget: { ...budget, maxNewTokens: 8000 } },
     ]) {
       await render([vectorModel(), vectorModel({ id: "starvector_8b" })], undefined, { assets: [source], createVectorJob: convert, studioLaunch: {
         view: "VectorStudio", assetId: source.id, recipe: { mode: "image_to_svg", sampling, ...recipe },
