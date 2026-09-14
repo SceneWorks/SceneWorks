@@ -55,11 +55,11 @@ use sceneworks_core::film_plan::{
 };
 use sceneworks_core::film_review::{
     aggregate_cut_observation, aggregate_observation, flag_for, format_eval_report, grade_answer,
-    parse_eval_set, score_case, tally, validate_eval_set, validate_review_plan, AdjacentTake,
-    CaseOutcome, EvalCase, EvalResults, EvalSet, FrameAnswer, FrameEvidence, IntendedRef,
-    MismatchFlag, Observation, ObservedState, ReviewBackendRecord, ReviewLimits, ReviewPlan,
-    ReviewQuestion, ReviewSourceRef, ASSISTIVE_NOTICE, OBSERVED_STATE_SCHEMA_VERSION,
-    REVIEW_EVAL_SCHEMA_VERSION,
+    parse_eval_set, score_case, tally, unasked_observation, unsafe_media_path, validate_eval_set,
+    validate_review_plan, AdjacentTake, CaseOutcome, EvalCase, EvalResults, EvalSet, FrameAnswer,
+    FrameEvidence, IntendedRef, MismatchFlag, Observation, ObservedState, ReviewBackendRecord,
+    ReviewLimits, ReviewPlan, ReviewQuestion, ReviewSourceRef, ASSISTIVE_NOTICE,
+    OBSERVED_STATE_SCHEMA_VERSION, REVIEW_EVAL_SCHEMA_VERSION,
 };
 use sceneworks_core::time::utc_now;
 use serde_json::{json, Value};
@@ -87,9 +87,9 @@ pub const VQA_ROUTE: &str = "POST /api/v1/image/vqa/jobs";
 /// all — is a row the store still holds, not a worker that will answer anything.
 pub const LIVE_STATUSES: &[&str] = &["idle", "busy"];
 
-/// Tokens an answer is truncated to. The questions are yes/no-with-a-reason, so this is generous;
-/// it exists to bound one backend call, not to shape the answer.
-const VQA_MAX_NEW_TOKENS: u32 = 192;
+// Tokens an answer is truncated to, and the memory the review declares it needs, both come off the
+// review document's own `limits` (`ReviewLimits::max_new_tokens`, `ReviewLimits::max_memory_gb`)
+// rather than a constant here: a bound nobody can read off the document is not a declared bound.
 
 // ---------------------------------------------------------------------------------------------
 // The vision seam
@@ -135,13 +135,15 @@ pub trait ReviewVision: Send + Sync {
         frame: &'a FrameRef,
     ) -> VisionFuture<'a, String>;
 
-    /// Put one question about one frame. Must return within `max_seconds`, or fail.
+    /// Put one question about one frame, within the review's own declared bounds: it must return
+    /// inside `limits.max_answer_seconds` or fail, and the answer is truncated to
+    /// `limits.max_new_tokens`.
     fn ask<'a>(
         &'a self,
         project_id: &'a str,
         asset_id: &'a str,
         question: &'a str,
-        max_seconds: u64,
+        limits: ReviewLimits,
     ) -> VisionFuture<'a, VisionAnswer>;
 }
 
@@ -184,7 +186,11 @@ impl<'a> VqaVision<'a> {
     /// an earlier run, whose `film-harness-smoke-gpu` row still advertised `image_vqa` with
     /// `status: "offline"`. The capability-only check passed it — the exact failure this function
     /// exists to prevent — so a worker only counts while its status is one of [`LIVE_STATUSES`].
-    pub async fn preflight(&self) -> Result<(), HarnessError> {
+    ///
+    /// It also checks the review's declared `limits.maxMemoryGb` against what
+    /// `GET /api/v1/host-capabilities` reports for the API HOST (`--api` may point at another
+    /// machine), the same way a production plan's budget is checked before a render.
+    pub async fn preflight(&self, limits: ReviewLimits) -> Result<(), HarnessError> {
         let workers = self
             .client()
             .expect_ok("GET", "/api/v1/workers", None)
@@ -203,7 +209,7 @@ impl<'a> VqaVision<'a> {
                 .is_some_and(|status| LIVE_STATUSES.contains(&status))
         };
         if rows.iter().any(|worker| advertises(worker) && live(worker)) {
-            return Ok(());
+            return self.preflight_memory(limits).await;
         }
         let stale: Vec<String> = rows
             .iter()
@@ -230,6 +236,42 @@ impl<'a> VqaVision<'a> {
              answer anything; start the GPU worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to \
              register, or clear a stale worker row that is shadowing it"
         )))
+    }
+
+    /// Refuse before anything is dispatched when the API host has less memory than the review
+    /// declares it needs.
+    ///
+    /// A review that starts on a host too small for the understanding model does not fail fast: it
+    /// creates a project, imports frames and then dies inside the loader, or swaps for minutes and
+    /// hits `maxAnswerSeconds` on every question — which records the whole take as unobserved and
+    /// READS LIKE EVIDENCE. A host that reports nothing at all is refused too: an unchecked ceiling
+    /// is not a checked one.
+    async fn preflight_memory(&self, limits: ReviewLimits) -> Result<(), HarnessError> {
+        let host = self
+            .client()
+            .expect_ok("GET", "/api/v1/host-capabilities", None)
+            .await?;
+        let reported = ["memoryGb", "unifiedMemoryGb", "gpuMemoryGb"]
+            .iter()
+            .find_map(|key| host.get(*key).and_then(Value::as_f64))
+            .filter(|gb| gb.is_finite() && *gb > 0.0);
+        match reported {
+            Some(available) if limits.max_memory_gb > available => {
+                Err(HarnessError::Refused(format!(
+                    "the review declares limits.maxMemoryGb {:.1} GB but the API host reports \
+                     {available:.1} GB; lower the ceiling only if {VQA_MODEL_ID} really fits, or \
+                     point --api at a host that has the memory",
+                    limits.max_memory_gb
+                )))
+            }
+            Some(_) => Ok(()),
+            None => Err(HarnessError::Refused(format!(
+                "no registered worker reports host memory, so the review's declared \
+                 limits.maxMemoryGb of {:.1} GB cannot be checked before anything is dispatched; \
+                 start the GPU worker and wait for its first heartbeat",
+                limits.max_memory_gb
+            ))),
+        }
     }
 
     /// Refuse before the first question unless the catalog reports the understanding model
@@ -301,10 +343,11 @@ impl ReviewVision for VqaVision<'_> {
         project_id: &'a str,
         asset_id: &'a str,
         question: &'a str,
-        max_seconds: u64,
+        limits: ReviewLimits,
     ) -> VisionFuture<'a, VisionAnswer> {
         Box::pin(async move {
             let started = Instant::now();
+            let max_seconds = limits.max_answer_seconds;
             let client = self.client();
             let created = client
                 .expect_ok(
@@ -315,7 +358,7 @@ impl ReviewVision for VqaVision<'_> {
                         "sourceAssetId": asset_id,
                         "question": question,
                         "model": self.model,
-                        "maxNewTokens": VQA_MAX_NEW_TOKENS,
+                        "maxNewTokens": limits.max_new_tokens,
                         "requestedGpu": "auto",
                     })),
                 )
@@ -434,7 +477,7 @@ impl ReviewVision for ScriptedVision {
         _project_id: &'a str,
         _asset_id: &'a str,
         question: &'a str,
-        _max_seconds: u64,
+        _limits: ReviewLimits,
     ) -> VisionFuture<'a, VisionAnswer> {
         let (question_id, frame_id) = Self::key_of(question);
         let answer = self
@@ -1131,14 +1174,12 @@ async fn ask_one(
     project_id: &str,
     question: &ReviewQuestion,
     frame: &FrameRef,
-    max_answer_seconds: u64,
+    limits: ReviewLimits,
     real_model_inference: &mut bool,
 ) -> Result<FrameAnswer, HarnessError> {
     let asset_id = vision.prepare_frame(project_id, frame).await?;
     let text = tagged_question(&question.id, &frame.id, &question.ask);
-    let answer = vision
-        .ask(project_id, &asset_id, &text, max_answer_seconds)
-        .await?;
+    let answer = vision.ask(project_id, &asset_id, &text, limits).await?;
     *real_model_inference &= answer.real_model_inference;
     let grade = grade_answer(question, &answer.answer);
     Ok(FrameAnswer {
@@ -1194,10 +1235,20 @@ async fn answer_questions(
         // An across-the-cut question is COMPARED, not aggregated: the same closed question goes to
         // this take's frames and to the adjacent selected take's frame, and the two answers are
         // held against each other. Without an adjacent take there is nothing to compare, so the
-        // question is skipped rather than answered from one side (which would report a clean cut
-        // on the strength of never having looked at the other one).
+        // question is never answered from one side (which would report a clean cut on the strength
+        // of never having looked at the other one) — but it IS recorded, as an unobserved
+        // observation naming why. Omitting it left the document silent about a declared question,
+        // which reads exactly like a question nobody asked for.
         let comparing = question.across_cut.then_some(adjacent_frame).flatten();
         if question.across_cut && comparing.is_none() {
+            let observation = unasked_observation(
+                question,
+                "no adjacent selected take to compare against, so the cut was never looked at",
+            );
+            if let Some(flag) = flag_for(shot_id, question, &observation, uncertain_below) {
+                mismatches.push(flag);
+            }
+            observations.push(observation);
             continue;
         }
         let mut answers = Vec::new();
@@ -1207,7 +1258,7 @@ async fn answer_questions(
                 project_id,
                 question,
                 frame,
-                limits.max_answer_seconds,
+                limits,
                 &mut real_model_inference,
             )
             .await?;
@@ -1220,7 +1271,7 @@ async fn answer_questions(
                     project_id,
                     question,
                     reference,
-                    limits.max_answer_seconds,
+                    limits,
                     &mut real_model_inference,
                 )
                 .await?;
@@ -1228,10 +1279,14 @@ async fn answer_questions(
             }
             None => aggregate_observation(question, answers),
         };
-        debug_assert!(
-            observation.is_well_formed(),
-            "an unobserved observation must carry no value: {observation:?}"
-        );
+        // Unconditional, not a `debug_assert!`: the "unobserved carries no value" invariant is the
+        // one this whole module exists to hold, and a release build is exactly where an observation
+        // claiming an unseen handoff would do harm.
+        if let Some(error) = observation.well_formed_error() {
+            return Err(HarnessError::Refused(format!(
+                "refusing to record a malformed observation for shot {shot_id}: {error}"
+            )));
+        }
         if let Some(flag) = flag_for(shot_id, question, &observation, uncertain_below) {
             mismatches.push(flag);
         }
@@ -1410,17 +1465,32 @@ fn record_review(
     Ok(path)
 }
 
-/// Read an observed-state document back off disk.
+/// Read an observed-state document back off disk, refusing one whose observations break the
+/// "unobserved carries no value" invariant.
+///
+/// The pair (`unobserved`, `observed`) is independently settable in the serialized shape, so a
+/// hand-edited or foreign document CAN say that an unseen handoff completed. Parsing one and
+/// handing it to `request-repair` (which reads its flags) or to a person would launder that into a
+/// fact, which is the one thing this module must not do.
 pub fn read_observed_state(path: &Path) -> Result<ObservedState, HarnessError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         HarnessError::Refused(format!("cannot read {}: {error}", path.display()))
     })?;
-    serde_json::from_str(&text).map_err(|error| {
+    let observed: ObservedState = serde_json::from_str(&text).map_err(|error| {
         HarnessError::Refused(format!(
             "{} is not an observed-state document: {error}",
             path.display()
         ))
-    })
+    })?;
+    for observation in &observed.observations {
+        if let Some(error) = observation.well_formed_error() {
+            return Err(HarnessError::Refused(format!(
+                "{} is not a usable observed-state document: {error}",
+                path.display()
+            )));
+        }
+    }
+    Ok(observed)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1480,12 +1550,37 @@ pub fn decide_take(
             context.record.run_id
         )));
     };
-    let attempt = target_attempt(&context.record.shots[index]).ok_or_else(|| {
+    let shot = &context.record.shots[index];
+    let attempt = match decision {
+        Decision::Accept => accept_target_attempt(shot),
+        Decision::Reject => target_attempt(shot),
+    }
+    .ok_or_else(|| {
         HarnessError::Refused(format!(
             "shot {shot_id} has no take to accept or reject in run {}",
             context.record.run_id
         ))
     })?;
+    // Accepting a REJECTED take would re-select it — rejection record and all — and clear the
+    // shot's `needsReview` flags while its dependents keep theirs and the export stays stale. The
+    // record would then say the same attempt was both rejected and accepted, and no verb would
+    // have moved the selection to anything anybody approved.
+    if decision == Decision::Accept {
+        if let Some(rejection) = shot
+            .attempts
+            .iter()
+            .find(|candidate| candidate.attempt == attempt)
+            .and_then(|candidate| candidate.rejection.as_ref())
+        {
+            return Err(HarnessError::Refused(format!(
+                "attempt {attempt} of shot {shot_id} was rejected at {} ({}), so accepting it \
+                 would confirm a take this run already threw away; render another with \
+                 `film-harness replace-take` (or `request-repair`), or point the shot at a take \
+                 that exists with `film-harness swap-take --shot {shot_id} --asset ASSET_ID`",
+                rejection.at, rejection.reason
+            )));
+        }
+    }
     let at = utc_now();
     let mut detail = format!("attempt {attempt}: {reason}");
 
@@ -1554,6 +1649,20 @@ fn target_attempt(shot: &ShotRunRecord) -> Option<u32> {
             .iter()
             .rev()
             .find(|attempt| attempt.has_live_take())
+            .map(|attempt| attempt.attempt)
+    })
+}
+
+/// The attempt an ACCEPT is about. The same resolution, plus a last fallback to an attempt whose
+/// take was rejected — resolved only so [`decide_take`] can refuse it BY NAME. Without the
+/// fallback, accepting a shot whose only take was rejected reports "no take to accept", which is
+/// both wrong (the take is right there, kept on purpose) and says nothing about what to do next.
+fn accept_target_attempt(shot: &ShotRunRecord) -> Option<u32> {
+    target_attempt(shot).or_else(|| {
+        shot.attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.take.is_some())
             .map(|attempt| attempt.attempt)
     })
 }
@@ -1666,27 +1775,26 @@ impl EvalOptions {
     }
 }
 
-/// Run the reviewer over a fixed labeled set and report what it caught, missed and cried wolf over.
-///
-/// This measures the REVIEWER, not the takes: the frames are already on disk and already labeled.
-/// Its report always ends with [`ASSISTIVE_NOTICE`], because a table of detection counts is
-/// exactly the artefact someone would otherwise read as a quality bar.
-pub async fn review_eval(
-    transport: &dyn ApiTransport,
-    options: &EvalOptions,
-    vision: &dyn ReviewVision,
-) -> Result<EvalResults, HarnessError> {
-    let started = Instant::now();
-    let set_text = std::fs::read_to_string(&options.set_path).map_err(|error| {
+/// A labeled set and the review plan it scores, both read and validated against each other.
+struct LabeledSet {
+    set: EvalSet,
+    set_dir: PathBuf,
+    review_path: PathBuf,
+    review_bytes: Vec<u8>,
+    review_plan: ReviewPlan,
+}
+
+/// Read a labeled set and the review plan it names, refusing a set the plan cannot score.
+fn read_labeled_set(set_path: &Path) -> Result<LabeledSet, HarnessError> {
+    let set_text = std::fs::read_to_string(set_path).map_err(|error| {
         HarnessError::Refused(format!(
             "cannot read the labeled set at {}: {error}",
-            options.set_path.display()
+            set_path.display()
         ))
     })?;
     let set: EvalSet = parse_eval_set(&set_text)
         .map_err(|error| HarnessError::Refused(format!("labeled set: {error}")))?;
-    let set_dir = options
-        .set_path
+    let set_dir = set_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -1705,6 +1813,48 @@ pub async fn review_eval(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
+    Ok(LabeledSet {
+        set,
+        set_dir,
+        review_path,
+        review_bytes,
+        review_plan,
+    })
+}
+
+/// The bounds a review of `out_dir` will run under, read off the review document before anything is
+/// dispatched. What [`VqaVision::preflight`] checks the host against.
+pub fn review_limits(
+    out_dir: &Path,
+    review_plan_path: Option<&Path>,
+) -> Result<ReviewLimits, HarnessError> {
+    let context = ReviewContext::open(out_dir, review_plan_path, true)?;
+    Ok(context.review_plan()?.limits)
+}
+
+/// The bounds the labeled set at `set_path` is scored under, for the same preflight.
+pub fn eval_review_limits(set_path: &Path) -> Result<ReviewLimits, HarnessError> {
+    Ok(read_labeled_set(set_path)?.review_plan.limits)
+}
+
+/// Run the reviewer over a fixed labeled set and report what it caught, missed and cried wolf over.
+///
+/// This measures the REVIEWER, not the takes: the frames are already on disk and already labeled.
+/// Its report always ends with [`ASSISTIVE_NOTICE`], because a table of detection counts is
+/// exactly the artefact someone would otherwise read as a quality bar.
+pub async fn review_eval(
+    transport: &dyn ApiTransport,
+    options: &EvalOptions,
+    vision: &dyn ReviewVision,
+) -> Result<EvalResults, HarnessError> {
+    let started = Instant::now();
+    let LabeledSet {
+        set,
+        set_dir,
+        review_path,
+        review_bytes,
+        review_plan,
+    } = read_labeled_set(&options.set_path)?;
     let media_root = options
         .media_root
         .clone()
@@ -1731,7 +1881,7 @@ pub async fn review_eval(
         let mut frames = Vec::new();
         let mut refs = Vec::new();
         for (index, frame) in case.frames.iter().enumerate() {
-            let path = resolve_under(&media_root, &frame.file);
+            let path = resolve_media_path(&media_root, &case.id, &frame.file)?;
             if !path.exists() {
                 return Err(HarnessError::Refused(format!(
                     "labeled case {} names a frame that is not on this host: {} — pass \
@@ -1764,7 +1914,7 @@ pub async fn review_eval(
         // asked about; a case that declares no neighbour simply does not score its cut question.
         let mut adjacent_frame = None;
         if let Some(frame) = case.adjacent_frames.last() {
-            let path = resolve_under(&media_root, &frame.file);
+            let path = resolve_media_path(&media_root, &case.id, &frame.file)?;
             if !path.exists() {
                 return Err(HarnessError::Refused(format!(
                     "labeled case {} names an adjacent frame that is not on this host: {} — pass \
@@ -1919,6 +2069,9 @@ pub async fn review_eval(
     Ok(results)
 }
 
+/// Resolve a document-declared path (the review plan, the media root) against the document's own
+/// directory. These MAY be absolute or `~`-relative: the real-takes set points at media outside the
+/// repository on purpose.
 fn resolve_under(base: &Path, value: &str) -> PathBuf {
     let candidate = PathBuf::from(shellexpand_home(value));
     if candidate.is_absolute() {
@@ -1926,6 +2079,31 @@ fn resolve_under(base: &Path, value: &str) -> PathBuf {
     } else {
         base.join(candidate)
     }
+}
+
+/// Resolve one labeled FRAME under the media root, refusing anything that could leave it.
+///
+/// A frame path is a name under the root, never a path in its own right: `review-eval` reads these
+/// and `review-fixtures` WRITES them, so `..` or an absolute value would make a labels file a read
+/// and write primitive for any directory on the host. [`validate_eval_set`] refuses such a document
+/// up front; this is the second half of the same rule, held at the moment the path is built, so no
+/// caller can reach a file outside the root even if it skipped validation.
+fn resolve_media_path(root: &Path, case_id: &str, file: &str) -> Result<PathBuf, HarnessError> {
+    if let Some(reason) = unsafe_media_path(file) {
+        return Err(HarnessError::Refused(format!(
+            "labeled case {case_id} names the frame {file:?}, which {reason}"
+        )));
+    }
+    let path = root.join(file);
+    if !path.starts_with(root) {
+        return Err(HarnessError::Refused(format!(
+            "labeled case {case_id} resolves the frame {file:?} to {}, which is outside the media \
+             root {}",
+            path.display(),
+            root.display()
+        )));
+    }
+    Ok(path)
 }
 
 /// `~`-relative paths are how a labels file points at media outside the repository without
@@ -2008,7 +2186,9 @@ pub fn write_review_fixture_frames(
     let mut written = Vec::new();
     for case in &set.cases {
         for frame in case.frames.iter().chain(case.adjacent_frames.iter()) {
-            let path = resolve_under(&root, &frame.file);
+            // This loop WRITES a file per named frame, so the containment rule matters more here
+            // than anywhere else in the module.
+            let path = resolve_media_path(&root, &case.id, &frame.file)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }

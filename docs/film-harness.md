@@ -427,7 +427,16 @@ declares questions, each with a `topic` (one of `character_identity`, `costume`,
 restated for the human who reads the flag, the `ask` put to the model verbatim, `expect` /
 `contradict` answer substrings, which `frames` to grade on (`first`/`last`/`all`/`any`), and two
 flags: `mustObserve` and `acrossCut`. Its `limits` (`maxSeconds`, `maxFramesPerShot`,
-`maxQuestionsPerShot`, `maxAnswerSeconds`) are declared **before** anything is dispatched.
+`maxQuestionsPerShot`, `maxAnswerSeconds`, `maxNewTokens`, `maxMemoryGb`) are declared **before**
+anything is dispatched. `maxNewTokens` bounds one backend answer; `maxMemoryGb` is checked in the
+preflight against the **API host's** reported memory (`GET /api/v1/host-capabilities`) — the shipped
+plan declares 16 GB, SenseNova-U1-8B's own `minMemoryGb`, so a host that cannot run the model is
+refused before a project, a timeline or a single frame exists. A host that reports no memory at all
+is refused too: an unchecked ceiling is not a checked one.
+
+Every shot the parcel appears in asks a `parcel_custody` question — all six, SH050 included. A shot
+without one is a shot in which the parcel can change hands with nobody asking, and that gap is
+invisible in a report that only counts the questions that were asked.
 
 Every shipped question is **closed and presupposition-free**, with its allowed answers named in the
 question itself. That is a finding, not a style choice: on real weights the model answered closed
@@ -443,10 +452,24 @@ Grading is **word-indexed and polarity-aware**:
   word "workshop" out of *"the room is **not** a cluttered woodworking workshop"* and scored a match;
 - a token that carries its own negation (`no parcel`, `nobody`) is taken at face value, so a leading
   "No," does not cancel it;
+- a leading yes/no **answer particle** punctuated off from the sentence ("No, this is a kitchen.")
+  is the ANSWER, not a negation scope for everything after it. Read as a negation, the commonest
+  negative shape a closed question gets lost its `contradict` hit under the rule below and abstained
+  — on exactly the custody and colour questions the evaluation reports detections for. An inner
+  negation still negates: *"No, the room is **not** a workshop"* is a contradiction of `workshop`;
 - a `contradict` token inside a negated clause ("it is not red") decides **nothing**: it rules one
   value out without establishing another, and inventing agreement from that is the overclaim this
   module exists to prevent;
-- the earliest decisive hit wins — these answers lead with their verdict and then elaborate;
+- a leading **restatement of the question** is stripped before any of this. These models lead with
+  the question — *"Is the door in this frame open or closed? It is closed."* — and the restatement
+  carries every declared answer word the question listed, which used to decide the verdict on the
+  question's own wording (a confident `match` on `open` for the shot that wants it open, and a
+  confident false alarm on the shot that wants it closed);
+- an answer that AFFIRMS a value from both lists — *"the parcel is red-brown"*, *"Red? No - blue."* —
+  is self-contradictory and reports `unobserved`, with `matched` naming the conflict. Letting word
+  order pick the winner published a 0.9-confidence verdict the answer never supported;
+- otherwise the earliest decisive hit wins — these answers lead with their verdict and then
+  elaborate;
 - an answer matching neither list is `unobserved`, because silence is not agreement.
 
 A hedge keeps the reading but halves its confidence, so a hedged contradiction is reported
@@ -459,7 +482,11 @@ Every graded answer records the token it matched and the polarity it was read wi
 **Cut continuity is COMPARED, not judged.** An `acrossCut` question puts the same closed question to
 this take's frames and to the adjacent selected take's frame and holds the two answers against each
 other: the same answer means the cut holds, a different answer means a jump, and either side
-unreadable means `unobserved`. Asking each frame independently whether it shows "a woodworking
+unreadable means `unobserved`. With **no adjacent selected take at all** — the neighbour's take was
+rejected, or the labeled case declares no `adjacentFrames` — the question is never answered from one
+side, but it IS recorded: an `unobserved` observation whose `note` says *"no adjacent selected take
+to compare against"*. Omitting it left the document silent about a declared question, which reads
+exactly like a question nobody asked for. Asking each frame independently whether it shows "a woodworking
 workshop" answers yes on both sides of a cut between two *different* workshops — which is exactly
 what the first real-weights smoke missed. `frames: "last"` rather than `"first"` on these questions
 is deliberate: the first frame of an image-conditioned shot is the approved conditioning plate,
@@ -476,7 +503,11 @@ answer), and the mismatch flags those produced. Three invariants:
   into the run record) and never copies it, so the two cannot drift;
 - `unobserved` carries **no value** — `observed` is absent entirely. **An action or handoff the
   reviewer did not see is recorded `unobserved`, never `completed`**, and when the question is
-  `mustObserve` that raises a flag of its own;
+  `mustObserve` that raises a flag of its own. The pair (`unobserved`, `observed`) is independently
+  settable in the serialized shape, so the rule is enforced rather than assumed: an observation that
+  breaks it is refused when it is built (the review stops, naming the question) and again when a
+  document is read back, so a hand-edited or foreign file cannot launder an unseen handoff into a
+  fact through `request-repair`;
 - nothing here is an input to generation. `ShotRunRecord::intended` and `conditioningAssets` are
   derived from the plan and the reference pack alone; the run record gains only a `reviews[]` index
   entry — a path and some counts, no observed values.
@@ -495,9 +526,16 @@ film-harness request-repair --out DIR --shot SH030 [--reason TEXT] [--export]
 
 | command | what it changes | what it never does |
 | --- | --- | --- |
-| `accept-take` | records `humanDecision: accepted` and clears **that shot's** `needsReview` flags | touch any other shot; reach the API at all |
+| `accept-take` | records `humanDecision: accepted` and clears **that shot's** `needsReview` flags | touch any other shot; reach the API at all; **accept a take that carries a `rejection`** |
 | `reject-take` | marks the take `rejection` (the take, its job and its asset stay), clears the selection, flags the shots that **declared** a dependency on it, marks the export stale | re-render anything; touch an unrelated shot's accepted take |
 | `request-repair` | ONE bounded attempt through `replace-take`, with the review's own actionable flags folded into the recorded reason | loop, retry a failed repair, or put an observation into the prompt |
+
+**`accept-take` refuses a rejected take.** Accepting one would re-select the very attempt the run
+threw away — rejection record and all — and clear that shot's `needsReview` flags while its
+dependents keep theirs and the export stays stale, leaving a record that says the same attempt was
+both rejected and accepted. The refusal quotes the rejection and points at the two verbs that can
+actually move the selection: `replace-take` / `request-repair` (render another) and `swap-take`
+(point the shot at a take that already exists).
 
 `request-repair` folds in only the review **of the currently selected take** — a review of a take
 that has since been replaced says nothing about the one being repaired. The folded text lands in the
@@ -515,8 +553,11 @@ A labeled set is correct takes plus deliberately broken ones (wrong parcel colou
 character, wrong location, unfinished action, an occluded handoff, a discontinuous cut, wrong
 costume), each with the verdict a correct reviewer *should* reach per question. A case may also
 declare `adjacentFrames` — the frames of the take it cuts FROM, which is the only way its
-`acrossCut` question can be scored; a case without them simply does not score its cut question. The
-report counts, per question and per topic:
+`acrossCut` question can be scored; a case without them records the cut question as `unobserved`
+with its reason rather than scoring it. Frame paths are **names under the set's `mediaRoot`**: an
+absolute path, a `~` path or one carrying a `..` component is refused when the document is read and
+again when the path is built, because `review-fixtures` WRITES one file per named frame. The report
+counts, per question and per topic:
 
 | expected | reported | counted as |
 | --- | --- | --- |
@@ -562,7 +603,12 @@ reads as a reload; only the first one costs anything (the model stays resident i
 | `real_sh010.observed.json`, `real_sh020.observed.json` | every question, answer, confidence and flag, with the frames cited |
 
 **What it actually reports**, measured: 13 scored, 11 correct, 3 detections, 1 miss, 1 false alarm,
-0 abstentions, **0 overclaims**. Two of those are deliberately hard and are the point of the set:
+0 abstentions, **0 overclaims**. Re-measured after the grader gained answer-particle handling,
+question-echo stripping and the self-contradiction rule: **identical**, verdict by verdict and
+matched token by matched token (`~/SceneWorks/film-harness-evidence/sc-22714/review-eval-after-fix/`).
+Every answer on this set is a single word, which is what the closed questions are for, so those
+rules — all of which concern multi-clause answers — widen what the grader can read elsewhere without
+moving anything here. Two of the numbers are deliberately hard and are the point of the set:
 
 - **`sh010_courier_jacket` is a false alarm.** The courier's jacket is dark navy in a dim doorway
   and the model answers `black`, which the question lists as a contradiction. A costume reviewer

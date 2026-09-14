@@ -46,11 +46,18 @@
   // and keeps the partial evidence. Measured on real weights: ~3 s per answer once the model is
   // resident, so a whole shot's review is well inside maxSeconds; maxAnswerSeconds covers the cold
   // load (~38 s) plus a wide margin.
+  // maxNewTokens bounds ONE answer's length (the questions are closed, so the answers are a word
+  // or a sentence); maxMemoryGb is the review's memory ceiling, checked against the API HOST's
+  // reported memory before anything is dispatched. 16 GB is SenseNova-U1-8B's own declared
+  // `minMemoryGb` — a host below it cannot answer a single question, and failing there wastes a
+  // project, a timeline and every frame the review already extracted.
   "limits": {
     "maxSeconds": 1200,
     "maxFramesPerShot": 3,
     "maxQuestionsPerShot": 8,
-    "maxAnswerSeconds": 180
+    "maxAnswerSeconds": 180,
+    "maxNewTokens": 192,
+    "maxMemoryGb": 16
   },
 
   // A contradiction the model hedged ("it appears blue") is reported `uncertain` rather than
@@ -297,6 +304,17 @@
           "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
           "expect": ["red"],
           "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
+        },
+        {
+          // Custody is asked of EVERY shot the parcel is in, SH050 included: the parcel sitting
+          // untouched on the bench is exactly what this shot claims, and a shot with no custody
+          // question is a shot where the parcel can quietly change hands with nobody asking.
+          // Same vocabulary and polarity as SH040's: on the bench is agreement, in hands is not.
+          "id": "sh050_parcel_custody", "topic": "parcel_custody", "frames": "last", "mustObserve": true,
+          "intended": "The red parcel is still on the workbench, sealed; the recipient has not picked it up.",
+          "ask": "Where is the parcel in this frame? Answer with exactly one word: hands, surface, nobody, or unclear.",
+          "expect": ["surface", "workbench", "bench", "table", "nobody"],
+          "contradict": ["hands", "held", "holding"]
         },
         {
           "id": "sh050_action", "topic": "action_completion", "frames": "last", "mustObserve": true,

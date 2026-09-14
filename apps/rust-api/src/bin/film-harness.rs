@@ -723,9 +723,19 @@ async fn review_command(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // The review document's own declared bounds, read BEFORE anything is dispatched: the preflight
+    // checks the host against `limits.maxMemoryGb`, so it has to know what the document asks for.
+    let limits = match review::review_limits(&options.out_dir, options.review_plan_path.as_deref())
+    {
+        Ok(limits) => limits,
+        Err(error) => return report_error(error),
+    };
     let signal = spawn_interrupt_handler(options.control.clone());
     let vision = VqaVision::new(&transport, options.poll_interval, options.control.clone());
-    for check in [vision.preflight().await, vision.preflight_model().await] {
+    for check in [
+        vision.preflight(limits).await,
+        vision.preflight_model().await,
+    ] {
         if let Err(error) = check {
             signal.abort();
             return report_error(error);
@@ -821,8 +831,15 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
     let scripted_backend = ScriptedVision::new();
     let vqa_backend = VqaVision::new(&transport, options.poll_interval, options.control.clone());
     if !scripted {
+        let limits = match review::eval_review_limits(&options.set_path) {
+            Ok(limits) => limits,
+            Err(error) => {
+                signal.abort();
+                return report_error(error);
+            }
+        };
         for check in [
-            vqa_backend.preflight().await,
+            vqa_backend.preflight(limits).await,
             vqa_backend.preflight_model().await,
         ] {
             if let Err(error) = check {

@@ -165,6 +165,23 @@ fn the_shipped_review_plan_and_labeled_sets_validate_against_the_fixture_plan() 
             }
         }
     }
+    // ...and EVERY shot asks one. The parcel is the thing the whole sequence is about, so a shot
+    // with no custody question is a shot in which it can change hands unasked — SH050 was exactly
+    // that, and the gap is invisible in a report that only counts the questions that exist.
+    for (shot_id, spec) in &review.shots {
+        assert!(
+            spec.questions
+                .iter()
+                .any(|question| question.topic == "parcel_custody"),
+            "{shot_id} asks no parcel_custody question, so nothing checks who has the parcel"
+        );
+    }
+    // Both token and memory ceilings are declared, not inherited from a constant somewhere.
+    assert!(review.limits.max_new_tokens >= 1);
+    assert_eq!(
+        review.limits.max_memory_gb, 16.0,
+        "the review declares SenseNova-U1-8B's own minMemoryGb as its ceiling"
+    );
 
     for path in [EVAL_SET, REAL_TAKES_SET] {
         let set: EvalSet = parse_eval_set(&std::fs::read_to_string(path).expect("set reads"))
@@ -212,7 +229,7 @@ async fn a_review_writes_observed_state_beside_the_run_and_only_points_at_the_in
         options.control.clone(),
     );
     vision
-        .preflight()
+        .preflight(shipped_review_plan().limits)
         .await
         .expect("the fake worker advertises image_vqa");
     let reviewed = review::review(&harness.transport, &options, &vision)
@@ -615,6 +632,267 @@ async fn review_refuses_a_shot_with_no_take_and_a_shot_the_review_plan_asks_noth
 }
 
 #[tokio::test]
+async fn an_across_cut_question_with_no_neighbour_is_recorded_unobserved_with_its_reason() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    // SH010's take is rejected, so its selection is cleared and SH020 — which declares a continuity
+    // edge to it — has nothing on the other side of its cut to be compared against.
+    review::decide_take(
+        &harness.out_dir(),
+        "SH010",
+        Decision::Reject,
+        "the doorway is too dark",
+    )
+    .expect("reject records");
+
+    let options = review_options(&harness, &["SH020"]);
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let record = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("the review runs");
+    let observed = observed_for(&record, &harness.out_dir(), "SH020");
+    assert!(
+        observed.adjacent.is_none(),
+        "there is no adjacent selected take: {:?}",
+        observed.adjacent
+    );
+
+    // The declared question is in the document, saying WHY nothing was read. Skipping it silently
+    // left the document indistinguishable from one where nobody declared the question at all.
+    let asked: Vec<&str> = observed
+        .observations
+        .iter()
+        .map(|observation| observation.question_id.as_str())
+        .collect();
+    let plan = shipped_review_plan();
+    let declared: Vec<&str> = plan.shots["SH020"]
+        .questions
+        .iter()
+        .map(|question| question.id.as_str())
+        .collect();
+    assert_eq!(asked, declared, "every declared question is accounted for");
+    let cut = observed
+        .observations
+        .iter()
+        .find(|observation| observation.question_id == "sh020_cut")
+        .expect("the cut question is recorded even though nobody could ask it");
+    assert_eq!(cut.verdict, Verdict::Unobserved);
+    assert!(cut.unobserved);
+    assert!(cut.observed.is_none(), "and it claims nothing: {cut:?}");
+    assert_eq!(cut.confidence, 0.0);
+    assert!(
+        cut.answers.is_empty(),
+        "nothing was asked of any backend: {cut:?}"
+    );
+    assert!(
+        cut.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no adjacent selected take"),
+        "the reason has to be in the document: {cut:?}"
+    );
+    // It is not a mismatch either — a cut nobody could look at is not a discontinuous cut.
+    assert!(
+        !observed
+            .mismatches
+            .iter()
+            .any(|flag| flag.question_id == "sh020_cut"),
+        "{:#?}",
+        observed.mismatches
+    );
+    // And the whole document still holds the invariant the module exists for.
+    for observation in &observed.observations {
+        assert!(observation.is_well_formed(), "{observation:?}");
+    }
+    // The serialized form carries the note and no value.
+    let raw: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            harness.out_dir().join(
+                &record
+                    .shot("SH020")
+                    .expect("shot")
+                    .latest_review()
+                    .expect("review")
+                    .record_path,
+            ),
+        )
+        .expect("the document reads"),
+    )
+    .expect("the document is json");
+    let cut_json = raw["observations"]
+        .as_array()
+        .expect("observations")
+        .iter()
+        .find(|observation| observation["questionId"] == "sh020_cut")
+        .expect("the cut question is written out");
+    assert!(cut_json.get("observed").is_none(), "{cut_json}");
+    assert_eq!(cut_json["unobserved"], serde_json::json!(true));
+    assert!(cut_json["note"].as_str().is_some(), "{cut_json}");
+}
+
+#[tokio::test]
+async fn a_malformed_observed_state_document_is_refused_rather_than_read() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    let options = review_options(&harness, &["SH020"]);
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let record = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("the review runs");
+    let path = harness.out_dir().join(
+        &record
+            .shot("SH020")
+            .expect("shot")
+            .latest_review()
+            .expect("review")
+            .record_path,
+    );
+    review::read_observed_state(&path).expect("a document this build wrote reads back");
+
+    // The pair (unobserved, observed) is independently settable in the serialized shape, so a
+    // hand-edited or foreign document CAN claim that an unseen handoff completed. Reading one and
+    // folding its flags into a repair would launder that into a fact.
+    let mut document: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("json");
+    let observation = document["observations"]
+        .as_array_mut()
+        .expect("observations")
+        .iter_mut()
+        .find(|observation| observation["questionId"] == "sh020_parcel_custody")
+        .expect("the custody question");
+    observation["unobserved"] = serde_json::json!(true);
+    observation["verdict"] = serde_json::json!("unobserved");
+    observation["observed"] = serde_json::json!("the courier let go of the parcel");
+    std::fs::write(&path, document.to_string()).expect("the tampered document writes");
+
+    let error = review::read_observed_state(&path)
+        .expect_err("an unobserved observation carrying a value is not a usable document");
+    let message = format!("{error}");
+    assert!(
+        message.contains("no such thing as an unobserved value"),
+        "{message}"
+    );
+    assert!(
+        message.contains("sh020_parcel_custody"),
+        "the refusal must name the observation: {message}"
+    );
+}
+
+#[tokio::test]
+async fn the_declared_token_ceiling_is_what_reaches_the_vqa_job() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    // A review plan identical to the shipped one except for its declared token ceiling. The value
+    // the backend asks for must come from the DOCUMENT — it used to be a const in the caller, which
+    // no reader of the review plan could see and no author could change.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let plan_text = std::fs::read_to_string(REVIEW_PLAN).expect("review plan reads");
+    let narrowed = plan_text.replace("\"maxNewTokens\": 192", "\"maxNewTokens\": 48");
+    assert_ne!(
+        narrowed, plan_text,
+        "the shipped plan declares maxNewTokens"
+    );
+    let narrowed_path = temp.path().join("review.jsonc");
+    std::fs::write(&narrowed_path, narrowed).expect("the narrowed plan writes");
+
+    let mut options = review_options(&harness, &["SH020"]);
+    options.review_plan_path = Some(narrowed_path);
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("the review runs");
+
+    let vqa: Vec<Value> = harness
+        .jobs()
+        .await
+        .into_iter()
+        .filter(|job| job["type"] == "image_vqa")
+        .collect();
+    assert!(!vqa.is_empty(), "the review asked something");
+    for job in &vqa {
+        assert_eq!(
+            job.pointer("/payload/maxNewTokens").and_then(Value::as_u64),
+            Some(48),
+            "every question is bounded by the document's own ceiling: {job}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_labeled_set_whose_frames_climb_out_of_the_media_root_is_refused_before_any_file_is_touched(
+) {
+    let harness = Harness::start(false, Vec::new()).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let set_path = temp.path().join("escaping.jsonc");
+    let review_plan = PathBuf::from(REVIEW_PLAN);
+    std::fs::write(
+        &set_path,
+        serde_json::json!({
+            "schemaVersion": 1, "id": "escaping-set", "version": 1,
+            "mediaRoot": temp.path().join("frames").display().to_string(),
+            "reviewPlan": review_plan.display().to_string(),
+            "cases": [
+                {
+                    "id": "escapes", "shotId": "SH030", "label": "wrong_parcel_colour",
+                    "frames": [{ "file": "../../../../etc/passwd", "timestampSeconds": 0.0 }],
+                    "expected": { "sh030_parcel": "mismatch" }
+                },
+                {
+                    "id": "honest", "shotId": "SH030", "label": "correct",
+                    "frames": [{ "file": "a.png", "timestampSeconds": 0.0 }],
+                    "expected": { "sh030_parcel": "match" }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("the set writes");
+
+    // Reading side: the evaluation refuses the document rather than opening the file it names.
+    let options = EvalOptions::new(set_path.clone(), temp.path().join("eval"));
+    let error = review::review_eval(&harness.transport, &options, &ScriptedVision::new())
+        .await
+        .expect_err("a frame path that climbs out of the media root is not a frame path");
+    let message = format!("{error}");
+    assert!(message.contains("escapes"), "{message}");
+    assert!(message.contains("`..` component"), "{message}");
+
+    // Writing side, which matters more: `review-fixtures` creates a file per named frame.
+    let error = review::write_review_fixture_frames(&set_path, None)
+        .expect_err("review-fixtures must not write outside the media root either");
+    assert!(format!("{error}").contains("escapes"), "{error}");
+    assert!(
+        !Path::new("/etc/passwd.png").exists(),
+        "nothing was written outside the root"
+    );
+
+    // The same set with an absolute frame is refused too...
+    let absolute = std::fs::read_to_string(&set_path)
+        .expect("reads")
+        .replace("../../../../etc/passwd", "/etc/hosts");
+    std::fs::write(&set_path, absolute).expect("writes");
+    let error = review::write_review_fixture_frames(&set_path, None)
+        .expect_err("an absolute frame path is not a name under the root");
+    assert!(format!("{error}").contains("not an absolute"), "{error}");
+
+    // ...and the shipped set, whose frames are plain relative names, still writes.
+    review::write_review_fixture_frames(&PathBuf::from(EVAL_SET), Some(temp.path()))
+        .expect("the shipped labeled set is fine");
+}
+
+#[tokio::test]
 async fn a_review_that_hits_its_frame_budget_stops_and_keeps_the_partial_evidence() {
     let (harness, _) = rendered_two_shots().await;
     script_answers(&harness, &agreeing_answers());
@@ -791,9 +1069,14 @@ async fn rejecting_a_take_keeps_it_flags_dependents_and_leaves_unrelated_accepte
         Some("accepted"),
         "the earlier acceptance survives"
     );
-    if let Some(export) = &rejected.export {
-        assert!(export.stale, "the MP4 no longer matches the selected takes");
-    }
+    assert!(
+        rejected
+            .export
+            .as_ref()
+            .expect("the two-shot run exported an MP4")
+            .stale,
+        "the MP4 no longer matches the selected takes"
+    );
     // Nothing was rendered.
     assert_eq!(
         harness
@@ -810,6 +1093,74 @@ async fn rejecting_a_take_keeps_it_flags_dependents_and_leaves_unrelated_accepte
         logged.detail.contains("nothing was re-rendered"),
         "{logged:?}"
     );
+}
+
+#[tokio::test]
+async fn accepting_a_rejected_take_is_refused_and_changes_nothing() {
+    let (harness, _) = rendered_two_shots().await;
+    let out_dir = harness.out_dir();
+    let rejected = review::decide_take(
+        &out_dir,
+        "SH010",
+        Decision::Reject,
+        "the courier's jacket is the wrong blue",
+    )
+    .expect("reject records");
+    assert!(rejected
+        .shot("SH010")
+        .expect("shot")
+        .selected_attempt
+        .is_none());
+
+    // Accepting it would re-select the very attempt this run threw away — rejection record and all
+    // — clear THIS shot's needsReview flags, and leave its dependents flagged and the export stale.
+    let error = review::decide_take(&out_dir, "SH010", Decision::Accept, "actually it's fine")
+        .expect_err("a rejected take cannot be accepted back into the cut");
+    let message = format!("{error}");
+    assert!(message.contains("was rejected at"), "{message}");
+    assert!(
+        message.contains("the courier's jacket is the wrong blue"),
+        "the refusal must quote the rejection it is refusing to undo: {message}"
+    );
+    assert!(
+        message.contains("replace-take") && message.contains("swap-take"),
+        "the refusal must say what to do instead: {message}"
+    );
+
+    // Nothing moved: not the selection, not the decision, not the dependents, not the export.
+    let after = harness_record(&harness);
+    assert_eq!(after, rejected, "a refused decision writes nothing");
+    let sh010 = after.shot("SH010").expect("shot");
+    assert!(sh010.selected_attempt.is_none());
+    assert_eq!(
+        sh010.human_decision.as_ref().map(|d| d.state.as_str()),
+        Some("rejected"),
+        "the rejection stands"
+    );
+    assert_eq!(after.shot("SH020").expect("shot").needs_review.len(), 1);
+    assert!(after.export.as_ref().expect("the run exported").stale);
+
+    // The bounded repair — the verb the refusal points at — still works from here.
+    let mut resume = harness.resume_options();
+    resume.export = false;
+    let repaired = review::request_repair(&harness.transport, &resume, "SH010", "re-render it")
+        .await
+        .expect("the repair runs");
+    let sh010 = repaired.shot("SH010").expect("shot");
+    let selected = sh010.selected_attempt.expect("the repair selects its take");
+    assert!(
+        sh010
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt == selected)
+            .expect("the selected attempt")
+            .rejection
+            .is_none(),
+        "the take now in the cut is not a rejected one"
+    );
+    // And accepting THAT one is fine.
+    review::decide_take(&out_dir, "SH010", Decision::Accept, "the new take is good")
+        .expect("a live take accepts");
 }
 
 #[tokio::test]
@@ -978,6 +1329,7 @@ fn eval_answers() -> BTreeMap<String, String> {
     set("sh050_recipient", "yes");
     set("sh050_recipient_apron", "apron");
     set("sh050_parcel", "red");
+    set("sh050_parcel_custody", "surface");
     set("sh050_action", "yes");
     set("sh050_cut", "yes");
     set("sh060_bench", "wood");
@@ -1197,14 +1549,34 @@ async fn the_labeled_evaluation_reports_detections_misses_false_alarms_and_overc
                 ["affirmed", "negated", "none"].contains(&answer.polarity.as_str()),
                 "{answer:?}"
             );
-            assert_eq!(
-                answer.matched.is_some(),
-                answer.verdict != Verdict::Unobserved,
-                "a decisive answer names its token and an unobserved one names none: {answer:?}"
-            );
+            // A decisive answer names the token it was decided by. An unobserved one names nothing
+            // — unless it was SELF-CONTRADICTORY, where the conflict itself is the finding and the
+            // record has to say which two values collided.
+            match (answer.verdict, answer.matched.as_deref()) {
+                (Verdict::Unobserved, None) => {}
+                (Verdict::Unobserved, Some(matched)) => assert!(
+                    matched.starts_with("conflict:"),
+                    "an unobserved answer names no value unless it is a conflict: {answer:?}"
+                ),
+                (_, Some(_)) => {}
+                (_, None) => panic!("a decisive answer must name its token: {answer:?}"),
+            }
         }
     }
     assert_eq!(case("sh050_wrong_costume").counts.detections, 1);
+    // SH050's custody question is labeled on BOTH its cases. It was the one shot of six with no
+    // custody question at all, and an unlabeled question is not scored — so a coverage gap there is
+    // invisible in a report that only counts what it was asked.
+    assert_eq!(
+        question("sh050_parcel_custody").counts.scored,
+        2,
+        "both SH050 cases label the custody question"
+    );
+    assert_eq!(
+        question("sh050_parcel_custody").counts.correct,
+        2,
+        "the parcel sits on the bench in both, and the reviewer says so"
+    );
 
     // The miss: the wrong parcel colour read as red.
     assert_eq!(question("sh030_parcel").counts.misses, 1);
@@ -1291,6 +1663,11 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
             "gpuName": "Apple M-series (stale)",
             "capabilities": ["image_vqa"],
             "loadedModels": [],
+            // A registered worker reports its host's memory on every register AND heartbeat
+            // (`sceneworks_worker`: `utilization: gpu_utilization(...)`), and that report is the
+            // only thing `GET /api/v1/host-capabilities` has to answer with — so the memory half of
+            // the preflight reads it from here.
+            "utilization": { "memoryTotalMb": 128 * 1024 },
         }),
     )
     .await;
@@ -1299,7 +1676,10 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
         harness.app.clone(),
         "POST",
         "/api/v1/workers/stale-gpu/heartbeat",
-        serde_json::json!({ "status": "offline", "loadedModels": [] }),
+        serde_json::json!({
+            "status": "offline", "loadedModels": [],
+            "utilization": { "memoryTotalMb": 128 * 1024 },
+        }),
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -1309,8 +1689,9 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
         Duration::from_millis(50),
         RunControl::new(),
     );
+    let limits = shipped_review_plan().limits;
     let error = vision
-        .preflight()
+        .preflight(limits)
         .await
         .expect_err("an offline worker cannot answer anything");
     let message = format!("{error}");
@@ -1325,14 +1706,53 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
         harness.app.clone(),
         "POST",
         "/api/v1/workers/stale-gpu/heartbeat",
-        serde_json::json!({ "status": "idle", "loadedModels": [] }),
+        serde_json::json!({
+            "status": "idle", "loadedModels": [],
+            "utilization": { "memoryTotalMb": 128 * 1024 },
+        }),
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     vision
-        .preflight()
+        .preflight(limits)
         .await
         .expect("an idle worker advertising image_vqa is accepted");
+
+    // ...and the same live worker is refused when the review declares a ceiling the host cannot
+    // meet. A review that starts on a host too small dies inside the loader AFTER creating a
+    // project and extracting frames, or times out on every question — which records the whole take
+    // as unobserved and reads like evidence.
+    let mut hungry = limits;
+    hungry.max_memory_gb = 4096.0;
+    let error = vision
+        .preflight(hungry)
+        .await
+        .expect_err("a 4 TB ceiling cannot be met by any host this test runs on");
+    let message = format!("{error}");
+    assert!(message.contains("limits.maxMemoryGb"), "{message}");
+    assert!(
+        message.contains("4096.0") && message.contains("the API host reports"),
+        "the refusal must name both numbers: {message}"
+    );
+
+    // And a live worker whose heartbeat carries no utilization at all leaves the host reporting
+    // nothing: an UNCHECKED ceiling is not a checked one, so that is a refusal too.
+    let (status, _) = crate::tests::support::request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/workers/stale-gpu/heartbeat",
+        serde_json::json!({ "status": "idle", "loadedModels": [] }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let error = vision
+        .preflight(limits)
+        .await
+        .expect_err("a ceiling nobody can check is not a checked ceiling");
+    assert!(
+        format!("{error}").contains("no registered worker reports host memory"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

@@ -111,6 +111,7 @@
         "sh050_recipient": "match",
         "sh050_recipient_apron": "match",
         "sh050_parcel": "match",
+        "sh050_parcel_custody": "match",
         "sh050_action": "match",
         "sh050_cut": "match"
       }
@@ -266,6 +267,8 @@
         "sh050_recipient": "match",
         "sh050_recipient_apron": "mismatch",
         "sh050_parcel": "match",
+        // Only the costume is wrong in this take: the parcel is where it should be.
+        "sh050_parcel_custody": "match",
         "sh050_action": "match",
         "sh050_cut": "match"
       }

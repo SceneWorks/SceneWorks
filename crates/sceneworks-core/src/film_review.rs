@@ -135,6 +135,16 @@ const CONFIDENT: f64 = 0.9;
 /// Confidence a hedged answer carries.
 const HEDGED: f64 = 0.45;
 
+/// Tokens one backend answer is truncated to when the review document declares no `maxNewTokens`.
+/// The questions are closed with declared vocabularies, so this is generous; it bounds one backend
+/// call, it does not shape the answer.
+pub const DEFAULT_MAX_NEW_TOKENS: u32 = 192;
+
+/// Memory the review declares it needs, in GB, when the document names none. The understanding
+/// model the review drives (SenseNova-U1-8B) declares `minMemoryGb: 16`, so a host with less than
+/// this cannot answer a question at all and the review says so before it creates anything.
+pub const DEFAULT_MAX_MEMORY_GB: f64 = 16.0;
+
 // ---------------------------------------------------------------------------------------------
 // Review plan document
 // ---------------------------------------------------------------------------------------------
@@ -234,7 +244,7 @@ pub struct ReviewSampling {
 
 /// Finite bounds every review declares BEFORE it dispatches anything (epic requirement E5). A
 /// review that reaches one stops and says so in [`ObservedState::stop`]; it never retries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReviewLimits {
     /// Wall-clock for one shot's whole review, frame extraction included.
@@ -245,6 +255,22 @@ pub struct ReviewLimits {
     pub max_questions_per_shot: u32,
     /// Wall-clock for one backend answer.
     pub max_answer_seconds: u64,
+    /// Tokens one backend answer is truncated to. Declared here rather than hard-coded in the
+    /// caller so a review's whole cost is readable off its own document (epic requirement E5).
+    #[serde(default = "default_max_new_tokens")]
+    pub max_new_tokens: u32,
+    /// Memory the review declares it needs, in GB, checked against the API HOST's reported memory
+    /// before anything is dispatched — the same shape as a production plan's `limits.maxMemoryGb`.
+    #[serde(default = "default_max_memory_gb")]
+    pub max_memory_gb: f64,
+}
+
+fn default_max_new_tokens() -> u32 {
+    DEFAULT_MAX_NEW_TOKENS
+}
+
+fn default_max_memory_gb() -> f64 {
+    DEFAULT_MAX_MEMORY_GB
 }
 
 /// The review document: what to ask about each shot, how to sample it, and what bounds the run.
@@ -348,10 +374,20 @@ pub fn validate_review_plan(review: &ReviewPlan, plan: &ProductionPlan) -> Vec<P
             u64::from(review.limits.max_questions_per_shot),
         ),
         ("limits.maxAnswerSeconds", review.limits.max_answer_seconds),
+        (
+            "limits.maxNewTokens",
+            u64::from(review.limits.max_new_tokens),
+        ),
     ] {
         if value == 0 {
             findings.push(PlanDiagnostic::plan(field, format!("{field} must be >= 1")));
         }
+    }
+    if !review.limits.max_memory_gb.is_finite() || review.limits.max_memory_gb <= 0.0 {
+        findings.push(PlanDiagnostic::plan(
+            "limits.maxMemoryGb",
+            "the memory ceiling must be a finite number > 0",
+        ));
     }
     if review.shots.is_empty() {
         findings.push(PlanDiagnostic::plan(
@@ -604,17 +640,84 @@ pub struct Observation {
     pub confidence: f64,
     pub evidence_frame_ids: Vec<String>,
     pub answers: Vec<FrameAnswer>,
+    /// Why nothing was read, when the question was never put to the backend at all — an
+    /// `acrossCut` question with no adjacent selected take, above all. A question that reached the
+    /// backend carries its answers instead, and a skipped one used to be omitted from the document
+    /// entirely, which reads exactly like a question nobody declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl Observation {
     /// The invariant this type exists to hold. Used by the writer and asserted by tests.
     pub fn is_well_formed(&self) -> bool {
+        self.well_formed_error().is_none()
+    }
+
+    /// The invariant violation this observation carries, named — `None` when it is well formed.
+    ///
+    /// The pair (`unobserved`, `observed`) is independently settable, so the "an unobserved
+    /// observation carries no value" rule is a rule about VALUES rather than about types. It is
+    /// therefore checked wherever an `Observation` is built or read back
+    /// (`film_harness::review::answer_questions` and `read_observed_state`), unconditionally — a
+    /// `debug_assert!` would hold it in the test binary and nowhere a person's document is read.
+    pub fn well_formed_error(&self) -> Option<String> {
+        let question = &self.question_id;
         if self.unobserved {
-            return self.verdict == Verdict::Unobserved
-                && self.observed.is_none()
-                && self.confidence == 0.0;
+            if self.verdict != Verdict::Unobserved {
+                return Some(format!(
+                    "observation {question:?} is marked unobserved but carries verdict {}",
+                    self.verdict.as_str()
+                ));
+            }
+            if let Some(observed) = &self.observed {
+                return Some(format!(
+                    "observation {question:?} is unobserved but carries the value {observed:?}; \
+                     there is no such thing as an unobserved value"
+                ));
+            }
+            if self.confidence != 0.0 {
+                return Some(format!(
+                    "observation {question:?} is unobserved but claims confidence {}",
+                    self.confidence
+                ));
+            }
+            return None;
         }
-        self.verdict != Verdict::Unobserved && self.observed.is_some()
+        if self.verdict == Verdict::Unobserved {
+            return Some(format!(
+                "observation {question:?} reads unobserved but is not marked unobserved"
+            ));
+        }
+        if self.observed.is_none() {
+            return Some(format!(
+                "observation {question:?} claims verdict {} but names no observed value",
+                self.verdict.as_str()
+            ));
+        }
+        None
+    }
+}
+
+/// The observation for a question the reviewer could not put at all, naming why in `note`.
+///
+/// Skipping such a question silently — which is what an `acrossCut` question with no adjacent
+/// selected take used to do — leaves the document indistinguishable from one where the question was
+/// never declared, and a reader cannot tell "nobody asked" from "nobody answered".
+pub fn unasked_observation(question: &ReviewQuestion, reason: &str) -> Observation {
+    Observation {
+        question_id: question.id.clone(),
+        topic: question.topic.clone(),
+        question: question.ask.clone(),
+        intended: question.intended.clone(),
+        frames: question.frames.as_str().to_owned(),
+        verdict: Verdict::Unobserved,
+        observed: None,
+        unobserved: true,
+        confidence: 0.0,
+        evidence_frame_ids: Vec::new(),
+        answers: Vec::new(),
+        note: Some(reason.to_owned()),
     }
 }
 
@@ -714,9 +817,31 @@ const NEGATIONS: &[&str] = &[
 /// letting a token drift across a whole clause.
 const TOKEN_GAP: usize = 3;
 
+/// Words that open a closed question's answer as the ANSWER ITSELF rather than as a negation of
+/// everything after them. "No, this is a kitchen." says the room is a kitchen; reading its leading
+/// "No," as a clause negation loses the most common negative answer shape these questions get.
+const ANSWER_PARTICLES: &[&str] = &["yes", "no", "yeah", "yep", "nope", "nah"];
+
+/// Punctuation that terminates a leading answer particle. A particle is only an answer when it is
+/// punctuated off from the sentence — "no parcel is visible" is an ordinary negated clause.
+const PARTICLE_TERMINATORS: &[char] = &[',', ':', '-', '\u{2013}', '\u{2014}'];
+
+/// Sentence separators an answer is split on.
+const CLAUSE_SEPARATORS: &[char] = &['.', ';', '!', '?', '\n'];
+
+/// Words a clause must have before it can be read as a restatement of the question.
+const MIN_ECHO_WORDS: usize = 4;
+
 /// One sentence of an answer, as lowercased words.
 struct Clause {
     words: Vec<String>,
+    /// The word index the negation scan starts at: `1` when the clause opens with a yes/no answer
+    /// particle terminated by a comma, dash or colon, so that particle is graded as the answer
+    /// token it is instead of negating every token after it.
+    negation_from: usize,
+    /// The punctuation that ended this clause, when it had one. `?` marks an interrogative, which
+    /// is how a restatement of the question is told from an answer.
+    terminator: Option<char>,
 }
 
 /// Split an answer into clauses and each clause into lowercased words.
@@ -726,17 +851,86 @@ struct Clause {
 /// "Yes, there is a person. The room appears to be a workshop." is not read as a hedged sighting
 /// of the person).
 fn clauses_of(answer: &str) -> Vec<Clause> {
-    answer
-        .split(['.', ';', '!', '?', '\n'])
-        .map(|clause| Clause {
-            words: clause
-                .split(|c: char| !(c.is_alphanumeric() || c == '\''))
-                .filter(|word| !word.is_empty())
-                .map(|word| word.to_ascii_lowercase())
-                .collect(),
-        })
-        .filter(|clause| !clause.words.is_empty())
-        .collect()
+    let mut clauses = Vec::new();
+    let mut start = 0;
+    for (index, character) in answer.char_indices() {
+        if CLAUSE_SEPARATORS.contains(&character) {
+            push_clause(&answer[start..index], Some(character), &mut clauses);
+            start = index + character.len_utf8();
+        }
+    }
+    push_clause(&answer[start..], None, &mut clauses);
+    clauses
+}
+
+fn push_clause(raw: &str, terminator: Option<char>, clauses: &mut Vec<Clause>) {
+    let words: Vec<String> = raw
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    if words.is_empty() {
+        return;
+    }
+    let negation_from = usize::from(opens_with_answer_particle(raw));
+    clauses.push(Clause {
+        words,
+        negation_from,
+        terminator,
+    });
+}
+
+/// Whether a clause opens with a yes/no answer particle punctuated off from the rest.
+fn opens_with_answer_particle(raw: &str) -> bool {
+    let trimmed = raw.trim_start().to_ascii_lowercase();
+    ANSWER_PARTICLES.iter().any(|particle| {
+        trimmed
+            .strip_prefix(particle)
+            .is_some_and(|rest| rest.trim_start().starts_with(PARTICLE_TERMINATORS))
+    })
+}
+
+/// Whether `needle` occurs in `haystack` in order, gaps allowed.
+fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    let mut cursor = 0;
+    for word in needle {
+        match haystack[cursor..].iter().position(|other| other == word) {
+            Some(offset) => cursor += offset + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Drop the leading clauses that merely restate the question.
+///
+/// These models often lead with the question before answering it — "Is the door in this frame open
+/// or closed? It is closed." — and the restatement carries every declared answer word the question
+/// listed. Graded, it decides the verdict on the question's own wording: the echo above scored a
+/// confident `Match` on `open` for a shot expecting an open door and a confident `Mismatch` on the
+/// shot expecting a closed one, neither of which the model said.
+fn strip_question_echo(clauses: Vec<Clause>, ask: &str) -> Vec<Clause> {
+    let asked = token_words(ask);
+    if asked.is_empty() {
+        return clauses;
+    }
+    let echoes = clauses
+        .iter()
+        .take_while(|clause| is_question_echo(clause, &asked))
+        .count();
+    clauses.into_iter().skip(echoes).collect()
+}
+
+/// Whether one clause is a restatement of the question: an interrogative whose words all come from
+/// the question in order, or a run of the question's own opening words.
+fn is_question_echo(clause: &Clause, asked: &[String]) -> bool {
+    if clause.words.len() < MIN_ECHO_WORDS {
+        return false;
+    }
+    match clause.terminator {
+        Some('?') => is_subsequence(&clause.words, asked),
+        _ => asked.starts_with(&clause.words[..]),
+    }
 }
 
 /// The word index at which `token`'s words appear in order inside `words`, allowing at most
@@ -783,8 +977,13 @@ fn token_is_negating(token: &[String]) -> bool {
 }
 
 /// Whether the words before `position` in the same clause negate what follows.
-fn clause_negates(words: &[String], position: usize) -> bool {
-    words[..position]
+///
+/// The scan starts at [`Clause::negation_from`], which skips a leading yes/no answer particle: in
+/// "No, this is a kitchen." the "No," is the answer, not a negation of "kitchen". An inner negation
+/// ("No, the room is not a workshop") still negates, because "not" sits inside the scanned range.
+fn clause_negates(clause: &Clause, position: usize) -> bool {
+    let from = clause.negation_from.min(position);
+    clause.words[from..position]
         .iter()
         .any(|word| NEGATIONS.contains(&word.as_str()))
 }
@@ -814,7 +1013,7 @@ fn find_hits(clauses: &[Clause], tokens: &[String]) -> Vec<TokenHit> {
             hits.push(TokenHit {
                 token: token.trim().to_ascii_lowercase(),
                 position: offset + position,
-                negated: !token_is_negating(&parts) && clause_negates(&clause.words, position),
+                negated: !token_is_negating(&parts) && clause_negates(clause, position),
                 hedged: clause_hedges(clause),
             });
         }
@@ -878,14 +1077,23 @@ impl Grade {
 /// 3. each hit takes the POLARITY of its clause. An `expect` token inside a negated clause is a
 ///    **contradiction**, not a match — without this, "No, the room is not a cluttered woodworking
 ///    workshop" scored a match on the bare word "workshop". A token that carries its own negation
-///    is taken at face value instead, so "no parcel" is not cancelled by the leading "No,";
+///    is taken at face value instead, so "no parcel" is not cancelled by the leading "No,". A
+///    leading yes/no ANSWER PARTICLE ("No, this is a kitchen.") is the answer rather than a
+///    negation scope, so the most common negative shape these closed questions get still grades;
 /// 4. a `contradict` token inside a negated clause ("it is not red") decides nothing: it rules one
 ///    value out without establishing another, and inventing agreement from it is exactly the kind
 ///    of overclaim this module exists to prevent;
-/// 5. the EARLIEST decisive hit wins — these answers lead with their verdict and then elaborate;
-/// 6. an answer that matches nothing is `Unobserved`, not a match. Silence is not agreement.
+/// 5. a leading restatement of the question is stripped before any of this. These models lead with
+///    the question ("Is the door in this frame open or closed? It is closed."), and the
+///    restatement carries every declared answer word the question listed;
+/// 6. an answer that AFFIRMS both an `expect` and a `contradict` value ("the parcel is red-brown")
+///    is self-contradictory. It is `Unobserved`, with `matched` naming the conflict — letting word
+///    order pick the winner reported a confident 0.9 verdict the answer never supported;
+/// 7. otherwise the EARLIEST decisive hit wins — these answers lead with their verdict and then
+///    elaborate;
+/// 8. an answer that matches nothing is `Unobserved`, not a match. Silence is not agreement.
 pub fn grade_answer(question: &ReviewQuestion, answer: &str) -> Grade {
-    let clauses = clauses_of(answer.trim());
+    let clauses = strip_question_echo(clauses_of(answer.trim()), &question.ask);
     if clauses.is_empty() {
         return Grade::unobserved(false);
     }
@@ -893,19 +1101,11 @@ pub fn grade_answer(question: &ReviewQuestion, answer: &str) -> Grade {
         return Grade::unobserved(true);
     }
 
-    let mut decisive: Option<(Verdict, TokenHit)> = None;
-    let consider = |verdict: Verdict, hit: TokenHit, decisive: &mut Option<(Verdict, TokenHit)>| {
-        if decisive
-            .as_ref()
-            .is_none_or(|(_, current)| hit.position < current.position)
-        {
-            *decisive = Some((verdict, hit));
-        }
-    };
+    let mut hits: Vec<(Verdict, TokenHit)> = Vec::new();
     for hit in find_hits(&clauses, &question.contradict) {
         // A ruled-out value ("not red") establishes nothing; only an affirmed one contradicts.
         if !hit.negated {
-            consider(Verdict::Mismatch, hit, &mut decisive);
+            hits.push((Verdict::Mismatch, hit));
         }
     }
     for hit in find_hits(&clauses, &question.expect) {
@@ -914,10 +1114,34 @@ pub fn grade_answer(question: &ReviewQuestion, answer: &str) -> Grade {
         } else {
             Verdict::Match
         };
-        consider(verdict, hit, &mut decisive);
+        hits.push((verdict, hit));
+    }
+    hits.sort_by_key(|(_, hit)| hit.position);
+
+    let agreeing = hits
+        .iter()
+        .find(|(verdict, _)| *verdict == Verdict::Match)
+        .map(|(_, hit)| hit);
+    let contradicting = hits
+        .iter()
+        .find(|(verdict, _)| *verdict == Verdict::Mismatch)
+        .map(|(_, hit)| hit);
+    if let (Some(agreeing), Some(contradicting)) = (agreeing, contradicting) {
+        // The answer both agrees and contradicts. Whichever came first is not evidence of anything,
+        // so the reviewer says what it saw and claims nothing.
+        return Grade {
+            verdict: Verdict::Unobserved,
+            matched: Some(format!(
+                "conflict: {:?} and {:?} in one answer",
+                agreeing.token, contradicting.token
+            )),
+            polarity: "none".to_owned(),
+            confidence: 0.0,
+            hedged: agreeing.hedged || contradicting.hedged,
+        };
     }
 
-    let Some((verdict, hit)) = decisive else {
+    let Some((verdict, hit)) = hits.into_iter().next() else {
         return Grade::unobserved(clauses.iter().any(clause_hedges));
     };
     Grade {
@@ -1003,6 +1227,7 @@ pub fn aggregate_cut_observation(
         confidence,
         evidence_frame_ids: evidence,
         answers,
+        note: None,
     }
 }
 
@@ -1089,6 +1314,7 @@ pub fn aggregate_observation(question: &ReviewQuestion, answers: Vec<FrameAnswer
         },
         evidence_frame_ids: evidence,
         answers,
+        note: None,
     }
 }
 
@@ -1220,6 +1446,37 @@ pub fn parse_eval_set(text: &str) -> Result<EvalSet, String> {
     serde_json::from_str(&strip_jsonc_comments(text)).map_err(|error| error.to_string())
 }
 
+/// Why a labeled case's frame path may not be used, or `None` when it is a plain relative name
+/// under the set's media root.
+///
+/// Checked here rather than at the read, so a bad document is refused before anything opens a file
+/// — and so `review-fixtures`, which WRITES one file per named frame, is refused by the same rule.
+pub fn unsafe_media_path(file: &str) -> Option<&'static str> {
+    let trimmed = file.trim();
+    if trimmed.is_empty() {
+        return Some("is empty");
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('~') || trimmed.starts_with('\\') {
+        return Some("must be relative to the set's mediaRoot, not an absolute or ~ path");
+    }
+    // Windows drive letters (`C:\frames\x.png`) are absolute too, and `Path::is_absolute` says so
+    // only on Windows.
+    if trimmed
+        .chars()
+        .nth(1)
+        .is_some_and(|character| character == ':')
+    {
+        return Some("must be relative to the set's mediaRoot, not a drive-qualified path");
+    }
+    if trimmed
+        .split(['/', '\\'])
+        .any(|component| component == ".." || component == "~")
+    {
+        return Some("must not climb out of the set's mediaRoot with a `..` component");
+    }
+    None
+}
+
 /// Findings on a labeled set against the review plan it scores.
 pub fn validate_eval_set(set: &EvalSet, review: &ReviewPlan) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
@@ -1282,6 +1539,22 @@ pub fn validate_eval_set(set: &EvalSet, review: &ReviewPlan) -> Vec<PlanDiagnost
                 format!("cases.{}.frames", case.id),
                 "a case needs at least one frame",
             ));
+        }
+        // A frame file is a name UNDER the set's media root, never a way out of it: the evaluation
+        // both reads these paths and (through `review-fixtures`) WRITES them, so a document that
+        // could name `../../etc/x` or an absolute path would make a labels file a write primitive.
+        for (field, frames) in [
+            ("frames", &case.frames),
+            ("adjacentFrames", &case.adjacent_frames),
+        ] {
+            for (index, frame) in frames.iter().enumerate() {
+                if let Some(reason) = unsafe_media_path(&frame.file) {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("cases.{}.{field}[{index}].file", case.id),
+                        format!("{:?} {reason}", frame.file),
+                    ));
+                }
+            }
         }
         if case.expected.is_empty() {
             findings.push(PlanDiagnostic::plan(
@@ -1746,6 +2019,202 @@ mod tests {
         );
     }
 
+    /// The shipped `location` question, whose vocabulary the leading-particle tests use.
+    fn location_question() -> ReviewQuestion {
+        let mut q = question("sh010_location");
+        q.topic = "location".to_owned();
+        q.intended = "A cluttered woodworking workshop with a long wooden workbench.".to_owned();
+        q.ask = "What kind of room is in this frame? Answer with exactly one word from this list: \
+                 workshop, kitchen, office, bedroom, outdoors, studio, or unclear."
+            .to_owned();
+        q.expect = vec!["workshop".to_owned()];
+        q.contradict = ["kitchen", "office", "bedroom", "outdoors", "studio"]
+            .iter()
+            .map(|token| (*token).to_owned())
+            .collect();
+        q
+    }
+
+    /// A leading "No," / "Yes," is the ANSWER to a closed question, not a negation scope for every
+    /// token after it. Read as a negation, the most common negative shape these questions get —
+    /// "No, this is a kitchen." — dropped its affirmed `contradict` hit under rule 4 and abstained,
+    /// which depressed detections on exactly the axis the evaluation reports.
+    #[test]
+    fn a_leading_answer_particle_is_the_answer_not_a_negation_scope() {
+        let grade = grade_answer(&location_question(), "No, this is a kitchen.");
+        assert_eq!(
+            grade.verdict,
+            Verdict::Mismatch,
+            "a decisive wrong room must be flagged, not abstained on: {grade:?}"
+        );
+        assert_eq!(grade.matched.as_deref(), Some("kitchen"));
+        assert_eq!(grade.polarity, "affirmed");
+        assert_eq!(grade.confidence, CONFIDENT);
+
+        // The same shape on the custody and colour questions, which is where it cost detections.
+        let mut custody = question("sh040_parcel_custody");
+        custody.topic = "parcel_custody".to_owned();
+        custody.ask = "Where is the parcel in this frame? Answer with exactly one word: hands, \
+                       surface, nobody, or unclear."
+            .to_owned();
+        custody.expect = vec!["surface".to_owned(), "bench".to_owned()];
+        custody.contradict = vec!["hands".to_owned(), "holding".to_owned()];
+        let grade = grade_answer(&custody, "No - the parcel is in the courier's hands.");
+        assert_eq!(grade.verdict, Verdict::Mismatch, "{grade:?}");
+        assert_eq!(grade.matched.as_deref(), Some("hands"));
+
+        let grade = grade_answer(&question("parcel_colour"), "Yes: the parcel is blue.");
+        assert_eq!(grade.verdict, Verdict::Mismatch, "{grade:?}");
+        assert_eq!(grade.matched.as_deref(), Some("blue"));
+
+        // A particle that is NOT punctuated off is an ordinary negation and still negates.
+        let grade = grade_answer(&location_question(), "No kitchen is visible here.");
+        assert_eq!(
+            grade.verdict,
+            Verdict::Unobserved,
+            "\"no kitchen\" rules a value out without establishing another: {grade:?}"
+        );
+    }
+
+    /// An answer that affirms a value from BOTH lists is self-contradictory. Letting word order
+    /// decide reported a confident 0.9 verdict on half the sentence.
+    #[test]
+    fn an_answer_that_affirms_both_lists_claims_nothing() {
+        let q = question("parcel_colour"); // expect red, contradict blue / no parcel
+        let mut brown = q.clone();
+        brown.contradict.push("brown".to_owned());
+        for text in ["The parcel is red-brown.", "Red? No - blue."] {
+            let grade = grade_answer(if text.contains("brown") { &brown } else { &q }, text);
+            assert_eq!(
+                grade.verdict,
+                Verdict::Unobserved,
+                "{text:?} agrees and contradicts at once: {grade:?}"
+            );
+            assert_eq!(grade.confidence, 0.0, "{text:?}");
+            let matched = grade
+                .matched
+                .as_deref()
+                .unwrap_or_else(|| panic!("{text:?} must name the conflict"));
+            assert!(matched.starts_with("conflict:"), "{text:?}: {matched}");
+            assert!(matched.contains("red"), "{text:?}: {matched}");
+        }
+
+        // An answer that only agrees still agrees, at full confidence.
+        let grade = grade_answer(&q, "The parcel is red.");
+        assert_eq!(grade.verdict, Verdict::Match);
+        assert_eq!(grade.confidence, CONFIDENT);
+    }
+
+    /// These models lead with the question and then answer it. Graded, the restatement decides the
+    /// verdict on the QUESTION's own wording: the echo below scored `Match(open)` on the shot that
+    /// expects an open door and a confident `Mismatch(open)` on the shot that expects a closed one,
+    /// neither of which the model said.
+    #[test]
+    fn a_leading_restatement_of_the_question_is_stripped_before_grading() {
+        let echoed = "Is the door in this frame open or closed? It is closed.";
+        let mut opens = question("sh010_action");
+        opens.topic = "action_completion".to_owned();
+        opens.ask =
+            "Is the door in this frame open or closed? Answer with exactly one word: open, \
+                     closed, or unclear."
+                .to_owned();
+        opens.expect = vec!["open".to_owned()];
+        opens.contradict = vec!["closed".to_owned(), "shut".to_owned()];
+        let grade = grade_answer(&opens, echoed);
+        assert_eq!(
+            grade.verdict,
+            Verdict::Mismatch,
+            "the model said closed, and the shot wants it open: {grade:?}"
+        );
+        assert_eq!(grade.matched.as_deref(), Some("closed"));
+
+        // The same echo on the shot that WANTS the door closed is agreement, not a false alarm.
+        let mut closes = opens.clone();
+        closes.id = "sh040_action".to_owned();
+        closes.expect = vec!["closed".to_owned(), "shut".to_owned()];
+        closes.contradict = vec!["open".to_owned()];
+        let grade = grade_answer(&closes, echoed);
+        assert_eq!(
+            grade.verdict,
+            Verdict::Match,
+            "a confident false alarm on a correct take: {grade:?}"
+        );
+        assert_eq!(grade.matched.as_deref(), Some("closed"));
+
+        // An answer that is nothing BUT the question claims nothing at all.
+        let grade = grade_answer(&opens, "Is the door in this frame open or closed?");
+        assert_eq!(grade.verdict, Verdict::Unobserved, "{grade:?}");
+        assert!(grade.matched.is_none());
+    }
+
+    /// A question the reviewer could not put at all is an observation NAMING why, not an absence.
+    #[test]
+    fn an_unasked_question_is_recorded_unobserved_with_its_reason() {
+        let mut q = question("sh020_cut");
+        q.topic = "cut_continuity".to_owned();
+        q.across_cut = true;
+        let observation = unasked_observation(&q, "no adjacent selected take to compare against");
+        assert_eq!(observation.verdict, Verdict::Unobserved);
+        assert!(observation.unobserved);
+        assert!(observation.observed.is_none());
+        assert_eq!(observation.confidence, 0.0);
+        assert_eq!(
+            observation.note.as_deref(),
+            Some("no adjacent selected take to compare against")
+        );
+        assert!(observation.is_well_formed(), "{observation:?}");
+        let json = serde_json::to_value(&observation).expect("serializes");
+        assert!(json.get("observed").is_none(), "{json}");
+        assert_eq!(
+            json["note"],
+            json!("no adjacent selected take to compare against")
+        );
+    }
+
+    /// The "unobserved carries no value" rule is a rule about VALUES, so the type can express its
+    /// own violation. Every violation must be NAMED, because that name is what the reader of a
+    /// refused document gets.
+    #[test]
+    fn a_malformed_observation_names_what_is_wrong_with_it() {
+        let q = question("parcel_colour");
+        let good = aggregate_observation(&q, vec![answer("f1", "The parcel is red.", &q)]);
+        assert_eq!(good.well_formed_error(), None, "{good:?}");
+
+        let mut valued = good.clone();
+        valued.verdict = Verdict::Unobserved;
+        valued.unobserved = true;
+        let error = valued
+            .well_formed_error()
+            .expect("an unobserved value is malformed");
+        assert!(
+            error.contains("no such thing as an unobserved value"),
+            "{error}"
+        );
+
+        let mut confident = good.clone();
+        confident.verdict = Verdict::Unobserved;
+        confident.unobserved = true;
+        confident.observed = None;
+        let error = confident
+            .well_formed_error()
+            .expect("an unobserved observation cannot be confident");
+        assert!(error.contains("confidence"), "{error}");
+
+        let mut silent = good.clone();
+        silent.observed = None;
+        let error = silent
+            .well_formed_error()
+            .expect("a verdict with no value is malformed");
+        assert!(error.contains("names no observed value"), "{error}");
+
+        let mut mislabeled = good;
+        mislabeled.verdict = Verdict::Unobserved;
+        let error = mislabeled
+            .well_formed_error()
+            .expect("an unobserved verdict must be marked unobserved");
+        assert!(error.contains("not marked unobserved"), "{error}");
+    }
+
     /// A contradiction token inside a negated clause rules one value out without establishing
     /// another, so it decides nothing — inventing agreement from it would be the overclaim this
     /// module exists to prevent.
@@ -2017,6 +2486,93 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.message.contains("false alarms")),
             "{findings:#?}"
+        );
+    }
+
+    /// A labeled set's frame paths are names UNDER its media root. `review-eval` reads them and
+    /// `review-fixtures` WRITES them, so a document that could climb out is a write primitive.
+    #[test]
+    fn a_labeled_set_that_climbs_out_of_its_media_root_is_refused() {
+        let review = review_doc(
+            "SH010",
+            json!({ "id": "q", "topic": "location", "intended": "i", "ask": "a", "expect": ["x"] }),
+        );
+        let set: EvalSet = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": "s", "version": 1, "reviewPlan": "review.jsonc",
+            "cases": [
+                {
+                    "id": "escapes", "shotId": "SH010", "label": "wrong_location",
+                    "frames": [{ "file": "../../../etc/passwd", "timestampSeconds": 0.0 }],
+                    "adjacentFrames": [{ "file": "/etc/hosts", "timestampSeconds": 0.0 }],
+                    "expected": { "q": "mismatch" }
+                },
+                {
+                    "id": "tilde", "shotId": "SH010", "label": "correct",
+                    "frames": [{ "file": "~/secrets/a.png", "timestampSeconds": 0.0 }],
+                    "expected": { "q": "match" }
+                }
+            ]
+        }))
+        .expect("set parses");
+        let findings = validate_eval_set(&set, &review);
+        let messages: Vec<String> = findings.iter().map(|f| f.to_string()).collect();
+        let joined = messages.join("\n");
+        assert!(joined.contains("cases.escapes.frames[0].file"), "{joined}");
+        assert!(joined.contains("`..` component"), "{joined}");
+        assert!(
+            joined.contains("cases.escapes.adjacentFrames[0].file"),
+            "an adjacent frame is read the same way: {joined}"
+        );
+        assert!(joined.contains("cases.tilde.frames[0].file"), "{joined}");
+
+        // ...and a plain relative name in a subdirectory is fine.
+        assert_eq!(unsafe_media_path("frames/sh010_1.png"), None);
+        assert_eq!(unsafe_media_path("sh010_1.png"), None);
+    }
+
+    /// Every bound the review runs under is declared in the document, `maxNewTokens` and
+    /// `maxMemoryGb` included — a bound that lives in a `const` is not a declared bound.
+    #[test]
+    fn the_review_limits_declare_the_token_and_memory_ceilings() {
+        let plan = plan_with_shots(&["SH010"]);
+        let review = review_doc(
+            "SH010",
+            json!({ "id": "q", "topic": "location", "intended": "i", "ask": "a", "expect": ["x"] }),
+        );
+        // A document that names neither keeps the shipped defaults rather than failing to parse.
+        assert_eq!(review.limits.max_new_tokens, DEFAULT_MAX_NEW_TOKENS);
+        assert_eq!(review.limits.max_memory_gb, DEFAULT_MAX_MEMORY_GB);
+        assert!(validate_review_plan(&review, &plan).is_empty());
+
+        let declared: ReviewPlan = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": "r", "version": 1,
+            "sampling": { "positions": [0.5] },
+            "limits": { "maxSeconds": 60, "maxFramesPerShot": 1, "maxQuestionsPerShot": 1,
+                        "maxAnswerSeconds": 10, "maxNewTokens": 64, "maxMemoryGb": 12.5 },
+            "shots": { "SH010": { "questions": [
+                { "id": "q", "topic": "location", "intended": "i", "ask": "a", "expect": ["x"] }
+            ] } }
+        }))
+        .expect("review plan parses");
+        assert_eq!(declared.limits.max_new_tokens, 64);
+        assert_eq!(declared.limits.max_memory_gb, 12.5);
+        assert!(validate_review_plan(&declared, &plan).is_empty());
+
+        let mut zero = declared.clone();
+        zero.limits.max_new_tokens = 0;
+        assert!(
+            validate_review_plan(&zero, &plan)
+                .iter()
+                .any(|f| f.message.contains("maxNewTokens")),
+            "an answer truncated to zero tokens answers nothing"
+        );
+        let mut negative = declared;
+        negative.limits.max_memory_gb = 0.0;
+        assert!(
+            validate_review_plan(&negative, &plan)
+                .iter()
+                .any(|f| f.message.contains("memory ceiling")),
+            "a review that declares no memory ceiling has not declared its bounds"
         );
     }
 
