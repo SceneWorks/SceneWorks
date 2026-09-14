@@ -2246,8 +2246,8 @@ async fn a_reference_imported_but_not_recorded_is_adopted_not_imported_again() {
         let transport = FaultTransport::new(harness.app.clone(), nth, FaultMode::After)
             .on_post_route("/assets");
         let options = harness.options(
-            harness.fixture_plan(),
-            harness.fixture_pack(),
+            harness.edited_plan(|_| {}),
+            harness.fixture_pack_without_sound(),
             Some(&["SH010"]),
         );
         film_harness::run(&transport, &options)
@@ -2328,8 +2328,8 @@ async fn a_reference_imported_but_not_recorded_is_adopted_not_imported_again() {
 async fn resuming_a_finished_run_reuses_every_take_and_enqueues_nothing() {
     let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let first = film_harness::run(&harness.transport, &options)
@@ -2706,8 +2706,8 @@ async fn resume_refuses_a_plan_that_changed_under_it() {
 async fn replacing_a_take_renders_one_more_and_leaves_every_other_shot_untouched() {
     let harness = Harness::start(true, fast(&["SH010", "SH020", "SH030"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020", "SH030"]),
     );
     let before = film_harness::run(&harness.transport, &options)
@@ -2867,8 +2867,8 @@ async fn a_failed_export_is_resumable_and_the_retry_is_a_new_job() {
     let harness = Harness::start(true, fast(&["SH010"])).await;
     harness.script.lock().export_fails = true;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     let record = film_harness::run(&harness.transport, &options)
@@ -2920,8 +2920,17 @@ async fn a_failed_export_is_resumable_and_the_retry_is_a_new_job() {
 /// Review flags are cleared first, because a flag is precisely the change a replacement IS allowed
 /// to make to a dependent. Everything else — attempts, jobs, takes, selection, outcome — must hash
 /// identically before and after.
+///
+/// Every float is rounded to six decimals first. The two records being compared do not come down
+/// the same path: the "before" one is the controller's own in-memory record, the "after" one was
+/// read back off disk, and serde_json's float parser can land one ULP away from the value it wrote
+/// (`elapsedSeconds: 1.599993458` read back as `1.5999934580000001`), which flips the hash while
+/// nothing moved. That is the same round trip `selected_identity` above exists to dodge. Six
+/// decimals is ten orders of magnitude coarser than the artifact and far finer than any real
+/// re-measurement, so a shot that actually moved — a new attempt, job, take, status or selection —
+/// still changes the digest.
 fn other_shots_digest(record: &RunRecord, except: &str) -> String {
-    let value = serde_json::to_value(
+    let mut value = serde_json::to_value(
         record
             .shots
             .iter()
@@ -2934,16 +2943,36 @@ fn other_shots_digest(record: &RunRecord, except: &str) -> String {
             .collect::<Vec<_>>(),
     )
     .expect("shots serialize");
+    quantize_floats(&mut value);
     let digest = <sha2::Sha256 as sha2::Digest>::digest(value.to_string().as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Round every float in `value`, in place, to six decimal places.
+fn quantize_floats(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if let Some(float) = number.as_f64() {
+                if !number.is_i64() && !number.is_u64() {
+                    let rounded = (float * 1e6).round() / 1e6;
+                    if let Some(number) = serde_json::Number::from_f64(rounded) {
+                        *value = Value::Number(number);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(quantize_floats),
+        Value::Object(fields) => fields.values_mut().for_each(quantize_floats),
+        _ => {}
+    }
 }
 
 #[tokio::test]
 async fn replacing_a_take_with_export_re_renders_the_timeline_once() {
     let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let before = film_harness::run(&harness.transport, &options)
@@ -3005,8 +3034,8 @@ async fn replacing_a_take_with_export_re_renders_the_timeline_once() {
 async fn a_failed_replacement_keeps_the_rejection_and_does_not_loop() {
     let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let before = film_harness::run(&harness.transport, &options)
@@ -3109,8 +3138,8 @@ async fn a_failed_replacement_keeps_the_rejection_and_does_not_loop() {
 async fn replace_take_refuses_a_shot_the_run_does_not_hold() {
     let harness = Harness::start(true, fast(&["SH010"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     film_harness::run(&harness.transport, &options)
@@ -3141,8 +3170,8 @@ async fn replace_take_refuses_while_the_shot_still_has_an_unsettled_attempt() {
     let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
         .on_post_route("/api/v1/video/jobs");
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     film_harness::run(&transport, &options)
@@ -3243,8 +3272,8 @@ async fn a_conditioning_dependency_is_flagged_with_its_own_kind() {
 async fn a_second_re_export_dispatches_a_new_job_instead_of_adopting_the_first() {
     let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let first = film_harness::run(&harness.transport, &options)
@@ -3319,8 +3348,8 @@ async fn a_crash_after_the_timeline_was_created_adopts_it_instead_of_creating_a_
     let transport =
         FaultTransport::new(harness.app.clone(), 1, FaultMode::After).on_post_route("/timelines");
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     film_harness::run(&transport, &options)
@@ -3380,8 +3409,8 @@ async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
     let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
         .on_post_route("/api/v1/video/jobs");
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     film_harness::run(&transport, &options)
@@ -3620,8 +3649,8 @@ async fn an_attempt_whose_job_post_never_landed_is_not_charged_wall_clock() {
 async fn run_refuses_a_directory_that_already_holds_a_run_record() {
     let harness = Harness::start(true, fast(&["SH010"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     let first = film_harness::run(&harness.transport, &options)
@@ -3675,8 +3704,8 @@ fn cancel_refuses_a_directory_that_holds_no_run_record() {
 async fn replacing_the_same_take_twice_does_not_duplicate_a_review_flag() {
     let harness = Harness::start(true, fast(&["SH010", "SH020", "SH030"])).await;
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020", "SH030"]),
     );
     film_harness::run(&harness.transport, &options)
@@ -3711,8 +3740,8 @@ async fn a_reference_rejected_between_controllers_is_still_adopted_not_imported_
     let transport =
         FaultTransport::new(harness.app.clone(), 1, FaultMode::After).on_post_route("/assets");
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     film_harness::run(&transport, &options)
