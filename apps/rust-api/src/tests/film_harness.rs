@@ -930,13 +930,46 @@ impl Harness {
         Path::new(FIXTURE_DIR).join("references.jsonc")
     }
 
+    /// The shipped pack with its `sound` array emptied, copied into the temp dir so the relative
+    /// `file` paths still resolve. For the lanes with no ffmpeg to transcode an audio upload with.
+    pub(crate) fn fixture_pack_without_sound(&self) -> PathBuf {
+        let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
+        let mut pack: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("fixture pack parses");
+        pack["sound"] = json!([]);
+        let dir = self.temp_dir.path().join("pack");
+        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("references"))
+            .expect("fixture references dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
+                .expect("plate copies");
+        }
+        let path = dir.join("references.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+        path
+    }
+
     /// Copy the checked-in fixture into the temp dir with `edit` applied to the parsed plan, so a
     /// test can break one field without touching the shipped documents.
-    fn edited_plan(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    ///
+    /// The plan's SOUND is stripped first (sc-22712). Every caller is testing validation or a
+    /// budget, and importing sound costs an ffmpeg transcode per clip — enough real time to spend a
+    /// three-second run budget during setup, which is a test measuring the wrong thing. A test that
+    /// wants a sound field back sets it inside `edit`.
+    pub(crate) fn edited_plan(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
         let text = std::fs::read_to_string(self.fixture_plan()).expect("fixture plan");
         let mut plan: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
                 .expect("fixture plan parses");
+        plan.as_object_mut().expect("plan object").remove("sound");
+        for shot in plan["shots"].as_array_mut().expect("shots") {
+            shot.as_object_mut()
+                .expect("shot object")
+                .remove("dialogueClip");
+        }
         edit(&mut plan);
         let path = self.temp_dir.path().join("plan.json");
         std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
@@ -945,11 +978,18 @@ impl Harness {
 
     /// The checked-in pack (and its plates) copied into the temp dir with `edit` applied, so a test
     /// can change an entry without touching the shipped documents.
+    /// The checked-in pack with `edit` applied, copied into the temp dir.
+    ///
+    /// Its SOUND is emptied first, the mirror of `edited_plan` and for the same reason (sc-22712):
+    /// every caller is testing something about references, and importing sound needs an ffmpeg
+    /// that is not on every lane. Pair it with `edited_plan`, which drops the roles that would
+    /// otherwise dangle.
     fn edited_pack(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
         let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
         let mut pack: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
                 .expect("fixture pack parses");
+        pack["sound"] = json!([]);
         edit(&mut pack);
         let dir = self.temp_dir.path().join("pack");
         std::fs::create_dir_all(dir.join("references")).expect("pack dir");
@@ -1007,11 +1047,21 @@ fn summary(record: &sceneworks_core::film_plan::RunRecord) -> String {
 #[tokio::test]
 async fn two_shot_run_renders_imports_assembles_and_exports_through_the_real_routes() {
     let harness = Harness::start(true, vec![]).await;
-    let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
-        Some(&["SH010", "SH020"]),
-    );
+    // Sound import transcodes through ffmpeg (`ProjectStore::import_asset`), which is not on every
+    // lane — the same posture as `import_asset_admits_audio_and_normalizes_it_to_pcm16_wav`. Where
+    // there is no ffmpeg this test runs against the pack's pictures alone, so everything sc-22710
+    // established still runs everywhere; the sound assertions below are gated on the same check and
+    // `the_assembled_sequence_carries_three_independently_controlled_sound_buses` owns them in full.
+    let sound = ffmpeg_reachable();
+    let (plan, pack) = if sound {
+        (harness.fixture_plan(), harness.fixture_pack())
+    } else {
+        (
+            harness.edited_plan(|_| {}),
+            harness.fixture_pack_without_sound(),
+        )
+    };
+    let options = harness.options(plan, pack, Some(&["SH010", "SH020"]));
     let record = film_harness::run(&harness.transport, &options)
         .await
         .expect("run completes");
@@ -1156,8 +1206,8 @@ async fn two_shot_run_renders_imports_assembles_and_exports_through_the_real_rou
     assert_eq!(timeline.items.len(), 2);
     assert_eq!(timeline.fps, 24);
     assert_eq!(timeline.aspect_ratio, "16:9");
-    assert_eq!(timeline.items[0].shot_id, "SH010");
-    assert_eq!(timeline.items[1].shot_id, "SH020");
+    assert_eq!(timeline.items[0].shot_id.as_deref(), Some("SH010"));
+    assert_eq!(timeline.items[1].shot_id.as_deref(), Some("SH020"));
     assert!((timeline.items[0].timeline_end - 5.1667).abs() < 1e-6);
     assert!((timeline.items[1].timeline_start - 5.1667).abs() < 1e-6);
     let (status, saved) = request(
@@ -1180,6 +1230,19 @@ async fn two_shot_run_renders_imports_assembles_and_exports_through_the_real_rou
         items[1]["versionHistory"][0]["jobId"],
         rendered[1].attempts[0].job_id.clone().unwrap()
     );
+    if sound {
+        // The clips this two-shot selection places — both beds and SH020's line, but not the
+        // recipient's, whose shots are not in the selection. The detail lives in the dedicated
+        // test; this is the shipped fixture's smoke.
+        assert_eq!(record.sound.len(), 3, "{:#?}", record.sound);
+        let roles: Vec<&str> = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.kind == "audio")
+            .map(|track| track.role.as_str())
+            .collect();
+        assert_eq!(roles, vec!["dialogue", "ambience", "music"], "{roles:?}");
+    }
     let export = record.export.as_ref().expect("export ran");
     assert_eq!(export.status, "completed");
     assert!(export.asset_id.is_some());
@@ -1597,9 +1660,11 @@ async fn observed_memory_over_budget_stops_new_dispatch() {
         )],
     )
     .await;
+    // Sound-free: this test is about the memory budget, and importing the pack's clips transcodes
+    // through ffmpeg, which the hosted macOS lane does not have. Same reasoning as `edited_plan`.
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010", "SH020"]),
     );
     let record = film_harness::run(&harness.transport, &options)
@@ -1813,9 +1878,11 @@ async fn a_timeline_with_no_video_track_fails_the_run_instead_of_saving_nothing(
             body["tracks"] = json!([{ "id": "track_audio", "kind": "audio", "items": [] }]);
         }
     });
+    // Sound-free for the same reason as the budget test above: nothing here is about sound, and the
+    // import transcodes through an ffmpeg the hosted macOS lane does not have.
     let options = harness.options(
-        harness.fixture_plan(),
-        harness.fixture_pack(),
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
         Some(&["SH010"]),
     );
     let error = film_harness::run(&transport, &options)
@@ -1846,7 +1913,7 @@ async fn unapproved_references_are_tagged_and_recorded_apart_from_approved_ones(
             }
         }
     });
-    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010"]));
+    let options = harness.options(harness.edited_plan(|_| {}), pack, Some(&["SH010"]));
     let record = film_harness::run(&harness.transport, &options)
         .await
         .expect("run completes");
@@ -2870,7 +2937,7 @@ async fn replacing_a_take_renders_one_more_and_leaves_every_other_shot_untouched
     let item = timeline
         .items
         .iter()
-        .find(|item| item.shot_id == "SH020")
+        .find(|item| item.shot_id.as_deref() == Some("SH020"))
         .expect("SH020 on the timeline");
     assert_eq!(
         item.asset_id,
@@ -2883,12 +2950,12 @@ async fn replacing_a_take_renders_one_more_and_leaves_every_other_shot_untouched
             .unwrap()
             .items
             .iter()
-            .find(|item| item.shot_id == shot_id)
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
             .unwrap();
         let after_item = timeline
             .items
             .iter()
-            .find(|item| item.shot_id == shot_id)
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
             .unwrap();
         assert_eq!(before_item, after_item, "{shot_id}'s timeline item moved");
     }
@@ -3133,7 +3200,7 @@ async fn a_failed_replacement_keeps_the_rejection_and_does_not_loop() {
     let item = timeline
         .items
         .iter()
-        .find(|item| item.shot_id == "SH020")
+        .find(|item| item.shot_id.as_deref() == Some("SH020"))
         .expect("SH020 is still in the sequence");
     assert_eq!(
         item.asset_id, rejected_asset,
@@ -3360,7 +3427,7 @@ async fn a_second_re_export_dispatches_a_new_job_instead_of_adopting_the_first()
         let item = timeline
             .items
             .iter()
-            .find(|item| item.shot_id == shot_id)
+            .find(|item| item.shot_id.as_deref() == Some(shot_id))
             .expect("on the timeline");
         assert_eq!(item.asset_id, selected.asset_id, "{shot_id}");
     }
@@ -3839,6 +3906,945 @@ async fn a_reference_rejected_between_controllers_is_still_adopted_not_imported_
         "the adopted asset is the one that was already uploaded"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// Editable picture and continuous sound (sc-22712)
+// -------------------------------------------------------------------------------------------
+//
+// What is proved HERE is the shape of the saved sequence and what the editing commands do to it:
+// which track each clip lands on, what it is linked to, and how everything re-times. What the
+// exported MP4 actually SOUNDS like is proved where the real ffmpeg runs, in
+// `sceneworks_worker::media_jobs::timeline_audio_mix_tests` — an assertion about a timeline is not
+// an assertion about audio, and neither one substitutes for the other.
+
+/// Whether an ffmpeg the store can transcode an audio upload with is reachable.
+///
+/// Sound import goes through `ProjectStore::import_asset` -> `transcode_to_wav_pcm16`, and ffmpeg
+/// is not on every lane. Soft-skipping is the posture the sibling store test
+/// (`import_asset_admits_audio_and_normalizes_it_to_pcm16_wav`) already takes for exactly this
+/// call; `SCENEWORKS_REQUIRE_FFMPEG` turns the skip into a failure on the lane that installs one.
+fn ffmpeg_reachable() -> bool {
+    let reachable = match std::env::var("SCENEWORKS_FFMPEG") {
+        Ok(path) if !path.trim().is_empty() => Path::new(path.trim()).is_file(),
+        _ => std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
+    };
+    assert!(
+        reachable || std::env::var("SCENEWORKS_REQUIRE_FFMPEG").is_err(),
+        "SCENEWORKS_REQUIRE_FFMPEG is set but no ffmpeg is reachable, so the film-harness sound \
+         tests would have silently reported ok without importing a single clip"
+    );
+    reachable
+}
+
+/// Read the saved timeline document straight from the API — the thing the exporter reads and the
+/// editor opens, rather than the run record's description of it.
+async fn saved_timeline(app: &axum::Router, project_id: &str, timeline_id: &str) -> Value {
+    let (status, timeline) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{timeline}");
+    timeline
+}
+
+fn track_of<'a>(timeline: &'a Value, id: &str) -> &'a Value {
+    timeline["tracks"]
+        .as_array()
+        .expect("tracks")
+        .iter()
+        .find(|track| track["id"] == json!(id))
+        .unwrap_or_else(|| panic!("timeline has no track {id}: {timeline}"))
+}
+
+fn items_of<'a>(timeline: &'a Value, track_id: &str) -> &'a Vec<Value> {
+    track_of(timeline, track_id)["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("track {track_id} has no items"))
+}
+
+fn close(left: f64, right: f64) -> bool {
+    (left - right).abs() < 1e-3
+}
+
+/// AC2, on the saved sequence: dialogue, ambience and music are three separately controlled buses,
+/// and the beds are placed ONCE rather than per shot.
+#[tokio::test]
+async fn the_assembled_sequence_carries_three_independently_controlled_sound_buses() {
+    if !ffmpeg_reachable() {
+        return;
+    }
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+
+    // Every clip this selection places is a project asset of type `audio`, tagged with its role —
+    // and only those: `recipient_line` belongs to shots SH050/SH060, which this run left out.
+    let imported: Vec<&str> = record.sound.iter().map(|clip| clip.role.as_str()).collect();
+    assert_eq!(
+        imported,
+        // Pack order, filtered — not plan order.
+        vec!["courier_line", "workshop_room_tone", "main_theme"],
+        "{imported:?}"
+    );
+    for clip in &record.sound {
+        let (status, asset) = request(
+            harness.app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/assets/{}", clip.asset_id),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+        assert_eq!(asset["type"], "audio", "{asset}");
+        assert_eq!(asset["extra"]["filmHarness"]["role"], clip.role);
+        assert_eq!(asset["extra"]["filmHarness"]["kind"], "sound");
+        let tags: Vec<&str> = asset["tags"]
+            .as_array()
+            .map(|tags| tags.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            tags.contains(&format!("role:{}", clip.role).as_str()),
+            "{tags:?}"
+        );
+    }
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline.timeline_id).await;
+    let total = timeline.duration_seconds;
+    assert!(
+        close(total, 2.0 * 5.1667),
+        "two shots back to back: {total}"
+    );
+
+    // Picture: two takes, contiguous, both muting their own audio by default.
+    let picture = items_of(&saved, "track_main");
+    assert_eq!(picture.len(), 2);
+    assert!(close(picture[0]["timelineEnd"].as_f64().unwrap(), 5.1667));
+    assert!(close(picture[1]["timelineStart"].as_f64().unwrap(), 5.1667));
+    for item in picture {
+        assert_eq!(
+            item["generatedAudio"], "mute",
+            "the fixture's run-level policy is mute: {item}"
+        );
+    }
+
+    // Dialogue: the plan places a line against SH020 only, at its own offset INTO that shot.
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1, "{dialogue:#?}");
+    assert_eq!(dialogue[0]["filmHarness"]["shotId"], "SH020");
+    assert!(
+        close(dialogue[0]["timelineStart"].as_f64().unwrap(), 5.1667 + 1.2),
+        "the line sits 1.2s into SH020, not 1.2s into the sequence: {}",
+        dialogue[0]
+    );
+    assert!(
+        close(
+            dialogue[0]["timelineEnd"].as_f64().unwrap(),
+            5.1667 + 1.2 + 2.0
+        ),
+        "the clip is the 2s fixture take: {}",
+        dialogue[0]
+    );
+    assert_eq!(track_of(&saved, "track_dialogue")["gain"], 1.0);
+    assert_eq!(track_of(&saved, "track_dialogue")["muted"], false);
+
+    // Beds: ONE item each, spanning the whole sequence through the cut, at their own gains.
+    for (track_id, gain, fade_in, fade_out) in [
+        ("track_ambience", 0.35, 1.0, 1.5),
+        ("track_music", 0.2, 2.0, 3.0),
+    ] {
+        let track = track_of(&saved, track_id);
+        assert_eq!(track["kind"], "audio");
+        assert_eq!(track["muted"], false);
+        assert!(
+            close(track["gain"].as_f64().unwrap(), gain),
+            "{track_id} gain: {track}"
+        );
+        let items = items_of(&saved, track_id);
+        assert_eq!(
+            items.len(),
+            1,
+            "a bed is placed ONCE for the whole sequence — one item per shot is exactly the \
+             per-shot restart this design exists to avoid: {items:#?}"
+        );
+        assert!(close(items[0]["timelineStart"].as_f64().unwrap(), 0.0));
+        assert!(
+            close(items[0]["timelineEnd"].as_f64().unwrap(), total),
+            "the bed must reach the last frame: {} vs {total}",
+            items[0]
+        );
+        assert!(
+            close(items[0]["fadeInSeconds"].as_f64().unwrap(), fade_in)
+                && close(items[0]["fadeOutSeconds"].as_f64().unwrap(), fade_out),
+            "the plan's fades travel with the bed: {}",
+            items[0]
+        );
+        // The source range follows the span, so the whole stretch that plays is asked for.
+        assert!(close(
+            items[0]["sourceOut"].as_f64().unwrap() - items[0]["sourceIn"].as_f64().unwrap(),
+            total
+        ));
+    }
+
+    // Sound never extends the picture: the timeline's own recomputed duration is the picture's.
+    assert!(
+        close(saved["duration"].as_f64().unwrap(), total),
+        "the store recomputes duration across every track; sound must not stretch it: {}",
+        saved["duration"]
+    );
+
+    // The run record says the same thing, so run.json alone explains the mix.
+    assert_eq!(
+        timeline.generated_audio_default,
+        sceneworks_core::film_plan::GeneratedAudio::Mute
+    );
+    let buses: Vec<(&str, f64, bool, usize)> = timeline
+        .tracks
+        .iter()
+        .filter(|track| track.kind == "audio")
+        .map(|track| {
+            (
+                track.role.as_str(),
+                track.gain,
+                track.muted,
+                track.items.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        buses,
+        vec![
+            ("dialogue", 1.0, false, 1),
+            ("ambience", 0.35, false, 1),
+            ("music", 0.2, false, 1),
+        ],
+        "{buses:?}"
+    );
+    for item in &timeline.items {
+        assert_eq!(
+            item.generated_audio,
+            Some(sceneworks_core::film_plan::GeneratedAudio::Mute),
+            "every picture item records the policy the export obeyed: {item:?}"
+        );
+    }
+
+    // And the sound survives an edit to the picture: put SH020 first, and its line must travel
+    // with it while both beds re-span the sequence. This is the half of AC1 that a picture-only
+    // assertion misses — a reorder that leaves a line under the wrong shot has kept the shot/asset
+    // links and still broken the film.
+    film_harness::edit_timeline(
+        &harness.transport,
+        &film_harness::EditOptions {
+            run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+            export: false,
+            poll_interval: Duration::from_millis(250),
+        },
+        film_harness::TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+    let saved = saved_timeline(&harness.app, &project_id, &timeline.timeline_id).await;
+    let total = saved["duration"].as_f64().expect("duration");
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1);
+    assert!(
+        close(dialogue[0]["timelineStart"].as_f64().unwrap(), 1.2),
+        "SH020 now starts at 0, so its line sits at its own 1.2s offset into it: {}",
+        dialogue[0]
+    );
+    for track_id in ["track_ambience", "track_music"] {
+        let items = items_of(&saved, track_id);
+        assert_eq!(items.len(), 1, "{track_id} is still ONE continuous bed");
+        assert!(close(items[0]["timelineStart"].as_f64().unwrap(), 0.0));
+        assert!(
+            close(items[0]["timelineEnd"].as_f64().unwrap(), total),
+            "{track_id} must still reach the last frame after the edit: {}",
+            items[0]
+        );
+    }
+}
+
+/// AC3's policy half: a shot's own setting wins over the run's, and both are recorded.
+///
+/// Needs no sound files, so it runs on every lane. That the policy is OBEYED — that `mute` really
+/// keeps a generated line out of the mix and `include` really brings it in — is measured against a
+/// real export in `generated_audio_doubles_with_dialogue_only_when_explicitly_included`.
+#[tokio::test]
+async fn a_shots_generated_audio_policy_overrides_the_runs_and_both_are_recorded() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["sound"]["generatedAudio"] = json!("mute");
+        plan["shots"][1]["generatedAudio"] = json!("include");
+    });
+    let options = harness.options(
+        plan,
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+    let saved = saved_timeline(&harness.app, &project_id, &timeline.timeline_id).await;
+    let picture = items_of(&saved, "track_main");
+    assert_eq!(
+        picture[0]["generatedAudio"], "mute",
+        "SH010 inherits the run"
+    );
+    assert_eq!(
+        picture[1]["generatedAudio"], "include",
+        "SH020 declared its own"
+    );
+
+    // The resolved policy is on the shot record too, so run.json says what the export obeyed
+    // without anyone re-deriving it from the plan.
+    let resolved: Vec<(&str, &str)> = record
+        .shots
+        .iter()
+        .filter(|shot| shot.outcome == ShotOutcome::Rendered)
+        .map(|shot| {
+            (
+                shot.shot_id.as_str(),
+                shot.intended.generated_audio.as_timeline_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![("SH010", "mute"), ("SH020", "include")],
+        "{resolved:?}"
+    );
+}
+
+/// AC1: trim, reorder and replace-a-take, each keeping the shot -> asset links and re-timing the
+/// sequence, and each persisted in both the project timeline and the run record.
+#[tokio::test]
+async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequence() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let original: Vec<(String, String)> = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.shot_id.clone().expect("picture items carry a shot"),
+                item.asset_id.clone(),
+            )
+        })
+        .collect();
+
+    let edit_options = film_harness::EditOptions {
+        run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+        export: false,
+        poll_interval: Duration::from_millis(250),
+    };
+
+    // 1. TRIM. SH010 keeps only 1.0..3.0 of its take, and SH020 slides up to meet it.
+    let trimmed = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(1.0),
+            source_out: Some(3.0),
+        },
+    )
+    .await
+    .expect("trim applies");
+    let items = &trimmed.timeline.as_ref().expect("timeline").items;
+    assert!(close(items[0].source_in, 1.0) && close(items[0].source_out, 3.0));
+    assert!(close(items[0].timeline_start, 0.0) && close(items[0].timeline_end, 2.0));
+    assert!(
+        close(items[1].timeline_start, 2.0) && close(items[1].timeline_end, 2.0 + 5.1667),
+        "the trim must RIPPLE — a cut does not leave a hole: {items:#?}"
+    );
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.shot_id.clone().unwrap(), item.asset_id.clone()))
+            .collect::<Vec<_>>(),
+        original,
+        "a trim changes timing, never which take a shot points at"
+    );
+
+    // 2. REORDER. The takes swap places and keep their own lengths.
+    let reordered = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+    let items = &reordered.timeline.as_ref().expect("timeline").items;
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.shot_id.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["SH020", "SH010"]
+    );
+    assert_eq!(
+        items[0].asset_id, original[1].1,
+        "SH020 keeps its own take at the head"
+    );
+    assert_eq!(items[1].asset_id, original[0].1);
+    assert!(close(items[0].timeline_start, 0.0) && close(items[0].timeline_end, 5.1667));
+    assert!(
+        close(items[1].timeline_start, 5.1667) && close(items[1].timeline_end, 5.1667 + 2.0),
+        "SH010 is still the trimmed 2s: {items:#?}"
+    );
+
+    // 3. REPLACE THE TAKE. Point SH010 at a different asset in the project; the sequence re-times
+    //    around the replacement's own length and the version history remembers what it was.
+    let replacement = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported")
+        .asset_id
+        .clone();
+    let replaced = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::SwapTake {
+            shot_id: "SH010".to_owned(),
+            asset_id: replacement.clone(),
+        },
+    )
+    .await
+    .expect("replacement applies");
+    let items = &replaced.timeline.as_ref().expect("timeline").items;
+    let swapped = items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is still in the sequence");
+    assert_eq!(swapped.asset_id, replacement);
+    assert_ne!(swapped.asset_id, original[0].1);
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let picture = items_of(&saved, "track_main");
+    let swapped_item = picture
+        .iter()
+        .find(|item| item["filmHarness"]["shotId"] == json!("SH010"))
+        .expect("SH010 on the saved picture track");
+    assert_eq!(swapped_item["assetId"], replacement);
+    assert_eq!(swapped_item["currentVersionAssetId"], replacement);
+    let history: Vec<&str> = swapped_item["versionHistory"]
+        .as_array()
+        .expect("version history")
+        .iter()
+        .filter_map(|entry| entry["source"].as_str())
+        .collect();
+    assert_eq!(
+        history,
+        vec!["original", "replacement"],
+        "the take that was there is still addressable: {swapped_item}"
+    );
+    assert!(
+        swapped_item["versionAssetIds"]
+            .as_array()
+            .expect("version asset ids")
+            .iter()
+            .any(|value| value == &json!(replacement)),
+        "{swapped_item}"
+    );
+    // Contiguity survived all three edits.
+    let mut cursor = 0.0;
+    for item in picture {
+        assert!(
+            close(item["timelineStart"].as_f64().unwrap(), cursor),
+            "picture items must abut: {item} expected start {cursor}"
+        );
+        cursor = item["timelineEnd"].as_f64().unwrap();
+    }
+
+    // Every edit is in the run record on disk, oldest first, with the duration it produced.
+    let on_disk = harness.run_record();
+    let edits: Vec<&str> = on_disk["timeline"]["edits"]
+        .as_array()
+        .expect("edits recorded")
+        .iter()
+        .filter_map(|edit| edit["kind"].as_str())
+        .collect();
+    assert_eq!(edits, vec!["trim", "reorder", "swap_take"], "{on_disk}");
+    assert!(on_disk["timeline"]["edits"][2]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains(&replacement));
+
+    // The edits reach the RUN RECORD's own shape, not only the timeline block (sc-22712 on
+    // sc-22711's schema 2). Three things have to follow an edit, and none of them did before the
+    // two stories were merged:
+
+    // 1. The decision log carries every edit, in order, with the shot the edit named.
+    let decisions: Vec<(&str, Option<&str>)> = on_disk["decisions"]
+        .as_array()
+        .expect("decisions recorded")
+        .iter()
+        .filter_map(|decision| {
+            let action = decision["action"].as_str()?;
+            ["trim", "reorder", "swap_take"]
+                .contains(&action)
+                .then(|| (action, decision["shotId"].as_str()))
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![
+            ("trim", Some("SH010")),
+            ("reorder", None),
+            ("swap_take", Some("SH010")),
+        ],
+        "every edit is a human decision about the run: {on_disk}"
+    );
+
+    // 2. The export these edits ran against is FLAGGED stale — the sequence moved under the MP4,
+    //    and none of these edits passed `--export`. It is never silently re-rendered.
+    assert_eq!(
+        on_disk["export"]["stale"],
+        json!(true),
+        "an edited sequence leaves the existing export stale: {on_disk}"
+    );
+
+    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so there is
+    //    no attempt to select and the shot's selection stays exactly where it was. (The other
+    //    branch — a swap onto an asset that IS one of the shot's takes — moves the selection, and
+    //    is proved in `swapping_onto_an_existing_take_moves_the_shots_selected_attempt`.)
+    let sh010 = on_disk["shots"]
+        .as_array()
+        .expect("shots recorded")
+        .iter()
+        .find(|shot| shot["shotId"] == json!("SH010"))
+        .expect("SH010 recorded");
+    assert_eq!(
+        sh010["selectedAttempt"],
+        json!(1),
+        "a swap onto a foreign asset selects no attempt: {sh010}"
+    );
+
+    // A reorder that does not name the whole sequence is refused rather than silently dropping a
+    // shot — the one way a "reorder" could quietly become a delete.
+    let error = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Reorder {
+            shot_ids: vec!["SH010".to_owned()],
+        },
+    )
+    .await
+    .expect_err("a partial order is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("SH020") && message.contains("exactly once"),
+        "{message}"
+    );
+}
+
+/// AC1, bounded: a trim is measured against the take it cuts, not taken on faith.
+///
+/// An out point past the end of the media used to be accepted in silence. `relayout_timeline` then
+/// wrote a `timelineEnd` longer than the file, `render_item_segment` returned the DECLARED duration
+/// while `-t` gave ffmpeg a short segment, and the exported picture came out shorter than the saved
+/// sequence — sound drifting against picture, and a duration in the render sidecar that no file
+/// has. `SwapTake` always measured its asset first; `Trim` now does the same.
+#[tokio::test]
+async fn a_trim_past_the_end_of_the_take_is_clamped_to_the_takes_real_length() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let take_asset = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is in the sequence")
+        .asset_id
+        .clone();
+    let (status, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{take_asset}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+    let take_seconds = asset["file"]["duration"]
+        .as_f64()
+        .expect("the imported take carries a measured duration");
+
+    let edit_options = film_harness::EditOptions {
+        run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+        export: false,
+        poll_interval: Duration::from_millis(250),
+    };
+    let trimmed = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(0.5),
+            // Far past the end of a take this caller never measured.
+            source_out: Some(take_seconds * 10.0),
+        },
+    )
+    .await
+    .expect("a trim past the end of the take is clamped, not refused");
+    let trimmed_item = trimmed
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is still in the sequence")
+        .clone();
+    assert!(
+        close(trimmed_item.source_out, take_seconds),
+        "the out point must be clamped to the take's real {take_seconds}s, got {}",
+        trimmed_item.source_out
+    );
+    assert!(
+        close(
+            trimmed_item.timeline_end - trimmed_item.timeline_start,
+            take_seconds - 0.5
+        ),
+        "and the slot the sequence gives the shot must be the media that exists: {trimmed_item:#?}"
+    );
+
+    // The saved timeline says the same thing — this is what the exporter reads.
+    let saved = saved_timeline(
+        &harness.app,
+        &project_id,
+        &record.timeline.as_ref().expect("timeline").timeline_id,
+    )
+    .await;
+    let saved_item = items_of(&saved, "track_main")
+        .iter()
+        .find(|item| item["filmHarness"]["shotId"] == json!("SH010"))
+        .expect("SH010 on the saved picture track")
+        .clone();
+    assert!(
+        close(saved_item["sourceOut"].as_f64().unwrap(), take_seconds),
+        "{saved_item}"
+    );
+
+    // A range that lands entirely past the end is an error rather than a clamp, and it says how
+    // long the take actually is so the caller can pick a real number.
+    let error = film_harness::edit_timeline(
+        &harness.transport,
+        &edit_options,
+        film_harness::TimelineEdit::Trim {
+            shot_id: "SH010".to_owned(),
+            source_in: Some(take_seconds + 5.0),
+            source_out: Some(take_seconds + 9.0),
+        },
+    )
+    .await
+    .expect_err("an in point past the end of the take has no usable range");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("{take_seconds:.3}")),
+        "the refusal must name the take's real length: {message}"
+    );
+}
+
+/// A re-layout is not a licence to delete the editor's own clips (sc-22712 review).
+///
+/// The harness re-places what IT placed — a line follows its shot, a bed re-spans the sequence —
+/// and a harness-owned clip with nowhere left to go is dropped because the plan can put it back.
+/// A clip the harness did not place is none of its business: it is clamped into the sequence and
+/// kept. The shared drop used to apply to both, so any editor clip sitting within 40 ms of the end
+/// was destroyed by the next edit, with no diagnostic and no undo.
+#[tokio::test]
+async fn a_relayout_keeps_an_editor_placed_clip_the_harness_never_put_there() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project created");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let total = saved["duration"].as_f64().expect("duration");
+    let asset_id = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported")
+        .asset_id
+        .clone();
+
+    // A clip the editor placed: no `filmHarness` block, sitting right at the end of the sequence
+    // and overhanging it.
+    let mut edited = saved.clone();
+    edited["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .iter_mut()
+        .find(|track| track["id"] == json!("track_dialogue"))
+        .expect("the editor's dialogue lane")["items"]
+        .as_array_mut()
+        .expect("items")
+        .push(json!({
+            "id": "editor_clip",
+            "trackId": "track_dialogue",
+            "assetId": asset_id,
+            "type": "audio",
+            "displayName": "an editor's own clip",
+            "sourceIn": 0.0,
+            "sourceOut": 1.0,
+            "timelineStart": total - 0.02,
+            "timelineEnd": total + 0.5,
+            "speed": 1.0,
+            "fit": "fit",
+            "volume": 1.0,
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
+        }));
+    let (status, body) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": edited }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+    // A reorder does not change the sequence's length, so nothing about this clip is stale.
+    film_harness::edit_timeline(
+        &harness.transport,
+        &film_harness::EditOptions {
+            run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+            export: false,
+            poll_interval: Duration::from_millis(250),
+        },
+        film_harness::TimelineEdit::Reorder {
+            shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
+        },
+    )
+    .await
+    .expect("reorder applies");
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let kept = items_of(&saved, "track_dialogue")
+        .iter()
+        .find(|item| item["id"] == json!("editor_clip"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the harness deleted a clip it never placed. A re-layout may re-place the \
+                 harness's own dialogue, ambience and music items; the editor's belong to the \
+                 editor: {saved}"
+            )
+        })
+        .clone();
+    assert!(
+        close(kept["timelineStart"].as_f64().unwrap(), total - 0.02),
+        "an unowned clip keeps where the editor put it: {kept}"
+    );
+    assert!(
+        close(kept["timelineEnd"].as_f64().unwrap(), total),
+        "clamped to the sequence, never stretching it: {kept} against {total}"
+    );
+}
+
+/// The checked-in fixture clips are exactly what the generator writes, the same guarantee
+/// `checked_in_fixture_plates_match_the_generator_byte_for_byte` gives the plates.
+#[test]
+fn checked_in_fixture_sound_matches_the_generator_byte_for_byte() {
+    for (role, seconds, hz, amplitude) in film_harness::FIXTURE_SOUNDS {
+        let path = Path::new(FIXTURE_DIR)
+            .join("sound")
+            .join(format!("{role}.wav"));
+        let checked_in = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!("{} is missing ({error})", path.display());
+        });
+        let generated = film_harness::fixture_sound_wav(*seconds, *hz, *amplitude);
+        assert_eq!(
+            checked_in.len(),
+            generated.len(),
+            "{role}: checked-in clip is a different length from the generator's"
+        );
+        assert!(
+            checked_in == generated,
+            "{role}: the checked-in clip no longer matches `fixture_sound_wav`. Regenerate it \
+             with `film-harness fixture-sound --out config/film-harness/courier-workshop/sound`."
+        );
+    }
+}
+
+/// The seam between the two ways a shot's take can change (sc-22711 `replace-take` re-renders,
+/// sc-22712 `swap-take` re-cuts): swapping the sequence back onto a take the run ALREADY rendered
+/// must move the shot's `selectedAttempt` with it.
+///
+/// The generation side owns `selectedAttempt` and the edit side owns the timeline item, and before
+/// the two stories were merged neither told the other anything. A selection left behind is not
+/// cosmetic: `status` reports the wrong take, and a subsequent `replace-take` rejects the attempt
+/// the sequence no longer shows while leaving the one it does show in the cut.
+#[tokio::test]
+async fn swapping_onto_an_existing_take_moves_the_shots_selected_attempt() {
+    let harness = Harness::start(true, vec![]).await;
+    let options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let first_take = record
+        .shot("SH010")
+        .expect("SH010 recorded")
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.take.as_ref())
+        .expect("SH010 rendered")
+        .asset_id
+        .clone();
+
+    // Re-render SH010, which makes attempt 2 the selected one and leaves attempt 1's take in the
+    // project, still addressable.
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH010",
+        "prefer the first one after all",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(
+        after
+            .shot("SH010")
+            .expect("SH010 recorded")
+            .selected_attempt,
+        Some(2),
+        "the re-render is what the shot now carries"
+    );
+
+    // Now change our mind on the EDIT side: put attempt 1's take back into the cut.
+    let swapped = film_harness::edit_timeline(
+        &harness.transport,
+        &film_harness::EditOptions {
+            run_record_path: harness.temp_dir.path().join("run-out/run.json"),
+            export: false,
+            poll_interval: Duration::from_millis(250),
+        },
+        film_harness::TimelineEdit::SwapTake {
+            shot_id: "SH010".to_owned(),
+            asset_id: first_take.clone(),
+        },
+    )
+    .await
+    .expect("swap applies");
+
+    assert_eq!(
+        swapped
+            .shot("SH010")
+            .expect("SH010 recorded")
+            .selected_attempt,
+        Some(1),
+        "the selection follows the sequence back onto attempt 1"
+    );
+    let item = swapped
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .items
+        .iter()
+        .find(|item| item.shot_id.as_deref() == Some("SH010"))
+        .expect("SH010 is in the sequence");
+    assert_eq!(
+        item.asset_id, first_take,
+        "the record and the sequence name the same take"
+    );
+}
+
 // ----------------------------------------------------------------------------------------------
 // Local planner (sc-22713): brief -> plan -> compiled requests -> dispatch.
 //

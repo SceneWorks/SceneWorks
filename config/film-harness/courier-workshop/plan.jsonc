@@ -32,6 +32,29 @@
     "maxAttemptsPerShot": 1,
     "maxMemoryGb": 96
   },
+  // Sound (sc-22712). Three independently controlled buses: dialogue placed per shot, ambience and
+  // music placed ONCE across the whole sequence so they play straight through the cuts.
+  //
+  // `generatedAudio: "mute"` is the run-level policy for the takes' own audio, and it is what
+  // stops a model that spoke the line and the placed dialogue clip from both landing in the mix.
+  // A shot may override it with `"generatedAudio": "include"`; nothing else turns it on.
+  "sound": {
+    "generatedAudio": "mute",
+    "dialogue": { "gain": 1.0, "muted": false },
+    "ambience": {
+      "role": "workshop_room_tone",
+      "gain": 0.35,
+      "fadeInSeconds": 1.0,
+      "fadeOutSeconds": 1.5
+    },
+    "music": {
+      "role": "main_theme",
+      "gain": 0.2,
+      "startSeconds": 0.0,
+      "fadeInSeconds": 2.0,
+      "fadeOutSeconds": 3.0
+    }
+  },
   "shots": [
     {
       "id": "SH010",
@@ -54,6 +77,10 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Courier in the doorway with the red parcel.",
       "endState": "Courier standing at the workbench, parcel still in hand.",
+      "dialogue": "Courier: \"Delivery — I'll leave it on the bench.\"",
+      // Placed against SH020 so the two-shot smoke (`--shots SH010,SH020`) exercises all three
+      // buses: a line inside the second shot, with both beds running continuously under the cut.
+      "dialogueClip": { "role": "courier_line", "offsetSeconds": 1.2, "gain": 1.0 },
       "sound": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone.",
       "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
       "seed": 22711,
@@ -97,6 +124,7 @@
       "startState": "Empty workshop, red parcel on the bench, door closed.",
       "endState": "Recipient standing at the bench looking down at the parcel.",
       "dialogue": "Recipient (quietly): \"Huh. That's not mine.\"",
+      "dialogueClip": { "role": "recipient_line", "offsetSeconds": 2.6, "gain": 1.0 },
       "sound": "Door opening, footsteps, a rag dropped on the bench, room tone.",
       "conditioning": { "mode": "text_to_video" },
       "seed": 22714,
@@ -112,6 +140,7 @@
       "startState": "Sealed red parcel on the bench, recipient's hands entering frame.",
       "endState": "Parcel open, flaps folded back, hands resting on the bench beside it.",
       "dialogue": "Recipient (whisper): \"Oh.\"",
+      "dialogueClip": { "role": "recipient_line", "offsetSeconds": 3.0, "gain": 0.8, "fadeOutSeconds": 0.4 },
       "sound": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
       "conditioning": { "mode": "text_to_video" },
       "seed": 22715,

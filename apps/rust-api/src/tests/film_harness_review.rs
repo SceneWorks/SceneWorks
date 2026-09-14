@@ -41,8 +41,18 @@ fn plan_path() -> PathBuf {
     PathBuf::from(FIXTURE_DIR).join("plan.jsonc")
 }
 
-fn pack_path() -> PathBuf {
-    PathBuf::from(FIXTURE_DIR).join("references.jsonc")
+/// The shipped plan and pack with their SOUND stripped, copied into the harness temp dir.
+///
+/// Nothing in this suite is about sound, and importing a sound clip transcodes it through an
+/// ffmpeg the hosted macOS lane does not have (`ProjectStore::import_asset` -> `transcode_to_wav_pcm16`,
+/// sc-22712) — a review test that needs a rendered run would otherwise fail on the upload before
+/// it ever put a question to anything. The pictures, the shots, the dependsOn edges and every
+/// review question are unchanged, so these tests mean exactly what they meant before.
+fn sound_free_documents(harness: &Harness) -> (PathBuf, PathBuf) {
+    (
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+    )
 }
 
 fn shipped_review_plan() -> ReviewPlan {
@@ -53,7 +63,8 @@ fn shipped_review_plan() -> ReviewPlan {
 /// A run of SH010 + SH020 that completed, ready to review.
 async fn rendered_two_shots() -> (Harness, RunRecord) {
     let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
-    let options = harness.options(plan_path(), pack_path(), Some(&["SH010", "SH020"]));
+    let (plan, pack) = sound_free_documents(&harness);
+    let options = harness.options(plan, pack, Some(&["SH010", "SH020"]));
     let record = film_harness::run(&harness.transport, &options)
         .await
         .expect("the two-shot run completes");
@@ -571,7 +582,8 @@ async fn a_second_review_appends_and_keeps_the_first_documents_evidence() {
 #[tokio::test]
 async fn review_refuses_a_shot_with_no_take_and_a_shot_the_review_plan_asks_nothing_about() {
     let harness = Harness::start(true, fast(&["SH010"])).await;
-    let options = harness.options(plan_path(), pack_path(), Some(&["SH010"]));
+    let (plan, pack) = sound_free_documents(&harness);
+    let options = harness.options(plan, pack, Some(&["SH010"]));
     film_harness::run(&harness.transport, &options)
         .await
         .expect("the one-shot run completes");
