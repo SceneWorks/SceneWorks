@@ -54,11 +54,12 @@ use sceneworks_core::film_plan::{
     TakeRejection, TakeReviewSummary,
 };
 use sceneworks_core::film_review::{
-    aggregate_observation, flag_for, format_eval_report, grade_answer, parse_eval_set, score_case,
-    tally, validate_eval_set, validate_review_plan, AdjacentTake, CaseOutcome, EvalCase,
-    EvalResults, EvalSet, FrameAnswer, FrameEvidence, IntendedRef, MismatchFlag, Observation,
-    ObservedState, ReviewBackendRecord, ReviewLimits, ReviewPlan, ReviewQuestion, ReviewSourceRef,
-    ASSISTIVE_NOTICE, OBSERVED_STATE_SCHEMA_VERSION, REVIEW_EVAL_SCHEMA_VERSION,
+    aggregate_cut_observation, aggregate_observation, flag_for, format_eval_report, grade_answer,
+    parse_eval_set, score_case, tally, validate_eval_set, validate_review_plan, AdjacentTake,
+    CaseOutcome, EvalCase, EvalResults, EvalSet, FrameAnswer, FrameEvidence, IntendedRef,
+    MismatchFlag, Observation, ObservedState, ReviewBackendRecord, ReviewLimits, ReviewPlan,
+    ReviewQuestion, ReviewSourceRef, ASSISTIVE_NOTICE, OBSERVED_STATE_SCHEMA_VERSION,
+    REVIEW_EVAL_SCHEMA_VERSION,
 };
 use sceneworks_core::time::utc_now;
 use serde_json::{json, Value};
@@ -81,6 +82,10 @@ pub const VQA_MODEL_ID: &str = "sensenova_u1_8b";
 
 /// The route one question goes through.
 pub const VQA_ROUTE: &str = "POST /api/v1/image/vqa/jobs";
+
+/// Worker statuses that mean a worker will actually claim a job. Anything else — `offline` above
+/// all — is a row the store still holds, not a worker that will answer anything.
+pub const LIVE_STATUSES: &[&str] = &["idle", "busy"];
 
 /// Tokens an answer is truncated to. The questions are yes/no-with-a-reason, so this is generous;
 /// it exists to bound one backend call, not to shape the answer.
@@ -171,26 +176,59 @@ impl<'a> VqaVision<'a> {
         }
     }
 
-    /// Refuse before anything is dispatched unless a registered worker advertises `image_vqa`.
+    /// Refuse before anything is dispatched unless a LIVE registered worker advertises `image_vqa`.
     /// A review that queues questions no worker can claim would sit at the poll deadline and then
     /// record every question as unobserved, which reads as evidence and is not.
+    ///
+    /// The liveness half is not decoration: the sc-22714 smoke ran against a data dir seeded from
+    /// an earlier run, whose `film-harness-smoke-gpu` row still advertised `image_vqa` with
+    /// `status: "offline"`. The capability-only check passed it — the exact failure this function
+    /// exists to prevent — so a worker only counts while its status is one of [`LIVE_STATUSES`].
     pub async fn preflight(&self) -> Result<(), HarnessError> {
         let workers = self
             .client()
             .expect_ok("GET", "/api/v1/workers", None)
             .await?;
-        let serves = workers.as_array().into_iter().flatten().any(|worker| {
+        let rows: Vec<&Value> = workers.as_array().into_iter().flatten().collect();
+        let advertises = |worker: &Value| {
             worker
                 .get("capabilities")
                 .and_then(Value::as_array)
                 .is_some_and(|caps| caps.iter().any(|cap| cap == "image_vqa"))
-        });
-        if serves {
+        };
+        let live = |worker: &Value| {
+            worker
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| LIVE_STATUSES.contains(&status))
+        };
+        if rows.iter().any(|worker| advertises(worker) && live(worker)) {
             return Ok(());
         }
+        let stale: Vec<String> = rows
+            .iter()
+            .filter(|worker| advertises(worker) && !live(worker))
+            .map(|worker| {
+                format!(
+                    "{} ({})",
+                    worker.get("id").and_then(Value::as_str).unwrap_or("?"),
+                    worker.get("status").and_then(Value::as_str).unwrap_or("?")
+                )
+            })
+            .collect();
+        let detail = if stale.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({} advertise(s) it but is not live: {})",
+                stale.len(),
+                stale.join(", ")
+            )
+        };
         Err(HarnessError::Refused(format!(
-            "no registered worker advertises image_vqa, so {VQA_MODEL_ID} cannot answer anything; \
-             start the GPU worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to register"
+            "no live registered worker advertises image_vqa{detail}, so {VQA_MODEL_ID} cannot \
+             answer anything; start the GPU worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to \
+             register, or use a fresh data dir if a stale row is shadowing it"
         )))
     }
 }
@@ -1046,6 +1084,35 @@ fn review_stop_reason(control: &RunControl, limits: ReviewLimits) -> String {
     }
 }
 
+/// Put one question to one frame and grade the answer, keeping the token the grader matched and
+/// the polarity it read it with so a mis-grade is debuggable from the record alone.
+async fn ask_one(
+    vision: &dyn ReviewVision,
+    project_id: &str,
+    question: &ReviewQuestion,
+    frame: &FrameRef,
+    max_answer_seconds: u64,
+    real_model_inference: &mut bool,
+) -> Result<FrameAnswer, HarnessError> {
+    let asset_id = vision.prepare_frame(project_id, frame).await?;
+    let text = tagged_question(&question.id, &frame.id, &question.ask);
+    let answer = vision
+        .ask(project_id, &asset_id, &text, max_answer_seconds)
+        .await?;
+    *real_model_inference &= answer.real_model_inference;
+    let grade = grade_answer(question, &answer.answer);
+    Ok(FrameAnswer {
+        frame_id: frame.id.clone(),
+        answer: answer.answer,
+        verdict: grade.verdict,
+        matched: grade.matched,
+        polarity: grade.polarity,
+        confidence: grade.confidence,
+        hedged: grade.hedged,
+        elapsed_seconds: answer.elapsed_seconds,
+    })
+}
+
 /// What one pass of questions produced.
 struct Answered {
     observations: Vec<Observation>,
@@ -1084,31 +1151,43 @@ async fn answer_questions(
             stop.get_or_insert_with(|| review_stop_reason(control, limits));
             break;
         }
-        let mut graded: Vec<&FrameRef> = question.frames.select(frames);
-        if question.across_cut {
-            if let Some(reference) = adjacent_frame {
-                graded.push(reference);
-            }
+        // An across-the-cut question is COMPARED, not aggregated: the same closed question goes to
+        // this take's frames and to the adjacent selected take's frame, and the two answers are
+        // held against each other. Without an adjacent take there is nothing to compare, so the
+        // question is skipped rather than answered from one side (which would report a clean cut
+        // on the strength of never having looked at the other one).
+        let comparing = question.across_cut.then_some(adjacent_frame).flatten();
+        if question.across_cut && comparing.is_none() {
+            continue;
         }
         let mut answers = Vec::new();
-        for frame in graded {
-            let asset_id = vision.prepare_frame(project_id, frame).await?;
-            let text = tagged_question(&question.id, &frame.id, &question.ask);
-            let answer = vision
-                .ask(project_id, &asset_id, &text, limits.max_answer_seconds)
-                .await?;
-            real_model_inference &= answer.real_model_inference;
-            let (verdict, _, confidence, hedged) = grade_answer(question, &answer.answer);
-            answers.push(FrameAnswer {
-                frame_id: frame.id.clone(),
-                answer: answer.answer,
-                verdict,
-                confidence,
-                hedged,
-                elapsed_seconds: answer.elapsed_seconds,
-            });
+        for frame in question.frames.select(frames) {
+            let answer = ask_one(
+                vision,
+                project_id,
+                question,
+                frame,
+                limits.max_answer_seconds,
+                &mut real_model_inference,
+            )
+            .await?;
+            answers.push(answer);
         }
-        let observation = aggregate_observation(question, answers);
+        let observation = match comparing {
+            Some(reference) => {
+                let theirs = ask_one(
+                    vision,
+                    project_id,
+                    question,
+                    reference,
+                    limits.max_answer_seconds,
+                    &mut real_model_inference,
+                )
+                .await?;
+                aggregate_cut_observation(question, answers, theirs)
+            }
+            None => aggregate_observation(question, answers),
+        };
         debug_assert!(
             observation.is_well_formed(),
             "an unobserved observation must carry no value: {observation:?}"
@@ -1640,9 +1719,41 @@ pub async fn review_eval(
                 timestamp_seconds: frame.timestamp_seconds,
             });
         }
-        // The across-cut question of a labeled case compares the case's own last frame: a labeled
-        // set is one take, and inventing a neighbour for it would score a comparison nobody made.
-        let adjacent_frame = refs.last().cloned();
+        // The across-cut question compares against the take this one cuts FROM, which the case
+        // declares. Comparing a case against its OWN last frame would score a comparison nobody
+        // asked about; a case that declares no neighbour simply does not score its cut question.
+        let mut adjacent_frame = None;
+        if let Some(frame) = case.adjacent_frames.last() {
+            let path = resolve_under(&media_root, &frame.file);
+            if !path.exists() {
+                return Err(HarnessError::Refused(format!(
+                    "labeled case {} names an adjacent frame that is not on this host: {} — pass \
+                     --media-root DIR pointing at the media this set describes",
+                    case.id,
+                    path.display()
+                )));
+            }
+            let id = format!("{}-adjacent", case.id);
+            frames.push(FrameEvidence {
+                id: id.clone(),
+                shot_id: case.shot_id.clone(),
+                attempt: 0,
+                timestamp_seconds: frame.timestamp_seconds,
+                asset_id: String::new(),
+                path: path.display().to_string(),
+                source: "labeled_set_adjacent".to_owned(),
+                job_id: None,
+                captured_at: utc_now(),
+            });
+            // Deliberately NOT pushed into `refs`: those are the take's OWN frames, and a
+            // `frames: "last"` question must not end up asking about the neighbour.
+            adjacent_frame = Some(FrameRef {
+                id,
+                asset_id: None,
+                path,
+                timestamp_seconds: frame.timestamp_seconds,
+            });
+        }
         let case_started = Instant::now();
         let deadline = case_started + Duration::from_secs(review_plan.limits.max_seconds);
         let answered = answer_questions(
@@ -1667,7 +1778,11 @@ pub async fn review_eval(
         // Fill in the asset ids the backend actually cited, so the evidence is openable.
         for frame in frames.iter_mut() {
             if frame.asset_id.is_empty() {
-                if let Some(reference) = refs.iter().find(|reference| reference.id == frame.id) {
+                if let Some(reference) = refs
+                    .iter()
+                    .chain(adjacent_frame.iter())
+                    .find(|reference| reference.id == frame.id)
+                {
                     frame.asset_id = vision.prepare_frame(&project_id, reference).await?;
                 }
             }
@@ -1852,7 +1967,7 @@ pub fn write_review_fixture_frames(
         .unwrap_or_else(|| set_dir.clone());
     let mut written = Vec::new();
     for case in &set.cases {
-        for frame in &case.frames {
+        for frame in case.frames.iter().chain(case.adjacent_frames.iter()) {
             let path = resolve_under(&root, &frame.file);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;

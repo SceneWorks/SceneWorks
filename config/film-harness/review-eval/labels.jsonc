@@ -36,6 +36,9 @@
         { "file": "sh020_correct_2.png", "timestampSeconds": 2.58 },
         { "file": "sh020_correct_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh020_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh020_location": "match",
         "sh020_courier": "match",
@@ -56,6 +59,9 @@
         { "file": "sh030_correct_2.png", "timestampSeconds": 2.58 },
         { "file": "sh030_correct_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh030_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh030_bench": "match",
         "sh030_sleeve": "match",
@@ -75,6 +81,9 @@
         { "file": "sh060_correct_2.png", "timestampSeconds": 2.58 },
         { "file": "sh060_correct_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh060_correct_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh060_bench": "match",
         "sh060_apron_sleeve": "match",
@@ -93,6 +102,9 @@
         { "file": "sh050_correct_1.png", "timestampSeconds": 0.41 },
         { "file": "sh050_correct_2.png", "timestampSeconds": 2.58 },
         { "file": "sh050_correct_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh050_correct_prev.png", "timestampSeconds": 4.86 }
       ],
       "expected": {
         "sh050_location": "match",
@@ -114,6 +126,9 @@
         { "file": "sh030_wrong_parcel_colour_2.png", "timestampSeconds": 2.58 },
         { "file": "sh030_wrong_parcel_colour_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh030_wrong_parcel_colour_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh030_bench": "match",
         "sh030_sleeve": "match",
@@ -132,6 +147,9 @@
         { "file": "sh020_missing_courier_1.png", "timestampSeconds": 0.41 },
         { "file": "sh020_missing_courier_2.png", "timestampSeconds": 2.58 },
         { "file": "sh020_missing_courier_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh020_missing_courier_prev.png", "timestampSeconds": 4.86 }
       ],
       "expected": {
         "sh020_location": "match",
@@ -153,6 +171,9 @@
         { "file": "sh020_wrong_location_2.png", "timestampSeconds": 2.58 },
         { "file": "sh020_wrong_location_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh020_wrong_location_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh020_location": "mismatch",
         "sh020_courier": "match",
@@ -173,6 +194,9 @@
         { "file": "sh030_unfinished_action_2.png", "timestampSeconds": 2.58 },
         { "file": "sh030_unfinished_action_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh030_unfinished_action_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh030_bench": "match",
         "sh030_sleeve": "match",
@@ -191,6 +215,9 @@
         { "file": "sh030_occluded_handoff_1.png", "timestampSeconds": 0.41 },
         { "file": "sh030_occluded_handoff_2.png", "timestampSeconds": 2.58 },
         { "file": "sh030_occluded_handoff_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh030_occluded_handoff_prev.png", "timestampSeconds": 4.86 }
       ],
       "expected": {
         "sh030_bench": "match",
@@ -211,6 +238,9 @@
         { "file": "sh030_cut_discontinuity_2.png", "timestampSeconds": 2.58 },
         { "file": "sh030_cut_discontinuity_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh030_cut_discontinuity_prev.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
         "sh030_bench": "match",
         "sh030_cut": "mismatch",
@@ -227,6 +257,9 @@
         { "file": "sh050_wrong_costume_1.png", "timestampSeconds": 0.41 },
         { "file": "sh050_wrong_costume_2.png", "timestampSeconds": 2.58 },
         { "file": "sh050_wrong_costume_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh050_wrong_costume_prev.png", "timestampSeconds": 4.86 }
       ],
       "expected": {
         "sh050_location": "match",

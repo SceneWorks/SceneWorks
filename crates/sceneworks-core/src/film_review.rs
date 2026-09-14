@@ -100,6 +100,12 @@ const UNOBSERVED_MARKERS: &[&str] = &[
     "i don't know",
     "i do not know",
     "unknown",
+    // The conditioning plate of an image-conditioned shot is a flat field, and this is what the
+    // model says about it (sc-22714 real-weights smoke): "The image is too dark to determine the
+    // color of the jacket." Without it that answer matched nothing and read as silence.
+    "too dark",
+    "cannot make out",
+    "could not make out",
 ];
 
 /// Hedges that keep an answer usable but drop its confidence. A hedged contradiction becomes an
@@ -560,6 +566,15 @@ pub struct FrameAnswer {
     /// The backend's answer, verbatim.
     pub answer: String,
     pub verdict: Verdict,
+    /// The declared token the grader actually matched, and whether the clause around it affirmed
+    /// or negated it. Without these a mis-grade is undebuggable from the record: the sc-22714
+    /// real-weights smoke produced three of them and none could be diagnosed from the document
+    /// alone (the negated "workshop" that scored a match, the "red" jacket that matched nothing,
+    /// the "person's hands" that matched nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<String>,
+    /// `affirmed`, `negated` or `none` — the polarity of the clause the token was found in.
+    pub polarity: String,
     pub confidence: f64,
     pub hedged: bool,
     pub elapsed_seconds: f64,
@@ -688,51 +703,307 @@ impl ObservedState {
 // Grading
 // ---------------------------------------------------------------------------------------------
 
-fn contains_any(haystack: &str, needles: &[&str]) -> Option<String> {
-    needles
-        .iter()
-        .find(|needle| haystack.contains(**needle))
-        .map(|needle| (*needle).to_owned())
+/// Words that negate the clause they appear in.
+const NEGATIONS: &[&str] = &[
+    "no", "not", "nor", "never", "without", "cannot", "none", "nothing", "nobody", "neither",
+    "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "can't",
+];
+
+/// How many words may sit between two words of a declared token and still match it. Enough for the
+/// modifiers a VLM inserts ("no SMALL parcel", "not a CLUTTERED WOODWORKING workshop") without
+/// letting a token drift across a whole clause.
+const TOKEN_GAP: usize = 3;
+
+/// One sentence of an answer, as lowercased words.
+struct Clause {
+    words: Vec<String>,
 }
 
-fn contains_any_owned(haystack: &str, needles: &[String]) -> Option<String> {
-    needles
+/// Split an answer into clauses and each clause into lowercased words.
+///
+/// Sentence boundaries matter twice: a token must lie inside ONE clause (so "no ... parcel" cannot
+/// span two sentences), and both the negation scan and the hedge scan are clause-local (so
+/// "Yes, there is a person. The room appears to be a workshop." is not read as a hedged sighting
+/// of the person).
+fn clauses_of(answer: &str) -> Vec<Clause> {
+    answer
+        .split(|c| matches!(c, '.' | ';' | '!' | '?' | '\n'))
+        .map(|clause| Clause {
+            words: clause
+                .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+                .filter(|word| !word.is_empty())
+                .map(|word| word.to_ascii_lowercase())
+                .collect(),
+        })
+        .filter(|clause| !clause.words.is_empty())
+        .collect()
+}
+
+/// The word index at which `token`'s words appear in order inside `words`, allowing at most
+/// [`TOKEN_GAP`] intervening words between consecutive token words. `None` when it does not occur.
+///
+/// Word-indexed rather than substring: `"red"` must not match inside `"covered"`, and
+/// `"no parcel"` must match `"no small parcel or box"`.
+fn token_position(words: &[String], token: &[String]) -> Option<usize> {
+    if token.is_empty() || token.len() > words.len() {
+        return None;
+    }
+    'start: for start in 0..=words.len() - token.len() {
+        if words[start] != token[0] {
+            continue;
+        }
+        let mut cursor = start + 1;
+        for part in &token[1..] {
+            let limit = (cursor + TOKEN_GAP + 1).min(words.len());
+            match (cursor..limit).find(|index| &words[*index] == part) {
+                Some(index) => cursor = index + 1,
+                None => continue 'start,
+            }
+        }
+        return Some(start);
+    }
+    None
+}
+
+fn token_words(token: &str) -> Vec<String> {
+    token
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether a token carries its own negation (`"no parcel"`, `"not a workshop"`, `"nobody"`).
+///
+/// Such a token is taken at FACE VALUE: applying clause negation to it would double-negate the
+/// very phrasing it was written to catch ("No, there is no small parcel" would cancel itself out,
+/// which is exactly how the real smoke turned a correctly-detected missing parcel into silence).
+fn token_is_negating(token: &[String]) -> bool {
+    token.iter().any(|word| NEGATIONS.contains(&word.as_str()))
+}
+
+/// Whether the words before `position` in the same clause negate what follows.
+fn clause_negates(words: &[String], position: usize) -> bool {
+    words[..position]
         .iter()
-        .map(|needle| needle.trim().to_ascii_lowercase())
-        .filter(|needle| !needle.is_empty())
-        .find(|needle| haystack.contains(needle.as_str()))
+        .any(|word| NEGATIONS.contains(&word.as_str()))
+}
+
+/// Where a declared token was found, and what the clause around it did to it.
+struct TokenHit {
+    token: String,
+    /// Global word index, so the EARLIEST decisive hit in an answer can win.
+    position: usize,
+    negated: bool,
+    /// Whether the clause it sits in hedges.
+    hedged: bool,
+}
+
+fn find_hits(clauses: &[Clause], tokens: &[String]) -> Vec<TokenHit> {
+    let mut hits = Vec::new();
+    let mut offset = 0;
+    for clause in clauses {
+        for token in tokens {
+            let parts = token_words(token);
+            if parts.is_empty() {
+                continue;
+            }
+            let Some(position) = token_position(&clause.words, &parts) else {
+                continue;
+            };
+            hits.push(TokenHit {
+                token: token.trim().to_ascii_lowercase(),
+                position: offset + position,
+                negated: !token_is_negating(&parts) && clause_negates(&clause.words, position),
+                hedged: clause_hedges(clause),
+            });
+        }
+        offset += clause.words.len();
+    }
+    hits
+}
+
+/// Whether a clause hedges. Clause-local on purpose: "Yes, there is a person standing in the
+/// doorway. The room appears to be a workshop." hedges the ROOM, not the person.
+fn clause_hedges(clause: &Clause) -> bool {
+    let text = clause.words.join(" ");
+    HEDGE_MARKERS.iter().any(|marker| {
+        let parts = token_words(marker);
+        token_position(&clause.words, &parts).is_some() || text.contains(marker)
+    })
+}
+
+fn answer_is_unobservable(clauses: &[Clause]) -> bool {
+    clauses.iter().any(|clause| {
+        UNOBSERVED_MARKERS
+            .iter()
+            .any(|marker| token_position(&clause.words, &token_words(marker)).is_some())
+    })
+}
+
+/// What the grader concluded about one answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grade {
+    pub verdict: Verdict,
+    /// The declared token that decided it, verbatim from the review plan.
+    pub matched: Option<String>,
+    /// `affirmed`, `negated` or `none`.
+    pub polarity: String,
+    pub confidence: f64,
+    pub hedged: bool,
+}
+
+impl Grade {
+    fn unobserved(hedged: bool) -> Self {
+        Self {
+            verdict: Verdict::Unobserved,
+            matched: None,
+            polarity: "none".to_owned(),
+            confidence: 0.0,
+            hedged,
+        }
+    }
 }
 
 /// Grade one backend answer against one question.
 ///
-/// Order is load-bearing:
+/// Matching is **word-indexed and polarity-aware**, both of which the sc-22714 real-weights smoke
+/// proved necessary:
 ///
 /// 1. an empty answer, or one carrying an "I cannot see it" marker, is [`Verdict::Unobserved`] —
-///    checked FIRST so a hedge about a colour never becomes a colour;
-/// 2. then `contradict`, because the negative phrasing ("no courier") is the specific one and an
-///    answer usually restates the subject of the question either way;
-/// 3. then `expect`;
-/// 4. an answer that matches nothing is `Unobserved`, not a match. Silence is not agreement.
-pub fn grade_answer(
+///    checked FIRST, so a hedge about a colour never becomes a colour;
+/// 2. every `expect` and `contradict` token is located by WORD, inside a single clause, tolerating
+///    up to [`TOKEN_GAP`] intervening modifiers. Substring matching read `"red"` out of
+///    `"covered"` and failed to find `"no parcel"` in `"no small parcel or box"`;
+/// 3. each hit takes the POLARITY of its clause. An `expect` token inside a negated clause is a
+///    **contradiction**, not a match — without this, "No, the room is not a cluttered woodworking
+///    workshop" scored a match on the bare word "workshop". A token that carries its own negation
+///    is taken at face value instead, so "no parcel" is not cancelled by the leading "No,";
+/// 4. a `contradict` token inside a negated clause ("it is not red") decides nothing: it rules one
+///    value out without establishing another, and inventing agreement from it is exactly the kind
+///    of overclaim this module exists to prevent;
+/// 5. the EARLIEST decisive hit wins — these answers lead with their verdict and then elaborate;
+/// 6. an answer that matches nothing is `Unobserved`, not a match. Silence is not agreement.
+pub fn grade_answer(question: &ReviewQuestion, answer: &str) -> Grade {
+    let clauses = clauses_of(answer.trim());
+    if clauses.is_empty() {
+        return Grade::unobserved(false);
+    }
+    if answer_is_unobservable(&clauses) {
+        return Grade::unobserved(true);
+    }
+
+    let mut decisive: Option<(Verdict, TokenHit)> = None;
+    let consider = |verdict: Verdict, hit: TokenHit, decisive: &mut Option<(Verdict, TokenHit)>| {
+        if decisive
+            .as_ref()
+            .is_none_or(|(_, current)| hit.position < current.position)
+        {
+            *decisive = Some((verdict, hit));
+        }
+    };
+    for hit in find_hits(&clauses, &question.contradict) {
+        // A ruled-out value ("not red") establishes nothing; only an affirmed one contradicts.
+        if !hit.negated {
+            consider(Verdict::Mismatch, hit, &mut decisive);
+        }
+    }
+    for hit in find_hits(&clauses, &question.expect) {
+        let verdict = if hit.negated {
+            Verdict::Mismatch
+        } else {
+            Verdict::Match
+        };
+        consider(verdict, hit, &mut decisive);
+    }
+
+    let Some((verdict, hit)) = decisive else {
+        return Grade::unobserved(clauses.iter().any(clause_hedges));
+    };
+    Grade {
+        verdict,
+        matched: Some(hit.token),
+        polarity: if hit.negated { "negated" } else { "affirmed" }.to_owned(),
+        confidence: if hit.hedged { HEDGED } else { CONFIDENT },
+        hedged: hit.hedged,
+    }
+}
+
+/// Combine an ACROSS-THE-CUT question into its observation by COMPARING the two sides.
+///
+/// This is what makes `cut_continuity` a continuity test rather than another single-frame test.
+/// The same short closed question is put to this take's frames and to the adjacent selected take's
+/// frame, and the two answers are compared:
+///
+/// * either side unobserved -> `Unobserved` (there is nothing to compare, and a comparison nobody
+///   could make must never read as agreement);
+/// * the two sides landed on DIFFERENT declared values -> `Mismatch`, with both values named;
+/// * the same value on both sides -> `Match`.
+///
+/// The sc-22714 smoke is why this exists: SH020 renders a visibly different workshop from SH010,
+/// and the old question — "is this a woodworking workshop?", asked of each frame independently —
+/// answered yes on both sides and reported a clean cut. Asking what is ON THE WALL and comparing
+/// the two answers is a question a single frame cannot fake.
+pub fn aggregate_cut_observation(
     question: &ReviewQuestion,
-    answer: &str,
-) -> (Verdict, Option<String>, f64, bool) {
-    let lowered = answer.trim().to_ascii_lowercase();
-    if lowered.is_empty() {
-        return (Verdict::Unobserved, None, 0.0, false);
+    own: Vec<FrameAnswer>,
+    adjacent: FrameAnswer,
+) -> Observation {
+    let mut evidence: Vec<String> = own.iter().map(|a| a.frame_id.clone()).collect();
+    evidence.push(adjacent.frame_id.clone());
+
+    let decisive_own: Vec<&FrameAnswer> = own
+        .iter()
+        .filter(|a| a.verdict != Verdict::Unobserved)
+        .collect();
+    let (verdict, observed, confidence) =
+        if adjacent.verdict == Verdict::Unobserved || decisive_own.is_empty() {
+            (Verdict::Unobserved, None, 0.0)
+        } else {
+            let theirs = adjacent.matched.clone().unwrap_or_default();
+            let disagreeing = decisive_own.iter().find(|a| {
+                a.matched.as_deref().unwrap_or_default() != theirs || a.verdict != adjacent.verdict
+            });
+            match disagreeing {
+                Some(ours) => (
+                    Verdict::Mismatch,
+                    Some(format!(
+                        "this take reads {:?}, the take it cuts from reads {:?}",
+                        ours.matched.clone().unwrap_or_default(),
+                        theirs
+                    )),
+                    ours.confidence.min(adjacent.confidence),
+                ),
+                None => (
+                    Verdict::Match,
+                    Some(format!("both takes read {theirs:?}")),
+                    decisive_own
+                        .iter()
+                        .map(|a| a.confidence)
+                        .fold(adjacent.confidence, f64::min),
+                ),
+            }
+        };
+
+    let mut answers = own;
+    answers.push(adjacent);
+    Observation {
+        question_id: question.id.clone(),
+        topic: question.topic.clone(),
+        question: question.ask.clone(),
+        intended: question.intended.clone(),
+        frames: format!("{} + adjacent take", question.frames.as_str()),
+        verdict,
+        unobserved: verdict == Verdict::Unobserved,
+        observed: if verdict == Verdict::Unobserved {
+            None
+        } else {
+            observed
+        },
+        confidence,
+        evidence_frame_ids: evidence,
+        answers,
     }
-    if contains_any(&lowered, UNOBSERVED_MARKERS).is_some() {
-        return (Verdict::Unobserved, None, 0.0, true);
-    }
-    let hedged = contains_any(&lowered, HEDGE_MARKERS).is_some();
-    let confidence = if hedged { HEDGED } else { CONFIDENT };
-    if let Some(token) = contains_any_owned(&lowered, &question.contradict) {
-        return (Verdict::Mismatch, Some(token), confidence, hedged);
-    }
-    if let Some(token) = contains_any_owned(&lowered, &question.expect) {
-        return (Verdict::Match, Some(token), confidence, hedged);
-    }
-    (Verdict::Unobserved, None, 0.0, hedged)
 }
 
 /// Combine the per-frame answers for one question into its observation.
@@ -915,6 +1186,12 @@ pub struct EvalCase {
     #[serde(default)]
     pub description: String,
     pub frames: Vec<EvalFrame>,
+    /// Frames of the take this one cuts FROM. An `acrossCut` question compares this take's answer
+    /// against the last of these, which is the only way a cut-continuity question can be scored at
+    /// all — a labeled case is one take, and comparing it against its own last frame would measure
+    /// something nobody asked about. A case without them simply does not score its cut question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjacent_frames: Vec<EvalFrame>,
     /// question id -> expected verdict (`match` / `mismatch` / `unobserved`). A question the case
     /// does not name is not scored for that case.
     pub expected: BTreeMap<String, String>,
@@ -1297,13 +1574,15 @@ mod tests {
     }
 
     fn answer(frame: &str, text: &str, question: &ReviewQuestion) -> FrameAnswer {
-        let (verdict, _, confidence, hedged) = grade_answer(question, text);
+        let grade = grade_answer(question, text);
         FrameAnswer {
             frame_id: frame.to_owned(),
             answer: text.to_owned(),
-            verdict,
-            confidence,
-            hedged,
+            verdict: grade.verdict,
+            matched: grade.matched,
+            polarity: grade.polarity,
+            confidence: grade.confidence,
+            hedged: grade.hedged,
             elapsed_seconds: 0.1,
         }
     }
@@ -1317,30 +1596,208 @@ mod tests {
             "",
             "unknown",
         ] {
-            let (verdict, observed, confidence, _) = grade_answer(&q, text);
-            assert_eq!(verdict, Verdict::Unobserved, "{text:?}");
-            assert!(observed.is_none(), "{text:?} produced a value");
-            assert_eq!(confidence, 0.0);
+            let grade = grade_answer(&q, text);
+            assert_eq!(grade.verdict, Verdict::Unobserved, "{text:?}");
+            assert!(grade.matched.is_none(), "{text:?} produced a value");
+            assert_eq!(grade.polarity, "none");
+            assert_eq!(grade.confidence, 0.0);
         }
     }
 
     #[test]
     fn a_hedge_keeps_the_answer_but_halves_its_confidence() {
         let q = question("parcel_colour");
-        let (verdict, observed, confidence, hedged) =
-            grade_answer(&q, "It appears to be blue, though the light is warm.");
-        assert_eq!(verdict, Verdict::Mismatch);
-        assert_eq!(observed.as_deref(), Some("blue"));
-        assert!(hedged);
-        assert!(confidence < DEFAULT_UNCERTAIN_BELOW, "{confidence}");
+        let grade = grade_answer(&q, "It appears to be blue, though the light is warm.");
+        assert_eq!(grade.verdict, Verdict::Mismatch);
+        assert_eq!(grade.matched.as_deref(), Some("blue"));
+        assert_eq!(grade.polarity, "affirmed");
+        assert!(grade.hedged);
+        assert!(grade.confidence < DEFAULT_UNCERTAIN_BELOW, "{grade:?}");
     }
 
     #[test]
     fn an_answer_matching_nothing_is_unobserved_not_a_match() {
         let q = question("parcel_colour");
-        let (verdict, observed, _, _) = grade_answer(&q, "There is a wooden bench and sawdust.");
-        assert_eq!(verdict, Verdict::Unobserved);
-        assert!(observed.is_none());
+        let grade = grade_answer(&q, "There is a wooden bench and sawdust.");
+        assert_eq!(grade.verdict, Verdict::Unobserved);
+        assert!(grade.matched.is_none());
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The three mis-grades the sc-22714 real-weights smoke produced, pinned to the EXACT answer
+    // strings SenseNova-U1-8B returned (evidence:
+    // ~/SceneWorks/film-harness-evidence/sc-22714/smoke-20260914T001144Z/review-eval-real/).
+    // Every one of them was a grader fault, not a model fault.
+    // ------------------------------------------------------------------------------------------
+
+    /// FACE (a): the reported "overclaim" was the GRADER's. On the flat conditioning plate the
+    /// model answered correctly and decisively that the room is NOT a workshop; substring matching
+    /// found the bare word "workshop" inside the negated clause and scored a Match.
+    #[test]
+    fn a_negated_expect_word_is_a_contradiction_not_a_match() {
+        let mut q = question("sh020_location");
+        q.topic = "location".to_owned();
+        q.intended = "A cluttered woodworking workshop.".to_owned();
+        q.expect = vec!["workshop".to_owned()];
+        q.contradict = vec!["kitchen".to_owned(), "studio".to_owned()];
+        let grade = grade_answer(
+            &q,
+            "No, the room in this frame is not a cluttered woodworking workshop with a long \
+             wooden workbench. The room appears to be a plain, empty space with a uniform color, \
+             possibly a studio or a minimalist room.",
+        );
+        assert_eq!(
+            grade.verdict,
+            Verdict::Mismatch,
+            "a correct, decisive denial must not score a match: {grade:?}"
+        );
+        assert_eq!(grade.matched.as_deref(), Some("workshop"));
+        assert_eq!(grade.polarity, "negated");
+
+        // ... and the affirmative form of the same sentence still matches.
+        let grade = grade_answer(
+            &q,
+            "Yes, the room in this frame is a cluttered woodworking workshop with a long wooden \
+             workbench. The room you actually see is a workshop.",
+        );
+        assert_eq!(grade.verdict, Verdict::Match);
+        assert_eq!(grade.polarity, "affirmed");
+        assert_eq!(
+            grade.confidence, CONFIDENT,
+            "the hedge in the LATER clause must not weaken this one"
+        );
+    }
+
+    /// FACE (b): a real model error was laundered into silence. The model said the jacket is red
+    /// (it is navy); the token was the phrase "red jacket", and the answer put the colour AFTER
+    /// the noun, so nothing matched and the wrong answer read as "could not tell".
+    #[test]
+    fn a_colour_named_after_the_noun_still_matches_a_single_word_token() {
+        let mut q = question("sh010_courier_jacket");
+        q.topic = "costume".to_owned();
+        q.intended = "The courier wears a blue jacket.".to_owned();
+        q.expect = vec!["blue".to_owned(), "navy".to_owned()];
+        q.contradict = vec!["red".to_owned(), "green".to_owned(), "grey".to_owned()];
+        let grade = grade_answer(&q, "The jacket of the person in the doorway is red.");
+        assert_eq!(
+            grade.verdict,
+            Verdict::Mismatch,
+            "a wrong colour must be reported as a fault, not as an abstention: {grade:?}"
+        );
+        assert_eq!(grade.matched.as_deref(), Some("red"));
+        assert_eq!(grade.polarity, "affirmed");
+
+        // Word-indexed, so a colour word inside another word is not a hit.
+        let grade = grade_answer(&q, "The jacket is covered in sawdust.");
+        assert_eq!(
+            grade.verdict,
+            Verdict::Unobserved,
+            "\"red\" inside \"covered\" is not a colour: {grade:?}"
+        );
+    }
+
+    /// FACE (c): a correct concise answer scored unobserved and raised a spurious `mustObserve`
+    /// flag on a CORRECT take, because the declared tokens were long phrases the model did not use.
+    #[test]
+    fn a_concise_correct_answer_matches_a_single_word_token() {
+        let mut q = question("sh010_parcel_custody");
+        q.topic = "parcel_custody".to_owned();
+        q.intended = "The parcel is in the courier's hands.".to_owned();
+        q.must_observe = true;
+        q.frames = FrameScope::Last;
+        q.expect = vec!["hands".to_owned()];
+        q.contradict = vec![
+            "surface".to_owned(),
+            "bench".to_owned(),
+            "nobody".to_owned(),
+        ];
+        let grade = grade_answer(&q, "person's hands");
+        assert_eq!(grade.verdict, Verdict::Match, "{grade:?}");
+        assert_eq!(grade.matched.as_deref(), Some("hands"));
+        let observation = aggregate_observation(&q, vec![answer("f3", "person's hands", &q)]);
+        assert!(
+            flag_for("SH010", &q, &observation, DEFAULT_UNCERTAIN_BELOW).is_none(),
+            "a correct take must not be flagged because the grader could not read the answer"
+        );
+    }
+
+    /// FACE (c), second form: the missing parcel WAS correctly reported by the model and the
+    /// grader lost it, because "no parcel" was matched as a substring and the model said
+    /// "no small parcel or box".
+    #[test]
+    fn a_negating_token_tolerates_intervening_modifiers_and_is_taken_at_face_value() {
+        let mut q = question("sh020_parcel");
+        q.expect = vec!["red".to_owned()];
+        q.contradict = vec![
+            "no parcel".to_owned(),
+            "no box".to_owned(),
+            "none".to_owned(),
+        ];
+        let grade = grade_answer(
+            &q,
+            "No, there is no small parcel or box in this frame. The image appears to be a plain, \
+             dark brown surface with no visible objects.",
+        );
+        assert_eq!(grade.verdict, Verdict::Mismatch, "{grade:?}");
+        assert_eq!(grade.matched.as_deref(), Some("no parcel"));
+        assert_eq!(
+            grade.polarity, "affirmed",
+            "a token that carries its own negation must not be cancelled by the leading \"No,\""
+        );
+    }
+
+    /// A contradiction token inside a negated clause rules one value out without establishing
+    /// another, so it decides nothing — inventing agreement from it would be the overclaim this
+    /// module exists to prevent.
+    #[test]
+    fn a_ruled_out_value_establishes_nothing() {
+        let mut q = question("jacket");
+        q.expect = vec!["blue".to_owned()];
+        q.contradict = vec!["red".to_owned()];
+        let grade = grade_answer(&q, "The jacket is not red.");
+        assert_eq!(grade.verdict, Verdict::Unobserved, "{grade:?}");
+        assert!(grade.matched.is_none());
+    }
+
+    #[test]
+    fn an_across_cut_question_compares_the_two_sides_rather_than_aggregating_them() {
+        let mut q = question("sh020_cut");
+        q.topic = "cut_continuity".to_owned();
+        q.intended = "The same room, with the same pegboard behind the bench.".to_owned();
+        q.frames = FrameScope::Last;
+        q.across_cut = true;
+        q.expect = vec!["yes".to_owned()];
+        q.contradict = vec!["no".to_owned()];
+
+        // Both sides agree -> the cut holds.
+        let observation = aggregate_cut_observation(
+            &q,
+            vec![answer("SH020-f3", "Yes", &q)],
+            answer("SH010-cut", "Yes", &q),
+        );
+        assert_eq!(observation.verdict, Verdict::Match);
+
+        // The two sides disagree -> a jump, which is the case the old per-frame question missed:
+        // both frames were "a woodworking workshop", but they were DIFFERENT workshops.
+        let observation = aggregate_cut_observation(
+            &q,
+            vec![answer("SH020-f3", "No", &q)],
+            answer("SH010-cut", "Yes", &q),
+        );
+        assert_eq!(observation.verdict, Verdict::Mismatch);
+        let observed = observation.observed.as_deref().expect("a named difference");
+        assert!(observed.contains("this take reads"), "{observed}");
+        assert!(observed.contains("cuts from"), "{observed}");
+
+        // Either side unreadable -> unobserved. A comparison nobody could make is never agreement.
+        let observation = aggregate_cut_observation(
+            &q,
+            vec![answer("SH020-f3", "Yes", &q)],
+            answer("SH010-cut", "The image is too dark to tell.", &q),
+        );
+        assert_eq!(observation.verdict, Verdict::Unobserved);
+        assert!(observation.observed.is_none());
+        assert!(observation.is_well_formed());
     }
 
     #[test]

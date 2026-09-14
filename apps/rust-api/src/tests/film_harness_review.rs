@@ -81,38 +81,23 @@ fn script_answers(harness: &Harness, answers: &[(&str, &str)]) {
 
 /// Answers that make every SH010 and SH020 question agree with the plan.
 fn agreeing_answers() -> Vec<(&'static str, &'static str)> {
+    // Every shipped question is CLOSED with a declared answer vocabulary (sc-22714, after the
+    // real-weights smoke), so these are the short answers the model actually gives.
     vec![
-        (
-            "sh010_location",
-            "Yes. This is a cluttered woodworking workshop with a long wooden workbench.",
-        ),
-        (
-            "sh010_courier",
-            "Yes. A person — a courier — is standing in the doorway.",
-        ),
-        ("sh010_courier_jacket", "The jacket is blue."),
-        ("sh010_parcel", "Yes, a small box. It is red."),
-        ("sh010_parcel_custody", "It is in a person's hands."),
-        (
-            "sh010_action",
-            "The door is open and the workbench is clear.",
-        ),
-        (
-            "sh020_location",
-            "Yes. This is a cluttered woodworking workshop with a long wooden workbench.",
-        ),
-        (
-            "sh020_courier",
-            "Yes. A person in a jacket is walking across the room.",
-        ),
-        ("sh020_courier_jacket", "The jacket is blue."),
-        ("sh020_parcel", "Yes, a small box. It is red."),
-        ("sh020_parcel_custody", "It is still in the hands."),
-        ("sh020_action", "The person is at the workbench."),
-        (
-            "sh020_cut",
-            "A woodworking workshop; the person wears a blue jacket.",
-        ),
+        ("sh010_location", "workshop"),
+        ("sh010_courier", "Yes, a person is standing in the doorway."),
+        ("sh010_courier_jacket", "blue"),
+        ("sh010_parcel", "red"),
+        ("sh010_parcel_custody", "hands"),
+        ("sh010_action", "open"),
+        ("sh020_location", "workshop"),
+        ("sh020_courier", "Yes, a person is walking across the room."),
+        ("sh020_courier_jacket", "blue"),
+        ("sh020_parcel", "red"),
+        ("sh020_parcel_custody", "hands"),
+        ("sh020_action", "Yes, they are standing at the workbench."),
+        // The comparative cut question: the same answer on both sides means the cut holds.
+        ("sh020_cut", "yes"),
     ]
 }
 
@@ -961,63 +946,40 @@ fn eval_answers() -> BTreeMap<String, String> {
     let mut set = |key: &str, answer: &str| {
         answers.insert(key.to_owned(), answer.to_owned());
     };
-    // Generic per-question answers that agree with the plan.
-    set(
-        "sh020_location",
-        "Yes, a cluttered woodworking workshop with a long wooden workbench.",
-    );
-    set("sh020_courier", "Yes, a person is walking across the room.");
-    set("sh020_courier_jacket", "The jacket is blue.");
-    set("sh020_parcel", "Yes, a small box. It is red.");
-    set("sh020_parcel_custody", "It is still in the hands.");
-    set("sh020_action", "The person is at the workbench.");
-    set(
-        "sh020_cut",
-        "A woodworking workshop; the person wears a blue jacket.",
-    );
-    set(
-        "sh030_bench",
-        "Yes, this is a wooden workbench covered in sawdust.",
-    );
-    set("sh030_sleeve", "The sleeves are blue.");
-    set("sh030_parcel", "Yes, a small box. It is red.");
-    set(
-        "sh030_parcel_custody",
-        "It is resting on the workbench on its own.",
-    );
-    set("sh030_action", "The hands have let go and left the frame.");
-    set("sh030_cut", "A wooden workbench with a red parcel on it.");
-    set(
-        "sh050_location",
-        "Yes, a cluttered woodworking workshop with a long wooden workbench.",
-    );
-    set("sh050_recipient", "Yes, a woman is in the room.");
-    set("sh050_recipient_apron", "She is wearing a grey apron.");
-    set("sh050_parcel", "Yes, a small box. It is red.");
-    set(
-        "sh050_action",
-        "She is standing at the workbench looking down at the parcel.",
-    );
-    set(
-        "sh050_cut",
-        "A woodworking workshop with a red parcel on the bench.",
-    );
-    set("sh060_bench", "Yes, this is a wooden workbench.");
-    set("sh060_apron_sleeve", "The sleeves are grey.");
-    set("sh060_parcel", "Yes, a small box. It is red.");
-    set(
-        "sh060_parcel_custody",
-        "The hands wear a grey apron sleeve.",
-    );
-    set(
-        "sh060_action",
-        "The parcel is open with its flaps folded back.",
-    );
-    set("sh060_cut", "A wooden workbench with a red parcel on it.");
+    // The shipped questions are closed with declared answer vocabularies (sc-22714, after the
+    // real-weights smoke), so these are one-word answers agreeing with the plan. Anything a case
+    // does not override keeps these.
+    set("sh020_location", "workshop");
+    set("sh020_courier", "yes");
+    set("sh020_courier_jacket", "blue");
+    set("sh020_parcel", "red");
+    set("sh020_parcel_custody", "hands");
+    set("sh020_action", "yes");
+    set("sh020_cut", "yes");
+    set("sh030_bench", "wood");
+    set("sh030_sleeve", "blue");
+    set("sh030_parcel", "red");
+    set("sh030_parcel_custody", "surface");
+    set("sh030_action", "no");
+    set("sh030_cut", "red");
+    set("sh050_location", "workshop");
+    set("sh050_recipient", "yes");
+    set("sh050_recipient_apron", "apron");
+    set("sh050_parcel", "red");
+    set("sh050_action", "yes");
+    set("sh050_cut", "yes");
+    set("sh060_bench", "wood");
+    set("sh060_apron_sleeve", "grey");
+    set("sh060_parcel", "red");
+    set("sh060_parcel_custody", "yes");
+    set("sh060_action", "open");
+    set("sh060_cut", "red");
     answers
 }
 
-/// Rewrite the per-question answers for the frames of one case.
+/// Rewrite the per-question answers for the frames of one case. `frames` covers the case's OWN
+/// frames; the adjacent frame of a comparative cut question is keyed separately, so a test can
+/// make the two sides of a cut disagree.
 fn case_answers(
     answers: &mut BTreeMap<String, String>,
     case_id: &str,
@@ -1034,26 +996,50 @@ fn case_answers(
     }
 }
 
+/// What the take on the OTHER side of the cut answers for a comparative question.
+fn adjacent_answer(
+    answers: &mut BTreeMap<String, String>,
+    case_id: &str,
+    question: &str,
+    answer: &str,
+) {
+    answers.insert(format!("{question}@{case_id}-adjacent"), answer.to_owned());
+}
+
 fn eval_backend() -> ScriptedVision {
     let mut answers = eval_answers();
+    // Every comparative cut question needs its OTHER side answered. By default the neighbour
+    // agrees, so only the case that plants a discontinuity disagrees.
+    for (case, question, answer) in [
+        ("sh020_correct", "sh020_cut", "yes"),
+        ("sh020_missing_courier", "sh020_cut", "yes"),
+        ("sh020_wrong_location", "sh020_cut", "yes"),
+        ("sh030_correct", "sh030_cut", "red"),
+        ("sh030_wrong_parcel_colour", "sh030_cut", "red"),
+        ("sh030_unfinished_action", "sh030_cut", "red"),
+        ("sh030_occluded_handoff", "sh030_cut", "red"),
+        ("sh030_cut_discontinuity", "sh030_cut", "red"),
+        ("sh050_correct", "sh050_cut", "yes"),
+        ("sh050_wrong_costume", "sh050_cut", "yes"),
+        ("sh060_correct", "sh060_cut", "red"),
+    ] {
+        adjacent_answer(&mut answers, case, question, answer);
+    }
 
     // --- correct cases keep the agreeing answers, except one deliberate FALSE ALARM ---
     case_answers(
         &mut answers,
         "sh020_correct",
         3,
-        &[("sh020_location", "No, this looks like a kitchen to me.")],
+        &[("sh020_location", "kitchen")],
     );
 
-    // --- wrong parcel colour: the reviewer catches the cut question but MISSES the colour ---
+    // --- wrong parcel colour: the reviewer catches the cut but MISSES the colour itself ---
     case_answers(
         &mut answers,
         "sh030_wrong_parcel_colour",
         3,
-        &[
-            ("sh030_parcel", "Yes, a small box. It is red."),
-            ("sh030_cut", "A wooden workbench with a blue parcel on it."),
-        ],
+        &[("sh030_parcel", "red"), ("sh030_cut", "blue")],
     );
 
     // --- missing character ---
@@ -1062,21 +1048,18 @@ fn eval_backend() -> ScriptedVision {
         "sh020_missing_courier",
         3,
         &[
-            ("sh020_courier", "There is no person in this frame."),
+            ("sh020_courier", "no"),
             (
                 "sh020_courier_jacket",
                 "I cannot tell — there is nobody here.",
             ),
-            ("sh020_parcel", "There is no parcel in this frame."),
+            ("sh020_parcel", "none"),
             (
                 "sh020_parcel_custody",
                 "I cannot tell — there is nothing to hold.",
             ),
-            (
-                "sh020_action",
-                "There is no person, so they have not reached the bench.",
-            ),
-            ("sh020_cut", "A woodworking workshop with nobody in it."),
+            ("sh020_action", "no"),
+            ("sh020_cut", "no"),
         ],
     );
 
@@ -1086,9 +1069,9 @@ fn eval_backend() -> ScriptedVision {
         "sh020_wrong_location",
         3,
         &[
-            ("sh020_location", "No, this is a domestic kitchen."),
-            ("sh020_action", "The person has not reached any workbench."),
-            ("sh020_cut", "A kitchen; the person wears a blue jacket."),
+            ("sh020_location", "kitchen"),
+            ("sh020_action", "no"),
+            ("sh020_cut", "no"),
         ],
     );
 
@@ -1097,13 +1080,7 @@ fn eval_backend() -> ScriptedVision {
         &mut answers,
         "sh030_unfinished_action",
         3,
-        &[
-            ("sh030_parcel_custody", "Someone is still holding it."),
-            (
-                "sh030_action",
-                "No, the hands are still gripping the parcel.",
-            ),
-        ],
+        &[("sh030_parcel_custody", "hands"), ("sh030_action", "yes")],
     );
 
     // --- occluded handoff: custody is honestly unobserved, but the action is OVERCLAIMED ---
@@ -1116,16 +1093,18 @@ fn eval_backend() -> ScriptedVision {
                 "sh030_parcel_custody",
                 "I cannot tell — the parcel is behind the courier.",
             ),
-            ("sh030_action", "The hands have let go and left the frame."),
+            ("sh030_action", "no"),
         ],
     );
 
-    // --- cut discontinuity ---
+    // --- cut discontinuity: the take is internally fine, but the parcel it opens on is not the
+    //     one the previous take carried to the bench. ONLY the comparison can see this — asking
+    //     each frame independently whether it holds a red parcel answers "yes" on both sides.
     case_answers(
         &mut answers,
         "sh030_cut_discontinuity",
         3,
-        &[("sh030_cut", "A wooden workbench with no parcel on it.")],
+        &[("sh030_cut", "none")],
     );
 
     // --- wrong costume ---
@@ -1133,7 +1112,7 @@ fn eval_backend() -> ScriptedVision {
         &mut answers,
         "sh050_wrong_costume",
         3,
-        &[("sh050_recipient_apron", "She is wearing a blue jacket.")],
+        &[("sh050_recipient_apron", "jacket")],
     );
 
     let mut vision = ScriptedVision::new();
@@ -1176,6 +1155,43 @@ async fn the_labeled_evaluation_reports_detections_misses_false_alarms_and_overc
     assert_eq!(case("sh020_wrong_location").counts.detections, 3);
     assert_eq!(case("sh030_unfinished_action").counts.detections, 2);
     assert_eq!(case("sh030_cut_discontinuity").counts.detections, 1);
+    // ...and that detection came from COMPARING the two sides of the cut, not from judging one
+    // frame. Every frame of this case answers "red" on its own; only the neighbour disagrees.
+    {
+        let observed = review::read_observed_state(Path::new(
+            &case("sh030_cut_discontinuity").observed_state_path,
+        ))
+        .expect("observed state reads");
+        let cut = observed
+            .observations
+            .iter()
+            .find(|observation| observation.question_id == "sh030_cut")
+            .expect("the cut question was asked");
+        assert_eq!(cut.verdict, Verdict::Mismatch);
+        let named = cut.observed.as_deref().expect("a named difference");
+        assert!(named.contains("this take reads"), "{named}");
+        assert!(named.contains("the take it cuts from reads"), "{named}");
+        assert!(
+            cut.evidence_frame_ids
+                .iter()
+                .any(|id| id.ends_with("-adjacent")),
+            "the comparison must cite the neighbour's frame: {:?}",
+            cut.evidence_frame_ids
+        );
+        // Every graded answer records the token it matched and the polarity it was read with, so
+        // a mis-grade is debuggable from the document alone.
+        for answer in &cut.answers {
+            assert!(
+                ["affirmed", "negated", "none"].contains(&answer.polarity.as_str()),
+                "{answer:?}"
+            );
+            assert_eq!(
+                answer.matched.is_some(),
+                answer.verdict != Verdict::Unobserved,
+                "a decisive answer names its token and an unobserved one names none: {answer:?}"
+            );
+        }
+    }
     assert_eq!(case("sh050_wrong_costume").counts.detections, 1);
 
     // The miss: the wrong parcel colour read as red.
@@ -1244,6 +1260,67 @@ async fn the_labeled_evaluation_reports_detections_misses_false_alarms_and_overc
             assert!(observation.is_well_formed(), "{observation:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline() {
+    // The sc-22714 smoke ran against a data dir seeded from an earlier run. Its GPU worker row
+    // still advertised `image_vqa` with `status: "offline"`, the capability-only preflight passed
+    // it, and the review then queued questions nothing would ever claim — the exact failure the
+    // preflight exists to prevent.
+    let harness = Harness::start(false, Vec::new()).await;
+    let (status, _) = crate::tests::support::request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        serde_json::json!({
+            "workerId": "stale-gpu",
+            "gpuId": "mlx",
+            "gpuName": "Apple M-series (stale)",
+            "capabilities": ["image_vqa"],
+            "loadedModels": [],
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (status, _) = crate::tests::support::request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/workers/stale-gpu/heartbeat",
+        serde_json::json!({ "status": "offline", "loadedModels": [] }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    let vision = VqaVision::new(
+        &harness.transport,
+        Duration::from_millis(50),
+        RunControl::new(),
+    );
+    let error = vision
+        .preflight()
+        .await
+        .expect_err("an offline worker cannot answer anything");
+    let message = format!("{error}");
+    assert!(message.contains("no live registered worker"), "{message}");
+    assert!(
+        message.contains("stale-gpu (offline)"),
+        "the refusal must name the row that fooled the old check: {message}"
+    );
+
+    // A live row of the same shape passes.
+    let (status, _) = crate::tests::support::request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/workers/stale-gpu/heartbeat",
+        serde_json::json!({ "status": "idle", "loadedModels": [] }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    vision
+        .preflight()
+        .await
+        .expect("an idle worker advertising image_vqa is accepted");
 }
 
 #[tokio::test]

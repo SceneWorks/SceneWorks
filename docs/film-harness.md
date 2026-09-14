@@ -150,10 +150,41 @@ restated for the human who reads the flag, the `ask` put to the model verbatim, 
 flags: `mustObserve` and `acrossCut`. Its `limits` (`maxSeconds`, `maxFramesPerShot`,
 `maxQuestionsPerShot`, `maxAnswerSeconds`) are declared **before** anything is dispatched.
 
-Grading order is load-bearing: an empty answer or one carrying an "I cannot tell" marker is
-`unobserved` **first**, then `contradict`, then `expect`; an answer matching neither list is
-`unobserved`, because silence is not agreement. A hedge ("it appears blue") keeps the reading but
-halves its confidence, so a hedged contradiction is reported `uncertain` rather than `mismatch`.
+Every shipped question is **closed and presupposition-free**, with its allowed answers named in the
+question itself. That is a finding, not a style choice: on real weights the model answered closed
+short questions stably and open ones inconsistently — an open "is there a parcel, what colour?" gave
+a two-paragraph essay on one frame of a take and "no small parcel or box" on the next.
+
+Grading is **word-indexed and polarity-aware**:
+
+- an empty answer, or one carrying an "I cannot tell" marker, is `unobserved` **first**;
+- tokens match whole WORDS inside one clause, tolerating up to three intervening modifiers — so
+  `red` is not found inside `covered`, and `no parcel` IS found in "no small parcel or box";
+- an `expect` token inside a negated clause is a **contradiction**. Substring matching read the bare
+  word "workshop" out of *"the room is **not** a cluttered woodworking workshop"* and scored a match;
+- a token that carries its own negation (`no parcel`, `nobody`) is taken at face value, so a leading
+  "No," does not cancel it;
+- a `contradict` token inside a negated clause ("it is not red") decides **nothing**: it rules one
+  value out without establishing another, and inventing agreement from that is the overclaim this
+  module exists to prevent;
+- the earliest decisive hit wins — these answers lead with their verdict and then elaborate;
+- an answer matching neither list is `unobserved`, because silence is not agreement.
+
+A hedge keeps the reading but halves its confidence, so a hedged contradiction is reported
+`uncertain` rather than `mismatch`. Hedges are read **clause-locally**: "Yes, there is a person in
+the doorway. The room appears to be a workshop." hedges the room, not the person.
+
+Every graded answer records the token it matched and the polarity it was read with (`matched`,
+`polarity`), so a mis-grade is diagnosable from the document alone.
+
+**Cut continuity is COMPARED, not judged.** An `acrossCut` question puts the same closed question to
+this take's frames and to the adjacent selected take's frame and holds the two answers against each
+other: the same answer means the cut holds, a different answer means a jump, and either side
+unreadable means `unobserved`. Asking each frame independently whether it shows "a woodworking
+workshop" answers yes on both sides of a cut between two *different* workshops — which is exactly
+what the first real-weights smoke missed. `frames: "last"` rather than `"first"` on these questions
+is deliberate: the first frame of an image-conditioned shot is the approved conditioning plate,
+which carries no scene of its own.
 
 ### Observed state is not intended state
 
@@ -203,8 +234,10 @@ film-harness review-fixtures --set config/film-harness/review-eval/labels.jsonc
 
 A labeled set is correct takes plus deliberately broken ones (wrong parcel colour, missing
 character, wrong location, unfinished action, an occluded handoff, a discontinuous cut, wrong
-costume), each with the verdict a correct reviewer *should* reach per question. The report counts,
-per question and per topic:
+costume), each with the verdict a correct reviewer *should* reach per question. A case may also
+declare `adjacentFrames` — the frames of the take it cuts FROM, which is the only way its
+`acrossCut` question can be scored; a case without them simply does not score its cut question. The
+report counts, per question and per topic:
 
 | expected | reported | counted as |
 | --- | --- | --- |
@@ -236,9 +269,13 @@ target/release/film-harness review-eval \
   --api http://127.0.0.1:8000
 ```
 
-Twenty-four `image_vqa` calls over the six checked frames of the two takes. Budget **20–35 minutes**
-end to end on the dev Mac: the first call pays the ~16 GB bf16 load, the rest run 20–40 s each under
-the review plan's `maxAnswerSeconds: 180`. Outputs, all under `--out`:
+Twenty-odd `image_vqa` calls over the checked frames of the two takes. **Measured on real weights**
+(sc-22714 smoke, SenseNova-U1-8B on MLX): **2 m 19 s** end to end — the first call pays the cold
+bf16 load at **38 s**, every call after it runs in **~3 s**, well inside the review plan's
+`maxAnswerSeconds: 180`. Budget five minutes, not half an hour. The worker logs
+`image_pipeline_load_*` once per call, which reads as a reload; only the first one costs anything
+(the model stays resident in `refine_model_cache`), so do not size the budget off that log line.
+Outputs, all under `--out`:
 
 | file | what it holds |
 | --- | --- |
@@ -246,11 +283,18 @@ the review plan's `maxAnswerSeconds: 180`. Outputs, all under `--out`:
 | `review-eval.txt` | the printed report, ending with the assistive notice |
 | `real_sh010.observed.json`, `real_sh020.observed.json` | every question, answer, confidence and flag, with the frames cited |
 
-Two labels are expected to be *hard*, and the report saying so is the point: SH020's first frame is
-the flat conditioning plate (so its `frames: "all"` questions are honestly mismatch/unobserved), and
-`sh020_cut` is labeled `mismatch` because SH020 is a different workshop from SH010 — which the
-shipped question, asking only what KIND of room it is, cannot see. Expect that one to be reported as
-a **miss**.
+Two labels are deliberately hard, and the report saying so is the point. SH020's first frame is the
+flat conditioning plate, so its `frames: "all"` questions are honestly mismatch or unobserved.
+`sh020_cut` is labeled `mismatch` because SH020 renders a visibly different workshop from SH010 —
+the first smoke reported that as a clean cut and the evaluation correctly counted a **miss**, which
+is what prompted the comparative cut question (*The review plan* above): the same closed question
+now goes to both sides of the cut and the answers are compared, so a different room is a different
+answer.
+
+The API needs a **fresh data dir**. A dir seeded from an earlier run carries that run's worker row,
+and a row still advertising `image_vqa` with `status: "offline"` is not a worker that will answer
+anything. `review` and `review-eval` now refuse on exactly that (naming the stale row), rather than
+queuing questions nobody claims and recording every one as unobserved.
 
 ## Validation before dispatch
 

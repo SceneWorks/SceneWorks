@@ -16,13 +16,21 @@
   //     mismatch (nothing is there) or unobserved (nothing can be told). That is a true fact about
   //     this take, not a reviewer error.
   //   * SH020's room is a DIFFERENT workshop from SH010's: a lumber/joinery shop with a stone-ish
-  //     slab bench, not the panelled workshop with the pegboard and the long wooden bench. The
-  //     cut is discontinuous, so `sh020_cut` is labeled `mismatch`. The shipped question only asks
-  //     what KIND of room it is, so a reviewer is expected to MISS this one — and the evaluation
-  //     reporting that miss is exactly what it is for.
+  //     slab bench, not the panelled workshop with the pegboard of hand tools and the long wooden
+  //     bench. The cut is discontinuous, so `sh020_cut` is labeled `mismatch`.
+  //
+  // v2 (after the first real-weights smoke): `sh020_location` was labeled `unobserved` on the
+  // assumption that a flat plate can only produce silence. It does not — the model answered "No,
+  // the room in this frame is not a cluttered woodworking workshop… a plain, empty space", which
+  // is a correct and decisive CONTRADICTION. The label is now `mismatch`, which is what a correct
+  // reviewer should report; the old label was the thing at fault, not the model.
+  //
+  // `adjacentFrames` is what makes `sh020_cut` scorable at all: the cut question compares SH020's
+  // last frame against SH010's last frame. Without it there is no neighbour and the question is
+  // skipped rather than answered from one side.
   "schemaVersion": 1,
   "id": "courier-review-eval-real",
-  "version": 1,
+  "version": 2,
   "description": "Hand labels for the two real MiniMax-H3 takes from the sc-22710 smoke (576x320, 5.17s, 24 fps).",
   "mediaRoot": "~/SceneWorks/film-harness-evidence/sc-22710/smoke-20260913T210136Z/frames",
   "reviewPlan": "../courier-workshop/review.jsonc",
@@ -57,8 +65,11 @@
         { "file": "sh020_2.png", "timestampSeconds": 2.58 },
         { "file": "sh020_3.png", "timestampSeconds": 4.86 }
       ],
+      "adjacentFrames": [
+        { "file": "sh010_3.png", "timestampSeconds": 4.86 }
+      ],
       "expected": {
-        "sh020_location": "unobserved",
+        "sh020_location": "mismatch",
         "sh020_courier": "mismatch",
         "sh020_courier_jacket": "unobserved",
         "sh020_parcel": "mismatch",
