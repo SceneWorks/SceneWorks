@@ -315,6 +315,57 @@ pub fn capabilities_for(
 }
 
 impl PlannerCapabilities {
+    /// Widen this envelope to the family's REFERENCE partition (sc-23405).
+    ///
+    /// A split family — MiniMax-H3 is the shipped one — serves `reference_to_video` from a SECOND
+    /// catalog entry with its own `capabilities` and its own `limits.maxReferenceAssets`, and the
+    /// base entry declares neither. Built from the base entry alone the envelope can never produce
+    /// a reference-binding shot, which is where sc-23402 deliberately left it; the caps the planner
+    /// is now held to are the ones the shot will ACTUALLY dispatch against, read off the partition
+    /// that will render it rather than off the entry that cannot.
+    ///
+    /// The modes UNION rather than replace: the base checkpoint's `text_to_video` and keyframe
+    /// modes stay legal on a plan that also has reference shots, because the partition is resolved
+    /// per shot and a plan may mix them (`plan.ref.jsonc`).
+    pub fn with_reference_partition(mut self, entry: &Map<String, Value>) -> Self {
+        for mode in entry
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|mode| SHOT_CONDITIONING_MODES.contains(mode))
+        {
+            if !self.modes.iter().any(|declared| declared == mode) {
+                self.modes.push(mode.to_owned());
+            }
+        }
+        self.max_reference_images = self.max_reference_images.max(reference_caps(entry).images);
+        self
+    }
+
+    /// Narrow this envelope to what THIS reference pack can actually fill (E1).
+    ///
+    /// References are OPTIONAL input: a user may supply a pack that approves none, and then the
+    /// base path runs. A `reference_to_video` shot needs at least one approved reference role to
+    /// bind, so on such a pack the mode and the cap come off the envelope entirely rather than
+    /// being offered and then refused a decode later — the planner emits the modes it emitted
+    /// before this story, and the plan resolves to the base checkpoint throughout.
+    pub fn narrowed_to_pack(mut self, pack: &ReferencePack) -> Self {
+        if pack.references.iter().any(|entry| entry.approved) {
+            return self;
+        }
+        self.modes.retain(|mode| mode != "reference_to_video");
+        self.max_reference_images = 0;
+        self
+    }
+
+    /// Whether this envelope offers reference conditioning at all — the one question the contract,
+    /// the mode guidance and the driver's install gate all branch on, so they cannot disagree.
+    pub fn offers_references(&self) -> bool {
+        self.max_reference_images > 0 && self.modes.iter().any(|mode| mode == "reference_to_video")
+    }
+
     /// The envelope as the planner is shown it: one line per axis, values only, no prose the model
     /// could read as optional.
     pub fn as_prompt_section(&self) -> String {
@@ -358,7 +409,7 @@ impl PlannerCapabilities {
             )),
             (None, _) => lines.push("Resolution: omit the resolution field.".to_owned()),
         }
-        lines.push(if self.max_reference_images == 0 {
+        lines.push(if !self.offers_references() {
             "Reference conditioning: THIS CHECKPOINT HAS NONE. referenceRoles must be empty on \
              every shot, and the reference_to_video mode is unavailable. Keyframe modes \
              (image_to_video, first_last_frame) take a first/last frame role instead; a shot never \
@@ -366,9 +417,13 @@ impl PlannerCapabilities {
                 .to_owned()
         } else {
             format!(
-                "Reference conditioning: at most {} reference roles on a reference_to_video shot. \
-                 A shot never mixes keyframe roles with reference roles — they are different \
-                 conditioning tasks.",
+                "Reference conditioning: at most {} reference roles on a reference_to_video shot, \
+                 and an approved reference pack is available — so USE IT. Every shot binds, in \
+                 referenceRoles, the approved roles that are on screen in it: the person the shot \
+                 is about, the prop the beat turns on, the location it happens in. That is what \
+                 makes the same character, the same object and the same place appear in every shot \
+                 instead of a new one each time. A shot never mixes keyframe roles with reference \
+                 roles — they are different conditioning tasks.",
                 self.max_reference_images
             )
         });
@@ -382,7 +437,22 @@ impl PlannerCapabilities {
         // Which mode to REACH FOR, not merely which are legal. Without this the planner satisfies
         // the slot shape the cheapest way it can see — every shot first_last_frame with the same
         // plate at both ends, which asks each clip to finish exactly where it began (sc-22713).
-        if self.modes.iter().any(|mode| mode == "first_last_frame") {
+        //
+        // With an approved pack in hand the default INVERTS (sc-23405): reference conditioning is
+        // the whole reason the pack exists, and a text_to_video shot in a reference film is a shot
+        // that quietly reinvents whoever is in it. The system turn defers to this line rather than
+        // naming a default of its own, so the two cannot contradict each other.
+        if self.offers_references() {
+            lines.push(
+                "Choosing a mode: reference_to_video is the DEFAULT and the right answer for every \
+                 shot that shows an approved character, prop or location — which is nearly every \
+                 shot. Use text_to_video only for a shot that shows none of them. image_to_video \
+                 and first_last_frame BEGIN (and end) on one specific approved plate and take no \
+                 referenceRoles at all; reach for them only when a shot must start on an exact \
+                 frame."
+                    .to_owned(),
+            );
+        } else if self.modes.iter().any(|mode| mode == "first_last_frame") {
             lines.push(
                 "Choosing a mode: text_to_video is the default and the right answer for most \
                  shots. Use image_to_video when a shot should BEGIN on a specific approved plate. \
@@ -1012,6 +1082,12 @@ pub fn build_planner_request(
          to these approved references rather than to whatever the previous shot happened to end \
          on.\n\n",
     );
+    if caps.offers_references() {
+        out.push_str(
+            "This model can also CONDITION on these references directly. Bind the ones a shot \
+             shows in that shot's referenceRoles as well — see the conditioning rules below.\n\n",
+        );
+    }
     for entry in &pack.references {
         if !entry.approved {
             continue;
@@ -1093,15 +1169,46 @@ pub fn build_repair_request(
 /// the one filled example it gets was being taught the wrong thing (AT4, sc-22715).
 pub const EXAMPLE_DURATION_PLACEHOLDER: &str = "{{EXAMPLE_DURATION}}";
 
+/// Where the worked example's `conditioning` object goes. Filled from the envelope for the same
+/// reason the duration is (sc-23405): the one filled shot a planner is shown is the strongest
+/// instruction in the contract, so on a pack-and-partition that make `reference_to_video` the
+/// default it must not show a `text_to_video` shot — that teaches the opposite of what the
+/// envelope's own mode guidance just said.
+pub const EXAMPLE_CONDITIONING_PLACEHOLDER: &str = "{{EXAMPLE_CONDITIONING}}";
+
+/// Where the per-envelope reference RULE goes: the standing instruction to bind approved roles on
+/// every shot, or nothing at all when no reference conditioning is on offer.
+pub const REFERENCE_RULE_PLACEHOLDER: &str = "{{REFERENCE_RULE}}";
+
+/// The rule inserted at [`REFERENCE_RULE_PLACEHOLDER`] when the envelope offers references.
+const REFERENCE_BINDING_RULE: &str = "\n- An approved reference pack is available, so EVERY shot \
+that shows an approved character, prop or location uses \"mode\": \"reference_to_video\" and lists \
+those roles in referenceRoles — subject first, then the object the beat turns on, then the place. \
+A shot that binds nothing renders a stranger in a room nobody approved. referenceRoles and \
+continuityRoles are not alternatives: a bound role is still named in continuityRoles.";
+
 /// The contract with its worked example on THIS model's envelope: the first allowed duration when
-/// the model declares a menu, else a plain round number the "any positive value" rule admits.
+/// the model declares a menu, else a plain round number the "any positive value" rule admits, and
+/// the conditioning form the envelope makes the default.
 pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
     let example = caps
         .durations
         .first()
         .map(|value| format!("{value}"))
         .unwrap_or_else(|| "6".to_owned());
-    PLAN_JSON_CONTRACT.replace(EXAMPLE_DURATION_PLACEHOLDER, &example)
+    let (conditioning, reference_rule) = if caps.offers_references() {
+        (
+            "{ \"mode\": \"reference_to_video\", \"referenceRoles\": [\"mechanic\", \
+             \"brass_key\"] }",
+            REFERENCE_BINDING_RULE,
+        )
+    } else {
+        ("{ \"mode\": \"text_to_video\" }", "")
+    };
+    PLAN_JSON_CONTRACT
+        .replace(EXAMPLE_DURATION_PLACEHOLDER, &example)
+        .replace(EXAMPLE_CONDITIONING_PLACEHOLDER, conditioning)
+        .replace(REFERENCE_RULE_PLACEHOLDER, reference_rule)
 }
 
 /// The JSON contract both the first round and every repair round end with. Kept as one constant so
@@ -1155,7 +1262,7 @@ conditioning tasks.
 - chainFromShotId names the shot IMMEDIATELY BEFORE this one, or is omitted. It is never a \
 substitute for continuityRoles: a chained shot still names the approved roles it depicts.
 - Every shot needs at least one approved role in continuityRoles, and a shot lists every approved \
-role that is on screen in it — the character, the prop the beat turns on, the location.
+role that is on screen in it — the character, the prop the beat turns on, the location.{{REFERENCE_RULE}}
 
 One filled shot, for shape only. It is from a DIFFERENT film: copy the spelling and the level of \
 detail, never the content.
@@ -1174,7 +1281,7 @@ palm; the customer waits opposite with both hands at their sides.\",
   \"endState\": \"The counter is empty and the customer holds the brass key at chest height; the \
 mechanic's hand is withdrawn.\",
   \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
-  \"conditioning\": { \"mode\": \"text_to_video\" },
+  \"conditioning\": {{EXAMPLE_CONDITIONING}},
   \"continuityRoles\": [\"mechanic\", \"customer\", \"brass_key\"]
 }";
 
@@ -1248,6 +1355,29 @@ mod tests {
         .as_object()
         .cloned()
         .expect("object")
+    }
+
+    /// MiniMax-H3's REFERENCE partition as the catalog serves it: `reference_to_video` only, nine
+    /// reference images, the same geometry and duration menus as the base entry (sc-23405).
+    fn reference_entry() -> Map<String, Value> {
+        let mut entry = model_entry();
+        entry["id"] = json!("minimax_h3_ref");
+        entry["capabilities"] = json!(["reference_to_video"]);
+        entry["limits"]["maxReferenceAssets"] = json!(9);
+        entry
+    }
+
+    /// A pack that approves nothing — the user who supplied no references (E1).
+    fn pack_without_references() -> ReferencePack {
+        serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "courier-refs",
+            "version": 1,
+            "references": [
+                { "role": "draft_look", "kind": "style", "file": "references/draft.png", "description": "Not approved.", "approved": false }
+            ]
+        }))
+        .expect("pack parses")
     }
 
     fn draft_shot(id: &str, beat_id: &str) -> Value {
@@ -1714,6 +1844,159 @@ mod tests {
         let section = caps.as_prompt_section();
         assert!(section.contains("at most 3 reference roles"), "{section}");
         assert!(!section.contains("negativePrompt"), "{section}");
+    }
+
+    /// sc-23405 AC2. The envelope the planner is held to is widened to the family's REFERENCE
+    /// partition — the entry a reference shot actually dispatches against — and then narrowed to
+    /// what the supplied pack can fill. Both halves matter: without the first the planner can never
+    /// write a reference shot (where sc-23402 left it); without the second a user who supplied no
+    /// references is offered a mode no draft of theirs could satisfy.
+    #[test]
+    fn the_envelope_widens_to_the_reference_partition_and_narrows_to_the_pack() {
+        let brief = brief();
+        let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        assert!(!base.offers_references());
+
+        let widened = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack());
+        // The base modes SURVIVE the widening: the partition is resolved per shot, so a plan may
+        // mix a reference shot with a text-to-video one.
+        assert_eq!(
+            widened.modes,
+            vec![
+                "text_to_video",
+                "image_to_video",
+                "first_last_frame",
+                "reference_to_video"
+            ]
+        );
+        assert_eq!(widened.max_reference_images, 9);
+        assert!(widened.offers_references());
+        // Nothing else moved: the geometry, the menu and the memory floor are still the base
+        // entry's, which is what the two partitions agree on.
+        assert_eq!(widened.durations, base.durations);
+        assert_eq!(widened.default_resolution, base.default_resolution);
+        assert_eq!(widened.min_memory_gb, base.min_memory_gb);
+
+        let section = widened.as_prompt_section();
+        assert!(section.contains("at most 9 reference roles"), "{section}");
+        assert!(
+            section.contains("Every shot binds, in referenceRoles"),
+            "{section}"
+        );
+        assert!(
+            section.contains("reference_to_video is the DEFAULT"),
+            "{section}"
+        );
+
+        // The SAME model and the SAME partition, with a pack that approves nothing: the mode and
+        // the cap come straight back off, and the planner is shown the phase-1 envelope.
+        let narrowed = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack_without_references());
+        assert_eq!(narrowed.modes, base.modes);
+        assert_eq!(narrowed.max_reference_images, 0);
+        assert!(!narrowed.offers_references());
+        let section = narrowed.as_prompt_section();
+        assert!(section.contains("THIS CHECKPOINT HAS NONE"), "{section}");
+        assert!(
+            !section.contains("reference_to_video is the DEFAULT"),
+            "{section}"
+        );
+    }
+
+    /// sc-23405. The worked example and the standing reference rule follow the ENVELOPE, for the
+    /// same reason the duration does (AT4, sc-22715): the one filled shot a planner is shown is the
+    /// strongest instruction in the contract, so on an envelope whose default is
+    /// `reference_to_video` it must not model a `text_to_video` shot.
+    #[test]
+    fn the_contracts_worked_example_and_reference_rule_follow_the_envelope() {
+        let brief = brief();
+        let with_references = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack());
+        let contract = plan_json_contract(&with_references);
+        assert!(
+            contract.contains(
+                "\"conditioning\": { \"mode\": \"reference_to_video\", \"referenceRoles\": \
+                 [\"mechanic\", \"brass_key\"] },"
+            ),
+            "{contract}"
+        );
+        assert!(
+            contract.contains("uses \"mode\": \"reference_to_video\" and lists"),
+            "{contract}"
+        );
+
+        let without = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        let contract = plan_json_contract(&without);
+        assert!(
+            contract.contains("\"conditioning\": { \"mode\": \"text_to_video\" },"),
+            "{contract}"
+        );
+        assert!(
+            !contract.contains("An approved reference pack is available"),
+            "{contract}"
+        );
+
+        // No placeholder ever reaches the planner unfilled, on either envelope or in either round.
+        for caps in [&with_references, &without] {
+            for text in [
+                build_planner_request(&brief, &pack(), caps),
+                build_repair_request(&brief, caps, "{}", &[], 1, 1),
+            ] {
+                for placeholder in [
+                    EXAMPLE_DURATION_PLACEHOLDER,
+                    EXAMPLE_CONDITIONING_PLACEHOLDER,
+                    REFERENCE_RULE_PLACEHOLDER,
+                ] {
+                    assert!(
+                        !text.contains(placeholder),
+                        "{placeholder} survived: {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// sc-23405 AC2, the enforcement half. `requiredRoles` is checked exactly as before: a role
+    /// bound only in `referenceRoles` COVERS its beat (it is on screen by the plan's own account),
+    /// and a role bound nowhere is a finding that names it, which is what a repair round is handed.
+    #[test]
+    fn a_required_role_is_covered_by_a_reference_binding_and_named_when_it_is_bound_nowhere() {
+        let brief: ProductionBrief = {
+            let mut value = brief_json();
+            value["requiredBeats"][0]["requiredRoles"] = json!(["courier", "red_parcel"]);
+            serde_json::from_value(value).expect("brief parses")
+        };
+        let bound = |roles: Value, continuity: Value| {
+            let mut shot = draft_shot("SH010", "arrival");
+            shot["conditioning"] = json!({ "mode": "reference_to_video", "referenceRoles": roles });
+            shot["continuityRoles"] = continuity;
+            let draft: PlannerDraft = serde_json::from_value(json!({
+                "shots": [shot, draft_shot("SH020", "delivery"), draft_shot("SH030", "discovery")]
+            }))
+            .expect("draft parses");
+            draft_to_plan(&brief, &draft)
+        };
+
+        // Bound ONLY as conditioning: covered.
+        let plan = bound(json!(["courier", "red_parcel"]), json!(["courier"]));
+        assert!(
+            role_coverage_findings(&brief, &plan).is_empty(),
+            "{:?}",
+            messages(&role_coverage_findings(&brief, &plan))
+        );
+
+        // The parcel bound nowhere at all: a finding that names it.
+        let plan = bound(json!(["courier"]), json!(["courier"]));
+        let findings = messages(&role_coverage_findings(&brief, &plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("[SH010]") && findings[0].contains("red_parcel"),
+            "{findings:?}"
+        );
     }
 
     #[test]

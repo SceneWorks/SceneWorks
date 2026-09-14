@@ -1927,3 +1927,184 @@ async fn rejecting_a_take_records_that_the_shot_stays_in_the_cut_carrying_it() {
         note.detail
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// sc-23405 (S4) — the reference-conditioned courier plan
+// ---------------------------------------------------------------------------------------------
+
+/// AC1. `plan.v2.jsonc` validates and compiles against the LIVE catalog with every one of its six
+/// shots resolved to `minimax_h3_ref`, every beat of the shipped brief covered and every role that
+/// brief requires bound — and `plan.jsonc` still validates unchanged beside it as the phase-1
+/// no-reference baseline, every request on `minimax_h3`.
+///
+/// The pack here is the checked-in stand-in (deterministic placeholder plates). It declares exactly
+/// the roles a GENERATED pack declares, so what this proves is the plumbing — the right partition,
+/// the right payload, the right coverage — which is the part a test can prove. Likeness needs real
+/// plates and a GPU.
+#[tokio::test]
+async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_covers_the_brief() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let v2_path = Path::new(FIXTURE_DIR).join("plan.v2.jsonc");
+    let baseline_path = Path::new(FIXTURE_DIR).join("plan.jsonc");
+
+    // `validate` first — the same command a human runs, against the live catalog entries.
+    let (plan, pack) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(v2_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.jsonc validates against the live catalog");
+    assert_eq!(plan.id, "courier-workshop-v2");
+    assert_eq!(plan.shots.len(), 6);
+    assert_eq!(pack.references.len(), 7);
+    for shot in &plan.shots {
+        assert_eq!(shot.conditioning.mode, "reference_to_video", "{}", shot.id);
+        assert!(
+            shot.conditioning
+                .reference_roles
+                .contains(&"workshop_location".to_owned())
+                && shot
+                    .conditioning
+                    .reference_roles
+                    .contains(&"red_parcel".to_owned()),
+            "every shot is conditioned on the one approved room and the one approved parcel: {} \
+             binds {:?}",
+            shot.id,
+            shot.conditioning.reference_roles
+        );
+    }
+
+    // Beat coverage and the brief's REQUIRED ROLES, by identity, through the `beatId` each shot
+    // carries. `compile_existing` refuses on these findings too (it picks the sibling brief up);
+    // asserting them here says which rule holds rather than only that compiling succeeded.
+    let brief = sceneworks_core::film_planner::read_brief_file(Path::new(BRIEF_FIXTURE))
+        .expect("the shipped brief reads");
+    let coverage = sceneworks_core::film_planner::plan_coverage_findings(&brief, &plan);
+    assert!(
+        coverage.is_empty(),
+        "{:?}",
+        coverage
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>()
+    );
+    let claimed: Vec<&str> = plan
+        .shots
+        .iter()
+        .filter_map(|shot| shot.beat_id.as_deref())
+        .collect();
+    assert_eq!(
+        claimed,
+        vec![
+            "arrival",
+            "approach",
+            "handover",
+            "departure",
+            "discovery",
+            "opening"
+        ]
+    );
+
+    // Compile: every request resolves to the reference partition, says why, and keeps the plan's
+    // role order.
+    let mut options = planner_options(&harness, "plan-v2");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &v2_path,
+    )
+    .await
+    .expect("plan.v2.jsonc compiles");
+    assert_eq!(artifacts.compiled.requests.len(), 6);
+    // The plan still declares the FAMILY once; only the requests resolve.
+    assert_eq!(artifacts.compiled.model.id, "minimax_h3");
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(request.mode, "reference_to_video", "{}", request.shot_id);
+        assert!(
+            request.partition_reason.contains("minimax_h3_ref"),
+            "{}: {}",
+            request.shot_id,
+            request.partition_reason
+        );
+        let shot = plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot of the plan");
+        assert_eq!(
+            request.reference_roles, shot.conditioning.reference_roles,
+            "{}",
+            request.shot_id
+        );
+        assert!(
+            request.reference_roles.len() <= 9,
+            "{}: minimax_h3_ref declares maxReferenceAssets 9",
+            request.shot_id
+        );
+    }
+
+    // The phase-1 baseline is UNCHANGED: still validates, still entirely on the base checkpoint,
+    // and still the same film shot for shot — which is what makes the two comparable.
+    let (baseline, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(baseline_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.jsonc still validates");
+    assert_eq!(baseline.id, "courier-workshop");
+    assert!(
+        baseline
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "the baseline binds no reference roles at all"
+    );
+    let ids = |plan: &sceneworks_core::film_plan::ProductionPlan| {
+        plan.shots
+            .iter()
+            .map(|shot| shot.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&plan), ids(&baseline), "the same six shots, same ids");
+    for (v2, phase1) in plan.shots.iter().zip(&baseline.shots) {
+        assert!(close(
+            v2.target_duration_seconds,
+            phase1.target_duration_seconds
+        ));
+        assert_eq!(v2.start_state, phase1.start_state, "{}", v2.id);
+        assert_eq!(v2.end_state, phase1.end_state, "{}", v2.id);
+        assert_eq!(v2.dialogue, phase1.dialogue, "{}", v2.id);
+        assert_eq!(
+            v2.dialogue_clip.as_ref().map(|clip| clip.role.as_str()),
+            phase1.dialogue_clip.as_ref().map(|clip| clip.role.as_str()),
+            "{}",
+            v2.id
+        );
+    }
+
+    options.out_dir = harness.temp_dir.path().join("plan-baseline");
+    let baseline_artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &baseline_path,
+    )
+    .await
+    .expect("plan.jsonc compiles");
+    assert!(
+        baseline_artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        baseline_artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| (request.shot_id.clone(), request.model.clone()))
+            .collect::<Vec<_>>()
+    );
+}
