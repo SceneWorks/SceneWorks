@@ -417,6 +417,54 @@ pub struct ReferenceEntry {
     /// Only approved references may be used as conditioning.
     #[serde(default = "default_true")]
     pub approved: bool,
+    /// This plate was GENERATED as a test fixture rather than supplied by a person (sc-23403).
+    ///
+    /// Provenance only. The harness treats a generated reference exactly like any other — the same
+    /// import, the same tags, the same `approved` gate decides conditioning — and the flag exists
+    /// so a pack, and the asset imported from it, always says whether its plates came from a
+    /// person or from a fixture generator. In the product a user supplies the references; the
+    /// generator (`film-harness make-references`) exists for the harness's own fixtures.
+    #[serde(default)]
+    pub generated: bool,
+    /// What produced a generated plate, for the record: model, geometry, prompt, seed and the job
+    /// and asset it came out of. Present only on a `generated` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GeneratedReference>,
+}
+
+/// Provenance of one generated reference plate (sc-23403).
+///
+/// Every field is what the generation route was actually told or what it actually answered; none
+/// of it is read back by the harness, and changing it changes nothing about how the reference is
+/// used. `negative_prompt` is absent for a model that declares no negative-prompt support (Krea 2
+/// Turbo is CFG-free and declares `image.supportsNegativePrompt: false`), rather than recorded as
+/// an empty string the model never saw.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeneratedReference {
+    /// Catalog model id the plate was rendered with.
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Backend the job reported (`mlx` / `candle`), when it reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Image mode the job was created with (`text_to_image`).
+    pub mode: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    pub width: u32,
+    pub height: u32,
+    /// The job that rendered it.
+    pub job_id: String,
+    /// The asset the job wrote in the generating project.
+    pub asset_id: String,
+    /// SHA-256 of the file as it was written into the pack.
+    pub sha256: String,
+    pub created_at: String,
 }
 
 fn default_true() -> bool {
@@ -1105,6 +1153,109 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
 }
 
 /// Structural findings on the reference pack alone.
+/// The checks one reference FILE path must pass, wherever it is declared — a pack entry or a
+/// [`ReferenceSpec`] entry. Kept in one place because the basename rule is security-relevant: the
+/// name is interpolated into the multipart `Content-Disposition` header the import posts, so a
+/// CR/LF in it injects multipart headers.
+fn reference_image_file_findings(field: &str, file: &str) -> Vec<PlanDiagnostic> {
+    let path = Path::new(file);
+    let extension_ok = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            REFERENCE_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if file.trim().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    if file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must have a 1-128 character [A-Za-z0-9._-] basename (it is sent as \
+                 a multipart filename)"
+            ),
+        )];
+    }
+    if !extension_ok {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must be an image ({})",
+                REFERENCE_IMAGE_EXTENSIONS.join(", ")
+            ),
+        )];
+    }
+    Vec::new()
+}
+
+/// `generated` and `generation` must agree (sc-23403): a pack that claims a plate was generated
+/// has to say what generated it, and provenance without the flag is a document that has been
+/// hand-edited into a state nothing wrote.
+fn generated_reference_findings(field: &str, entry: &ReferenceEntry) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    match (entry.generated, entry.generation.as_ref()) {
+        (true, None) => findings.push(PlanDiagnostic::plan(
+            format!("{field}.generation"),
+            format!(
+                "reference {:?} is marked generated but declares no generation provenance",
+                entry.role
+            ),
+        )),
+        (false, Some(_)) => findings.push(PlanDiagnostic::plan(
+            format!("{field}.generated"),
+            format!(
+                "reference {:?} carries generation provenance but is not marked generated",
+                entry.role
+            ),
+        )),
+        (true, Some(generation)) => {
+            for (name, value) in [
+                ("model", generation.model.as_str()),
+                ("mode", generation.mode.as_str()),
+                ("prompt", generation.prompt.as_str()),
+                ("jobId", generation.job_id.as_str()),
+                ("assetId", generation.asset_id.as_str()),
+                ("sha256", generation.sha256.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.generation.{name}"),
+                        format!(
+                            "reference {:?}: generation provenance needs a non-empty {name}",
+                            entry.role
+                        ),
+                    ));
+                }
+            }
+            if generation.width == 0 || generation.height == 0 {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.generation"),
+                    format!(
+                        "reference {:?}: generation provenance needs the geometry it was rendered \
+                         at",
+                        entry.role
+                    ),
+                ));
+            }
+        }
+        (false, None) => {}
+    }
+    findings
+}
+
 pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     if pack.schema_version != REFERENCE_PACK_SCHEMA_VERSION {
@@ -1162,52 +1313,8 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        let file = Path::new(&entry.file);
-        let extension_ok = file
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                REFERENCE_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-            });
-        let basename = file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if entry.file.trim().is_empty()
-            || file.is_absolute()
-            || file
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must be a relative path inside the pack directory",
-                    entry.file
-                ),
-            ));
-        } else if entry.file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
-            // The basename is interpolated into the multipart `Content-Disposition` header the
-            // import posts, so a CR/LF in it injects multipart headers. sc-22713 generates these
-            // documents, so the charset is enforced here rather than trusted.
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must have a 1-128 character [A-Za-z0-9._-] basename (it is sent as \
-                     a multipart filename)",
-                    entry.file
-                ),
-            ));
-        } else if !extension_ok {
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must be an image ({})",
-                    entry.file,
-                    REFERENCE_IMAGE_EXTENSIONS.join(", ")
-                ),
-            ));
-        }
+        findings.extend(reference_image_file_findings(&field, &entry.file));
+        findings.extend(generated_reference_findings(&field, entry));
     }
     // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
     // because the two are placed through different slots and a collision would make
@@ -1459,6 +1566,379 @@ pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> V
         }
     }
     findings
+}
+
+// ------------------------------------------------------------------------------------------
+// Reference SPEC (sc-23403) — the document `film-harness make-references` reads
+// ------------------------------------------------------------------------------------------
+
+/// Schema version of [`ReferenceSpec`] documents this build reads.
+pub const REFERENCE_SPEC_SCHEMA_VERSION: u32 = 1;
+
+/// Image modes a reference spec may drive. Generation only: an `edit_image` request needs a source
+/// asset, which a spec that starts from nothing does not have.
+pub const REFERENCE_SPEC_MODES: &[&str] = &["text_to_image"];
+
+/// Attempts one role may cost. A retry re-renders on the GPU, so the ceiling is low on purpose.
+pub const MAX_REFERENCE_SPEC_ATTEMPTS: u32 = 5;
+
+/// A recipe for GENERATING a reference pack's plates (sc-23403).
+///
+/// **Test fixtures only.** In the product the user supplies the reference images; this document
+/// exists so the film harness can produce its own courier/workshop fixtures locally, with the
+/// provenance of every plate recorded in the pack it writes. Nothing in the product reads it, and
+/// a pack it produced is an ordinary [`ReferencePack`] with `generated: true` on the entries it
+/// rendered.
+///
+/// The roles a plan needs but the spec does not render — a style plate, a keyframe plate — are
+/// named in [`ReferenceSpecInherit`] and copied verbatim from an existing pack, along with its
+/// sound, so the written pack validates against the same plan the source pack did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpec {
+    pub schema_version: u32,
+    /// Id of the pack this spec writes (`[A-Za-z0-9_-]{1,64}`).
+    pub id: String,
+    /// Version of the pack this spec writes.
+    pub version: u32,
+    #[serde(default)]
+    pub description: String,
+    pub model: ReferenceSpecModel,
+    pub limits: ReferenceSpecLimits,
+    /// First seed of the run; role `n` renders at `seedBase + n` so a re-run of the same spec asks
+    /// for the same images. Absent means the route picks a seed and the pack records what it got.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_base: Option<i64>,
+    /// Roles copied verbatim from an existing pack instead of generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<ReferenceSpecInherit>,
+    pub references: Vec<ReferenceSpecEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecModel {
+    /// Catalog model id (`krea_2_turbo` / `krea_2_raw` for the shipped fixture spec).
+    pub id: String,
+    /// Quant tier, when the spec pins one. Checked against the catalog's install state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// One of [`REFERENCE_SPEC_MODES`].
+    #[serde(default = "default_reference_spec_mode")]
+    pub mode: String,
+    /// `"WxH"`, or absent to render at the model's own declared default resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// Negative prompt applied to every role that does not declare its own. Refused for a model
+    /// whose catalog entry declares `image.supportsNegativePrompt: false`, rather than silently
+    /// dropped — Krea 2 Turbo is CFG-free and would ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+}
+
+fn default_reference_spec_mode() -> String {
+    REFERENCE_SPEC_MODES[0].to_owned()
+}
+
+/// What bounds a `make-references` run. Finite by declaration, like a plan's [`PlanLimits`]: the
+/// generator is driving a real GPU and nothing else stops it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecLimits {
+    /// Wall-clock budget for ONE image job.
+    pub max_job_seconds: u64,
+    /// Attempts per role, counting the first. `1` means no retry.
+    pub max_attempts_per_role: u32,
+    /// Memory the generation is allowed, in GB. Checked against the host's reported memory before
+    /// dispatch and against each job's observed peak after it.
+    pub max_memory_gb: f64,
+}
+
+/// Roles (and sound) copied from an existing pack rather than generated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecInherit {
+    /// The pack document to copy from, relative to this spec's own directory.
+    pub pack: String,
+    /// Reference roles to copy. Each must exist in that pack and must not also be generated here.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// Copy the source pack's whole `sound` array (and its files) too.
+    #[serde(default)]
+    pub sound: bool,
+}
+
+/// One role the spec renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecEntry {
+    /// Role name (`[A-Za-z0-9_-]{1,64}`), unique within the spec.
+    pub role: String,
+    /// One of [`REFERENCE_KINDS`].
+    pub kind: String,
+    /// Where the rendered plate is written, relative to the pack directory.
+    pub file: String,
+    #[serde(default)]
+    pub description: String,
+    /// The prompt this role renders from. Required: a role with no prompt is refused by name
+    /// rather than rendered from its description.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    /// Seed for this role, overriding `seedBase + index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// `"WxH"` for this role, overriding the spec's model resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+}
+
+impl ReferenceSpecEntry {
+    /// The negative prompt this role sends, falling back to the spec-wide one.
+    pub fn negative_prompt_with<'a>(&'a self, spec: &'a ReferenceSpec) -> Option<&'a str> {
+        self.negative_prompt
+            .as_deref()
+            .or(spec.model.negative_prompt.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The geometry this role renders at, falling back to the spec-wide one.
+    pub fn resolution_with<'a>(&'a self, spec: &'a ReferenceSpec) -> Option<&'a str> {
+        self.resolution
+            .as_deref()
+            .or(spec.model.resolution.as_deref())
+    }
+}
+
+/// Read and parse a reference spec document (JSONC tolerated).
+pub fn read_reference_spec_file(path: &Path) -> Result<ReferenceSpec, PlanDiagnostic> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        PlanDiagnostic::plan(
+            "referenceSpec",
+            format!("cannot read {}: {error}", path.display()),
+        )
+    })?;
+    parse_reference_spec(&text).map_err(|error| {
+        PlanDiagnostic::plan("referenceSpec", format!("{}: {error}", path.display()))
+    })
+}
+
+/// Parse a reference spec from JSON/JSONC text.
+pub fn parse_reference_spec(text: &str) -> Result<ReferenceSpec, String> {
+    let stripped = strip_jsonc_comments(text);
+    serde_json::from_str(&stripped).map_err(|error| error.to_string())
+}
+
+/// Structural findings on a reference spec alone. Every one of them is answerable before a single
+/// job is created, which is the point: a spec with a role that declares no prompt must never cost
+/// four renders before it says so.
+pub fn validate_reference_spec(spec: &ReferenceSpec) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    if spec.schema_version != REFERENCE_SPEC_SCHEMA_VERSION {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.schemaVersion",
+            format!(
+                "unsupported reference spec schema version {} (this build reads \
+                 {REFERENCE_SPEC_SCHEMA_VERSION})",
+                spec.schema_version
+            ),
+        ));
+    }
+    if !is_safe_plan_id(&spec.id) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.id",
+            "reference spec id must be 1-64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    if spec.version == 0 {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.version",
+            "reference spec version must be >= 1",
+        ));
+    }
+    if !is_safe_plan_id(&spec.model.id) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.model.id",
+            format!(
+                "model id {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                spec.model.id
+            ),
+        ));
+    }
+    if !REFERENCE_SPEC_MODES.contains(&spec.model.mode.as_str()) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.model.mode",
+            format!(
+                "unsupported image mode {:?}; a reference spec generates from text ({})",
+                spec.model.mode,
+                REFERENCE_SPEC_MODES.join(", ")
+            ),
+        ));
+    }
+    if let Some(tier) = spec.model.tier.as_deref() {
+        if !is_safe_plan_id(tier) {
+            findings.push(PlanDiagnostic::plan(
+                "referenceSpec.model.tier",
+                format!("tier {tier:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+            ));
+        }
+    }
+    findings.extend(spec_resolution_finding(
+        "referenceSpec.model.resolution",
+        spec.model.resolution.as_deref(),
+    ));
+    findings.extend(spec_prompt_length_finding(
+        "referenceSpec.model.negativePrompt",
+        spec.model.negative_prompt.as_deref(),
+    ));
+    if spec.limits.max_job_seconds == 0 {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxJobSeconds",
+            "a reference spec must declare a finite per-job budget of at least 1 second",
+        ));
+    }
+    if !(1..=MAX_REFERENCE_SPEC_ATTEMPTS).contains(&spec.limits.max_attempts_per_role) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxAttemptsPerRole",
+            format!(
+                "attempts per role must be between 1 and {MAX_REFERENCE_SPEC_ATTEMPTS} (got {})",
+                spec.limits.max_attempts_per_role
+            ),
+        ));
+    }
+    if !(spec.limits.max_memory_gb.is_finite() && spec.limits.max_memory_gb > 0.0) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxMemoryGb",
+            "a reference spec must declare a positive memory budget",
+        ));
+    }
+    if spec.references.is_empty() {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.references",
+            "a reference spec needs at least one role to generate",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for (index, entry) in spec.references.iter().enumerate() {
+        let field = format!("referenceSpec.references[{index}]");
+        if !is_safe_plan_id(&entry.role) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!(
+                    "role {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                    entry.role
+                ),
+            ));
+        } else if !seen.insert(entry.role.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!("duplicate reference role {:?}", entry.role),
+            ));
+        }
+        if !REFERENCE_KINDS.contains(&entry.kind.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.kind"),
+                format!(
+                    "unknown reference kind {:?}; expected one of {}",
+                    entry.kind,
+                    REFERENCE_KINDS.join(", ")
+                ),
+            ));
+        }
+        let file_findings = reference_image_file_findings(&field, &entry.file);
+        if file_findings.is_empty() && !files.insert(entry.file.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.file"),
+                format!(
+                    "file {:?} is declared by more than one role; each role writes its own plate",
+                    entry.file
+                ),
+            ));
+        }
+        findings.extend(file_findings);
+        if entry.prompt.trim().is_empty() {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.prompt"),
+                format!(
+                    "role {:?} declares no prompt; every generated role needs the text it renders \
+                     from",
+                    entry.role
+                ),
+            ));
+        }
+        findings.extend(spec_prompt_length_finding(
+            &format!("{field}.prompt"),
+            Some(entry.prompt.as_str()),
+        ));
+        findings.extend(spec_prompt_length_finding(
+            &format!("{field}.negativePrompt"),
+            entry.negative_prompt.as_deref(),
+        ));
+        findings.extend(spec_resolution_finding(
+            &format!("{field}.resolution"),
+            entry.resolution.as_deref(),
+        ));
+    }
+    if let Some(inherit) = &spec.inherit {
+        let path = Path::new(&inherit.pack);
+        if inherit.pack.trim().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            findings.push(PlanDiagnostic::plan(
+                "referenceSpec.inherit.pack",
+                format!(
+                    "pack {:?} must be a relative path beside the spec",
+                    inherit.pack
+                ),
+            ));
+        }
+        let mut inherited = BTreeSet::new();
+        for (index, role) in inherit.references.iter().enumerate() {
+            let field = format!("referenceSpec.inherit.references[{index}]");
+            if !is_safe_plan_id(role) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("role {role:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+                ));
+            } else if !inherited.insert(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("duplicate inherited role {role:?}"),
+                ));
+            } else if seen.contains(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("role {role:?} is generated by this spec and cannot also be inherited"),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+fn spec_resolution_finding(field: &str, resolution: Option<&str>) -> Option<PlanDiagnostic> {
+    let value = resolution?;
+    parse_resolution(value)
+        .is_none()
+        .then(|| PlanDiagnostic::plan(field, format!("resolution {value:?} must be \"WxH\"")))
+}
+
+fn spec_prompt_length_finding(field: &str, text: Option<&str>) -> Option<PlanDiagnostic> {
+    let value = text?;
+    (value.chars().count() > MAX_PROMPT_CHARS).then(|| {
+        PlanDiagnostic::plan(
+            field,
+            format!(
+                "prompt is {} characters; the generation route accepts at most {MAX_PROMPT_CHARS}",
+                value.chars().count()
+            ),
+        )
+    })
 }
 
 /// The lane a manifest entry's memory minimum is read from.
@@ -3228,5 +3708,190 @@ mod tests {
         });
         assert!(!shot.attempts[1].has_live_take());
         assert!(shot.attempts[2].has_live_take());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Reference spec (sc-23403)
+    // ---------------------------------------------------------------------------------------
+
+    fn spec_json() -> Value {
+        json!({
+            "schemaVersion": 1,
+            "id": "courier-workshop-refs",
+            "version": 2,
+            "model": { "id": "krea_2_turbo", "tier": "q8", "resolution": "1024x1024" },
+            "limits": { "maxJobSeconds": 900, "maxAttemptsPerRole": 2, "maxMemoryGb": 96 },
+            "seedBase": 4200,
+            "inherit": { "pack": "references.jsonc", "references": ["house_style"], "sound": true },
+            "references": [
+                {
+                    "role": "courier", "kind": "character", "file": "references/courier.png",
+                    "description": "the courier", "prompt": "a courier in a blue jacket"
+                },
+                {
+                    "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png",
+                    "description": "the parcel", "prompt": "a small red parcel on a plain surface"
+                }
+            ]
+        })
+    }
+
+    fn spec_from(value: Value) -> ReferenceSpec {
+        serde_json::from_value(value).expect("spec parses")
+    }
+
+    #[test]
+    fn a_well_formed_reference_spec_validates() {
+        let spec = spec_from(spec_json());
+        assert_eq!(validate_reference_spec(&spec), Vec::new());
+        assert_eq!(spec.model.mode, "text_to_image");
+        assert_eq!(
+            spec.references[0].resolution_with(&spec),
+            Some("1024x1024"),
+            "a role with no resolution renders at the spec's"
+        );
+        assert_eq!(
+            spec.references[0].negative_prompt_with(&spec),
+            None,
+            "no negative prompt is declared anywhere, so none is sent"
+        );
+    }
+
+    #[test]
+    fn a_reference_spec_role_without_a_prompt_is_refused_by_name() {
+        let mut value = spec_json();
+        value["references"][1]["prompt"] = json!("   ");
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referenceSpec.references[1].prompt"
+                    && finding.message.contains("red_parcel")
+            }),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_spec_refuses_unbounded_or_colliding_declarations() {
+        let mut value = spec_json();
+        value["limits"] = json!({ "maxJobSeconds": 0, "maxAttemptsPerRole": 9, "maxMemoryGb": 0 });
+        value["references"][1]["role"] = json!("courier");
+        value["references"][1]["file"] = json!("references/courier.png");
+        value["inherit"]["references"] = json!(["courier"]);
+        let findings = validate_reference_spec(&spec_from(value));
+        for field in [
+            "referenceSpec.limits.maxJobSeconds",
+            "referenceSpec.limits.maxAttemptsPerRole",
+            "referenceSpec.limits.maxMemoryGb",
+            "referenceSpec.references[1].role",
+            "referenceSpec.references[1].file",
+            "referenceSpec.inherit.references[0]",
+        ] {
+            assert!(
+                findings.iter().any(|finding| finding.field == field),
+                "expected a finding on {field}: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_spec_file_cannot_escape_the_pack_or_inject_a_multipart_header() {
+        for file in [
+            "../outside.png",
+            "/tmp/outside.png",
+            "references/co\r\nurier.png",
+            "references/courier.txt",
+        ] {
+            let mut value = spec_json();
+            value["references"][0]["file"] = json!(file);
+            let findings = validate_reference_spec(&spec_from(value));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.field == "referenceSpec.references[0].file"),
+                "{file} was admitted: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_reference_spec_key_or_schema_version_is_refused() {
+        let mut value = spec_json();
+        value["references"][0]["steps"] = json!(8);
+        assert!(
+            serde_json::from_value::<ReferenceSpec>(value).is_err(),
+            "an unknown key must not be silently dropped"
+        );
+        let mut value = spec_json();
+        value["schemaVersion"] = json!(99);
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.field == "referenceSpec.schemaVersion"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_courier_reference_spec_validates() {
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/film-harness/courier-workshop/references.spec.jsonc"
+        ));
+        let spec = parse_reference_spec(text).expect("the shipped spec parses");
+        assert_eq!(validate_reference_spec(&spec), Vec::new());
+    }
+
+    #[test]
+    fn a_generated_reference_must_carry_its_provenance() {
+        let mut value = pack_json();
+        value["references"][0]["generated"] = json!(true);
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referencePack.references[0].generation"
+                    && finding.message.contains("no generation provenance")
+            }),
+            "{findings:#?}"
+        );
+
+        let mut value = pack_json();
+        value["references"][0]["generation"] = json!({
+            "model": "krea_2_turbo", "mode": "text_to_image", "prompt": "a courier",
+            "width": 1024, "height": 1024, "jobId": "job_1", "assetId": "asset_1",
+            "sha256": "abc", "createdAt": "2026-09-14T00:00:00Z"
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.field == "referencePack.references[0].generated"),
+            "provenance without the flag is a document nothing wrote: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_generated_reference_with_full_provenance_validates() {
+        let mut value = pack_json();
+        value["references"][0]["generated"] = json!(true);
+        value["references"][0]["generation"] = json!({
+            "model": "krea_2_turbo", "tier": "q8", "backend": "mlx", "mode": "text_to_image",
+            "prompt": "a courier", "seed": 4200, "width": 1024, "height": 1024,
+            "jobId": "job_1", "assetId": "asset_1", "sha256": "abc",
+            "createdAt": "2026-09-14T00:00:00Z"
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        assert_eq!(validate_reference_pack(&pack), Vec::new());
+        assert!(pack.references[0].generated);
+        assert_eq!(
+            pack.references[0]
+                .generation
+                .as_ref()
+                .map(|generation| generation.model.as_str()),
+            Some("krea_2_turbo")
+        );
     }
 }

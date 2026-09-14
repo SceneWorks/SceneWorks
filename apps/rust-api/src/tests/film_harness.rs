@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::film_harness::{
-    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, ResumeOptions,
-    RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
+    self, ApiRequest, ApiResponse, ApiTransport, BytesResponse, BytesTransportFuture, HarnessError,
+    RequestBody, ResumeOptions, RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
 };
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
@@ -71,6 +71,29 @@ impl ApiTransport for RouterTransport {
                 serde_json::from_slice(&bytes).unwrap_or(Value::Null)
             };
             Ok(ApiResponse { status, body })
+        })
+    }
+
+    /// The bytes half (sc-23403): the same `oneshot` driver, without the JSON parse — what
+    /// `make-references` downloads a rendered plate through.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .expect("request builds");
+            let response = app
+                .oneshot(request)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?;
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
         })
     }
 }
@@ -138,6 +161,10 @@ impl ApiTransport for ScriptedTransport {
             Ok(response)
         })
     }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
+    }
 }
 
 /// How the fake worker treats one video job, keyed by the shot id the harness stamps into
@@ -189,6 +216,14 @@ pub(crate) struct WorkerScript {
     pub(crate) vqa_answers: std::collections::BTreeMap<String, String>,
     /// Fail every `image_vqa` job, for the "the backend answered nothing at all" path.
     pub(crate) vqa_fails: bool,
+    /// sc-23403: roles (`advanced.filmHarness.role`) whose `image_generate` job fails outright.
+    pub(crate) image_fails: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs until it is cancelled, so a test can spend
+    /// the spec's own `maxJobSeconds` on one.
+    pub(crate) image_hangs: Vec<String>,
+    /// sc-23403: peak the fake image worker reports in its metrics block, as a percentage of host
+    /// memory. `None` reports the ordinary small peak.
+    pub(crate) image_peak_pct: Option<f64>,
     /// Questions the fake worker has been asked, in order: (tag, question).
     pub(crate) vqa_asked: Vec<(String, String)>,
     /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
@@ -241,6 +276,9 @@ pub(crate) const FAKE_CAPABILITIES: &[&str] = &[
     "frame_extract",
     "image_vqa",
     "prompt_refine",
+    // sc-23403: the generation seam `make-references` drives. A real image worker advertises the
+    // same capability and answers with the same `assetWrites` fact shape.
+    "image_generate",
 ];
 
 async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
@@ -322,6 +360,8 @@ fn spawn_fake_worker(
                 "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
                 "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
+                // sc-23403: the image-generation seam the reference-fixture generator drives.
+                "image_generate" => run_fake_image_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -541,6 +581,144 @@ async fn run_fake_video_job(
             "backend": "mlx",
             "totalMs": 1_000,
             "peakMemoryBytes": peak_memory_bytes,
+            "peakMemoryPct": peak_pct,
+        }),
+    )
+    .await;
+}
+
+/// The `image_generate` job, faked (sc-23403): write a deterministic plate at the REQUESTED
+/// geometry where the GPU worker would write its render, and report it as an `assetWrites` fact in
+/// the shape `build_image_sidecar_parts` reads. Asset persistence, the sidecar, the recipe, the
+/// index, the two-phase result rewrite and the file route the plate is downloaded back through are
+/// all production code paths.
+async fn run_fake_image_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let role = payload["advanced"]["filmHarness"]["role"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let (fails, hangs, peak_pct) = {
+        let script = script.lock();
+        (
+            script.image_fails.contains(&role),
+            script.image_hangs.contains(&role),
+            script.image_peak_pct,
+        )
+    };
+    if fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake image engine fault", "error": "fake image engine fault",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    if hangs {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let width = payload["width"].as_u64().unwrap_or(1024) as u32;
+    let height = payload["height"].as_u64().unwrap_or(1024) as u32;
+    let seed = payload["seed"]
+        .as_i64()
+        .or_else(|| payload["seeds"][0].as_i64())
+        .unwrap_or(1);
+    let asset_id = format!("asset_{}", &job_id.replace('-', "")[..16]);
+    let genset_id = format!("genset_{}", &job_id.replace('-', "")[..16]);
+    let media_rel = format!("assets/images/{genset_id}/{asset_id}.png");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join(format!("assets/images/{genset_id}")))
+        .expect("images dir");
+    // A real PNG at the geometry the job asked for: the pack the generator publishes has to hold
+    // something a later `validate` and a later import can actually read.
+    let tint = [
+        (seed.unsigned_abs() % 251) as u8,
+        (role.len() as u8).wrapping_mul(17),
+        180,
+    ];
+    std::fs::write(
+        project_dir.join(&media_rel),
+        film_harness::fixture_plate_png_sized(&role, tint, width, height).expect("plate encodes"),
+    )
+    .expect("fake plate");
+    let fact = json!({
+        "type": "image",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "width": width, "height": height,
+        "normalizedWidth": width, "normalizedHeight": height,
+        "count": 1,
+        "index": 0,
+        "seed": seed,
+        "family": "krea-2",
+        "displayName": format!("fake plate {role}"),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": payload["mode"], "model": payload["model"], "adapter": "fake_mlx_krea",
+        "prompt": payload["prompt"], "negativePrompt": payload["negativePrompt"], "loras": [],
+        "rawAdapterSettings": { "advanced": payload["advanced"] }
+    });
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake plate done", "workerId": WORKER_ID, "backend": "mlx",
+            "result": {
+                "generationSetId": genset_id,
+                "expectedCount": 1,
+                "adapter": "fake_mlx_krea",
+                "model": payload["model"],
+                "generationSet": {
+                    "id": genset_id, "mode": payload["mode"], "model": payload["model"],
+                    "prompt": payload["prompt"], "negativePrompt": "", "count": 1,
+                    "createdAt": sceneworks_core::time::utc_now()
+                },
+                "assetWrites": [fact]
+            }
+        }),
+    )
+    .await;
+    let peak_pct = peak_pct.unwrap_or(12.0);
+    post_generation_metrics(
+        app,
+        job_id,
+        json!({
+            "backend": "mlx",
+            "totalMs": 1_000,
+            "peakMemoryBytes": (HOST_MEMORY_MB as f64 * 1024.0 * 1024.0 * peak_pct / 100.0) as u64,
             "peakMemoryPct": peak_pct,
         }),
     )
@@ -2363,6 +2541,15 @@ impl ApiTransport for FaultTransport {
                 "simulated controller death".to_owned(),
             ))
         })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        if self.fired() {
+            return Box::pin(async {
+                Err(HarnessError::Transport("controller is gone".to_owned()))
+            });
+        }
+        self.inner.get_bytes(path)
     }
 }
 

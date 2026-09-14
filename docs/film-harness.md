@@ -8,6 +8,8 @@ step. No new UI, no parallel renderer and no second LLM stack: every take is pro
 GPU worker claims the job, and every token by the `prompt_refine` worker that already ships.
 
 ```text
+references.spec.jsonc ─ film-harness make-references ──> references.jsonc (TEST FIXTURES ONLY)
+                                                              │
 brief.jsonc ─┐
              ├─ film-harness plan ──> plan.json ──(you edit it)──┐
 references ──┘                          │                        │
@@ -34,6 +36,7 @@ item at a take the run already has, and renders nothing.
 | Brief | `sceneworks_core::film_planner::ProductionBrief` | `config/film-harness/courier-workshop/brief.jsonc` |
 | Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots) |
 | Reference pack | `sceneworks_core::film_plan::ReferencePack` | `config/film-harness/courier-workshop/references.jsonc` |
+| Reference spec (fixtures only) | `sceneworks_core::film_plan::ReferenceSpec` | `config/film-harness/courier-workshop/references.spec.jsonc` |
 | Compiled requests | `sceneworks_core::film_compile::CompiledPlan` | written to `--out/compiled.json` |
 | Review plan | `sceneworks_core::film_review::ReviewPlan` | `config/film-harness/courier-workshop/review.jsonc` |
 | Run record | `sceneworks_core::film_plan::RunRecord` | written to `--out/run.json` and `<project>/film-harness/<run_id>/run.json` |
@@ -59,6 +62,114 @@ A pack entry with `"approved": false` is still imported (so a human can review i
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
 a `[A-Za-z0-9._-]` basename: it is sent as a multipart filename, so a CR/LF in it would inject
 headers.
+
+## Generating the reference plates (`make-references`, sc-23403)
+
+**TEST FIXTURES ONLY.** In the product the user supplies the reference images: a pack is a
+human-approved document, and nothing here changes that. `make-references` exists so the harness can
+produce its OWN courier/workshop fixtures on this machine instead of shipping flat placeholder
+plates forever, and so that every plate it produces says where it came from.
+
+```bash
+film-harness make-references \
+  --spec config/film-harness/courier-workshop/references.spec.jsonc \
+  --out  /tmp/courier-refs \
+  --api  http://127.0.0.1:8000
+```
+
+It drives the ordinary image route — `POST /api/v1/image/jobs`, `mode: "text_to_image"`, Krea 2 on
+the MLX lane by default — once per declared role, waits for each job under the spec's own declared
+limits, downloads the result through `GET /api/v1/projects/:id/files/*path` into the pack directory,
+and writes a `references.jsonc`. No new job type, no new model, no new route.
+
+### The spec
+
+| Field | Meaning |
+| --- | --- |
+| `model.id` / `model.tier` | Catalog model and quant tier (`krea_2_turbo` q8 by default; `krea_2_raw` is the undistilled 52-step base). `--model` / `--tier` override them. |
+| `model.mode` | `text_to_image`, the only mode a spec generates from — an edit needs a source asset a spec has not got. |
+| `model.resolution` | `"WxH"` for every role, defaulting to the model's own declared default. Refused unless the model's declared resolution menu admits it. |
+| `model.negativePrompt` | Optional, per-spec. **Refused** for a model whose entry declares `image.supportsNegativePrompt: false` — Krea 2 Turbo is CFG-free and the engine never forwards one, so a spec that declares one is stopped rather than rendered against text the model never saw. |
+| `limits.maxJobSeconds` | Wall clock for ONE job. The first job of a run also pays for loading the weights. |
+| `limits.maxAttemptsPerRole` | Attempts per role, counting the first (1–5). |
+| `limits.maxMemoryGb` | Checked against the host's reported memory before dispatch, and against each job's `peakMemoryBytes` (the metrics route, the same signal a video run reads) after it. Over budget stops the run — a retry would re-render at the same cost. |
+| `seedBase` | Role `n` renders at `seedBase + n`, so re-running a spec asks for the same images. A role may name its own `seed`. |
+| `references[]` | `role`, `kind`, `file`, `description` and the **required** `prompt` (plus optional `negativePrompt`, `seed`, `resolution`). A role with no prompt is refused by name before anything is dispatched. |
+| `inherit` | Roles copied verbatim from an existing pack (`pack`, `references[]`), plus its `sound` — so the written pack validates against the same plan the source pack did. |
+
+The shipped courier spec generates five roles (`courier`, `recipient`, `red_parcel`,
+`workshop_location`, `workbench_table`) and inherits two (`house_style`, `workshop_plate`) and the
+four sound clips. Its prompts are written for **cross-image consistency**: the same workshop
+description appears verbatim in every prompt, each character is one figure in a neutral
+three-quarter pose, the parcel sits alone on a plain surface, and the location plate is the wide
+shot that establishes the bench. Editing one prompt without editing the shared clause in the others
+is how a pack stops looking like one place.
+
+### What it writes
+
+Every generated entry carries `approved: true`, `generated: true` and a `generation` block — model,
+tier, backend, mode, prompt, negative prompt (absent when the model takes none), seed, geometry, job
+id, asset id, sha256 and the timestamp:
+
+```jsonc
+{
+  "role": "courier", "kind": "character", "file": "references/courier.png",
+  "description": "The courier: blue jacket, carries the parcel.",
+  "approved": true, "generated": true,
+  "generation": {
+    "model": "krea_2_turbo", "tier": "q8", "backend": "mlx", "mode": "text_to_image",
+    "prompt": "Full-length character reference photograph of a courier …",
+    "seed": 4200, "width": 1024, "height": 1024,
+    "jobId": "job_…", "assetId": "asset_…", "sha256": "…", "createdAt": "…"
+  }
+}
+```
+
+`generated` is provenance and nothing else. A generated reference is imported, tagged and resolved
+into a shot's conditioning exactly like a supplied one — `approved` remains the only gate — and the
+flag plus the `generation` block ride onto the imported asset's `filmHarness` provenance so the
+answer survives the pack document. An inherited plate keeps its own flag: a supplied plate stays
+supplied. The pack schema refuses the two incoherent states (`generated` with no provenance,
+provenance with no flag).
+
+### Refusals, and why `--out` is never half-written
+
+Every file is written into a hidden sibling of `--out` (`.<name>.make-references-pending`) and the
+directory is renamed into place only once the last plate has landed and the document has been
+written and re-validated against its own files. A refusal, a failed job, a timeout, an over-budget
+peak or a Ctrl-C removes it, so `--out` either holds a complete pack or does not exist. An existing
+non-empty `--out` is refused unless `--force` is passed, and even then the published pack is
+replaced only at the rename.
+
+Refused before the first render: a spec that does not validate (a role with no prompt names the
+role), an inherited role the source pack does not hold, a model that is not in the catalog / not an
+image model / does not declare the mode / is not installed (`--skip-install-check` turns the last
+one off), a negative prompt the model does not take, a geometry the model does not declare, a
+memory budget over the host's memory, and no live worker advertising `image_generate`.
+
+Refused during: a job that fails, a job that overruns `maxJobSeconds` (cancelled through the API),
+a job whose asset the API never publishes, and a peak over `maxMemoryGb`. Each names the role.
+
+### The real GPU run (the courier fixtures)
+
+Serial on the dev Mac's GPU. With the API and a GPU worker already running, and Krea 2 Turbo q8
+installed (~20.6 GB):
+
+```bash
+film-harness make-references \
+  --spec config/film-harness/courier-workshop/references.spec.jsonc \
+  --out  film-harness-evidence/sc-23403/courier-refs \
+  --api  http://127.0.0.1:8000
+film-harness validate \
+  --plan       config/film-harness/courier-workshop/plan.jsonc \
+  --references film-harness-evidence/sc-23403/courier-refs/references.jsonc
+```
+
+Expect roughly 10–20 minutes for the five plates: the first job pays the weight load (several
+minutes), the remaining four are an 8-step 1024² render each on a warm engine. `--model krea_2_raw`
+is the undistilled 52-step alternative and takes substantially longer per plate. The evidence is the
+`--out` directory itself: five PNGs under `references/`, the two inherited plates, the four sound
+clips and the `references.jsonc` with its provenance.
 
 ## Sound (sc-22712)
 
