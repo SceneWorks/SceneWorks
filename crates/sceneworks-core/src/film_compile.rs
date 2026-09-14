@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
 use crate::film_plan::{
-    shot_resolution, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
+    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
 };
 use crate::MAX_PROMPT_CHARS;
 
@@ -56,7 +56,16 @@ pub struct CompiledRequest {
     pub shot_id: String,
     pub beat: String,
     pub mode: String,
+    /// The catalog model id this request DISPATCHES as: the partition the shot resolved to, which
+    /// on a split family (MiniMax-H3's `minimax_h3` / `minimax_h3_ref`) is not the plan's declared
+    /// model (sc-23402). [`CompiledRequest::to_job_body_with`] writes exactly this into the job
+    /// body's `model`, so `compiled.json` and the route agree by construction.
     pub model: String,
+    /// Why this request resolved to `model` and not the family's other partition
+    /// ([`crate::film_plan::ShotPartition::reason`]). Derived, like every other field but the
+    /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
+    #[serde(default)]
+    pub partition_reason: String,
     /// The prompt the engine will receive.
     pub prompt: String,
     pub prompt_source: PromptSource,
@@ -143,8 +152,10 @@ pub fn mlx_quantize_for_tier(tier: &str) -> Value {
 
 /// Inputs the compile needs beyond the plan itself.
 pub struct CompileInputs<'a> {
-    /// The model's catalog entry, for fps and geometry defaults.
-    pub model_entry: &'a JsonObject<String, Value>,
+    /// The catalog entries the plan's shots resolve against: the declared model, plus the family's
+    /// reference partition when the catalog serves one. Each shot's geometry defaults come from the
+    /// entry it will actually dispatch as (sc-23402).
+    pub entries: &'a ModelEntries<'a>,
     pub lane: &'a str,
     pub plan_sha256: &'a str,
     pub compiled_at: &'a str,
@@ -163,7 +174,7 @@ pub fn compile_plan(
     inputs: &CompileInputs<'_>,
 ) -> Result<CompiledPlan, Vec<PlanDiagnostic>> {
     let mut findings = Vec::new();
-    let Some(fps) = crate::film_plan::plan_fps(plan, inputs.model_entry) else {
+    let Some(fps) = crate::film_plan::plan_fps(plan, inputs.entries.base_entry()) else {
         return Err(vec![PlanDiagnostic::plan(
             "model.fps",
             format!(
@@ -207,13 +218,27 @@ fn compile_shot(
     inputs: &CompileInputs<'_>,
     fps: u32,
 ) -> Result<CompiledRequest, Vec<PlanDiagnostic>> {
-    let Some((width, height)) = shot_resolution(plan, shot, inputs.model_entry) else {
+    // Which of the family's checkpoints this shot dispatches as, decided ONCE here and carried into
+    // the request, the job body and the attempt record (sc-23402). A shot that binds no reference
+    // roles stays on the plan's declared model: references are optional input, never a requirement.
+    let (partition, partition_entry) = inputs.entries.resolve_shot(shot);
+    let Some(partition_entry) = partition_entry else {
+        return Err(vec![PlanDiagnostic::shot(
+            &shot.id,
+            "conditioning.referenceRoles",
+            format!(
+                "{} is not in this API's model catalog, so this shot cannot be compiled ({})",
+                partition.model_id, partition.reason
+            ),
+        )]);
+    };
+    let Some((width, height)) = shot_resolution(plan, shot, partition_entry) else {
         return Err(vec![PlanDiagnostic::shot(
             &shot.id,
             "resolution",
             format!(
                 "{} declares no default resolution; set one on the plan or the shot",
-                plan.model.id
+                partition.model_id
             ),
         )]);
     };
@@ -244,7 +269,8 @@ fn compile_shot(
         shot_id: shot.id.clone(),
         beat: shot.beat.clone(),
         mode: shot.conditioning.mode.clone(),
-        model: plan.model.id.clone(),
+        model: partition.model_id,
+        partition_reason: partition.reason,
         prompt,
         prompt_source,
         authored_prompt: authored,
@@ -357,6 +383,12 @@ impl CompiledRequest {
         });
         if let Some(key) = context.idempotency_key {
             provenance["idempotencyKey"] = json!(key);
+        }
+        if !self.partition_reason.is_empty() {
+            // The dispatched body says which of the family's checkpoints it asked for AND why
+            // (sc-23402): `model` above is the resolved id, and this is the sentence that explains
+            // it, so a job read back on its own carries the same two facts as the attempt record.
+            provenance["partitionReason"] = json!(self.partition_reason);
         }
         if self.prompt_source == PromptSource::Refined {
             provenance["promptSource"] = json!("refined");
@@ -485,9 +517,10 @@ impl CompiledPlan {
     pub fn conformance_findings(
         &self,
         plan: &ProductionPlan,
-        entry: &JsonObject<String, Value>,
+        entries: &ModelEntries<'_>,
         lane: ModelLane,
     ) -> Vec<PlanDiagnostic> {
+        let entry = entries.base_entry();
         let mut findings = Vec::new();
         if self.model.id != plan.model.id {
             findings.push(PlanDiagnostic::plan(
@@ -539,7 +572,7 @@ impl CompiledPlan {
         }
         let empty = BTreeMap::new();
         let inputs = CompileInputs {
-            model_entry: entry,
+            entries,
             lane: lane.manifest_key(),
             plan_sha256: &self.plan_sha256,
             compiled_at: &self.compiled_at,
@@ -574,6 +607,7 @@ fn request_differences(
         beat,
         mode,
         model,
+        partition_reason,
         prompt: _,
         prompt_source: _,
         authored_prompt: _,
@@ -603,6 +637,11 @@ fn request_differences(
         }
     };
     differ("compiled.model", quoted(&actual.model), quoted(model));
+    differ(
+        "compiled.partitionReason",
+        quoted(&actual.partition_reason),
+        quoted(partition_reason),
+    );
     differ("compiled.beat", quoted(&actual.beat), quoted(beat));
     differ("compiled.mode", quoted(&actual.mode), quoted(mode));
     differ(
@@ -725,6 +764,17 @@ mod tests {
         .unwrap()
     }
 
+    fn reference_entry() -> JsonObject<String, Value> {
+        json!({
+            "id": "minimax_h3_ref",
+            "defaults": { "fps": 24, "resolution": "1344x768" },
+            "limits": { "resolutions": ["1344x768", "576x320"], "maxReferenceAssets": 9 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
     fn role_assets() -> BTreeMap<String, String> {
         [
             ("courier", "asset_courier"),
@@ -738,11 +788,12 @@ mod tests {
 
     fn compiled(refined: BTreeMap<String, String>) -> CompiledPlan {
         let plan = parse_plan(&plan_text()).unwrap();
+        let entry = entry();
         compile_plan(
             &plan,
             &pack(),
             &CompileInputs {
-                model_entry: &entry(),
+                entries: &ModelEntries::single("minimax_h3", &entry),
                 lane: "mlx",
                 plan_sha256: "abc123def456",
                 compiled_at: "2026-09-13T00:00:00Z",
@@ -910,7 +961,7 @@ mod tests {
                 &plan,
                 &pack(),
                 &CompileInputs {
-                    model_entry: &entry(),
+                    entries: &ModelEntries::single("minimax_h3", &entry()),
                     lane: "mlx",
                     plan_sha256: "abc",
                     compiled_at: "now",
@@ -959,9 +1010,10 @@ mod tests {
     fn a_hand_edited_request_is_refused_even_when_it_pins_the_right_plan() {
         let plan = parse_plan(&plan_text()).unwrap();
         let entry = entry();
+        let entries = ModelEntries::single("minimax_h3", &entry);
         let clean = compiled(BTreeMap::new());
         assert!(clean
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
         // The compile's own output is exempt: a refined prompt is why the document exists.
         let refined = compiled(
@@ -970,7 +1022,7 @@ mod tests {
                 .collect(),
         );
         assert!(refined
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
 
         // Every other field is a transcription of the plan, and an edit to one is named.
@@ -991,6 +1043,11 @@ mod tests {
                 "compiled.model",
                 |request| request.model = "ltx_2_5".to_owned(),
                 "ltx_2_5",
+            ),
+            (
+                "compiled.partitionReason",
+                |request| request.partition_reason = "because I said so".to_owned(),
+                "because I said so",
             ),
             ("compiled.fps", |request| request.fps = 30, "30 fps"),
             (
@@ -1038,7 +1095,7 @@ mod tests {
         for (field, edit, expected) in cases {
             let mut tampered = clean.clone();
             edit(&mut tampered.requests[0]);
-            let findings = tampered.conformance_findings(&plan, &entry, ModelLane::Mlx);
+            let findings = tampered.conformance_findings(&plan, &entries, ModelLane::Mlx);
             assert_eq!(findings.len(), 1, "{field}: {findings:?}");
             assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{field}");
             assert_eq!(findings[0].field, field, "{findings:?}");
@@ -1054,7 +1111,7 @@ mod tests {
         tampered.model.tier = Some("q8".to_owned());
         tampered.model.fps = 30;
         let fields: Vec<String> = tampered
-            .conformance_findings(&plan, &entry, ModelLane::Candle)
+            .conformance_findings(&plan, &entries, ModelLane::Candle)
             .into_iter()
             .map(|finding| finding.field)
             .collect();
@@ -1070,8 +1127,158 @@ mod tests {
         let mut short = clean;
         short.requests.retain(|request| request.shot_id != "SH020");
         assert!(short
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
+    }
+
+    /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402, AC1).
+    fn mixed_plan_text() -> String {
+        serde_json::to_string(&json!({
+            "schemaVersion": 1,
+            "id": "courier-workshop",
+            "version": 2,
+            "title": "Courier",
+            "model": { "id": "minimax_h3", "tier": "q4", "fps": 24, "resolution": "576x320" },
+            "limits": { "maxRunSeconds": 3600, "maxShotSeconds": 1800, "maxAttemptsPerShot": 1, "maxMemoryGb": 96 },
+            "shots": [
+                {
+                    "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "conditioning": {
+                        "mode": "reference_to_video",
+                        "referenceRoles": ["courier", "workshop_plate"]
+                    },
+                    "continuityRoles": ["courier"]
+                },
+                {
+                    "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "conditioning": { "mode": "text_to_video" },
+                    "continuityRoles": ["courier", "red_parcel"]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn each_shot_compiles_to_the_partition_its_own_conditioning_needs() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &entries,
+                lane: "mlx",
+                plan_sha256: "abc123def456",
+                compiled_at: "2026-09-14T00:00:00Z",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("compiles");
+        // The plan still declares the FAMILY once; only the requests differ.
+        assert_eq!(compiled.model.id, "minimax_h3");
+
+        let referenced = compiled.request("SH010").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.mode, "reference_to_video");
+        assert_eq!(
+            referenced.reference_roles,
+            vec!["courier".to_owned(), "workshop_plate".to_owned()]
+        );
+        assert!(
+            referenced.partition_reason.contains("minimax_h3_ref")
+                && referenced.partition_reason.contains("2 reference role"),
+            "{}",
+            referenced.partition_reason
+        );
+
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(plain.mode, "text_to_video");
+        assert!(plain.reference_roles.is_empty());
+        assert!(
+            plain.partition_reason.contains("no reference roles"),
+            "{}",
+            plain.partition_reason
+        );
+
+        // Both partitions reach the route under their own id, in role ORDER, and the reason rides
+        // the payload beside it.
+        let assets = role_assets();
+        let context = DispatchContext {
+            project_id: "proj_1",
+            run_id: "run_abc",
+            plan_id: "courier-workshop",
+            plan_version: 2,
+            attempt: 1,
+            tier: Some("q4"),
+            idempotency_key: Some("run_abc:SH010:a1"),
+            role_assets: &assets,
+        };
+        let body = referenced.to_job_body(&context).unwrap();
+        assert_eq!(body["model"], "minimax_h3_ref");
+        assert_eq!(body["mode"], "reference_to_video");
+        assert_eq!(
+            body["referenceAssetIds"],
+            json!(["asset_courier", "asset_plate"])
+        );
+        assert_eq!(
+            body["advanced"]["filmHarness"]["partitionReason"],
+            json!(referenced.partition_reason)
+        );
+        let body = plain.to_job_body(&context).unwrap();
+        assert_eq!(body["model"], "minimax_h3");
+        assert!(body.get("referenceAssetIds").is_none());
+
+        // Re-compiling the same plan says the same thing, so a conformance check on this document
+        // is clean — and a document whose reference shot was re-pointed at the base checkpoint is
+        // not.
+        assert!(compiled
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .is_empty());
+        let mut tampered = compiled.clone();
+        tampered.requests[0].model = "minimax_h3".to_owned();
+        let fields: Vec<String> = tampered
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert_eq!(fields, vec!["compiled.model".to_owned()], "{fields:?}");
+    }
+
+    #[test]
+    fn a_reference_shot_refuses_to_compile_when_the_partition_is_not_in_the_catalog() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let findings = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::single("minimax_h3", &base),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect_err("refuses");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert!(
+            findings[0].message.contains("minimax_h3_ref")
+                && findings[0]
+                    .message
+                    .contains("not in this API's model catalog"),
+            "{findings:?}"
+        );
     }
 
     #[test]

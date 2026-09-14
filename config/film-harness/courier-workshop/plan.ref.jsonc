@@ -1,0 +1,73 @@
+{
+  // Courier / workshop — the MIXED-PARTITION fixture (epic 23401, sc-23402). Two shots, and they
+  // deliberately resolve to DIFFERENT checkpoints of the same family:
+  //
+  //   SH010  binds `courier` + `workshop_plate`  -> minimax_h3_ref / reference_to_video
+  //   SH020  binds nothing                       -> minimax_h3     / text_to_video
+  //
+  // The plan declares the family ONCE (`model.id: "minimax_h3"`, as every other plan does). The
+  // compiler resolves the partition per shot and writes the resolved id and the reason onto each
+  // compiled request, the dispatched payload and the attempt record, so a run says which of the
+  // two 18.78 GB DiTs produced each take. See docs/film-harness.md, "Partition resolution".
+  //
+  // References are OPTIONAL input: SH020 binds none and is never refused for it. Everything else
+  // matches plan.jsonc — 24 fps, 576x320, the 5.1667s clip length — so the two plans are
+  // comparable shot for shot. `maxMemoryGb` is the same 96: both partitions declare
+  // `mlx.minMemoryGb: 64`, and a run that loads both is still bounded by the larger of the two.
+  //
+  // The pack's plates are the deterministic placeholders `film-harness fixture-images` writes, so
+  // the reference conditioning here proves the PLUMBING (the right checkpoint, the right payload,
+  // the right record), not likeness. Swap in real approved plates to judge likeness.
+  "schemaVersion": 2,
+  "id": "courier-workshop-ref",
+  "version": 1,
+  "title": "Courier at the Workshop (mixed partitions)",
+  "synopsis": "A courier enters a cluttered workshop carrying a red parcel and sets it on the workbench.",
+  "model": {
+    "id": "minimax_h3",
+    "tier": "q4",
+    "fps": 24,
+    "resolution": "576x320"
+  },
+  "limits": {
+    "maxRunSeconds": 7200,
+    "maxShotSeconds": 2700,
+    "maxAttemptsPerShot": 1,
+    "maxMemoryGb": 96
+  },
+  "shots": [
+    {
+      "id": "SH010",
+      "beat": "Establish the workshop with the courier in the doorway.",
+      "framing": "wide static, eye level, door camera-left, workbench centre",
+      "prompt": "A quiet, cluttered woodworking workshop in warm late-afternoon light. Tools hang on pegboard, sawdust on a long wooden workbench in the centre of frame. A courier in a blue jacket steps into the doorway on the left holding a small bright red parcel. Static wide shot, natural light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, door closed, workbench clear.",
+      "endState": "Courier standing in the doorway holding the red parcel.",
+      "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
+      // Reference conditioning, in ROLE ORDER: the courier first, the workshop plate second. The
+      // compiled request's `referenceAssetIds` keeps exactly this order.
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["courier", "workshop_plate"]
+      },
+      "seed": 23402,
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH020",
+      "beat": "The courier places the red parcel on the workbench.",
+      "framing": "close on the workbench surface, hands and parcel",
+      "prompt": "Close-up on a wooden workbench dusted with sawdust in a cluttered woodworking workshop. Two hands in the sleeves of a blue courier jacket lower a small bright red parcel onto the bench and let go, then withdraw out of frame. Warm late-afternoon light, shallow depth of field, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier at the bench with the parcel in hand.",
+      "endState": "Red parcel resting on the workbench, hands gone.",
+      "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
+      // No reference roles at all: this shot stays on the base checkpoint.
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 23403,
+      "dependsOn": [{ "shotId": "SH010", "kind": "continuity", "note": "SH020 places the parcel SH010's courier carried in." }],
+      "continuityRoles": ["workbench_table", "courier", "red_parcel", "house_style"]
+    }
+  ]
+}

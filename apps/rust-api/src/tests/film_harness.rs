@@ -1175,6 +1175,21 @@ impl Harness {
         path
     }
 
+    /// The shipped MIXED-PARTITION fixture (sc-23402) copied into the temp dir with `edit`
+    /// applied: SH010 binds `courier` + `workshop_plate`, SH020 binds nothing. Its sound block is
+    /// already absent, so it needs no ffmpeg.
+    pub(crate) fn mixed_partition_plan(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+        let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("plan.ref.jsonc"))
+            .expect("mixed fixture plan");
+        let mut plan: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("mixed fixture plan parses");
+        edit(&mut plan);
+        let path = self.temp_dir.path().join("plan-ref.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    }
+
     pub(crate) fn run_record(&self) -> Value {
         let text = std::fs::read_to_string(self.temp_dir.path().join("run-out/run.json"))
             .expect("run.json written");
@@ -1571,10 +1586,9 @@ async fn missing_reference_files_and_dangling_roles_are_refused_before_dispatch(
 async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_catalog() {
     let harness = Harness::start(true, vec![]).await;
     let plan = harness.edited_plan(|plan| {
-        // References on the base MiniMax-H3 checkpoint (limits.maxReferenceAssets = 0).
-        plan["shots"][0]["conditioning"] =
-            json!({ "mode": "reference_to_video", "referenceRoles": ["courier", "red_parcel"] });
-        // A negative prompt the model has no axis for.
+        // A negative prompt the model has no axis for. (A shot that binds reference roles is NOT a
+        // refusal any more: it resolves to `minimax_h3_ref`, which declares nine — sc-23402, and
+        // `a_mixed_plan_dispatches_each_shot_on_its_own_partition` owns that case.)
         plan["shots"][0]["negativePrompt"] = json!("blurry, low quality");
         // Off the fourteen-length menu, and an undeclared canvas.
         plan["shots"][1]["targetDurationSeconds"] = json!(6.0);
@@ -1590,17 +1604,6 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
         panic!("expected a validation refusal, got {error}");
     };
     let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
-    assert!(
-        text.iter().any(|m| m.contains("[SH010] conditioning.mode")
-            && m.contains("does not declare reference_to_video")),
-        "{text:?}"
-    );
-    assert!(
-        text.iter()
-            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
-                && m.contains("maxReferenceAssets")),
-        "{text:?}"
-    );
     assert!(
         text.iter().any(|m| m.contains("[SH010] negativePrompt")),
         "{text:?}"
@@ -1624,6 +1627,233 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
     );
     assert!(harness.jobs().await.is_empty());
     assert_eq!(harness.run_record()["outcome"], "rejected");
+}
+
+/// sc-23402 AC1/AC2. One plan, two checkpoints of one family: the shot that binds reference roles
+/// dispatches as `minimax_h3_ref` / `reference_to_video`, the shot that binds none as `minimax_h3`
+/// / `text_to_video` with no reference field at all — through the REAL
+/// `POST /api/v1/video/jobs` route, with the shipped catalog deciding what each partition declares.
+#[tokio::test]
+async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan_path = harness.mixed_partition_plan(|_| {});
+    let pack_path = harness.fixture_pack_without_sound();
+
+    // `film-harness compile --no-refine` writes the document a reviewer reads and the run
+    // dispatches. Doing it here rather than compiling in memory is the point: `compiled.json` is
+    // where per-shot partition resolution has to be visible.
+    let mut compile_options = planner_options(&harness, "compile-mixed");
+    compile_options.reference_pack_path = pack_path.clone();
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &compile_options,
+        &plan_path,
+    )
+    .await
+    .expect("the mixed plan compiles");
+    let compiled: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
+    )
+    .expect("compiled.json parses");
+
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.compiled_path = Some(artifacts.compiled_path.clone());
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(
+        compiled["model"]["id"], "minimax_h3",
+        "the plan declares the family once"
+    );
+    let request = |shot_id: &str| -> Value {
+        compiled["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .find(|request| request["shotId"] == shot_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no compiled request for {shot_id}"))
+    };
+    let referenced = request("SH010");
+    assert_eq!(referenced["model"], "minimax_h3_ref");
+    assert_eq!(referenced["mode"], "reference_to_video");
+    assert_eq!(
+        referenced["referenceRoles"],
+        json!(["courier", "workshop_plate"]),
+        "role ORDER is the plan's"
+    );
+    assert!(referenced["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+    let plain = request("SH020");
+    assert_eq!(plain["model"], "minimax_h3");
+    assert_eq!(plain["mode"], "text_to_video");
+    assert_eq!(plain["referenceRoles"], json!([]));
+
+    // What the route received, and what the record says about it.
+    let plate = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_plate")
+        .expect("plate imported");
+    let courier = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "courier")
+        .expect("courier imported");
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3_ref");
+                assert_eq!(job["payload"]["mode"], "reference_to_video");
+                assert_eq!(
+                    job["payload"]["referenceAssetIds"],
+                    json!([courier.asset_id, plate.asset_id]),
+                    "the reference assets ride the payload in role order"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
+                assert_eq!(
+                    shot.conditioning_assets.reference_asset_ids,
+                    vec![courier.asset_id.clone(), plate.asset_id.clone()]
+                );
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3_ref",
+                    "the route resolved the reference partition's entry for this shot"
+                );
+                assert_eq!(
+                    attempt.take.as_ref().expect("take").model,
+                    "minimax_h3_ref",
+                    "the take names the checkpoint that rendered it"
+                );
+            }
+            "SH020" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3");
+                assert_eq!(job["payload"]["mode"], "text_to_video");
+                // The route normalises an absent list to `[]`; the SENT body carries no
+                // `referenceAssetIds` key at all (asserted on the compiled request in
+                // `film_compile`'s own tests).
+                assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3",
+                    "the route resolved the base entry for this shot"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3");
+                assert_eq!(attempt.take.as_ref().expect("take").model, "minimax_h3");
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+        assert!(
+            !attempt.partition_reason.is_empty(),
+            "{} has no partition reason",
+            shot.shot_id
+        );
+        assert_eq!(
+            job["payload"]["advanced"]["filmHarness"]["partitionReason"],
+            json!(attempt.partition_reason),
+            "the payload and the record carry the same reason"
+        );
+    }
+
+    // And on disk, where a later reader finds it.
+    let on_disk = harness.run_record();
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .and_then(|shot| shot["attempts"][0].as_object())
+            .map(|attempt| Value::Object(attempt.clone()))
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(attempt("SH010")["resolvedModelId"], "minimax_h3_ref");
+    assert_eq!(attempt("SH020")["resolvedModelId"], "minimax_h3");
+    assert!(attempt("SH010")["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+}
+
+/// sc-23402 AC1, the refusals: too many roles for the RESOLVED partition, and a
+/// `reference_to_video` shot binding none.
+#[tokio::test]
+async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
+    let harness = Harness::start(true, vec![]).await;
+    // Ten roles against `minimax_h3_ref`'s declared nine. The pack approves ten so the count is
+    // the only thing wrong with the plan.
+    let roles: Vec<String> = (0..10).map(|index| format!("plate_{index}")).collect();
+    let pack = harness.edited_pack(|pack| {
+        let references = pack["references"].as_array_mut().expect("references");
+        for role in 0..10 {
+            references.push(json!({
+                "role": format!("plate_{role}"),
+                "kind": "plate",
+                "file": "references/workshop_plate.png"
+            }));
+        }
+    });
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"]["referenceRoles"] = json!(roles);
+    });
+    let mut options = harness.options(plan, pack.clone(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-too-many-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("over the cap");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("minimax_h3_ref")
+                && m.contains("maxReferenceAssets")
+                && m.contains('9')),
+        "{text:?}"
+    );
+
+    // A reference_to_video shot binding nothing: a contradiction, named with the shot.
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"] = json!({ "mode": "reference_to_video" });
+    });
+    let mut options = harness.options(plan, pack, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-no-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("no references on a reference shot");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("at least one reference role")),
+        "{text:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// `GET /api/v1/jobs/{id}`, for the assertions above.
+async fn request_job(harness: &Harness, job_id: &str) -> (axum::http::StatusCode, Value) {
+    request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -5417,9 +5647,11 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
     unknown_field["shots"][0]["cameraLens"] = json!("35mm");
     let mut off_menu = full_draft();
     off_menu["shots"][1]["targetDurationSeconds"] = json!(6.0);
+    // A reference mode with nothing bound to it. Since sc-23402 a draft that BINDS reference roles
+    // is legitimate — it resolves to the family's reference partition and dispatches there — but a
+    // reference shot with no references is still a contradiction the validator names.
     let mut unsupported = full_draft();
-    unsupported["shots"][2]["conditioning"] =
-        json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+    unsupported["shots"][2]["conditioning"] = json!({ "mode": "reference_to_video" });
     let mut unanchored = full_draft();
     unanchored["shots"][3]["continuityRoles"] = json!([]);
     unanchored["shots"][3]["conditioning"] =
@@ -5439,7 +5671,7 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
         (
             "unsupported conditioning",
             draft_text(&unsupported),
-            "does not declare reference_to_video",
+            "requires at least one reference role",
         ),
         (
             "chain as the only anchor",

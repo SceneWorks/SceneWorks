@@ -32,7 +32,7 @@ item at a take the run already has, and renders nothing.
 | Document | Schema | Fixture |
 | --- | --- | --- |
 | Brief | `sceneworks_core::film_planner::ProductionBrief` | `config/film-harness/courier-workshop/brief.jsonc` |
-| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots) |
+| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots), `plan.ref.jsonc` (two shots on two MiniMax-H3 partitions) |
 | Reference pack | `sceneworks_core::film_plan::ReferencePack` | `config/film-harness/courier-workshop/references.jsonc` |
 | Compiled requests | `sceneworks_core::film_compile::CompiledPlan` | written to `--out/compiled.json` |
 | Review plan | `sceneworks_core::film_review::ReviewPlan` | `config/film-harness/courier-workshop/review.jsonc` |
@@ -312,6 +312,51 @@ reference pack.
 `compiled.json` also carries the planner's cost (`planner`, sc-22715) whenever an LLM produced or
 refined it — see *Planning from a brief*. A `--no-refine` compile of a hand-authored plan ran no
 LLM and records none.
+
+### Partition resolution (sc-23402)
+
+Some model families ship their reference conditioning as a **separate catalog entry**. MiniMax-H3 is
+two 18.78 GB DiT checkpoints: `minimax_h3` serves `text_to_video | image_to_video |
+first_last_frame` and declares `limits.maxReferenceAssets: 0`, while `minimax_h3_ref` serves
+`reference_to_video` only and declares 9 reference images, 3 source clips and 3 reference audio
+clips. Routing a text-to-video request at the reference entry loads the wrong checkpoint, so the
+route refuses every other pairing.
+
+A plan still declares the **family once** (`model.id: "minimax_h3"`). The compiler resolves the
+partition **per shot**:
+
+| the shot's `conditioning.referenceRoles` | it compiles to |
+| --- | --- |
+| non-empty | `minimax_h3_ref`, with `referenceAssetIds` in the plan's role order |
+| empty | `minimax_h3`, with its declared mode and no reference field at all |
+
+References are **optional input**. A shot that binds none is never refused for it — it simply stays
+on the plan's model. (A shot that declares `reference_to_video` and binds nothing is a
+contradiction, and is refused naming the shot and the requirement.) A family with no reference
+partition keeps the old behaviour exactly: the declared model's own `limits.maxReferenceAssets` is
+what refuses a shot that binds too many.
+
+Three documents carry the outcome, and they cannot disagree because all three read one string:
+
+- the compiled request's `model` is the **resolved** id, with `partitionReason` beside it saying why;
+- the dispatched body's `model` is that same id (`to_job_body` writes it), and
+  `advanced.filmHarness.partitionReason` carries the reason;
+- the attempt record's `resolvedModelId` / `partitionReason`, and the take's `model`.
+
+Validation follows the resolution: each shot is checked against the **resolved** partition's
+declared capabilities, menus and caps, and `validate`/`run` check catalog presence, install state
+and platform reachability for **both** partitions when any shot needs the reference one. The run's
+memory preflight uses the largest `minMemoryGb` among the partitions the plan actually uses — a run
+that loads both is bounded by the larger floor. A reference shot whose partition is not in the
+catalog is refused **by name, with the shot**, never dispatched at the base checkpoint.
+
+There are no per-shot model overrides across families: the only id resolution can ever produce is
+the declared model's own reference partition.
+
+`config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
+`courier` + `workshop_plate`, SH020 binds nothing — and
+`PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh` renders it
+end to end. Budget it longer than the base two-shot smoke: the run loads both DiTs.
 
 ### Dependencies (plan schema 2)
 
@@ -860,6 +905,25 @@ eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
 export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
 scripts/film-harness-smoke.sh
 ```
+
+**Mixed partitions (sc-23402).** `config/film-harness/courier-workshop/plan.ref.jsonc` is two shots
+that resolve to two different MiniMax-H3 checkpoints out of one plan — SH010 binds `courier` +
+`workshop_plate` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
+renders on `minimax_h3` / `text_to_video`. It is the same `SH010,SH020` selection the script
+defaults to, so the plan is the only thing that changes:
+
+```sh
+eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
+export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
+PLAN=config/film-harness/courier-workshop/plan.ref.jsonc \
+  SCENEWORKS_SMOKE_DIR=~/SceneWorks/film-harness-evidence/sc-23402/mixed-smoke \
+  scripts/film-harness-smoke.sh
+```
+
+Budget it longer than the base two-shot smoke: the run loads BOTH 18.78 GB DiTs (the reference one
+for SH010, the base one for SH020), so there is an extra checkpoint load between the shots. Read
+`run.json`'s `shots[].attempts[].resolvedModelId` to confirm which checkpoint rendered each take —
+see *Partition resolution* above.
 
 The script sets `SCENEWORKS_GPU_ID` for the render worker (`mlx` on macOS): the worker binary
 defaults that to `cpu`, and a cpu worker spawns the utility pool and advertises no
