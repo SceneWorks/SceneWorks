@@ -969,6 +969,29 @@ for SH010, the base one for SH020), so there is an extra checkpoint load between
 `run.json`'s `shots[].attempts[].resolvedModelId` to confirm which checkpoint rendered each take —
 see *Partition resolution* above.
 
+**What the 2026-09-14 runs measured (sc-23402), and the engine defect they hit.** Both runs
+dispatched SH010 as `minimax_h3_ref` / `reference_to_video` through the real route and the MLX
+worker loaded the reference checkpoint for it — the resolution, the payload and the record all
+agree. The RENDER is a different story, and it is inference-side, not harness-side:
+
+- **The reference partition is far slower per denoise step.** SH020 on the base checkpoint ran at
+  ~17 s/step (50 steps in ~17 min at 576x320, matching the entry's own `durationHint`). SH010 on
+  the reference partition ran at roughly **110 s/step** — about 6x — on top of a ~21 minute cold
+  load of the `transformer_ref` DiT plus the staged text encoder. `plan.ref.jsonc`'s limits are
+  sized for that; `plan.jsonc`'s 2700 s per-shot budget cuts the reference shot mid-render.
+- **The reference conditioning intermittently arrives degenerate.** The second run's SH010 was
+  refused by the engine before denoising: *"minimax-h3 te (ref2va token embedding): refusing to
+  render from a degenerate conditioning tensor — every element is exactly zero at shape
+  [1, 14801, 5120]"* (the engine's own guard, citing sc-23053, originally sc-17153). The first run
+  did NOT hit it — the same plan, the same weights, the same host, denoising past step 14 — so it
+  is intermittent, which is the signature of the fresh-Metal-buffer zero-read class rather than bad
+  weights on disk. Nothing in SceneWorks can work around it: the fix is in the inference engine at
+  the pinned revision.
+
+The harness behaved correctly through both: the first run stopped on its declared per-shot budget
+and refused to dispatch a second render beside the one still in flight, the second recorded the
+engine's refusal against SH010, rendered SH020 and exported the timeline.
+
 The script sets `SCENEWORKS_GPU_ID` for the render worker (`mlx` on macOS): the worker binary
 defaults that to `cpu`, and a cpu worker spawns the utility pool and advertises no
 `video_generate`, so the harness would refuse for want of a GPU worker that is in fact running.
