@@ -38,6 +38,7 @@
 //! outright when the directory already holds a run record, and `replace_take` refuses while the
 //! shot still has an unsettled attempt; neither is a substitute for not starting two at once.
 
+pub mod references;
 pub mod review;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,11 +54,11 @@ use sceneworks_core::film_compile::{
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
-    HardwareRecord, IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionDecision,
-    ProductionPlan, ReferenceAssetRecord, ReferencePack, ReviewFlag, RunOutcome, RunRecord,
-    RunState, RunStop, ShotOutcome, ShotRunRecord, SoundBed, SoundBus, SourceDocument, TakeRecord,
-    TakeRejection, TimelineEditRecord, TimelineItemRecord, TimelineRecord, TimelineTrackRecord,
-    RUN_RECORD_SCHEMA_VERSION,
+    HardwareRecord, IntendedState, ModelEntries, ModelLane, ModelRecord, PlanDiagnostic,
+    ProductionDecision, ProductionPlan, ReferenceAssetRecord, ReferencePack, ReviewFlag,
+    RunOutcome, RunRecord, RunState, RunStop, ShotOutcome, ShotRunRecord, SoundBed, SoundBus,
+    SourceDocument, TakeRecord, TakeRejection, TimelineEditRecord, TimelineItemRecord,
+    TimelineRecord, TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
 };
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
@@ -97,7 +98,7 @@ const ASPECT_TIE_EPSILON: f64 = 1e-9;
 /// reports `memoryGb` as the worker's `memoryTotalMb / 1024`, and the manifests' `minMemoryGb` are
 /// written in the same base, so `limits.maxMemoryGb` is a GiB budget and an observed peak in bytes
 /// has to be divided by 1024^3 to be compared with it.
-const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+pub(crate) const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Tag every harness-imported APPROVED reference carries beside its role tag.
 const REFERENCE_TAG: &str = "film-harness-reference";
@@ -175,11 +176,13 @@ pub trait ApiTransport: Send + Sync {
     fn call(&self, request: ApiRequest) -> TransportFuture<'_>;
 
     /// GET a file the API serves as BYTES rather than as JSON — a project's stored media
-    /// (`/api/v1/projects/:id/files/*path`), which is how a synthesized dialogue clip (sc-23404)
-    /// reaches the pack directory.
+    /// (`/api/v1/projects/:id/files/*path`). Two callers share it: `make-references` (sc-23403)
+    /// downloads a rendered plate into the pack directory, and a synthesized dialogue clip
+    /// (sc-23404) reaches the pack directory the same way.
     ///
     /// A separate method rather than a flag on [`ApiRequest`] because the two answers have
-    /// different shapes: [`ApiResponse`] parses its body as JSON, and a WAV is not JSON. It is the
+    /// different shapes: [`ApiResponse`] parses its body as JSON, and neither a PNG nor a WAV is
+    /// JSON. It is the
     /// download seam, so it must go through the transport like every other request: `--api` may
     /// legitimately point at a SceneWorks API on another machine on the private network, whose
     /// project directory this process cannot read.
@@ -527,22 +530,6 @@ pub(crate) async fn job_peak_memory_bytes(
         .await
         .and_then(|metrics| metrics.get("peakMemoryBytes").and_then(Value::as_u64))
         .filter(|bytes| *bytes > 0)
-}
-
-/// The catalog entry for `model_id`, against a bare transport.
-pub(crate) async fn model_entry_for(
-    transport: &dyn ApiTransport,
-    model_id: &str,
-) -> Result<Option<JsonObject<String, Value>>, HarnessError> {
-    let control = RunControl::new();
-    resolve_model_entry(
-        &Client {
-            transport,
-            control: &control,
-        },
-        model_id,
-    )
-    .await
 }
 
 /// The API host's facts, against a bare transport: the platform whose lane and reachability gate a
@@ -1104,8 +1091,165 @@ async fn resolve_model_entry(
         .cloned())
 }
 
+/// The catalog entries one plan's shots may dispatch as (sc-23402): the declared model, plus the
+/// family's reference partition when some shot of THIS plan binds reference roles.
+///
+/// It owns the entries because `Prepared` outlives the request that fetched them;
+/// [`PlanCatalog::entries`] is the borrowed view every validator and the compiler read.
+pub(crate) struct PlanCatalog {
+    model_id: String,
+    base: Option<JsonObject<String, Value>>,
+    /// The reference partition this plan needs, when it needs one. `Some(id)` with a `None`
+    /// `reference` is a partition the catalog does not serve — named per shot by the validator.
+    reference_id: Option<String>,
+    reference: Option<JsonObject<String, Value>>,
+}
+
+impl PlanCatalog {
+    /// The borrowed view, or `None` when the plan's own model is not in the catalog at all (which
+    /// [`model_entry_findings`] has already reported).
+    pub(crate) fn entries(&self) -> Option<ModelEntries<'_>> {
+        let base = self.base.as_ref()?;
+        Some(ModelEntries::with_reference_partition(
+            &self.model_id,
+            base,
+            self.reference_id.as_deref().zip(self.reference.as_ref()),
+        ))
+    }
+
+    pub(crate) fn base_entry(&self) -> Option<&JsonObject<String, Value>> {
+        self.base.as_ref()
+    }
+}
+
+/// The entry-level gate — catalog presence, video type, install state, platform reachability.
+///
+/// The base partition is always gated. The reference partition is gated only when
+/// `gate_reference` says THIS invocation will load it (sc-23402): the reference DiT is a separate
+/// 18.78 GB download with its own install state, so a run that discovers it uninstalled at
+/// dispatch has already spent the base checkpoint's load — but references are OPTIONAL (E1), and a
+/// caller that will never load those weights must not be asked to have them on disk. The planner
+/// passes `false` (no draft exists yet, and its envelope cannot produce a reference shot at all),
+/// and `validate`/`run` pass whether a SELECTED shot resolves to it.
+///
+/// A partition the catalog does not serve at all is deliberately NOT reported here: the per-shot
+/// validator names it together with the shot that needs it, which is the actionable form.
+pub(crate) fn catalog_entry_findings(
+    catalog: &PlanCatalog,
+    tier: Option<&str>,
+    require_installed: bool,
+    facts: &HostFacts,
+    gate_reference: bool,
+) -> Vec<PlanDiagnostic> {
+    let mut findings = model_entry_findings(
+        &catalog.model_id,
+        catalog.base_entry(),
+        tier,
+        require_installed,
+        facts,
+    );
+    if !gate_reference {
+        return findings;
+    }
+    if let (Some(reference_id), Some(reference)) =
+        (catalog.reference_id.as_deref(), catalog.reference.as_ref())
+    {
+        findings.extend(model_entry_findings(
+            reference_id,
+            Some(reference),
+            tier,
+            require_installed,
+            facts,
+        ));
+    }
+    findings
+}
+
+/// Whether some SELECTED shot resolves to the family's reference partition — which is what decides
+/// whether that partition's install state and platform reachability are gated (sc-23402 review).
+///
+/// Plan-level validation of the DOCUMENT stays whole-plan: a `--shots SH020` run is still refused
+/// for a malformed SH010, and the reference entry is still resolved so SH010's declared caps can be
+/// judged. Only the install gate follows the selection, because only the selected shots are
+/// dispatched and only their partitions are ever loaded.
+fn selection_needs_reference(plan: &ProductionPlan, selection: Option<&[String]>) -> bool {
+    plan.shots
+        .iter()
+        .filter(|shot| match selection {
+            Some(ids) => ids.iter().any(|id| id == &shot.id),
+            None => true,
+        })
+        .any(|shot| !shot.conditioning.reference_roles.is_empty())
+}
+
+/// Resolve the catalog entries a plan or brief on `model_id` may dispatch as, against a bare
+/// transport. `include_reference` asks for the family's reference partition too — what the PLANNER
+/// needs, since the draft it is about to produce may bind reference roles.
+pub(crate) async fn plan_catalog_for(
+    transport: &dyn ApiTransport,
+    model_id: &str,
+    include_reference: bool,
+) -> Result<PlanCatalog, HarnessError> {
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    resolve_catalog(&client, model_id, include_reference).await
+}
+
+/// The family's reference partition when THIS plan needs it: some shot binds reference roles and
+/// the declared model's family splits reference conditioning into a second catalog entry. A plan
+/// whose shots bind none never resolves it, so a run that needs only the base checkpoint neither
+/// demands the reference weights be installed nor prices their memory.
+fn plan_reference_partition(plan: &ProductionPlan) -> Option<String> {
+    if !plan
+        .shots
+        .iter()
+        .any(|shot| !shot.conditioning.reference_roles.is_empty())
+    {
+        return None;
+    }
+    film_plan::reference_partition_for(&plan.model.id).map(str::to_owned)
+}
+
+/// Resolve every catalog entry `plan` may dispatch as.
+async fn resolve_plan_catalog(
+    client: &Client<'_>,
+    plan: &ProductionPlan,
+) -> Result<PlanCatalog, HarnessError> {
+    resolve_catalog(
+        client,
+        &plan.model.id,
+        plan_reference_partition(plan).is_some(),
+    )
+    .await
+}
+
+async fn resolve_catalog(
+    client: &Client<'_>,
+    model_id: &str,
+    include_reference: bool,
+) -> Result<PlanCatalog, HarnessError> {
+    let base = resolve_model_entry(client, model_id).await?;
+    let reference_id = include_reference
+        .then(|| film_plan::reference_partition_for(model_id))
+        .flatten()
+        .map(str::to_owned);
+    let reference = match reference_id.as_deref() {
+        Some(id) => resolve_model_entry(client, id).await?,
+        None => None,
+    };
+    Ok(PlanCatalog {
+        model_id: model_id.to_owned(),
+        base,
+        reference_id,
+        reference,
+    })
+}
+
 /// Whether the catalog reports the requested tier (or, with no tier named, the model) installed.
-fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
+pub(crate) fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
     if let Some(tier) = tier {
         if let Some(variants) = entry.get("variants").and_then(Value::as_array) {
             if let Some(variant) = variants
@@ -1150,6 +1294,38 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
     }))
 }
 
+/// [`primary_weights`] for EVERY partition the SELECTED shots resolve to, keyed by catalog model id
+/// (sc-23402 review).
+///
+/// `ModelRecord::weights` names the declared model's download row only, so on a mixed run nothing
+/// recorded the `transformer_ref` rows that produced the reference takes. Keyed by partition so a
+/// reader can pair a take's `model` with the files behind it. A partition the catalog does not
+/// serve contributes no entry — the run is already refused for it by name.
+fn partition_weights(
+    plan: &ProductionPlan,
+    entries: &ModelEntries<'_>,
+    tier: Option<&str>,
+    selection: &[String],
+) -> BTreeMap<String, Value> {
+    let mut weights = BTreeMap::new();
+    let selected = ProductionPlan {
+        shots: plan
+            .shots
+            .iter()
+            .filter(|shot| selection.iter().any(|id| id == &shot.id))
+            .cloned()
+            .collect(),
+        ..plan.clone()
+    };
+    for partition in entries.partitions_used(&selected) {
+        let (id, entry) = entries.resolve_shot_partition_entry(&partition);
+        if let Some(row) = entry.and_then(|entry| primary_weights(entry, tier)) {
+            weights.insert(id.to_owned(), row);
+        }
+    }
+    weights
+}
+
 /// The compiled requests this run dispatches: the document beside the plan when there is one, else
 /// the plan compiled in memory with its authored prompts (the hand-authored path). Either way the
 /// job bodies come from [`CompiledRequest::to_job_body`], so what a reviewer reads in
@@ -1157,7 +1333,7 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
 fn compiled_for_run(
     plan: &ProductionPlan,
     pack: &ReferencePack,
-    entry: &JsonObject<String, Value>,
+    entries: &ModelEntries<'_>,
     lane: ModelLane,
     plan_sha256: &str,
     supplied: Option<CompiledPlan>,
@@ -1170,7 +1346,7 @@ fn compiled_for_run(
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
             let mut findings = compiled.staleness_findings(plan, plan_sha256);
             if findings.is_empty() {
-                findings = compiled.conformance_findings(plan, entry, lane);
+                findings = compiled.conformance_findings(plan, entries, lane);
             }
             if findings.is_empty() {
                 Ok(compiled)
@@ -1182,7 +1358,7 @@ fn compiled_for_run(
             plan,
             pack,
             &CompileInputs {
-                model_entry: entry,
+                entries,
                 lane: lane.manifest_key(),
                 plan_sha256,
                 compiled_at: &utc_now(),
@@ -1527,8 +1703,14 @@ pub async fn validate(
         // checked against and which platform the route's reachability gate is judged on, so the
         // model checks cannot run before it is known.
         let facts = discover_host(&client).await?;
-        let entry = resolve_model_entry(&client, &plan.model.id).await?;
-        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed, &facts);
+        let catalog = resolve_plan_catalog(&client, &plan).await?;
+        let mut findings = model_findings(
+            &plan,
+            &catalog,
+            options.require_installed,
+            &facts,
+            options.shot_ids.as_deref(),
+        );
         if findings.is_empty() {
             findings.extend(host_findings(&plan, &facts, options.export));
         }
@@ -1537,8 +1719,9 @@ pub async fn validate(
         // `execute_run` reads every field but the prompt straight out of it, so this is the only
         // place a hand-edited request meets the model's declared menus (sc-22713 review).
         if findings.is_empty() {
-            if let (Some((compiled, path)), Some(entry)) = (compiled.as_ref(), entry.as_ref()) {
-                let mut conformance = compiled.conformance_findings(&plan, entry, facts.lane());
+            if let (Some((compiled, path)), Some(entries)) = (compiled.as_ref(), catalog.entries())
+            {
+                let mut conformance = compiled.conformance_findings(&plan, &entries, facts.lane());
                 if !conformance.is_empty() {
                     findings.push(compiled_document_header(path));
                     findings.append(&mut conformance);
@@ -1640,13 +1823,20 @@ fn platform_reachability_finding(
 /// that depend on the PLAN — how many references a shot carries, and the model/mode spelling.
 fn reference_payload_findings(
     plan: &ProductionPlan,
-    entry: &JsonObject<String, Value>,
+    entries: &ModelEntries<'_>,
 ) -> Vec<PlanDiagnostic> {
-    let value = Value::Object(entry.clone());
     let mut findings = Vec::new();
     for shot in &plan.shots {
+        // The gate runs on the payload this shot will ACTUALLY produce, which on a split family
+        // names the resolved partition and carries that entry's caps (sc-23402). A shot whose
+        // partition is not in the catalog is already a finding from the validator.
+        let (partition, partition_entry) = entries.resolve_shot(shot);
+        let Some(partition_entry) = partition_entry else {
+            continue;
+        };
+        let value = Value::Object(partition_entry.clone());
         let mut payload = JsonObject::new();
-        payload.insert("model".to_owned(), json!(plan.model.id));
+        payload.insert("model".to_owned(), json!(partition.model_id));
         payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
         payload.insert(
             "referenceAssetIds".to_owned(),
@@ -1711,26 +1901,27 @@ pub(crate) fn model_entry_findings(
 
 fn model_findings(
     plan: &ProductionPlan,
-    entry: Option<&JsonObject<String, Value>>,
+    catalog: &PlanCatalog,
     require_installed: bool,
     facts: &HostFacts,
+    selection: Option<&[String]>,
 ) -> Vec<PlanDiagnostic> {
-    let mut findings = model_entry_findings(
-        &plan.model.id,
-        entry,
+    let mut findings = catalog_entry_findings(
+        catalog,
         plan.model.tier.as_deref(),
         require_installed,
         facts,
+        selection_needs_reference(plan, selection),
     );
-    let Some(entry) = entry else {
+    let Some(entries) = catalog.entries() else {
         return findings;
     };
     findings.extend(film_plan::validate_plan_against_model(
         plan,
-        entry,
+        &entries,
         facts.lane(),
     ));
-    findings.extend(reference_payload_findings(plan, entry));
+    findings.extend(reference_payload_findings(plan, &entries));
     findings
 }
 
@@ -1777,31 +1968,56 @@ fn host_findings(plan: &ProductionPlan, facts: &HostFacts, export: bool) -> Vec<
 
 /// The model entry, host facts and fps a run needs once the documents themselves are valid.
 struct Prepared {
-    entry: JsonObject<String, Value>,
+    catalog: PlanCatalog,
     facts: HostFacts,
     fps: u32,
 }
 
+impl Prepared {
+    /// The plan's declared model entry. Present by construction: `prepare` only builds a
+    /// `Prepared` once the model findings are empty, which needs the entry.
+    fn base_entry(&self) -> &JsonObject<String, Value> {
+        self.catalog
+            .base_entry()
+            .expect("model findings are empty only with an entry")
+    }
+
+    fn entries(&self) -> ModelEntries<'_> {
+        self.catalog
+            .entries()
+            .expect("model findings are empty only with an entry")
+    }
+}
+
 /// Resolve the catalog entry and the host facts and judge the plan against both. `Ok(Err(findings))`
 /// is a refusal: the caller writes a `rejected` record and creates nothing.
+///
+/// `selection` is the shots THIS controller will dispatch (`None` = the whole plan). It scopes the
+/// reference partition's install gate only — the plan itself is still judged whole (sc-23402).
 async fn prepare(
     client: &Client<'_>,
     plan: &ProductionPlan,
     export: bool,
     require_installed: bool,
+    selection: Option<&[String]>,
 ) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
     let facts = discover_host(client).await?;
-    let entry = resolve_model_entry(client, &plan.model.id).await?;
-    let mut findings = model_findings(plan, entry.as_ref(), require_installed, &facts);
+    let catalog = resolve_plan_catalog(client, plan).await?;
+    let mut findings = model_findings(plan, &catalog, require_installed, &facts, selection);
     if findings.is_empty() {
         findings.extend(host_findings(plan, &facts, export));
     }
     if !findings.is_empty() {
         return Ok(Err(findings));
     }
-    let entry = entry.expect("model findings are empty only with an entry");
-    let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
-    Ok(Ok(Prepared { entry, facts, fps }))
+    let prepared = Prepared {
+        catalog,
+        facts,
+        fps: 0,
+    };
+    let fps =
+        film_plan::plan_fps(plan, prepared.base_entry()).expect("validated against the model");
+    Ok(Ok(Prepared { fps, ..prepared }))
 }
 
 /// One shot's selected take, resolved to everything the timeline needs.
@@ -1917,6 +2133,46 @@ struct Session<'a> {
 }
 
 impl Session<'_> {
+    /// The model id one shot dispatches as and why, read straight off the compiled request so the
+    /// attempt record, the job payload and `compiled.json` carry one string, not three derivations
+    /// of it (sc-23402). A shot with no compiled request cannot be dispatched at all, so the
+    /// fallback is only ever reached by a caller that is about to refuse.
+    fn resolved_partition(&self, shot_id: &str) -> (String, String) {
+        match self.compiled.request(shot_id) {
+            Some(request) => (request.model.clone(), request.partition_reason.clone()),
+            None => (self.plan.model.id.clone(), String::new()),
+        }
+    }
+
+    /// The partition one RECORDED attempt dispatched as, for the take it produced.
+    ///
+    /// A run record written before sc-23402 carries no `resolvedModelId` at all, and
+    /// `#[serde(default)]` reads that as `""` — so a resume that adopted such an attempt used to
+    /// record its take with `model: ""`, losing the only statement of which checkpoint made it.
+    /// An empty value falls back to this shot's resolved partition, which is exactly what the
+    /// first controller would have written, and the attempt row is BACKFILLED so the record
+    /// self-heals on the resume that touched it rather than staying blank forever.
+    fn dispatched_model_for(
+        &mut self,
+        shot_id: &str,
+        shot_index: usize,
+        attempt_index: usize,
+    ) -> String {
+        let recorded = self.record.shots[shot_index].attempts[attempt_index]
+            .resolved_model_id
+            .clone();
+        if !recorded.is_empty() {
+            return recorded;
+        }
+        let (model, reason) = self.resolved_partition(shot_id);
+        let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+        attempt.resolved_model_id = model.clone();
+        if attempt.partition_reason.is_empty() {
+            attempt.partition_reason = reason;
+        }
+        model
+    }
+
     /// Total AUTOMATIC wall-clock this run has consumed, across every controller that has held it.
     /// A controller that does not charge the run budget contributes nothing here.
     fn elapsed(&self) -> f64 {
@@ -2884,12 +3140,17 @@ impl Session<'_> {
             Some("webp") => "image/webp",
             _ => "image/png",
         };
-        let provenance = json!({
+        let mut provenance = json!({
             "filmHarness": {
                 "kind": "reference",
                 "role": reference.role,
                 "referenceKind": reference.kind,
                 "approved": reference.approved,
+                // sc-23403: whether this plate was GENERATED as a fixture or supplied by a person,
+                // carried onto the asset so the answer survives the pack document. It changes
+                // nothing else — a generated reference is imported, tagged and conditioned on
+                // exactly like any other, and `approved` remains the only gate.
+                "generated": reference.generated,
                 "referencePackId": self.pack.id,
                 "referencePackVersion": self.pack.version,
                 "planId": self.plan.id,
@@ -2899,6 +3160,22 @@ impl Session<'_> {
                 "sha256": sha256,
             }
         });
+        if let Some(generation) = reference.generation.as_ref() {
+            // A provenance block that cannot be serialized is a refusal, not a `null`: the whole
+            // point of `generated` is that the answer survives the pack document, and an asset
+            // stamped `"generation": null` would say the plate came from nowhere.
+            let block = serde_json::to_value(generation).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot serialize the generation provenance for reference {:?}: {error}",
+                    reference.role
+                ))
+            })?;
+            provenance
+                .get_mut("filmHarness")
+                .and_then(Value::as_object_mut)
+                .expect("the provenance literal has a filmHarness object")
+                .insert("generation".to_owned(), block);
+        }
         let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
         let route = format!("/api/v1/projects/{project_id}/assets");
         let response = self
@@ -3117,9 +3394,12 @@ impl Session<'_> {
                     }
                     let number = self.record.shots[index].next_attempt_number();
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
+                    let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
                         attempt: number,
                         idempotency_key: key,
+                        resolved_model_id,
+                        partition_reason,
                         job_id: None,
                         status: "dispatching".to_owned(),
                         started_at: utc_now(),
@@ -3304,8 +3584,11 @@ impl Session<'_> {
         let cancel_honoured = view.is_terminal();
         let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
         let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
+        // The take names the partition that actually rendered it, not the plan's declared family
+        // model (sc-23402).
+        let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
-            .then(|| take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref()))
+            .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
             .flatten();
         {
             let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
@@ -3499,10 +3782,9 @@ impl Session<'_> {
             };
             let view = self.client.get_job(&job_id).await?;
             let terminal = view.is_terminal() && view.is_settled();
+            let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
             let take = (terminal && view.status == "completed")
-                .then(|| {
-                    take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref())
-                })
+                .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
                 .flatten();
             let mut adopted_memory = None;
             if terminal {
@@ -4510,7 +4792,15 @@ pub async fn run_with_control(
         }
         Err(other) => return Err(other),
     };
-    let prepared = match prepare(&client, &plan, options.export, options.require_installed).await? {
+    let prepared = match prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        options.shot_ids.as_deref(),
+    )
+    .await?
+    {
         Ok(prepared) => prepared,
         Err(findings) => {
             let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
@@ -4556,7 +4846,7 @@ pub async fn run_with_control(
     let compiled = compiled_for_run(
         &plan,
         &pack,
-        &prepared.entry,
+        &prepared.entries(),
         lane,
         &record.plan.sha256,
         supplied_compiled.map(|(compiled, _)| compiled),
@@ -4567,7 +4857,13 @@ pub async fn run_with_control(
         fps: prepared.fps,
         lane: lane.manifest_key().to_owned(),
         backend_observed: None,
-        weights: primary_weights(&prepared.entry, plan.model.tier.as_deref()),
+        weights: primary_weights(prepared.base_entry(), plan.model.tier.as_deref()),
+        partition_weights: partition_weights(
+            &plan,
+            &prepared.entries(),
+            plan.model.tier.as_deref(),
+            record.selected_shot_ids.as_slice(),
+        ),
         hardware: HardwareRecord {
             platform: prepared.facts.platform_or_local().to_owned(),
             // The host-capabilities route reports no arch, so this process's arch is the truth only
@@ -4684,9 +4980,17 @@ async fn continue_run(
         transport,
         control: &options.control,
     };
-    let prepared = prepare(&client, &plan, options.export, options.require_installed)
-        .await?
-        .map_err(HarnessError::Validation)?;
+    // A resume dispatches exactly the shots the first controller selected, so the reference
+    // partition's install gate follows the RECORD's selection, not the whole plan (sc-23402).
+    let prepared = prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        Some(&record.selected_shot_ids),
+    )
+    .await?
+    .map_err(HarnessError::Validation)?;
     // The requests the run was dispatching. A record that named a compiled document is held to it,
     // hash and all — re-reading the file the run started from is what keeps a resume from
     // dispatching an edited `compiled.json` under the takes the first controller already made, the
@@ -4721,7 +5025,7 @@ async fn continue_run(
     let compiled = compiled_for_run(
         &plan,
         &pack,
-        &prepared.entry,
+        &prepared.entries(),
         prepared.facts.lane(),
         &record.plan.sha256,
         supplied,
@@ -4990,9 +5294,12 @@ pub async fn replace_take(
     // Exactly one attempt, marked as the human decision it is so it never spends the plan's cap.
     let number = session.record.shots[index].next_attempt_number();
     let key = idempotency_key(&session.record.run_id, shot_id, number);
+    let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
         idempotency_key: key,
+        resolved_model_id,
+        partition_reason,
         job_id: None,
         status: "dispatching".to_owned(),
         started_at: utc_now(),
@@ -5354,6 +5661,20 @@ pub const FIXTURE_PLATE_SIZE: (u32, u32) = (576, 320);
 /// image-conditioned model something other than a single colour.
 pub fn fixture_plate_png(role: &str, rgb: [u8; 3]) -> Result<Vec<u8>, HarnessError> {
     let (width, height) = FIXTURE_PLATE_SIZE;
+    fixture_plate_png_sized(role, rgb, width, height)
+}
+
+/// The same deterministic plate at an arbitrary canvas. The fixture plates are
+/// [`FIXTURE_PLATE_SIZE`]; a caller that must honour a REQUESTED geometry — the scripted image
+/// worker the sc-23403 tests drive, which answers `make-references` at the size the job asked for
+/// — names its own.
+pub fn fixture_plate_png_sized(
+    role: &str,
+    rgb: [u8; 3],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, HarnessError> {
+    let (width, height) = (width.max(16), height.max(16));
     let mut image = image::RgbImage::new(width, height);
     let seed = role.bytes().fold(7_u32, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(u32::from(byte))
@@ -5632,7 +5953,8 @@ mod unit_tests {
             .as_object()
             .cloned()
             .unwrap();
-        let findings = reference_payload_findings(&plan, &entry);
+        let findings =
+            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
         assert!(findings[0].message.contains("at most 9"), "{findings:?}");
@@ -5650,7 +5972,10 @@ mod unit_tests {
             }]
         }))
         .expect("plan parses");
-        assert!(reference_payload_findings(&plan, &entry).is_empty());
+        assert!(
+            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5999,6 +6324,8 @@ mod unit_tests {
         let attempt = |job_id: Option<&str>, started_at: &str| AttemptRecord {
             attempt: 1,
             idempotency_key: "run:SH010:a1".to_owned(),
+            resolved_model_id: "minimax_h3".to_owned(),
+            partition_reason: String::new(),
             job_id: job_id.map(str::to_owned),
             status: "dispatching".to_owned(),
             started_at: started_at.to_owned(),

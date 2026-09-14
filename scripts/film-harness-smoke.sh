@@ -11,6 +11,14 @@
 #   SHOTS=SH010 scripts/film-harness-smoke.sh           # one shot
 #   PLAN=... REFERENCES=... scripts/film-harness-smoke.sh
 #
+# MIXED-PARTITION smoke (sc-23402) — SH010 renders on `minimax_h3_ref` (reference_to_video,
+# `courier` + `workshop_plate`), SH020 on `minimax_h3` (text_to_video), from one plan:
+#
+#   PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh
+#
+# Budget it longer than the base two-shot smoke: the run loads BOTH 18.78 GB DiTs, the reference
+# one for SH010 and the base one for SH020, so there is an extra checkpoint load in the middle.
+#
 # Runs one GPU render at a time; budget the wall clock from the plan's `limits` (7200 s for the
 # fixture). Requires `ffmpeg` on PATH (or SCENEWORKS_FFMPEG) for the export.
 #
