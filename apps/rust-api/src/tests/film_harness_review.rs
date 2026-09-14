@@ -1915,12 +1915,21 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
 ) {
     let (harness, _) = rendered_two_shots().await;
     script_answers(&harness, &agreeing_answers());
-    // ~0.6 s per answer against a 2 s budget: the frames sample well inside it, the first answer
-    // or two land, and the deadline falls between questions.
-    harness.script.lock().vqa_delay = Some(Duration::from_millis(600));
+    // 2 s per answer against an 8 s budget. The two bounds this test needs are both wide:
+    // the frames plus ONE answer must fit (frames have ~6 s of room, against the fraction of a
+    // second three extractions take even on a loaded runner), and all six answers must NOT
+    // (6 x 2 s = 12 s, half again over the budget) — so the deadline always falls between
+    // questions with evidence already in hand.
+    //
+    // It used to be 0.6 s answers against a 2 s budget, which left the frames ~1.4 s: enough on an
+    // idle machine, and not enough on a busy one, where this test measured 0 of 6 answers and
+    // failed (sc-23403). Its sibling above tolerates a loaded runner in its claims; this one
+    // cannot, because "partial evidence is KEPT" is the thing it exists to prove — so the margin
+    // has to be in the timings instead.
+    harness.script.lock().vqa_delay = Some(Duration::from_secs(2));
     let mut options = review_options(&harness, &["SH010"]);
     options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
-        plan.limits.max_seconds = 2;
+        plan.limits.max_seconds = 8;
     }));
     let vision = VqaVision::new(
         &harness.transport,
@@ -1936,7 +1945,7 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
         .as_deref()
         .expect("a review that spent its budget says so");
     assert!(
-        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        stop.starts_with("review_budget: limits.maxSeconds is 8s"),
         "{stop}"
     );
     let declared = shipped_review_plan().shots["SH010"].questions.len();

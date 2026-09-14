@@ -23,6 +23,7 @@
 //! film-harness swap-take    --run RUN.json --shot SH010 --asset asset_...
 //! film-harness fixture-images --out DIR
 //! film-harness fixture-sound  --out DIR
+//! film-harness make-references --spec SPEC.jsonc --out DIR [--api URL] [--model ID] [--tier T]
 //! ```
 //!
 //! The intended loop is `plan` -> read and edit `plan.json` -> `compile` -> `validate` -> `run`.
@@ -65,6 +66,11 @@
 //!   mismatch flags folded into the recorded reason, so it renders exactly one more take. It is
 //!   NOT `swap-take` — a reviewer's reading is never a reason to point an item at a take the run
 //!   already has.
+//!
+//! `make-references` (sc-23403) is the odd one out: it does not read a plan at all. It renders a
+//! reference pack's plates from a spec document through the ordinary image route — TEST FIXTURES
+//! ONLY, because in the product a person supplies the reference images — and publishes the pack
+//! directory only once every plate has landed.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,6 +78,7 @@ use std::time::Duration;
 
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState};
 use sceneworks_core::film_review::{format_eval_report, ASSISTIVE_NOTICE};
+use sceneworks_rust_api::film_harness::references::{self, MakeReferencesOptions};
 use sceneworks_rust_api::film_harness::review::{
     self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
 };
@@ -106,6 +113,7 @@ USAGE:
   film-harness swap-take    --run RUN.json --shot ID --asset ASSET_ID                 [EDIT OPTIONS]
   film-harness fixture-images --out DIR
   film-harness fixture-sound  --out DIR
+  film-harness make-references --spec SPEC.jsonc --out DIR [MAKE-REFERENCES OPTIONS]
 
 OPTIONS (plan / compile):
   --brief BRIEF.json     The brief to plan from (plan); re-checked for dropped beats (compile)
@@ -127,6 +135,19 @@ OPTIONS (run):
   --poll-seconds N       Job polling cadence in seconds (default 5)
   --no-export            Skip the timeline assembly and MP4 export
   --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
+
+MAKE-REFERENCES OPTIONS (TEST FIXTURES ONLY — in the product the user supplies the references):
+  --spec SPEC.jsonc      The reference spec to render (prompts, roles, limits, inherited roles)
+  --out DIR              Pack directory to publish. Written to a temporary sibling and renamed
+                         into place only once every plate has landed, so a failed run leaves no
+                         half-written pack. Refused if it already exists and is not empty.
+  --api URL / --token    As above
+  --model ID             Override the spec's model (default: the spec's, krea_2_turbo)
+  --tier TIER            Override the spec's quant tier (q4 / q8 / bf16)
+  --project-id ID        Generate into an existing project instead of creating one
+  --poll-seconds N       Job polling cadence in seconds (default 5)
+  --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
+  --force                Replace an existing --out directory
 
 EDIT OPTIONS (trim / reorder / swap-take):
   --run RUN.json         The run record to edit. It names the project and the timeline, and is
@@ -162,6 +183,12 @@ request-repair  ONE bounded repair attempt through replace-take, with the review
 review-eval  scores the reviewer against a fixed labeled set of correct and deliberately broken
              takes and reports detections, misses, false alarms, abstentions and overclaims.
 review-fixtures writes the placeholder frames a labeled set names.
+make-references renders one image per role in the spec (text_to_image, Krea 2 by default), bounded
+             by the spec's own limits.maxJobSeconds / maxAttemptsPerRole / maxMemoryGb, downloads
+             each result into the pack directory and writes a references.jsonc whose generated
+             entries carry `generated: true` and the model, prompt, seed, job, asset and sha256
+             they came from. Roles the spec inherits (a style reference, a keyframe plate) and the
+             source pack's sound are copied verbatim, so the pack validates against the same plan.
 
 Every edit re-lays the whole sequence: picture items stay contiguous in cut order, each dialogue
 clip keeps its offset from the start of its own shot, and the ambience/music beds re-span the new
@@ -202,6 +229,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
         "accept-take" | "reject-take" => return decide_command(command, &args[1..]),
         "review-eval" => return review_eval_command(&args[1..]).await,
         "review-fixtures" => return review_fixtures_command(&args[1..]),
+        "make-references" => return make_references_command(&args[1..]).await,
         "cancel" => return cancel_command(&args[1..]),
         "status" => return status_command(&args[1..]),
         "fixture-images" => return fixture_images(&args[1..]),
@@ -1329,6 +1357,124 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
             println!(
                 "results: {}",
                 options.out_dir.join("review-eval.json").display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => report_error(error),
+    }
+}
+
+/// `make-references`: render a reference pack's plates from a spec (sc-23403).
+///
+/// TEST FIXTURES ONLY. In the product the user supplies the reference images; this exists so the
+/// harness can make its own. Exit codes match the rest of the binary: 2 when the spec, the model or
+/// the host is refused before anything is dispatched, 1 on a transport/API/io failure, 0 on a
+/// published pack.
+async fn make_references_command(args: &[String]) -> ExitCode {
+    let (Some(spec), Some(out)) = (flag_value(args, "--spec"), flag_value(args, "--out")) else {
+        eprintln!("film-harness: make-references needs --spec SPEC.jsonc --out DIR\n\n{USAGE}");
+        return ExitCode::from(1);
+    };
+    let known = [
+        "--spec",
+        "--out",
+        "--api",
+        "--token",
+        "--model",
+        "--tier",
+        "--project-id",
+        "--poll-seconds",
+        "--skip-install-check",
+        "--force",
+    ];
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        if !known.contains(&arg.as_str()) {
+            eprintln!("film-harness: unknown option {arg:?}\n\n{USAGE}");
+            return ExitCode::from(1);
+        }
+        if !matches!(arg.as_str(), "--skip-install-check" | "--force") {
+            iter.next();
+        }
+    }
+    let api_url = flag_value(args, "--api")
+        .or_else(|| std::env::var("SCENEWORKS_API_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_owned());
+    let token =
+        flag_value(args, "--token").or_else(|| std::env::var("SCENEWORKS_ACCESS_TOKEN").ok());
+    let mut options = MakeReferencesOptions::new(PathBuf::from(spec), PathBuf::from(out));
+    options.model_id = flag_value(args, "--model");
+    options.tier = flag_value(args, "--tier");
+    options.project_id = flag_value(args, "--project-id");
+    options.require_installed = !args.iter().any(|arg| arg == "--skip-install-check");
+    options.force = args.iter().any(|arg| arg == "--force");
+    match flag_value(args, "--poll-seconds").map(|value| value.parse::<u64>()) {
+        Some(Ok(seconds)) => options.poll_interval = Duration::from_secs(seconds.max(1)),
+        Some(Err(error)) => {
+            eprintln!("film-harness: --poll-seconds: {error}");
+            return ExitCode::from(1);
+        }
+        None => {}
+    }
+    let transport = match guarded_transport(&api_url, token) {
+        Ok(transport) => transport,
+        Err(code) => return code,
+    };
+    let signal = spawn_interrupt_handler(options.control.clone());
+    let result = references::make_references(&transport, &options).await;
+    signal.finished();
+    match result {
+        Ok(build) => {
+            println!(
+                "reference pack {:?} v{} written to {} ({} generated, {} inherited, {:.0}s)",
+                build.pack.id,
+                build.pack.version,
+                build.pack_path.display(),
+                build.generated.len(),
+                build.inherited.len(),
+                build.elapsed_seconds
+            );
+            for plate in &build.generated {
+                println!(
+                    "  {:<20} {:>5}x{:<5} seed={} {:>7.0}s {:>8} B  job={} asset={}{}",
+                    plate.role,
+                    plate.width,
+                    plate.height,
+                    plate
+                        .seed
+                        .map(|seed| seed.to_string())
+                        .unwrap_or_else(|| "-".to_owned()),
+                    plate.elapsed_seconds,
+                    plate.bytes,
+                    plate.job_id,
+                    plate.asset_id,
+                    plate
+                        .peak_memory_gb
+                        .map(|gb| format!("  peak={gb:.1} GB"))
+                        .unwrap_or_default()
+                );
+            }
+            for role in &build.inherited {
+                println!("  {role:<20} inherited (copied verbatim, not generated)");
+            }
+            println!(
+                "these are TEST FIXTURES generated with {}{} in project {}; in the product the \
+                 user supplies the reference images",
+                build.model_id,
+                build
+                    .tier
+                    .as_deref()
+                    .map(|tier| format!(" tier {tier}"))
+                    .unwrap_or_default(),
+                build.project_id
+            );
+            println!(
+                "validate it with: film-harness validate --plan PLAN.jsonc --references {}",
+                build.pack_path.display()
             );
             ExitCode::SUCCESS
         }

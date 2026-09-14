@@ -38,6 +38,7 @@
 //! outright when the directory already holds a run record, and `replace_take` refuses while the
 //! shot still has an unsettled attempt; neither is a substitute for not starting two at once.
 
+pub mod references;
 pub mod review;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,7 +98,7 @@ const ASPECT_TIE_EPSILON: f64 = 1e-9;
 /// reports `memoryGb` as the worker's `memoryTotalMb / 1024`, and the manifests' `minMemoryGb` are
 /// written in the same base, so `limits.maxMemoryGb` is a GiB budget and an observed peak in bytes
 /// has to be divided by 1024^3 to be compared with it.
-const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+pub(crate) const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Tag every harness-imported APPROVED reference carries beside its role tag.
 const REFERENCE_TAG: &str = "film-harness-reference";
@@ -155,13 +156,35 @@ pub struct ApiResponse {
     pub body: Value,
 }
 
+/// The API's answer to a file request: HTTP status plus the raw body. A non-2xx body is kept as-is
+/// so a refusal's JSON detail can still be read out of it.
+#[derive(Debug, Clone)]
+pub struct BytesResponse {
+    pub status: u16,
+    pub bytes: Vec<u8>,
+}
+
 pub type TransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ApiResponse, HarnessError>> + Send + 'a>>;
+
+pub type BytesTransportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BytesResponse, HarnessError>> + Send + 'a>>;
 
 /// The harness's only dependency on the outside world. Implemented over `reqwest` for the binary
 /// and over an in-process `axum::Router` in tests.
 pub trait ApiTransport: Send + Sync {
     fn call(&self, request: ApiRequest) -> TransportFuture<'_>;
+
+    /// GET a file the API serves as BYTES rather than as JSON — a project's stored media
+    /// (`/api/v1/projects/:id/files/*path`), which is how `make-references` (sc-23403) downloads a
+    /// rendered plate into the pack directory.
+    ///
+    /// A separate method rather than a flag on [`ApiRequest`] because the two answers have
+    /// different shapes: [`ApiResponse`] parses its body as JSON, and a PNG is not JSON. It is the
+    /// download seam, so it must go through the transport like every other request: `--api` may
+    /// legitimately point at a SceneWorks API on another machine on the private network, whose
+    /// project directory this process cannot read.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_>;
 }
 
 #[derive(Debug)]
@@ -1083,7 +1106,7 @@ async fn resolve_model_entry(
 }
 
 /// Whether the catalog reports the requested tier (or, with no tier named, the model) installed.
-fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
+pub(crate) fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
     if let Some(tier) = tier {
         if let Some(variants) = entry.get("variants").and_then(Value::as_array) {
             if let Some(variant) = variants
@@ -2300,12 +2323,17 @@ impl Session<'_> {
             Some("webp") => "image/webp",
             _ => "image/png",
         };
-        let provenance = json!({
+        let mut provenance = json!({
             "filmHarness": {
                 "kind": "reference",
                 "role": reference.role,
                 "referenceKind": reference.kind,
                 "approved": reference.approved,
+                // sc-23403: whether this plate was GENERATED as a fixture or supplied by a person,
+                // carried onto the asset so the answer survives the pack document. It changes
+                // nothing else — a generated reference is imported, tagged and conditioned on
+                // exactly like any other, and `approved` remains the only gate.
+                "generated": reference.generated,
                 "referencePackId": self.pack.id,
                 "referencePackVersion": self.pack.version,
                 "planId": self.plan.id,
@@ -2315,6 +2343,22 @@ impl Session<'_> {
                 "sha256": sha256,
             }
         });
+        if let Some(generation) = reference.generation.as_ref() {
+            // A provenance block that cannot be serialized is a refusal, not a `null`: the whole
+            // point of `generated` is that the answer survives the pack document, and an asset
+            // stamped `"generation": null` would say the plate came from nowhere.
+            let block = serde_json::to_value(generation).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot serialize the generation provenance for reference {:?}: {error}",
+                    reference.role
+                ))
+            })?;
+            provenance
+                .get_mut("filmHarness")
+                .and_then(Value::as_object_mut)
+                .expect("the provenance literal has a filmHarness object")
+                .insert("generation".to_owned(), block);
+        }
         let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
         let route = format!("/api/v1/projects/{project_id}/assets");
         let response = self
@@ -4746,6 +4790,20 @@ pub const FIXTURE_PLATE_SIZE: (u32, u32) = (576, 320);
 /// image-conditioned model something other than a single colour.
 pub fn fixture_plate_png(role: &str, rgb: [u8; 3]) -> Result<Vec<u8>, HarnessError> {
     let (width, height) = FIXTURE_PLATE_SIZE;
+    fixture_plate_png_sized(role, rgb, width, height)
+}
+
+/// The same deterministic plate at an arbitrary canvas. The fixture plates are
+/// [`FIXTURE_PLATE_SIZE`]; a caller that must honour a REQUESTED geometry — the scripted image
+/// worker the sc-23403 tests drive, which answers `make-references` at the size the job asked for
+/// — names its own.
+pub fn fixture_plate_png_sized(
+    role: &str,
+    rgb: [u8; 3],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, HarnessError> {
+    let (width, height) = (width.max(16), height.max(16));
     let mut image = image::RgbImage::new(width, height);
     let seed = role.bytes().fold(7_u32, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(u32::from(byte))
@@ -4918,6 +4976,27 @@ impl ApiTransport for HttpTransport {
                 serde_json::from_str(&text).unwrap_or(Value::String(text))
             };
             Ok(ApiResponse { status, body })
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        Box::pin(async move {
+            let url = format!("{}{}", self.base_url, path);
+            let mut builder = self.client.get(&url);
+            if let Some(token) = &self.token {
+                builder = builder.header("x-sceneworks-token", token);
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?;
+            let status = response.status().as_u16();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
         })
     }
 }
