@@ -24544,6 +24544,7 @@
         {
           "provider": "huggingface",
           "repo": "fancyfeast/llama-joycaption-beta-one-hf-llava",
+          "revision": "ebf414ea497a020da0f82df3913e5b6cb8e9663a",
           "files": [],
           "estimatedSizeBytes": 16977442945
         }
