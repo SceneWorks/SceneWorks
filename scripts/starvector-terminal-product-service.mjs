@@ -103,14 +103,40 @@ export async function assertTerminalProductWorkerReady(url, tuple, expectedWorke
   if (!workerResponse.ok || !modelResponse.ok) die(`worker readiness HTTP failed: workers=${workerResponse.status}, models=${modelResponse.status}`);
   return validateTerminalProductWorkerReadiness(await workerResponse.json(), await modelResponse.json(), contract, expectedWorkerId);
 }
-async function waitForTerminalProductWorker(url, tuple, expectedWorkerId, assertRunning) {
+export async function waitForTerminalProductWorker(url, tuple, expectedWorkerId, assertRunning, {
+  fetchImpl = fetch,
+  timeoutMs = 180_000,
+  registrationRequestTimeoutMs = 5_000,
+  retryIntervalMs = 1_000,
+  now = Date.now,
+  sleep = (durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)),
+} = {}) {
+  const deadline = now() + timeoutMs;
   let lastError;
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  while (now() < deadline) {
     assertRunning();
-    try { return await assertTerminalProductWorkerReady(url, tuple, expectedWorkerId); } catch (error) { lastError = error; }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const response = await fetchImpl(new URL("/api/v1/workers", url), {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(registrationRequestTimeoutMs, deadline - now()))),
+      });
+      if (!response.ok) throw new Error(`workers=${response.status}`);
+      const workers = await response.json();
+      if (!Array.isArray(workers)) throw new Error("worker readiness response is malformed");
+      const matching = workers.filter((worker) => worker?.id === expectedWorkerId);
+      if (matching.length === 1 && matching[0].status === "idle" && matching[0].currentJobId == null) break;
+      lastError = new Error(`exact terminal worker ${expectedWorkerId} is not registered and idle`);
+    } catch (error) {
+      lastError = error;
+    }
+    const remaining = deadline - now();
+    if (remaining > 0) await sleep(Math.min(retryIntervalMs, remaining));
   }
-  die(`exact native product worker did not become ready: ${lastError?.message ?? "unknown readiness failure"}`);
+  const remaining = deadline - now();
+  if (remaining <= 0) die(`exact native product worker did not become ready: ${lastError?.message ?? "registration timed out"}`);
+  assertRunning();
+  // Inventory is the expensive verified-filesystem operation. Issue it once under
+  // the registration deadline; a client abort does not cancel server-side scanning.
+  return assertTerminalProductWorkerReady(url, tuple, expectedWorkerId, { fetchImpl, timeoutMs: remaining });
 }
 export async function runProductServiceGpuPreflight(binary, serviceEnv, {
   execFileImpl = execFile,
@@ -426,10 +452,9 @@ export async function startProductService({ root, output, permanentPin, url, wei
     // identity without rewriting receipts or downloading anything.
     const relocation = await relocateProductServiceLibrary(url, hfHome);
     assertRunning();
-    // The post-relocation model inventory performs verified filesystem identity work. Keep one
-    // bounded request alive long enough to finish: abort-and-retry would leave overlapping server
-    // scans even though the client no longer waits for them.
-    const selectedWorker = await assertTerminalProductWorkerReady(url, tuple, workerId, { timeoutMs: 180_000 });
+    // Wait for cheap worker registration before issuing one bounded post-relocation model
+    // inventory. Abort-and-retry would leave overlapping server scans after the client returned.
+    const selectedWorker = await waitForTerminalProductWorker(url, tuple, workerId, assertRunning);
     if (gpuBinding.backend === "candle") {
       const current = await probeTerminalCuda(gpuBinding.uuid, { expectedUuid: gpuBinding.uuid });
       if (current.index !== selectedWorker.gpu_id || current.name !== selectedWorker.gpu_name) die("registered worker and selected physical GPU differ");

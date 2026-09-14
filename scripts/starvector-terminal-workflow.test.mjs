@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provision.mjs";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -299,6 +299,28 @@ test("terminal product worker readiness rejects CPU-only, stale, wrong-backend, 
     const changed = structuredClone(cuda); mutate(changed);
     assert.throws(() => validateTerminalProductWorkerReadiness(changed.workers, changed.models, changed.contract, changed.workerId), /wrong device identity|lacks discovered NVIDIA|lacks candle|not installed and available/);
   }
+});
+
+test("terminal product worker readiness waits for registration before one model inventory", async () => {
+  const fixture = workerReadinessFixture("mlx:1b", "darwin");
+  let workerRequests = 0, modelRequests = 0, clock = 0;
+  const selected = await waitForTerminalProductWorker("http://127.0.0.1:17821", "mlx:1b", fixture.workerId, () => {}, {
+    timeoutMs: 1_000,
+    retryIntervalMs: 1,
+    now: () => clock,
+    sleep: async (durationMs) => { clock += durationMs; },
+    fetchImpl: async (url) => {
+      if (url.pathname.endsWith("/workers")) {
+        workerRequests += 1;
+        return { ok: true, status: 200, json: async () => workerRequests === 1 ? fixture.workers.slice(0, 1) : fixture.workers };
+      }
+      modelRequests += 1;
+      return { ok: true, status: 200, json: async () => fixture.models };
+    },
+  });
+  assert.equal(selected.worker_id, fixture.workerId);
+  assert.equal(workerRequests, 3, "registration polling plus final binding reads workers");
+  assert.equal(modelRequests, 1, "verified model inventory is never retried");
 });
 
 test("terminal product GPU preflight is mandatory, bounded, and fail-closed", async () => {
