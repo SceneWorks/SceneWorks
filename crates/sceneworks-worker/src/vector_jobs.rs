@@ -6,6 +6,7 @@
 //! a deliberately small inert SVG subset, canonicalized, rendered through resvg (which has no
 //! network/resource loader), and published as an SVG+PNG directory rename.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,6 +38,15 @@ const MAX_SVG_PATH_NUMBERS: usize = 65_536;
 const MAX_SVG_POINT_NUMBERS: usize = 32_768;
 const MAX_SVG_TRANSFORM_NUMBERS: usize = 4_096;
 const MAX_SVG_DASH_NUMBERS: usize = 4_096;
+const MAX_SVG_RESOURCES: usize = 128;
+const MAX_SVG_RESOURCE_REFERENCES: usize = 256;
+const MAX_SVG_GRADIENT_STOPS: usize = 512;
+const MAX_SVG_FILTER_PRIMITIVES: usize = 64;
+const MAX_SVG_FILTER_BLUR_SIGMA: f64 = 64.0;
+// Eight maximum-size RGBA renderer surfaces (128 MiB). The parsed-tree check below charges the
+// actual clipped layer for every application, result, and input surface before resvg can allocate.
+const MAX_SVG_FILTER_OFFSCREEN_PIXELS: u64 =
+    MAX_PREVIEW_DIMENSION as u64 * MAX_PREVIEW_DIMENSION as u64 * 8;
 const MAX_SVG_COORDINATE_MAGNITUDE: f64 = 1_000_000.0;
 const MAX_SVG_VIEWBOX_ORIGIN_MAGNITUDE: f64 = 1_000_000.0;
 const MAX_PREVIEW_DIMENSION: u32 = 2_048;
@@ -1327,8 +1337,388 @@ struct SanitizerBudget {
     dash_numbers: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SvgResourceKind {
+    ClipPath,
+    LinearGradient,
+    Filter,
+}
+
+#[derive(Debug)]
+struct SvgResourceReference {
+    source: Option<String>,
+    target: String,
+    expected: SvgResourceKind,
+}
+
+#[derive(Debug)]
+struct SvgResourceCatalog {
+    ids: BTreeMap<String, SvgResourceKind>,
+    width: u32,
+    height: u32,
+}
+
 fn sanitize_svg(input: &str) -> WorkerResult<CanonicalSvg> {
     sanitize_svg_bytes(input.as_bytes())
+}
+
+#[derive(Debug)]
+struct SvgIndexFrame {
+    hidden: bool,
+    filter_id: Option<String>,
+    resource_owner: Option<String>,
+}
+
+fn attribute_value<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value.as_str())
+}
+
+fn validate_resource_id(value: &str, label: &str) -> WorkerResult<()> {
+    let mut bytes = value.bytes();
+    if value.len() > 128
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG {label} is not a bounded local identifier"
+        )));
+    }
+    Ok(())
+}
+
+fn local_url_target(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("url(#")
+        .and_then(|value| value.strip_suffix(')'))
+        .filter(|value| !value.is_empty())
+}
+
+fn local_href_target(value: &str) -> Option<&str> {
+    value.strip_prefix('#').filter(|value| !value.is_empty())
+}
+
+fn validate_filter_input(value: &str, results: &BTreeSet<String>, label: &str) -> WorkerResult<()> {
+    if matches!(value, "SourceGraphic" | "SourceAlpha") || results.contains(value) {
+        Ok(())
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "provider SVG {label} must reference an earlier filter result"
+        )))
+    }
+}
+
+fn index_filter_primitive(
+    name: &str,
+    attrs: &[(String, String)],
+    filter_id: Option<&str>,
+    filter_results: &mut BTreeMap<String, BTreeSet<String>>,
+    filter_primitives: &mut usize,
+) -> WorkerResult<()> {
+    if !matches!(
+        name,
+        "feGaussianBlur" | "feOffset" | "feMerge" | "feMergeNode"
+    ) {
+        return Ok(());
+    }
+    let filter_id = filter_id.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("provider SVG element <{name}> is outside a filter"))
+    })?;
+    *filter_primitives = filter_primitives.checked_add(1).ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG filter primitive count overflow".to_owned())
+    })?;
+    if *filter_primitives > MAX_SVG_FILTER_PRIMITIVES {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG exceeds the filter-primitive budget".to_owned(),
+        ));
+    }
+    let results = filter_results.entry(filter_id.to_owned()).or_default();
+    if let Some(input) = attribute_value(attrs, "in") {
+        validate_filter_input(input, results, name)?;
+    } else if matches!(name, "feGaussianBlur" | "feOffset" | "feMergeNode") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG {name} requires an input"
+        )));
+    }
+    if let Some(result) = attribute_value(attrs, "result") {
+        if !matches!(name, "feGaussianBlur" | "feOffset") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG {name} cannot name a result"
+            )));
+        }
+        validate_resource_id(result, "filter result")?;
+        if !results.insert(result.to_owned()) {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG filter result is duplicated".to_owned(),
+            ));
+        }
+    } else if matches!(name, "feGaussianBlur" | "feOffset") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG {name} requires a result"
+        )));
+    }
+    Ok(())
+}
+
+fn visit_resource(
+    id: &str,
+    edges: &BTreeMap<String, Vec<String>>,
+    visiting: &mut BTreeSet<String>,
+    complete: &mut BTreeSet<String>,
+) -> WorkerResult<()> {
+    if complete.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id.to_owned()) {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG resource cycle is not allowed".to_owned(),
+        ));
+    }
+    if let Some(targets) = edges.get(id) {
+        for target in targets {
+            visit_resource(target, edges, visiting, complete)?;
+        }
+    }
+    visiting.remove(id);
+    complete.insert(id.to_owned());
+    Ok(())
+}
+
+fn validate_resource_cycles(references: &[SvgResourceReference]) -> WorkerResult<()> {
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for reference in references {
+        if let Some(source) = &reference.source {
+            edges
+                .entry(source.clone())
+                .or_default()
+                .push(reference.target.clone());
+        }
+    }
+    let mut visiting = BTreeSet::new();
+    let mut complete = BTreeSet::new();
+    for id in edges.keys() {
+        visit_resource(id, &edges, &mut visiting, &mut complete)?;
+    }
+    Ok(())
+}
+
+fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
+    let mut reader = Reader::from_reader(input.as_bytes());
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut stack: Vec<SvgIndexFrame> = Vec::new();
+    let mut budget = SanitizerBudget::default();
+    let mut elements = 0usize;
+    let mut ids = BTreeMap::new();
+    let mut id_counts = BTreeMap::new();
+    let mut references = Vec::new();
+    let mut filter_results = BTreeMap::new();
+    let mut resources = 0usize;
+    let mut gradient_stops = 0usize;
+    let mut filter_primitives = 0usize;
+    let mut dimensions = None;
+    let mut xlink_namespace_bound = false;
+
+    loop {
+        let (event, empty) = match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => (event, false),
+            Ok(Event::Empty(event)) => (event, true),
+            Ok(Event::End(_)) => {
+                stack.pop();
+                buffer.clear();
+                continue;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {
+                buffer.clear();
+                continue;
+            }
+            Err(error) => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "provider SVG is malformed: {error}"
+                )))
+            }
+        };
+        if stack.len() >= MAX_SVG_DEPTH {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG exceeds the element nesting budget".to_owned(),
+            ));
+        }
+        elements += 1;
+        if elements > MAX_SVG_ELEMENTS {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG exceeds the element budget".to_owned(),
+            ));
+        }
+        let name = std::str::from_utf8(event.name().as_ref())
+            .map_err(|_| WorkerError::InvalidPayload("provider SVG tag is not UTF-8".to_owned()))?
+            .to_owned();
+        let is_root = stack.is_empty();
+        let attrs = source_attributes(
+            &reader,
+            &event,
+            source_attribute_limit(&name, is_root),
+            &mut budget,
+        )?;
+        if is_root && name == "svg" {
+            let mut root_attrs = attrs.clone();
+            normalize_root_dimensions(&mut root_attrs)?;
+            dimensions = Some(svg_dimensions(&root_attrs)?);
+            xlink_namespace_bound =
+                attribute_value(&attrs, "xmlns:xlink") == Some("http://www.w3.org/1999/xlink");
+        }
+        if attrs.iter().any(|(key, _)| key == "xlink:href") && !xlink_namespace_bound {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG xlink:href requires the exact root xmlns:xlink binding".to_owned(),
+            ));
+        }
+        if let Some(id) = attribute_value(&attrs, "id") {
+            *id_counts.entry(id.to_owned()).or_insert(0usize) += 1;
+        }
+        let hidden = stack.last().is_some_and(|frame| frame.hidden)
+            || (name == "g" && attribute_value(&attrs, "display") == Some("none"));
+        let resource_kind = if hidden {
+            None
+        } else {
+            match name.as_str() {
+                "clipPath" => Some(SvgResourceKind::ClipPath),
+                "linearGradient" => Some(SvgResourceKind::LinearGradient),
+                "filter" => Some(SvgResourceKind::Filter),
+                _ => None,
+            }
+        };
+        let resource_id = resource_kind
+            .map(|kind| {
+                let id = attribute_value(&attrs, "id").ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "provider SVG resource <{name}> requires an id"
+                    ))
+                })?;
+                validate_resource_id(id, "resource id")?;
+                resources = resources.checked_add(1).ok_or_else(|| {
+                    WorkerError::InvalidPayload("provider SVG resource count overflow".to_owned())
+                })?;
+                if resources > MAX_SVG_RESOURCES {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG exceeds the resource budget".to_owned(),
+                    ));
+                }
+                if ids.insert(id.to_owned(), kind).is_some() {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG resource id is duplicated".to_owned(),
+                    ));
+                }
+                Ok(id.to_owned())
+            })
+            .transpose()?;
+        if !hidden && name == "stop" {
+            gradient_stops = gradient_stops.checked_add(1).ok_or_else(|| {
+                WorkerError::InvalidPayload("provider SVG gradient stop count overflow".to_owned())
+            })?;
+            if gradient_stops > MAX_SVG_GRADIENT_STOPS {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG exceeds the gradient-stop budget".to_owned(),
+                ));
+            }
+        }
+        let filter_id = if name == "filter" {
+            resource_id.clone()
+        } else {
+            stack.last().and_then(|frame| frame.filter_id.clone())
+        };
+        let resource_owner = resource_id
+            .clone()
+            .or_else(|| stack.last().and_then(|frame| frame.resource_owner.clone()));
+        if !hidden {
+            index_filter_primitive(
+                &name,
+                &attrs,
+                filter_id.as_deref(),
+                &mut filter_results,
+                &mut filter_primitives,
+            )?;
+            for (key, value) in &attrs {
+                if key == "style" {
+                    for declaration in value.split(';') {
+                        let Some((property, property_value)) = declaration.split_once(':') else {
+                            continue;
+                        };
+                        if property.trim() != "fill" {
+                            continue;
+                        }
+                        let Some(target) = local_url_target(property_value.trim()) else {
+                            continue;
+                        };
+                        validate_resource_id(target, "resource reference")?;
+                        if references.len() >= MAX_SVG_RESOURCE_REFERENCES {
+                            return Err(WorkerError::InvalidPayload(
+                                "provider SVG exceeds the resource-reference budget".to_owned(),
+                            ));
+                        }
+                        references.push(SvgResourceReference {
+                            source: resource_owner.clone(),
+                            target: target.to_owned(),
+                            expected: SvgResourceKind::LinearGradient,
+                        });
+                    }
+                }
+                let expected = match key.as_str() {
+                    "fill" => local_url_target(value).map(|_| SvgResourceKind::LinearGradient),
+                    "clip-path" => local_url_target(value).map(|_| SvgResourceKind::ClipPath),
+                    "filter" => local_url_target(value).map(|_| SvgResourceKind::Filter),
+                    "href" | "xlink:href" if name == "linearGradient" => {
+                        local_href_target(value).map(|_| SvgResourceKind::LinearGradient)
+                    }
+                    _ => None,
+                };
+                if let Some(expected) = expected {
+                    let target = if matches!(key.as_str(), "href" | "xlink:href") {
+                        local_href_target(value)
+                    } else {
+                        local_url_target(value)
+                    }
+                    .expect("matched above");
+                    validate_resource_id(target, "resource reference")?;
+                    if references.len() >= MAX_SVG_RESOURCE_REFERENCES {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG exceeds the resource-reference budget".to_owned(),
+                        ));
+                    }
+                    references.push(SvgResourceReference {
+                        source: resource_owner.clone(),
+                        target: target.to_owned(),
+                        expected,
+                    });
+                }
+            }
+        }
+        if !empty {
+            stack.push(SvgIndexFrame {
+                hidden,
+                filter_id,
+                resource_owner,
+            });
+        }
+        buffer.clear();
+    }
+    let (width, height) = dimensions
+        .ok_or_else(|| WorkerError::InvalidPayload("provider output has no SVG root".to_owned()))?;
+    for reference in &references {
+        if id_counts.get(&reference.target) != Some(&1)
+            || ids.get(&reference.target) != Some(&reference.expected)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG local resource reference #{} is unresolved or has the wrong type",
+                reference.target
+            )));
+        }
+    }
+    validate_resource_cycles(&references)?;
+    Ok(SvgResourceCatalog { ids, width, height })
 }
 
 fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
@@ -1339,6 +1729,7 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     }
     let input = std::str::from_utf8(input)
         .map_err(|_| WorkerError::InvalidPayload("provider SVG is not valid UTF-8".to_owned()))?;
+    let resources = index_svg_resources(input)?;
     let mut reader = Reader::from_reader(input.as_bytes());
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
@@ -1375,10 +1766,17 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                     source_attribute_limit(&raw_name, is_root),
                     &mut budget,
                 )?;
-                let kind = classify_element(&raw_name, stack.last(), false, root_seen)?;
-                if kind == RawSvgElementKind::Retained {
-                    let (name, mut attrs) =
-                        canonical_element(&raw_name, source_attrs, is_root, &mut budget)?;
+                let kind =
+                    classify_element(&raw_name, stack.last(), &source_attrs, false, root_seen)?;
+                if kind.emitted() {
+                    let (name, mut attrs) = canonical_emitted_element(
+                        kind,
+                        &raw_name,
+                        source_attrs,
+                        is_root,
+                        &resources,
+                        &mut budget,
+                    )?;
                     if is_root {
                         root_seen = true;
                         if !attrs
@@ -1397,6 +1795,8 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         dimensions = Some(svg_dimensions(&attrs)?);
                     }
                     write_start(&mut output, &name, &attrs, false);
+                } else if kind == RawSvgElementKind::Hidden {
+                    validate_hidden_attributes(&raw_name, &source_attrs, &mut budget)?;
                 } else {
                     validate_discarded_attributes(kind, &source_attrs)?;
                 }
@@ -1429,11 +1829,20 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                     source_attribute_limit(&raw_name, false),
                     &mut budget,
                 )?;
-                let kind = classify_element(&raw_name, stack.last(), true, root_seen)?;
-                if kind == RawSvgElementKind::Retained {
-                    let (name, attrs) =
-                        canonical_element(&raw_name, source_attrs, false, &mut budget)?;
+                let kind =
+                    classify_element(&raw_name, stack.last(), &source_attrs, true, root_seen)?;
+                if kind.emitted() {
+                    let (name, attrs) = canonical_emitted_element(
+                        kind,
+                        &raw_name,
+                        source_attrs,
+                        false,
+                        &resources,
+                        &mut budget,
+                    )?;
                     write_start(&mut output, &name, &attrs, true);
+                } else if kind == RawSvgElementKind::Hidden {
+                    validate_hidden_attributes(&raw_name, &source_attrs, &mut budget)?;
                 } else {
                     validate_discarded_attributes(kind, &source_attrs)?;
                 }
@@ -1454,7 +1863,7 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         "provider SVG has mismatched tags".to_owned(),
                     ));
                 }
-                if open.kind == RawSvgElementKind::Retained {
+                if open.kind.emitted() {
                     output.push_str("</");
                     output.push_str(&name);
                     output.push('>');
@@ -1506,10 +1915,16 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     }
     // A second parse through the renderer proves the canonical subset is renderable before any
     // write. usvg does not load network resources, and our whitelist already removed every URL.
-    usvg::Tree::from_str(&output, &usvg::Options::default()).map_err(|error| {
+    let tree = usvg::Tree::from_str(&output, &usvg::Options::default()).map_err(|error| {
         WorkerError::InvalidPayload(format!("provider SVG cannot be rendered: {error}"))
     })?;
     let (width, height) = dimensions.expect("validated above");
+    validate_filter_render_budget(
+        &tree,
+        width,
+        height,
+        resvg::tiny_skia::Transform::identity(),
+    )?;
     Ok(CanonicalSvg {
         svg: output,
         width,
@@ -1521,6 +1936,16 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
 enum RawSvgElementKind {
     Retained,
     Defs,
+    ResourceDefs,
+    ClipPath,
+    LinearGradient,
+    GradientStop,
+    Filter,
+    FeGaussianBlur,
+    FeOffset,
+    FeMerge,
+    FeMergeNode,
+    Hidden,
     NamedView,
     Grid,
     Metadata,
@@ -1532,6 +1957,24 @@ enum RawSvgElementKind {
     DcType,
     DcTitle,
     Title,
+}
+
+impl RawSvgElementKind {
+    fn emitted(self) -> bool {
+        matches!(
+            self,
+            Self::Retained
+                | Self::ResourceDefs
+                | Self::ClipPath
+                | Self::LinearGradient
+                | Self::GradientStop
+                | Self::Filter
+                | Self::FeGaussianBlur
+                | Self::FeOffset
+                | Self::FeMerge
+                | Self::FeMergeNode
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -1609,10 +2052,371 @@ fn source_attributes(
     Ok(attrs)
 }
 
+fn one_number(value: &str, label: &str, allow_px: bool) -> WorkerResult<f64> {
+    let values = parse_number_list(value, allow_px, label, true)?;
+    if values.len() != 1 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG {label} must contain exactly one finite number"
+        )));
+    }
+    Ok(values[0])
+}
+
+fn number_or_percentage(value: &str, label: &str) -> WorkerResult<f64> {
+    if let Some(number) = value.strip_suffix('%') {
+        one_number(number, label, false)
+    } else {
+        one_number(value, label, false)
+    }
+}
+
+fn canonical_stop_style(value: &str) -> WorkerResult<Vec<(String, String)>> {
+    let mut attrs = Vec::new();
+    let declarations = value.split(';').collect::<Vec<_>>();
+    for (index, declaration) in declarations.iter().enumerate() {
+        if declaration.trim().is_empty() {
+            if index + 1 == declarations.len() && value.ends_with(';') {
+                continue;
+            }
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG gradient stop style is malformed".to_owned(),
+            ));
+        }
+        let (key, value) = declaration.split_once(':').ok_or_else(|| {
+            WorkerError::InvalidPayload("provider SVG gradient stop style is malformed".to_owned())
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if !matches!(key, "stop-color" | "stop-opacity")
+            || value.is_empty()
+            || value.contains(':')
+            || unsafe_attribute_value(value)
+            || attrs.iter().any(|(existing, _)| existing == key)
+        {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG gradient stop style is not allowed".to_owned(),
+            ));
+        }
+        if key == "stop-opacity" {
+            let opacity = one_number(value, "stop-opacity", false)?;
+            if !(0.0..=1.0).contains(&opacity) {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG stop-opacity must be between zero and one".to_owned(),
+                ));
+            }
+        }
+        attrs.push((key.to_owned(), value.to_owned()));
+    }
+    if attrs.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG gradient stop style is empty".to_owned(),
+        ));
+    }
+    Ok(attrs)
+}
+
+fn canonical_resource_element(
+    kind: RawSvgElementKind,
+    name: &str,
+    source_attrs: Vec<(String, String)>,
+    resources: &SvgResourceCatalog,
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<(String, Vec<(String, String)>)> {
+    let mut attrs = Vec::new();
+    let expected_id_kind = match kind {
+        RawSvgElementKind::ClipPath => Some(SvgResourceKind::ClipPath),
+        RawSvgElementKind::LinearGradient => Some(SvgResourceKind::LinearGradient),
+        RawSvgElementKind::Filter => Some(SvgResourceKind::Filter),
+        _ => None,
+    };
+    for (key, value) in source_attrs {
+        if unsafe_attribute_value(&value)
+            && !(kind == RawSvgElementKind::GradientStop && key == "style")
+            && !(matches!(key.as_str(), "href" | "xlink:href")
+                && local_href_target(&value).is_some())
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG resource attribute {key} is not allowed"
+            )));
+        }
+        match kind {
+            RawSvgElementKind::ResourceDefs | RawSvgElementKind::FeMerge => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "provider SVG element <{name}> does not allow attributes"
+                )));
+            }
+            RawSvgElementKind::ClipPath => match key.as_str() {
+                "id" => attrs.push((key, value)),
+                "clipPathUnits"
+                    if matches!(value.as_str(), "userSpaceOnUse" | "objectBoundingBox") =>
+                {
+                    attrs.push((key, value));
+                }
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG clipPath attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::LinearGradient => match key.as_str() {
+                "id" => attrs.push((key, value)),
+                "x1" | "y1" | "x2" | "y2" => {
+                    number_or_percentage(&value, &key)?;
+                    attrs.push((key, value));
+                }
+                "gradientUnits"
+                    if matches!(value.as_str(), "userSpaceOnUse" | "objectBoundingBox") =>
+                {
+                    attrs.push((key, value));
+                }
+                "gradientTransform" => {
+                    let numbers = validate_transform_list(&value)?;
+                    budget.transform_numbers = budget
+                        .transform_numbers
+                        .checked_add(numbers)
+                        .ok_or_else(|| {
+                            WorkerError::InvalidPayload(
+                                "provider SVG transform number overflow".to_owned(),
+                            )
+                        })?;
+                    if budget.transform_numbers > MAX_SVG_TRANSFORM_NUMBERS {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG exceeds the transform-number budget".to_owned(),
+                        ));
+                    }
+                    attrs.push((key, value));
+                }
+                "href" | "xlink:href" => {
+                    let target = local_href_target(&value).ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "provider SVG gradient href must be a local fragment".to_owned(),
+                        )
+                    })?;
+                    if resources.ids.get(target) != Some(&SvgResourceKind::LinearGradient) {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG gradient href has the wrong resource type".to_owned(),
+                        ));
+                    }
+                    attrs.push(("href".to_owned(), value));
+                }
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG linearGradient attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::GradientStop => match key.as_str() {
+                "offset" => {
+                    let percent = value.ends_with('%');
+                    let offset = number_or_percentage(&value, "gradient stop offset")?;
+                    let maximum = if percent { 100.0 } else { 1.0 };
+                    if !(0.0..=maximum).contains(&offset) {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG gradient stop offset is outside its range".to_owned(),
+                        ));
+                    }
+                    attrs.push((key, value));
+                }
+                "stop-color" => attrs.push((key, value)),
+                "stop-opacity" => {
+                    let opacity = one_number(&value, "stop-opacity", false)?;
+                    if !(0.0..=1.0).contains(&opacity) {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG stop-opacity must be between zero and one".to_owned(),
+                        ));
+                    }
+                    attrs.push((key, value));
+                }
+                "style" => {
+                    for style_attr in canonical_stop_style(&value)? {
+                        if attrs.iter().any(|(existing, _)| existing == &style_attr.0) {
+                            return Err(WorkerError::InvalidPayload(
+                                "provider SVG gradient stop style duplicates an attribute"
+                                    .to_owned(),
+                            ));
+                        }
+                        attrs.push(style_attr);
+                    }
+                }
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG gradient stop attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::Filter => match key.as_str() {
+                "id" | "width" | "height" => attrs.push((key, value)),
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG filter attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::FeGaussianBlur => match key.as_str() {
+                "in" | "result" => attrs.push((key, value)),
+                "stdDeviation" => {
+                    let values = parse_number_list(&value, false, "filter blur", true)?;
+                    if values.len() > 2
+                        || values
+                            .iter()
+                            .any(|value| *value < 0.0 || *value > MAX_SVG_FILTER_BLUR_SIGMA)
+                    {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG filter blur exceeds its bounded range".to_owned(),
+                        ));
+                    }
+                    attrs.push((key, value));
+                }
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG feGaussianBlur attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::FeOffset => match key.as_str() {
+                "in" | "result" => attrs.push((key, value)),
+                "dx" | "dy" => {
+                    one_number(&value, &key, false)?;
+                    attrs.push((key, value));
+                }
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG feOffset attribute {key} is not allowed"
+                    )))
+                }
+            },
+            RawSvgElementKind::FeMergeNode => match key.as_str() {
+                "in" => attrs.push((key, value)),
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "provider SVG feMergeNode attribute {key} is not allowed"
+                    )))
+                }
+            },
+            _ => unreachable!("resource canonicalizer called for {kind:?}"),
+        }
+    }
+    if let Some(expected) = expected_id_kind {
+        let id = attribute_value(&attrs, "id").ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("provider SVG resource <{name}> requires an id"))
+        })?;
+        if resources.ids.get(id) != Some(&expected) {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG resource id differs from the validated index".to_owned(),
+            ));
+        }
+    }
+    if kind == RawSvgElementKind::Filter {
+        let width = attribute_value(&attrs, "width").ok_or_else(|| {
+            WorkerError::InvalidPayload("provider SVG filter requires width".to_owned())
+        })?;
+        let height = attribute_value(&attrs, "height").ok_or_else(|| {
+            WorkerError::InvalidPayload("provider SVG filter requires height".to_owned())
+        })?;
+        bounded_filter_axis(width, resources.width, "width")?;
+        bounded_filter_axis(height, resources.height, "height")?;
+    }
+    let mut keys = BTreeSet::new();
+    if attrs.iter().any(|(key, _)| !keys.insert(key.as_str())) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG element <{name}> has duplicate canonical attributes"
+        )));
+    }
+    attrs.sort_unstable();
+    Ok((name.to_owned(), attrs))
+}
+
+fn bounded_filter_axis(value: &str, viewport: u32, label: &str) -> WorkerResult<u32> {
+    let pixels = if let Some(number) = value.strip_suffix('%') {
+        let percentage = one_number(number, label, false)?;
+        if !(0.0..=200.0).contains(&percentage) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG filter {label} exceeds 200%"
+            )));
+        }
+        f64::from(viewport) * percentage / 100.0
+    } else {
+        one_number(value, label, false)?
+    };
+    if pixels <= 0.0 || pixels > f64::from(MAX_PREVIEW_DIMENSION) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "provider SVG filter {label} exceeds the renderer dimension budget"
+        )));
+    }
+    Ok(pixels.ceil() as u32)
+}
+
+fn canonical_emitted_element(
+    kind: RawSvgElementKind,
+    name: &str,
+    attrs: Vec<(String, String)>,
+    is_root: bool,
+    resources: &SvgResourceCatalog,
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<(String, Vec<(String, String)>)> {
+    if kind == RawSvgElementKind::Retained {
+        canonical_element(name, attrs, is_root, resources, budget)
+    } else {
+        canonical_resource_element(kind, name, attrs, resources, budget)
+    }
+}
+
+fn validate_hidden_attributes(
+    element: &str,
+    attrs: &[(String, String)],
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<()> {
+    for (key, value) in attrs {
+        let inert = matches!(key.as_str(), "id" | "class" | "data-name");
+        let hidden_group = element == "g"
+            && matches!(
+                key.as_str(),
+                "display" | "overflow" | "x" | "y" | "width" | "height"
+            );
+        if !inert && !hidden_group && !allowed_attribute(element, key) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG hidden attribute {key} is not allowed"
+            )));
+        }
+        let local_paint = key == "fill" && local_url_target(value).is_some();
+        if !local_paint && unsafe_attribute_value(value) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "provider SVG hidden attribute {key} is not allowed"
+            )));
+        }
+        match key.as_str() {
+            "display" if value != "none" => {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG hidden display must be none".to_owned(),
+                ))
+            }
+            "overflow" if !matches!(value.as_str(), "visible" | "hidden") => {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG hidden overflow is not recognized".to_owned(),
+                ))
+            }
+            "width" | "height" | "x" | "y" if value.ends_with('%') => {
+                let percentage = number_or_percentage(value, key)?;
+                if percentage.abs() > 100.0 {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG hidden percentage exceeds its budget".to_owned(),
+                    ));
+                }
+            }
+            _ if !inert && !hidden_group && !local_paint => {
+                validate_attribute_resource_budget(element, key, value, budget)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn canonical_element(
     name: &str,
     mut source_attrs: Vec<(String, String)>,
     is_root: bool,
+    resources: &SvgResourceCatalog,
     budget: &mut SanitizerBudget,
 ) -> WorkerResult<(String, Vec<(String, String)>)> {
     if !matches!(
@@ -1632,7 +2436,7 @@ fn canonical_element(
             continue;
         }
         if key == "style" {
-            let style_attrs = canonical_presentation_style(name, &value, budget)?;
+            let style_attrs = canonical_presentation_style(name, &value, resources, budget)?;
             if style_attrs
                 .iter()
                 .any(|(key, _)| attrs.iter().any(|(existing, _)| existing == key))
@@ -1642,6 +2446,36 @@ fn canonical_element(
                 ));
             }
             attrs.extend(style_attrs);
+            continue;
+        }
+        let reference_kind = match key.as_str() {
+            "fill" if local_url_target(&value).is_some() => Some(SvgResourceKind::LinearGradient),
+            "clip-path" => Some(SvgResourceKind::ClipPath),
+            "filter" => Some(SvgResourceKind::Filter),
+            _ => None,
+        };
+        if let Some(expected) = reference_kind {
+            if matches!(key.as_str(), "clip-path" | "filter")
+                && !matches!(
+                    name,
+                    "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
+                )
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "provider SVG attribute {key} is not allowed on <{name}>"
+                )));
+            }
+            let target = local_url_target(&value).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "provider SVG attribute {key} must be an exact local resource reference"
+                ))
+            })?;
+            if resources.ids.get(target) != Some(&expected) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "provider SVG attribute {key} has an unresolved or mistyped resource"
+                )));
+            }
+            attrs.push((key, value));
             continue;
         }
         // The default namespace changes the meaning of unprefixed elements, so retain only SVG's
@@ -1675,6 +2509,7 @@ fn canonical_element(
 fn classify_element(
     name: &str,
     parent: Option<&RawSvgElement>,
+    attrs: &[(String, String)],
     empty: bool,
     root_seen: bool,
 ) -> WorkerResult<RawSvgElementKind> {
@@ -1692,16 +2527,56 @@ fn classify_element(
             ))
         };
     };
+    if parent.kind == RawSvgElementKind::Hidden {
+        return if matches!(
+            name,
+            "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
+        ) {
+            Ok(RawSvgElementKind::Hidden)
+        } else if name == "title" {
+            Ok(RawSvgElementKind::Title)
+        } else {
+            Err(invalid())
+        };
+    }
     if parent.kind == RawSvgElementKind::Retained
         && matches!(
             name,
             "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
         )
     {
+        if name == "g" && attribute_value(attrs, "display") == Some("none") {
+            return Ok(RawSvgElementKind::Hidden);
+        }
         return Ok(RawSvgElementKind::Retained);
     }
     match (parent.kind, parent.name.as_str(), name, empty) {
         (RawSvgElementKind::Retained, "svg", "defs", true) => Ok(RawSvgElementKind::Defs),
+        (RawSvgElementKind::Retained, "svg", "defs", false) => Ok(RawSvgElementKind::ResourceDefs),
+        (RawSvgElementKind::ResourceDefs, "defs", "clipPath", false) => {
+            Ok(RawSvgElementKind::ClipPath)
+        }
+        (RawSvgElementKind::ResourceDefs, "defs", "linearGradient", _) => {
+            Ok(RawSvgElementKind::LinearGradient)
+        }
+        (RawSvgElementKind::ResourceDefs, "defs", "filter", false) => Ok(RawSvgElementKind::Filter),
+        (
+            RawSvgElementKind::ClipPath,
+            "clipPath",
+            "g" | "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon",
+            _,
+        ) => Ok(RawSvgElementKind::Retained),
+        (RawSvgElementKind::LinearGradient, "linearGradient", "stop", true) => {
+            Ok(RawSvgElementKind::GradientStop)
+        }
+        (RawSvgElementKind::Filter, "filter", "feGaussianBlur", true) => {
+            Ok(RawSvgElementKind::FeGaussianBlur)
+        }
+        (RawSvgElementKind::Filter, "filter", "feOffset", true) => Ok(RawSvgElementKind::FeOffset),
+        (RawSvgElementKind::Filter, "filter", "feMerge", false) => Ok(RawSvgElementKind::FeMerge),
+        (RawSvgElementKind::FeMerge, "feMerge", "feMergeNode", true) => {
+            Ok(RawSvgElementKind::FeMergeNode)
+        }
         (RawSvgElementKind::Retained, "svg", "sodipodi:namedview", _) => {
             Ok(RawSvgElementKind::NamedView)
         }
@@ -1799,11 +2674,14 @@ fn stripped_retained_attribute(
         ),
         "g" => matches!(
             key,
-            "inkscape:label" | "inkscape:groupmode" | "id" | "class"
+            "inkscape:label" | "inkscape:groupmode" | "id" | "class" | "data-name"
         ),
-        "path" => matches!(key, "id" | "class" | "inkscape:connector-curvature"),
+        "path" => matches!(
+            key,
+            "id" | "class" | "data-name" | "inkscape:connector-curvature"
+        ),
         "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {
-            matches!(key, "id" | "class")
+            matches!(key, "id" | "class" | "data-name")
         }
         _ => false,
     };
@@ -1870,7 +2748,19 @@ fn validate_discarded_attributes(
             RawSvgElementKind::DcType => {
                 key == "rdf:resource" && value == "http://purl.org/dc/dcmitype/StillImage"
             }
-            RawSvgElementKind::Retained => unreachable!("retained attributes are canonicalized"),
+            RawSvgElementKind::Retained
+            | RawSvgElementKind::ResourceDefs
+            | RawSvgElementKind::ClipPath
+            | RawSvgElementKind::LinearGradient
+            | RawSvgElementKind::GradientStop
+            | RawSvgElementKind::Filter
+            | RawSvgElementKind::FeGaussianBlur
+            | RawSvgElementKind::FeOffset
+            | RawSvgElementKind::FeMerge
+            | RawSvgElementKind::FeMergeNode
+            | RawSvgElementKind::Hidden => {
+                unreachable!("emitted or hidden attributes are validated separately")
+            }
         };
         let known_metadata_uri = kind == RawSvgElementKind::DcType && allowed;
         if !allowed || (!known_metadata_uri && unsafe_attribute_value(value)) {
@@ -1966,6 +2856,7 @@ fn validate_inert_enable_background(value: &str) -> WorkerResult<()> {
 fn canonical_presentation_style(
     element: &str,
     style: &str,
+    resources: &SvgResourceCatalog,
     budget: &mut SanitizerBudget,
 ) -> WorkerResult<Vec<(String, String)>> {
     let lower = style.to_ascii_lowercase();
@@ -1979,7 +2870,6 @@ fn canonical_presentation_style(
             .any(|character| matches!(character, '\\' | '{' | '}' | '@'))
         || compact.contains("/*")
         || compact.contains("*/")
-        || compact.contains("url(")
         || compact.contains("expression(")
     {
         return Err(WorkerError::InvalidPayload(
@@ -2021,6 +2911,17 @@ fn canonical_presentation_style(
         if key == "enable-background" && element == "svg" {
             validate_inert_enable_background(value)?;
             continue;
+        }
+        if key == "fill" {
+            if let Some(target) = local_url_target(value) {
+                if resources.ids.get(target) != Some(&SvgResourceKind::LinearGradient) {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG fill has an unresolved or mistyped resource".to_owned(),
+                    ));
+                }
+                attrs.push((key.to_owned(), value.to_owned()));
+                continue;
+            }
         }
         if !allowed_presentation_property(key) || value.is_empty() || unsafe_attribute_value(value)
         {
@@ -2075,7 +2976,7 @@ fn allowed_attribute(element: &str, attribute: &str) -> bool {
         || match element {
             "svg" => matches!(
                 attribute,
-                "xmlns" | "width" | "height" | "viewBox" | "preserveAspectRatio"
+                "xmlns" | "width" | "height" | "viewBox" | "preserveAspectRatio" | "overflow"
             ),
             "path" => attribute == "d",
             "rect" => matches!(attribute, "x" | "y" | "width" | "height" | "rx" | "ry"),
@@ -2173,6 +3074,11 @@ fn validate_attribute_resource_budget(
         }
         "preserveAspectRatio" => {
             validate_preserve_aspect_ratio(value)?;
+        }
+        "overflow" if value != "hidden" => {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG root overflow must be hidden".to_owned(),
+            ));
         }
         "stroke-miterlimit" => {
             let values = parse_number_list(value, false, key, true)?;
@@ -2658,6 +3564,7 @@ async fn render_preview_with_size(
             }
             None => (width, height, resvg::tiny_skia::Transform::identity()),
         };
+        validate_filter_render_budget(&tree, width, height, transform)?;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
             WorkerError::InvalidPayload("provider SVG preview dimensions are invalid".to_owned())
         })?;
@@ -2670,6 +3577,127 @@ async fn render_preview_with_size(
     .await
     .map_err(|error| task_join_error("SVG preview render", error))??;
     Ok(())
+}
+
+fn filter_input_surface_count(kind: &usvg::filter::Kind) -> WorkerResult<u64> {
+    match kind {
+        // Pinned resvg's box blur allocates one RGBA back buffer. Its IIR path allocates one f64
+        // value per pixel, equivalent to two RGBA surfaces, so charge the larger scratch cost in
+        // addition to the primitive result charged by the caller.
+        usvg::filter::Kind::GaussianBlur(_) => Ok(2),
+        usvg::filter::Kind::Offset(_) => Ok(1),
+        usvg::filter::Kind::Merge(merge) => u64::try_from(merge.inputs().len()).map_err(|_| {
+            WorkerError::InvalidPayload("provider SVG filter input count overflow".to_owned())
+        }),
+        _ => Err(WorkerError::InvalidPayload(
+            "provider SVG parsed to an unsupported filter primitive".to_owned(),
+        )),
+    }
+}
+
+fn clipped_filter_layer_pixels(
+    group: &usvg::Group,
+    target_width: u32,
+    target_height: u32,
+    root_transform: resvg::tiny_skia::Transform,
+) -> WorkerResult<u64> {
+    let bbox = group
+        .abs_layer_bounding_box()
+        .transform(root_transform)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "provider SVG filter layer has an invalid transform".to_owned(),
+            )
+        })?
+        .to_int_rect();
+    // Keep this identical to resvg::render's max_bbox and render_group intersection. The parsed
+    // abs_layer_bounding_box already contains objectBoundingBox filter resolution and every SVG
+    // transform, while root_transform contains the requested preview fit.
+    let left = bbox.left().max(-(target_width as i32) * 2);
+    let top = bbox.top().max(-(target_height as i32) * 2);
+    let right = bbox.right().min((target_width as i32) * 3);
+    let bottom = bbox.bottom().min((target_height as i32) * 3);
+    if right <= left || bottom <= top {
+        return Ok(0);
+    }
+    let width = u64::try_from(right - left).map_err(|_| {
+        WorkerError::InvalidPayload("provider SVG filter layer width overflow".to_owned())
+    })?;
+    let height = u64::try_from(bottom - top).map_err(|_| {
+        WorkerError::InvalidPayload("provider SVG filter layer height overflow".to_owned())
+    })?;
+    width.checked_mul(height).ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG filter layer pixels overflow".to_owned())
+    })
+}
+
+fn validate_filter_render_budget(
+    tree: &usvg::Tree,
+    target_width: u32,
+    target_height: u32,
+    root_transform: resvg::tiny_skia::Transform,
+) -> WorkerResult<()> {
+    fn visit(
+        group: &usvg::Group,
+        target_width: u32,
+        target_height: u32,
+        root_transform: resvg::tiny_skia::Transform,
+        total: &mut u64,
+    ) -> WorkerResult<()> {
+        if !group.filters().is_empty() {
+            let layer_pixels =
+                clipped_filter_layer_pixels(group, target_width, target_height, root_transform)?;
+            // resvg allocates the isolated group layer once. Its filter evaluator retains every
+            // primitive result and can clone every input surface while producing the next result.
+            let mut surfaces = 1u64;
+            for filter in group.filters() {
+                for primitive in filter.primitives() {
+                    surfaces = surfaces.checked_add(1).ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "provider SVG filter surface count overflow".to_owned(),
+                        )
+                    })?;
+                    let inputs = filter_input_surface_count(primitive.kind())?;
+                    surfaces = surfaces.checked_add(inputs).ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "provider SVG filter surface count overflow".to_owned(),
+                        )
+                    })?;
+                }
+            }
+            *total = total
+                .checked_add(layer_pixels.checked_mul(surfaces).ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "provider SVG filter offscreen pixels overflow".to_owned(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "provider SVG filter offscreen pixels overflow".to_owned(),
+                    )
+                })?;
+            if *total > MAX_SVG_FILTER_OFFSCREEN_PIXELS {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG filters exceed the total offscreen-pixel budget".to_owned(),
+                ));
+            }
+        }
+        for child in group.children() {
+            if let usvg::Node::Group(child) = child {
+                visit(child, target_width, target_height, root_transform, total)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut total = 0u64;
+    visit(
+        tree.root(),
+        target_width,
+        target_height,
+        root_transform,
+        &mut total,
+    )
 }
 
 #[cfg(test)]
@@ -3674,6 +4702,207 @@ mod tests {
             pixels.pixels().any(|pixel| pixel[3] > 0),
             "actual visible geometry renders"
         );
+    }
+
+    fn comparison_pixels(svg: &str, size: u32) -> Vec<u8> {
+        let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).expect("comparison SVG");
+        let intrinsic = tree.size();
+        let scale = (size as f32 / intrinsic.width()).min(size as f32 / intrinsic.height());
+        let x = (size as f32 - intrinsic.width() * scale) / 2.0;
+        let y = (size as f32 - intrinsic.height() * scale) / 2.0;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).expect("comparison pixmap");
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.data().to_vec()
+    }
+
+    #[test]
+    fn bounded_internal_resources_preserve_all_five_upstream_renders() {
+        let cases = [
+            include_str!("../tests/fixtures/starvector/upstream-34847121425-case-01.svg"),
+            include_str!("../tests/fixtures/starvector/upstream-34847121425-case-03.svg"),
+            include_str!("../tests/fixtures/starvector/upstream-34847121425-case-04.svg"),
+            include_str!("../tests/fixtures/starvector/upstream-34847121425-case-09.svg"),
+            include_str!("../tests/fixtures/starvector/upstream-34847121425-case-17.svg"),
+        ];
+        for (index, raw) in cases.into_iter().enumerate() {
+            let canonical = sanitize_svg(raw).unwrap_or_else(|error| {
+                panic!("upstream internal-resource case {index} failed: {error}")
+            });
+            let tree = usvg::Tree::from_str(&canonical.svg, &usvg::Options::default())
+                .expect("canonical comparison SVG");
+            let intrinsic = tree.size();
+            let scale = (512.0 / intrinsic.width()).min(512.0 / intrinsic.height());
+            let x = (512.0 - intrinsic.width() * scale) / 2.0;
+            let y = (512.0 - intrinsic.height() * scale) / 2.0;
+            validate_filter_render_budget(
+                &tree,
+                512,
+                512,
+                resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y),
+            )
+            .unwrap_or_else(|error| {
+                panic!("upstream internal-resource case {index} exceeded preview budget: {error}")
+            });
+            assert_eq!(
+                comparison_pixels(raw, 512),
+                comparison_pixels(&canonical.svg, 512),
+                "upstream internal-resource case {index} changed visible pixels"
+            );
+            assert_eq!(
+                canonical.svg,
+                sanitize_svg(raw).expect("repeat sanitation").svg,
+                "upstream internal-resource case {index} is not byte deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_resource_graph_is_typed_resolved_acyclic_and_forward_safe() {
+        let forward = concat!(
+            "<svg width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/>",
+            "<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>",
+            "<stop offset=\"1\" stop-color=\"blue\"/></linearGradient></defs></svg>"
+        );
+        sanitize_svg(forward).expect("forward local resource reference");
+        for invalid in [
+            "<svg><path fill=\"url(#missing)\" d=\"M0 0H1\"/></svg>",
+            "<svg><defs><clipPath id=\"x\"><rect/></clipPath></defs><path fill=\"url(#x)\" d=\"M0 0H1\"/></svg>",
+            "<svg><defs><clipPath id=\"x\"><rect/></clipPath><filter id=\"x\" width=\"1\" height=\"1\"><feGaussianBlur in=\"SourceAlpha\" result=\"b\" stdDeviation=\"1\"/></filter></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\" href=\"#b\"/><linearGradient id=\"b\" href=\"#a\"/></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\" href=\"#a\"/></defs></svg>",
+            "<svg><defs><clipPath id=\"c\"><rect clip-path=\"url(#c)\"/></clipPath></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\" href=\"#b\" xlink:href=\"#b\"/><linearGradient id=\"b\"/></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\" href=\"https://example.invalid/g\"/></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\"/></defs><path fill=\"url( #a )\" d=\"M0 0H1\"/></svg>",
+            "<svg><defs><linearGradient id=\"a\"><stop offset=\"2\" stop-color=\"red\"/></linearGradient></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\"><stop offset=\"0\" style=\"stop-color:red;;stop-opacity:1\"/></linearGradient></defs></svg>",
+            "<svg><defs><linearGradient id=\"a\"><stop offset=\"0\" style=\"stop-color:url(#a)\"/></linearGradient></defs></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+        let unbound_xlink = "<svg><defs><linearGradient id=\"a\" xlink:href=\"#b\"/><linearGradient id=\"b\"/></defs></svg>";
+        assert!(
+            invalid_detail(sanitize_svg(unbound_xlink)).contains("exact root xmlns:xlink binding"),
+            "unbound xlink prefix must fail closed"
+        );
+    }
+
+    #[test]
+    fn internal_resource_and_filter_costs_are_independently_bounded() {
+        let resources = (0..=MAX_SVG_RESOURCES)
+            .map(|index| format!("<clipPath id=\"c{index}\"><rect/></clipPath>"))
+            .collect::<String>();
+        assert!(invalid_detail(sanitize_svg(&format!(
+            "<svg><defs>{resources}</defs></svg>"
+        )))
+        .contains("resource budget"));
+
+        let references = (0..=MAX_SVG_RESOURCE_REFERENCES)
+            .map(|_| "<path fill=\"url(#g)\" d=\"M0 0H1\"/>".to_owned())
+            .collect::<String>();
+        let input = format!(
+            "<svg><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/></linearGradient></defs>{references}</svg>"
+        );
+        assert!(invalid_detail(sanitize_svg(&input)).contains("resource-reference budget"));
+
+        let stops = "<stop offset=\"0\" stop-color=\"red\"/>".repeat(MAX_SVG_GRADIENT_STOPS + 1);
+        assert!(invalid_detail(sanitize_svg(&format!(
+            "<svg><defs><linearGradient id=\"g\">{stops}</linearGradient></defs></svg>"
+        )))
+        .contains("gradient-stop budget"));
+
+        let mut primitives = String::new();
+        let mut input = "SourceAlpha".to_owned();
+        for index in 0..=MAX_SVG_FILTER_PRIMITIVES {
+            let result = format!("r{index}");
+            primitives.push_str(&format!(
+                "<feOffset in=\"{input}\" result=\"{result}\" dx=\"1\" dy=\"1\"/>"
+            ));
+            input = result;
+        }
+        let svg = format!(
+            "<svg width=\"8\" height=\"8\"><defs><filter id=\"f\" width=\"100%\" height=\"100%\">{primitives}</filter></defs></svg>"
+        );
+        assert!(invalid_detail(sanitize_svg(&svg)).contains("filter-primitive budget"));
+
+        for invalid in [
+            "<svg width=\"8\" height=\"8\"><defs><filter id=\"f\" width=\"100%\" height=\"100%\"><feGaussianBlur in=\"later\" result=\"b\" stdDeviation=\"1\"/></filter></defs></svg>",
+            "<svg width=\"8\" height=\"8\"><defs><filter id=\"f\" width=\"100%\" height=\"100%\"><feGaussianBlur in=\"SourceAlpha\" result=\"b\" stdDeviation=\"65\"/></filter></defs></svg>",
+            "<svg width=\"2048\" height=\"2048\"><defs><filter id=\"f\" width=\"200%\" height=\"200%\"><feGaussianBlur in=\"SourceAlpha\" result=\"b\" stdDeviation=\"1\"/></filter></defs></svg>",
+            "<svg width=\"8\" height=\"8\"><defs><filter id=\"f\" width=\"100%\" height=\"100%\"><feOffset in=\"SourceAlpha\" result=\"b\"/><feOffset in=\"b\" result=\"b\"/></filter></defs></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+
+        let scaled = "<svg width=\"900\" height=\"600\"><defs><filter id=\"f\" width=\"200%\" height=\"200%\"><feGaussianBlur in=\"SourceAlpha\" result=\"b\" stdDeviation=\"1\"/></filter></defs><g filter=\"url(#f)\" transform=\"scale(1000)\"><rect width=\"900\" height=\"600\"/></g></svg>";
+        assert!(
+            invalid_detail(sanitize_svg(scaled)).contains("offscreen-pixel budget"),
+            "resolved transformed filter layer must be charged"
+        );
+
+        let filter = "<filter id=\"f\" width=\"100%\" height=\"100%\"><feGaussianBlur in=\"SourceAlpha\" result=\"b\" stdDeviation=\"1\"/></filter>";
+        let applications =
+            "<g filter=\"url(#f)\"><rect width=\"2048\" height=\"2048\"/></g>".repeat(3);
+        let repeated = format!(
+            "<svg width=\"2048\" height=\"2048\"><defs>{filter}</defs>{applications}</svg>"
+        );
+        let detail = invalid_detail(sanitize_svg(&repeated));
+        assert!(
+            detail.contains("offscreen-pixel budget"),
+            "filter applications must be charged independently: {detail}"
+        );
+
+        let case_17 = sanitize_svg(include_str!(
+            "../tests/fixtures/starvector/upstream-34847121425-case-17.svg"
+        ))
+        .expect("case 17 stays within its intrinsic render budget");
+        let tree = usvg::Tree::from_str(&case_17.svg, &usvg::Options::default())
+            .expect("case 17 canonical tree");
+        let intrinsic = tree.size();
+        let scale = (MAX_PREVIEW_DIMENSION as f32 / intrinsic.width())
+            .min(MAX_PREVIEW_DIMENSION as f32 / intrinsic.height());
+        let x = (MAX_PREVIEW_DIMENSION as f32 - intrinsic.width() * scale) / 2.0;
+        let y = (MAX_PREVIEW_DIMENSION as f32 - intrinsic.height() * scale) / 2.0;
+        let detail = validate_filter_render_budget(
+            &tree,
+            MAX_PREVIEW_DIMENSION,
+            MAX_PREVIEW_DIMENSION,
+            resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y),
+        )
+        .expect_err("oversized case 17 preview must be rejected")
+        .to_string();
+        assert!(
+            detail.contains("offscreen-pixel budget"),
+            "preview transforms must be included in the allocation bound: {detail}"
+        );
+    }
+
+    #[test]
+    fn hidden_geometry_is_omitted_but_remains_strictly_parsed_and_bounded() {
+        let accepted = sanitize_svg(
+            "<svg><g display=\"none\"><rect width=\"100%\" height=\"100%\" fill=\"url(#missing)\"/></g><path d=\"M0 0H1\"/></svg>",
+        )
+        .expect("bounded hidden geometry");
+        assert!(!accepted.svg.contains("display"));
+        assert!(!accepted.svg.contains("missing"));
+        for invalid in [
+            "<svg><g display=\"none\"><script/></g></svg>",
+            "<svg><g display=\"none\"><text>hidden</text></g></svg>",
+            "<svg><g display=\"none\"><use href=\"#x\"/></g></svg>",
+            "<svg><g display=\"none\"><rect fill=\"url(https://example.invalid/a)\"/></g></svg>",
+            "<svg><g display=\"none\" onclick=\"alert(1)\"><rect/></g></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+        let paths = format!(
+            "<svg><g display=\"none\"><path d=\"{}\"/></g></svg>",
+            "M".repeat(MAX_SVG_PATH_COMMANDS + 1)
+        );
+        assert!(invalid_detail(sanitize_svg(&paths)).contains("path-command budget"));
     }
 
     #[test]
