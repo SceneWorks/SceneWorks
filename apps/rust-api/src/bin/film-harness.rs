@@ -258,7 +258,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     let control = parsed.control.clone();
     let signal = spawn_interrupt_handler(control.clone());
     let outcome = film_harness::run_with_control(&transport, &parsed.options, &control).await;
-    signal.abort();
+    signal.finished();
     match outcome {
         Ok(record) => {
             print_record(&record, &parsed.options.out_dir);
@@ -539,28 +539,491 @@ fn fixture_images(args: &[String]) -> ExitCode {
     }
 }
 
-/// Cancel the in-flight run on SIGINT, and exit on a second one.
+/// Cancel the in-flight run on SIGINT or SIGTERM, and exit on a second one.
 ///
-/// The second listener is not optional: once `ctrl_c()` has been awaited, tokio owns SIGINT for the
-/// rest of the process, so without it a second Ctrl-C would be swallowed and the operator would
-/// have no way out but another signal.
-fn spawn_interrupt_handler(control: RunControl) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+/// The second listener is not optional: once a signal stream has been awaited, tokio owns that
+/// signal for the rest of the process, so without it a second Ctrl-C would be swallowed and the
+/// operator would have no way out but another signal.
+///
+/// SIGTERM is handled exactly as Ctrl-C (sc-22715 evaluation): a plain `kill <pid>` of the
+/// controller used to take the crash path — the process died with the record left `running`, the
+/// in-flight job unmentioned, and the operator's intent (stop this run) unrecorded. The record
+/// was still resumable, which is what `resume` is for, but a signal the operator sent on purpose
+/// deserves the cancel path: the job is cancelled through the API and the record says `canceled`.
+///
+/// The streams are registered HERE rather than inside the task, so they exist before the command
+/// starts: a signal arriving in the gap between the spawn and the task's first poll is buffered by
+/// the stream instead of being delivered to nothing.
+fn spawn_interrupt_handler(control: RunControl) -> StopWatch {
+    let (over, run_over) = tokio::sync::watch::channel(false);
+    let signals = StopSignals::listen();
+    tokio::spawn(watch_stop_signals(control, signals, run_over, |code| {
+        std::process::exit(code)
+    }));
+    StopWatch { over }
+}
+
+/// The handle a command holds while its run is in flight.
+///
+/// [`StopWatch::finished`] tells the watcher the run is over. It is NOT an abort (sc-22715):
+/// aborting the task left the process-wide handlers tokio installs with nothing consuming them, so
+/// for the whole tail of the process — printing the record, the last flush — a plain `kill <pid>`
+/// was swallowed and did nothing at all. The watcher stays alive and stands in for the default
+/// disposition instead.
+///
+/// The run-over message is a LATCHED flag (a `watch`), not a one-shot wake-up (sc-22715 CI fix).
+/// It used to be a `oneshot` the watcher awaited as one arm of a `select!` against the signal
+/// stream — but `select!` polls its arms in random order, so when a signal and the end of the run
+/// were ready in the same poll the signal arm could win and the watcher would take the cancel
+/// path for a run that was already over. A flag can be RE-READ after the signal is in hand, which
+/// makes the order unambiguous instead of a coin flip.
+struct StopWatch {
+    over: tokio::sync::watch::Sender<bool>,
+}
+
+impl StopWatch {
+    fn finished(self) {
+        // Publishing the flag is the ordering guarantee: every signal the watcher reads after this
+        // send sees the run as over. The receiver only ever goes away with the task, which is the
+        // same message.
+        let _ = self.over.send(true);
+    }
+}
+
+/// What the in-flight half of [`watch_stop_signals`] ended on.
+enum InFlight {
+    /// The run finished on its own; the process is now in its tail. Carries a stop signal that
+    /// landed in the same breath as the end of the run, if one did, so the tail acts on it rather
+    /// than dropping it — a consumed signal is delivered to nothing and the operator's `kill`
+    /// would vanish, which is the very bug this watcher exists to fix.
+    RunOver(Option<StopSignal>),
+    /// A second stop signal arrived: give up on the record and leave with this code.
+    Exit(i32),
+    /// No stop signal can be listened for at all, so there is nothing left to watch.
+    Deaf,
+}
+
+/// Watch for stop signals while the run is in flight, then go on watching for the tail of the
+/// process.
+///
+/// `exit` is the process exit, taken as an argument so both paths that reach it can be asserted
+/// without ending the test binary.
+async fn watch_stop_signals(
+    control: RunControl,
+    mut signals: StopSignals,
+    mut run_over: tokio::sync::watch::Receiver<bool>,
+    exit: impl Fn(i32),
+) {
+    match in_flight(&control, &mut signals, &mut run_over).await {
+        InFlight::Exit(code) => return exit(code),
+        InFlight::Deaf => return,
+        // A signal arrived at the same instant the run ended. The run is over, so there is nothing
+        // to cancel — but the signal is still the operator's `kill`, and the tail is where it is
+        // answered. Answer it here rather than going back to wait for a second one.
+        InFlight::RunOver(Some(signal)) => return exit(signal.exit_code()),
+        InFlight::RunOver(None) => {}
+    }
+    // The run is over and this process is finishing. The handlers tokio installed stay installed
+    // for the life of the process — dropping the streams does not restore the default disposition
+    // — so with nothing consuming a signal here, `kill <pid>` would do nothing for the rest of the
+    // process. Stand in for the default disposition: terminate, with the code a shell reports.
+    if let Some(signal) = signals.next().await {
+        exit(signal.exit_code());
+    }
+}
+
+/// The first half: cancel on the first signal, give up on the second, stand down when the run ends.
+async fn in_flight(
+    control: &RunControl,
+    signals: &mut StopSignals,
+    run_over: &mut tokio::sync::watch::Receiver<bool>,
+) -> InFlight {
+    match next_stop_signal(signals, run_over).await {
+        Stopped::RunOver(pending) => return InFlight::RunOver(pending),
+        Stopped::Deaf => return InFlight::Deaf,
+        // The first signal cancels the run whichever of the two it was; only the second one's
+        // exit code is reported, because only it ends the process here.
+        Stopped::Signal(_) => {}
+    }
+    eprintln!(
+        "film-harness: interrupt received — canceling the in-flight job and writing the run \
+         record; interrupt again to exit now (the render keeps going)"
+    );
+    control.cancel();
+    match next_stop_signal(signals, run_over).await {
+        Stopped::RunOver(pending) => InFlight::RunOver(pending),
+        Stopped::Deaf => InFlight::Deaf,
+        Stopped::Signal(signal) => {
             eprintln!(
-                "film-harness: interrupt received — canceling the in-flight job and writing the \
-                 run record; interrupt again to exit now (the render keeps going)"
+                "film-harness: second interrupt — exiting without a run record; the worker \
+                 may still be rendering (cancel it in the job list)"
             );
-            control.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!(
-                    "film-harness: second interrupt — exiting without a run record; the worker \
-                     may still be rendering (cancel it in the job list)"
-                );
-                std::process::exit(130);
+            InFlight::Exit(signal.exit_code())
+        }
+    }
+}
+
+/// What ended a wait for the next stop signal while the run was still in flight.
+enum Stopped {
+    /// A stop signal arrived and the run was still in flight when it did.
+    Signal(StopSignal),
+    /// The run ended. Carries a signal that arrived in the same poll, if one did.
+    RunOver(Option<StopSignal>),
+    /// No stop signal can be listened for at all.
+    Deaf,
+}
+
+/// Wait for whichever comes first: the next stop signal, or the end of the run.
+///
+/// The race this resolves (sc-22715 CI fix) is why the run-over flag is latched. `tokio::select!`
+/// polls its arms in a RANDOM order, so when the end of the run and a signal are both ready in the
+/// same poll — routine on a loaded Linux runner, where the spawned watcher is not polled until
+/// after the command has already returned AND a signal has been raised — the signal arm wins half
+/// the time. The watcher would then print "canceling the in-flight job" and call `cancel()` on a
+/// run that had already finished.
+///
+/// Winning the `select!` therefore proves nothing about the order. The flag is the authority, so
+/// it is read AFTER the signal is in hand: if the run was already over, the signal belongs to the
+/// tail, and it is handed back rather than swallowed.
+async fn next_stop_signal(
+    signals: &mut StopSignals,
+    run_over: &mut tokio::sync::watch::Receiver<bool>,
+) -> Stopped {
+    let already_over = *run_over.borrow();
+    if already_over {
+        return Stopped::RunOver(None);
+    }
+    let signal = tokio::select! {
+        _ = run_is_over(run_over) => return Stopped::RunOver(None),
+        signal = signals.next() => match signal {
+            Some(signal) => signal,
+            None => return Stopped::Deaf,
+        },
+    };
+    let over = *run_over.borrow();
+    if over {
+        Stopped::RunOver(Some(signal))
+    } else {
+        Stopped::Signal(signal)
+    }
+}
+
+/// Resolves once the run is over.
+///
+/// A dropped sender says the same thing as a send: the command that held the [`StopWatch`] is
+/// gone, so nothing is in flight any more. `changed()` is cancel-safe, which is what lets this sit
+/// in a `select!` arm that loses.
+async fn run_is_over(run_over: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        let over = *run_over.borrow();
+        if over {
+            return;
+        }
+        if run_over.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Which signal stopped the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopSignal {
+    Interrupt,
+    Terminate,
+}
+
+impl StopSignal {
+    /// The exit code a shell reports for a process this signal killed (`128 + signo`).
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+/// The signals that mean "stop this run": SIGINT (Ctrl-C) everywhere, and SIGTERM (`kill`) on
+/// unix. Registering the streams once, up front, is what lets a second signal be observed at all.
+///
+/// BOTH streams are held here (sc-22715). SIGINT used to be `tokio::signal::ctrl_c()`, created
+/// afresh on every call and dropped again whenever the SIGTERM arm of the `select!` won — and a
+/// signal that arrives while no stream is registered for it is delivered to nothing, so a SIGINT
+/// in the gap between the first `next()` returning and the second being awaited was lost. A
+/// `Signal` held across both calls buffers it instead.
+struct StopSignals {
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+}
+
+impl StopSignals {
+    fn listen() -> Self {
+        Self {
+            #[cfg(unix)]
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .ok(),
+            #[cfg(unix)]
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .ok(),
+        }
+    }
+
+    /// Resolves on the next SIGINT or SIGTERM; `None` only if neither can be listened for.
+    async fn next(&mut self) -> Option<StopSignal> {
+        #[cfg(unix)]
+        {
+            match (self.interrupt.as_mut(), self.terminate.as_mut()) {
+                (Some(interrupt), Some(terminate)) => tokio::select! {
+                    signal = interrupt.recv() => signal.map(|()| StopSignal::Interrupt),
+                    signal = terminate.recv() => signal.map(|()| StopSignal::Terminate),
+                },
+                (Some(interrupt), None) => interrupt.recv().await.map(|()| StopSignal::Interrupt),
+                (None, Some(terminate)) => terminate.recv().await.map(|()| StopSignal::Terminate),
+                // Neither stream registered: fall back to the portable listener rather than going
+                // deaf, and report it as the Ctrl-C it is.
+                (None, None) => tokio::signal::ctrl_c()
+                    .await
+                    .ok()
+                    .map(|()| StopSignal::Interrupt),
             }
         }
-    })
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .ok()
+                .map(|()| StopSignal::Interrupt)
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stop_signal_tests {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+
+    use tokio::sync::{Mutex, MutexGuard};
+
+    use sceneworks_rust_api::film_harness::RunControl;
+
+    use super::{watch_stop_signals, StopSignal, StopSignals};
+
+    /// Signal handlers are PROCESS-wide and tokio delivers a raised signal to every registered
+    /// stream, so two of these running at once would read each other's signals. The test harness
+    /// runs tests on threads of one process, so they take turns.
+    ///
+    /// An async mutex, because the guard is deliberately held across the awaits that raise and
+    /// observe the signals — which is the whole point of taking the turn.
+    async fn one_at_a_time() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().await
+    }
+
+    fn raise(signal: nix::sys::signal::Signal) {
+        nix::sys::signal::raise(signal).expect("raise");
+    }
+
+    /// Raise a signal and do not return until it has actually been DELIVERED to the registered
+    /// streams — not merely raised.
+    ///
+    /// This is what makes the two tail tests below deterministic instead of load-dependent
+    /// (sc-22715 CI fix). `raise()` only sets a pending flag; tokio's signal driver turns that into
+    /// a delivery on some later turn of the runtime, so a test that raises and then hopes is
+    /// racing the scheduler — which is exactly why the tail test passed on every macOS run and on
+    /// an unloaded Linux container, and failed on a loaded hosted runner.
+    ///
+    /// Tokio broadcasts a delivered signal to EVERY stream registered for it, so a second set of
+    /// streams opened here observes the same delivery the watcher's streams get. The caller
+    /// registers the watcher's `StopSignals` first and spawns the watcher last; when this returns,
+    /// the watcher's streams are known to be holding the signal, so the watcher's very first poll
+    /// meets a ready signal AND a run that is already over. That is the collision the old
+    /// `select!` resolved with a coin flip.
+    async fn raise_and_await_delivery(signal: nix::sys::signal::Signal, expect: StopSignal) {
+        let mut observer = StopSignals::listen();
+        raise(signal);
+        let delivered = tokio::time::timeout(Duration::from_secs(5), observer.next())
+            .await
+            .expect("the raised signal is delivered within 5s");
+        assert_eq!(
+            delivered,
+            Some(expect),
+            "the observer sees the signal that was raised"
+        );
+    }
+
+    /// Wait for the injected exit hook to record a code, or give up.
+    async fn recorded_exit_code(code: &Arc<AtomicI32>) -> Option<i32> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let seen = code.load(Ordering::SeqCst);
+                if seen != 0 {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .ok()
+    }
+
+    /// A `kill <pid>` (SIGTERM) reaches the same listener as Ctrl-C. The stream is registered
+    /// before the signal is raised, so the raise is observed rather than terminating the test
+    /// binary — which is exactly the difference between the cancel path and the crash path.
+    #[tokio::test]
+    async fn sigterm_is_a_stop_signal() {
+        let _serial = one_at_a_time().await;
+        let mut signals = StopSignals::listen();
+        assert!(signals.terminate.is_some(), "SIGTERM stream registered");
+        raise(nix::sys::signal::Signal::SIGTERM);
+        let observed = tokio::time::timeout(Duration::from_secs(5), signals.next())
+            .await
+            .expect("the signal is observed within 5s");
+        assert_eq!(observed, Some(StopSignal::Terminate));
+    }
+
+    /// A SIGINT that arrives while nothing is awaiting one is still the operator's SECOND
+    /// interrupt when it is next asked for (sc-22715).
+    ///
+    /// `next()` used to build a fresh `tokio::signal::ctrl_c()` inside its `select!`, so the SIGINT
+    /// stream existed only for the duration of one call: whenever the SIGTERM arm won, the stream
+    /// was dropped, and a SIGINT raised before the next call had nothing registered to deliver it
+    /// to. The second Ctrl-C — the operator's only way out of a 45-minute render — was swallowed
+    /// and the call hung until a third signal. Holding the `Signal` in the struct buffers it.
+    ///
+    /// The `sleep` below is load-bearing, not padding: raising a signal only sets a pending flag,
+    /// and tokio's signal driver turns that into a delivery on a later turn of the runtime. Without
+    /// an await in the gap, the driver cannot run until the next `select!` has ALREADY created its
+    /// short-lived stream, and the old code caught the signal by accident. The sleep puts the
+    /// delivery where it really lands in a multi-threaded runtime — while nothing is registered.
+    #[tokio::test]
+    async fn a_signal_that_lands_between_two_calls_is_still_observed() {
+        let _serial = one_at_a_time().await;
+        let mut signals = StopSignals::listen();
+        assert!(signals.interrupt.is_some(), "SIGINT stream registered");
+        raise(nix::sys::signal::Signal::SIGTERM);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), signals.next())
+                .await
+                .expect("the first signal is observed within 5s"),
+            Some(StopSignal::Terminate)
+        );
+        // Nothing is awaiting a signal at this instant — exactly the gap between the cancel being
+        // recorded and the second listener being awaited.
+        raise(nix::sys::signal::Signal::SIGINT);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), signals.next())
+                .await
+                .expect("the interrupt raised between the two calls is not lost"),
+            Some(StopSignal::Interrupt)
+        );
+    }
+
+    /// Once the run is over, a `kill <pid>` still terminates the process (sc-22715).
+    ///
+    /// The watcher used to be `abort()`ed the moment the command returned, leaving the handlers
+    /// tokio installed with nothing consuming them: SIGTERM's default disposition was gone, and for
+    /// the whole tail of the process — printing the record, the last flush — a plain `kill` did
+    /// nothing whatsoever. The watcher now stays and stands in for the default disposition.
+    ///
+    /// This test failed on the Linux CI runner while passing on macOS (sc-22715 CI fix). Nothing
+    /// about it is macOS-specific: the run-over hand-off used to be one arm of a `tokio::select!`
+    /// against the signal stream, and `select!` picks at random between arms that are ready in the
+    /// same poll. On a loaded hosted runner the spawned watcher was not polled until after BOTH
+    /// the run-over send and the first raise, so both arms were ready on the first poll and the
+    /// signal arm won about half the time — the watcher took the in-flight branch and cancelled a
+    /// run that was already over, tripping the last assertion below. The fix is in the watcher,
+    /// not here: the run-over flag is latched and re-read after the signal is in hand.
+    ///
+    /// The ordering the test relies on is therefore published, not timed. `finished()` sends the
+    /// flag before the raise, and the watcher reads it after every signal it receives, so
+    /// `cancel()` is unreachable from this point on however the runtime schedules the two.
+    ///
+    /// The setup deliberately arranges the WORST case rather than hoping for it: the run-over flag
+    /// is published and the signal is awaited all the way to delivery BEFORE the watcher is
+    /// spawned, so the watcher's first poll always meets both at once. Under the old `select!`
+    /// this fails about half the time; it is the CI failure, reproduced on demand.
+    #[tokio::test]
+    async fn a_signal_after_the_run_is_over_still_terminates() {
+        let _serial = one_at_a_time().await;
+        // Registered BEFORE the raise, so these streams buffer the signal rather than losing it.
+        let signals = StopSignals::listen();
+        let (over, run_over) = tokio::sync::watch::channel(false);
+        let code = Arc::new(AtomicI32::new(0));
+        let recorder = Arc::clone(&code);
+        let control = RunControl::new();
+        let cancelled = control.clone();
+        // The run is over: this is what replaced `signal.abort()`.
+        over.send(true).expect("the watcher is listening");
+        raise_and_await_delivery(nix::sys::signal::Signal::SIGTERM, StopSignal::Terminate).await;
+        let watcher = tokio::spawn(watch_stop_signals(
+            control,
+            signals,
+            run_over,
+            move |value| {
+                recorder.store(value, Ordering::SeqCst);
+            },
+        ));
+        let observed = recorded_exit_code(&code).await;
+        assert_eq!(
+            observed,
+            Some(143),
+            "a SIGTERM after the run finished must leave with what a shell reports for it \
+             (128 + 15); nothing recorded means it was swallowed and the process would ignore \
+             `kill` for the whole tail"
+        );
+        assert!(
+            !cancelled.is_canceled(),
+            "the run is already over, so the tail must not pretend it cancelled anything"
+        );
+        watcher.await.expect("the watcher exits cleanly");
+    }
+
+    /// The other half of the tail's contract: a Ctrl-C after the run is over leaves with 130, and
+    /// ONE is enough (sc-22715 CI fix).
+    ///
+    /// Raising exactly once is the point. The watcher can meet a signal and the end of the run in
+    /// the same poll, and the losing side of that race must not eat the signal: the streams are
+    /// registered up front precisely so a signal raised before the tail asks for one is buffered
+    /// rather than delivered to nothing. A watcher that consumed the signal and then decided the
+    /// run was over would leave this waiting for a second Ctrl-C that an operator has no reason to
+    /// send — the same swallowing bug as the `abort()` this watcher replaced, one poll later. The
+    /// sibling test above re-raises on a timer, so only this one can see it.
+    #[tokio::test]
+    async fn one_interrupt_after_the_run_is_over_is_enough_to_leave_with_130() {
+        let _serial = one_at_a_time().await;
+        let signals = StopSignals::listen();
+        let (over, run_over) = tokio::sync::watch::channel(false);
+        let code = Arc::new(AtomicI32::new(0));
+        let recorder = Arc::clone(&code);
+        let control = RunControl::new();
+        let cancelled = control.clone();
+        over.send(true).expect("the watcher is listening");
+        raise_and_await_delivery(nix::sys::signal::Signal::SIGINT, StopSignal::Interrupt).await;
+        let watcher = tokio::spawn(watch_stop_signals(
+            control,
+            signals,
+            run_over,
+            move |value| {
+                recorder.store(value, Ordering::SeqCst);
+            },
+        ));
+        let observed = recorded_exit_code(&code).await;
+        assert_eq!(
+            observed,
+            Some(130),
+            "one SIGINT after the run finished must leave with what a shell reports for it \
+             (128 + 2); nothing recorded means the watcher ate the signal and the operator would \
+             have to press Ctrl-C twice to leave a process that is already done"
+        );
+        assert!(
+            !cancelled.is_canceled(),
+            "the run is already over, so the tail must not pretend it cancelled anything"
+        );
+        watcher.await.expect("the watcher exits cleanly");
+    }
 }
 
 fn exit_code_for(record: &RunRecord) -> ExitCode {
@@ -678,7 +1141,7 @@ async fn record_command(command: &str, args: &[String]) -> ExitCode {
             }
         }
     };
-    signal.abort();
+    signal.finished();
     match result {
         Ok(record) => {
             print_record(&record, &parsed.options.out_dir);
@@ -745,12 +1208,12 @@ async fn review_command(args: &[String]) -> ExitCode {
         vision.preflight_model().await,
     ] {
         if let Err(error) = check {
-            signal.abort();
+            signal.finished();
             return report_error(error);
         }
     }
     let result = review::review(&transport, &options, &vision).await;
-    signal.abort();
+    signal.finished();
     match result {
         Ok(record) => {
             print_record(&record, &options.out_dir);
@@ -839,7 +1302,7 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
         let limits = match review::eval_review_limits(&options.set_path) {
             Ok(limits) => limits,
             Err(error) => {
-                signal.abort();
+                signal.finished();
                 return report_error(error);
             }
         };
@@ -848,7 +1311,7 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
             vqa_backend.preflight_model().await,
         ] {
             if let Err(error) = check {
-                signal.abort();
+                signal.finished();
                 return report_error(error);
             }
         }
@@ -859,7 +1322,7 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
         &vqa_backend
     };
     let result = review::review_eval(&transport, &options, vision).await;
-    signal.abort();
+    signal.finished();
     match result {
         Ok(results) => {
             print!("{}", format_eval_report(&results));

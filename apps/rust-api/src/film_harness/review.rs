@@ -1598,7 +1598,9 @@ impl Decision {
 ///   selection where it is;
 /// * **reject** marks the take `rejection` (it stays, with its job and its asset), clears the
 ///   selection, flags the declared dependents and marks the export stale. Nothing is re-rendered:
-///   `film-harness request-repair` or `resume` is a separate, explicit act.
+///   `film-harness request-repair` or `resume` is a separate, explicit act — and because nothing
+///   is, the decision says in so many words that the shot stays in the cut carrying the take that
+///   was just rejected, exactly as the failed-replacement path does (sc-22715).
 pub fn decide_take(
     out_dir: &Path,
     shot_id: &str,
@@ -1686,6 +1688,16 @@ pub fn decide_take(
             detail.push_str(&format!(
                 " (the take, its job and its asset are kept; {flagged} declared dependent(s) \
                  flagged needsReview; nothing was re-rendered)"
+            ));
+            // The SAME annotation the failed-replacement path writes (`super::replace_take`), and
+            // for the same reason (sc-22715): rejecting a take does not take the shot out of the
+            // sequence, so the timeline — and any MP4 exported from it — still carry the take the
+            // human just threw away. Without this the record left the shot `rendered` with
+            // `selectedAttempt: null` and nothing anywhere said what the cut actually shows.
+            detail.push_str(&format!(
+                "; shot {shot_id} stays in the sequence, so the timeline and the exported MP4 \
+                 still carry the REJECTED take until `film-harness replace-take --shot {shot_id}` \
+                 (or `request-repair`) renders another"
             ));
         }
     }
