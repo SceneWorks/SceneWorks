@@ -152,6 +152,12 @@ pub struct Shot {
     /// Stable id (`[A-Za-z0-9_-]{1,64}`), unique within the plan. Later stories key resume,
     /// take replacement and review on it.
     pub id: String,
+    /// The brief beat this shot covers, when the plan was generated from one
+    /// ([`crate::film_planner`]). Kept in the plan so beat coverage survives a hand edit: a
+    /// recompile checks it against the brief by identity rather than by matching prose. A
+    /// hand-authored plan carries no brief and so no beat ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beat_id: Option<String>,
     pub beat: String,
     pub framing: String,
     pub prompt: String,
@@ -203,6 +209,16 @@ pub struct ShotConditioning {
     pub last_frame_role: Option<String>,
     #[serde(default)]
     pub reference_roles: Vec<String>,
+    /// DECLARED continuity intent: "this shot continues from the end of that earlier shot".
+    ///
+    /// It is recorded on the compiled request and in the run record so a reviewer can see which
+    /// shots were meant to chain, and it is **never** a conditioning anchor by itself: the frames
+    /// and references a shot is actually conditioned on are the pack roles above, which resolve to
+    /// approved, canonical reference assets. [`validate_plan_against_pack`] enforces that — a shot
+    /// that names a chain but binds no canonical role is refused — so a sequence can never drift by
+    /// depending solely on the previous shot's last frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_from_shot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -408,6 +424,31 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
         }
         findings.extend(validate_shot_structure(shot));
+        // A declared continuity chain must point BACKWARDS at a shot this plan already established,
+        // so the intent is readable in plan order and cannot form a cycle.
+        if let Some(target) = shot.conditioning.chain_from_shot_id.as_deref() {
+            // Not merely "some earlier shot": the shot IMMEDIATELY before this one. "Continues
+            // from" is a claim about adjacency in the cut, and a chain that skips over the shots
+            // between reads as continuity the sequence does not have — a planner that chains every
+            // shot back to the first one says nothing while looking like it says something
+            // (sc-22713 real-LLM smoke).
+            let previous = plan.shots[..index].last().map(|prior| prior.id.as_str());
+            if previous != Some(target) {
+                findings.push(PlanDiagnostic::shot(
+                    &shot.id,
+                    "conditioning.chainFromShotId",
+                    match previous {
+                        Some(previous) => format!(
+                            "{target:?} is not the shot immediately before this one ({previous:?}); \
+                             a continuity chain names the shot it cuts from, or is omitted"
+                        ),
+                        None => format!(
+                            "{target:?} cannot be chained from: this is the first shot in the plan"
+                        ),
+                    },
+                ));
+            }
+        }
     }
     findings.extend(validate_dependencies(plan));
     findings
@@ -598,6 +639,15 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    if let Some(beat_id) = shot.beat_id.as_deref() {
+        if !is_safe_plan_id(beat_id) {
+            findings.push(PlanDiagnostic::shot(
+                id,
+                "beatId",
+                format!("beat id {beat_id:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+            ));
+        }
+    }
     let prompt_chars = shot.prompt.chars().count();
     if shot.prompt.trim().is_empty() || prompt_chars > MAX_PROMPT_CHARS {
         findings.push(PlanDiagnostic::shot(
@@ -663,6 +713,29 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
             format!("mode {mode} does not take a last-frame role"),
         )),
         _ => {}
+    }
+    // A first/last-frame shot whose two keyframes are the SAME reference asks the engine to start
+    // and end on one still — the clip is told to go nowhere, and whatever motion it invents has to
+    // return to the frame it began on. It is the degenerate way to satisfy the slot shape without
+    // planning a shot, and it is what the local planner reached for on every shot of the first
+    // real-LLM draft (sc-22713).
+    if wants_last {
+        if let (Some(first), Some(last)) = (
+            conditioning.first_frame_role.as_deref(),
+            conditioning.last_frame_role.as_deref(),
+        ) {
+            if first == last {
+                findings.push(PlanDiagnostic::shot(
+                    id,
+                    "conditioning.lastFrameRole",
+                    format!(
+                        "the first and last frame are both {first:?}, so this shot is asked to end \
+                         exactly where it started; use two different reference roles, or a mode \
+                         that takes one keyframe (image_to_video) or none (text_to_video)"
+                    ),
+                ));
+            }
+        }
     }
     match (wants_references, conditioning.reference_roles.is_empty()) {
         (true, true) => findings.push(PlanDiagnostic::shot(
@@ -802,7 +875,7 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
 }
 
 /// Findings that need both documents: every role a shot names must exist in the pack and be
-/// approved.
+/// approved, and every shot must be anchored to at least one approved canonical reference.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -828,6 +901,7 @@ pub fn validate_plan_against_pack(
         for role in &shot.continuity_roles {
             slots.push(("continuityRoles", role.as_str()));
         }
+        let mut anchored = false;
         for (field, role) in slots {
             match roles.get(role) {
                 None => findings.push(PlanDiagnostic::shot(
@@ -846,8 +920,29 @@ pub fn validate_plan_against_pack(
                         format!("reference role {role:?} is not approved for conditioning"),
                     ));
                 }
-                Some(_) => {}
+                Some(entry) => anchored |= entry.approved,
             }
+        }
+        // Continuity comes from the approved pack, not from whatever the previous shot happened to
+        // end on. A shot that names no approved role has nothing canonical holding it to the rest
+        // of the sequence — and a shot that only declares a chain is exactly the case where the
+        // last frame would silently become the sole anchor.
+        if !anchored {
+            let message = match shot.conditioning.chain_from_shot_id.as_deref() {
+                Some(target) => format!(
+                    "the only continuity this shot declares is the chain from {target:?}; a \
+                     chained shot must still bind at least one approved canonical reference role \
+                     from pack {:?} (conditioning slots or continuityRoles)",
+                    pack.id
+                ),
+                None => format!(
+                    "the shot binds no approved reference role from pack {:?}; every shot names \
+                     the canonical roles it depicts in continuityRoles (and, where the mode takes \
+                     them, in its conditioning slots)",
+                    pack.id
+                ),
+            };
+            findings.push(PlanDiagnostic::shot(&shot.id, "continuityRoles", message));
         }
     }
     findings
@@ -1579,6 +1674,10 @@ pub struct ExportRecord {
 /// controller that died in between adopts its own export job instead of starting a second render.
 /// `supersedes` is the export job this one replaces (a re-export after a take changed), which is
 /// what tells a resume apart the old finished job from the new one on the same timeline.
+///
+/// `supersedes` names only the MOST RECENT one; the full exclusion set a lookup needs is
+/// [`RunRecord::superseded_export_job_ids`], because a second re-export has to exclude the first
+/// export as well as the second.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPending {
@@ -1610,6 +1709,10 @@ pub struct RunRecord {
     pub stop: Option<RunStop>,
     pub plan: SourceDocument,
     pub reference_pack: SourceDocument,
+    /// The compiled request document this run dispatched from, when one was supplied. Its `sha256`
+    /// is what makes a run reproducible: the compiled prompts are the exact text the model saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<SourceDocument>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1629,6 +1732,15 @@ pub struct RunRecord {
     /// Set while an export job has been asked for but its id is not recorded yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_pending: Option<ExportPending>,
+    /// EVERY export job this record has ever held and then superseded, oldest first.
+    ///
+    /// The export route carries no field of the harness's own, so an export job is recognised by
+    /// the timeline it renders — and the run's timeline is the same one for every export it ever
+    /// dispatches. Excluding only the most recently superseded job would let the SECOND re-export
+    /// adopt the FIRST export: a finished job whose asset is the timeline from before both
+    /// replacements, recorded as current. The whole history is the exclusion set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_export_job_ids: Vec<String>,
     #[serde(default)]
     pub diagnostics: Vec<PlanDiagnostic>,
     /// Every human decision taken on this run, oldest first.
@@ -1681,7 +1793,8 @@ mod tests {
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
                     "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
-                    "conditioning": { "mode": "text_to_video" }
+                    "conditioning": { "mode": "text_to_video" },
+                    "continuityRoles": ["red_parcel"]
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
@@ -1835,6 +1948,110 @@ mod tests {
         assert!(findings
             .iter()
             .any(|m| m.contains("[SH010]") && m.contains("not approved")));
+        // Both shots still list an approved role in continuityRoles, so the dangling and
+        // unapproved conditioning slots are the ONLY findings — the anchor rule does not pile on.
+    }
+
+    #[test]
+    fn a_shot_must_bind_a_canonical_role_and_a_chain_is_never_the_only_anchor() {
+        let mut value = plan_json();
+        value["shots"][0]["continuityRoles"] = json!([]);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] continuityRoles:")
+                && findings[0].contains("binds no approved reference role"),
+            "{findings:?}"
+        );
+
+        // A chain instead of a canonical binding is refused, and named as such.
+        let mut value = plan_json();
+        value["shots"][1]["continuityRoles"] = json!([]);
+        value["shots"][1]["conditioning"] =
+            json!({ "mode": "text_to_video", "chainFromShotId": "SH010" });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
+        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("the only continuity this shot declares is the chain"),
+            "{findings:?}"
+        );
+
+        // A chain on the FIRST shot has nothing to chain from.
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] =
+            json!({ "mode": "text_to_video", "chainFromShotId": "SH020" });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("conditioning.chainFromShotId")
+                && findings[0].contains("first shot"),
+            "{findings:?}"
+        );
+
+        // A chain that skips over the shot between is refused: "continues from" is a claim about
+        // the cut, and a planner that chains everything back to SH010 says nothing (sc-22713).
+        let mut value = plan_json();
+        let third = json!({
+            "id": "SH030", "beat": "leave", "framing": "wide", "prompt": "the courier leaves",
+            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty",
+            "conditioning": { "mode": "text_to_video", "chainFromShotId": "SH010" },
+            "continuityRoles": ["red_parcel"]
+        });
+        value["shots"].as_array_mut().unwrap().push(third);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("[SH030]")
+                && findings[0].contains("not the shot immediately before")
+                && findings[0].contains("\"SH020\""),
+            "{findings:?}"
+        );
+
+        // Chained AND canonically anchored is accepted.
+        let mut value = plan_json();
+        value["shots"][1]["conditioning"] = json!({
+            "mode": "image_to_video",
+            "firstFrameRole": "workshop_plate",
+            "chainFromShotId": "SH010"
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
+        assert!(validate_plan_against_pack(&plan, &pack()).is_empty());
+    }
+
+    #[test]
+    fn a_first_last_frame_shot_cannot_start_and_end_on_the_same_reference() {
+        // What the real local planner produced on every shot of its first draft: the slot shape
+        // satisfied by the same plate twice, so the clip is told to end where it began (sc-22713).
+        let mut value = plan_json();
+        value["shots"][1]["conditioning"] = json!({
+            "mode": "first_last_frame",
+            "firstFrameRole": "workshop_plate",
+            "lastFrameRole": "workshop_plate"
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH020] conditioning.lastFrameRole:")
+                && findings[0].contains("end exactly where it started"),
+            "{findings:?}"
+        );
+
+        // Two different roles is the shape the mode is for.
+        let mut value = plan_json();
+        value["shots"][1]["conditioning"] = json!({
+            "mode": "first_last_frame",
+            "firstFrameRole": "workshop_plate",
+            "lastFrameRole": "red_parcel"
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
     }
 
     #[test]
@@ -2025,6 +2242,7 @@ mod tests {
                 path: "references.json".into(),
                 sha256: "0".into(),
             },
+            compiled: None,
             project_id: None,
             project_path: None,
             model: None,
@@ -2035,6 +2253,7 @@ mod tests {
             timeline: None,
             export: None,
             export_pending: None,
+            superseded_export_job_ids: Vec::new(),
             diagnostics: vec![PlanDiagnostic::shot("SH010", "prompt", "empty")],
             decisions: vec![ProductionDecision {
                 at: "2026-09-13T00:00:01Z".into(),
