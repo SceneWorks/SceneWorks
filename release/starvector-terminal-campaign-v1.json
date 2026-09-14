@@ -3,7 +3,8 @@
   "inference_contract": {
     "repository": "SceneWorks/inference",
     "revision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
-    "receipt_schema": "release/starvector-terminal-receipt-v2.schema.json",
+    "receipt_schema": "release/starvector-terminal-receipt-v2-outcome-parity.schema.json",
+    "receipt_schema_sha256": "fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35",
     "corpus": "release/starvector-terminal-corpus-v1.json"
   },
   "inference_preflight": {

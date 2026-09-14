@@ -185,9 +185,19 @@ async function materializeRunArtifacts(output, tuple, entry, events, run) {
   for (const [index, record] of run.deterministic_parity.cases.entries()) {
     const event = events.deterministic_parity[index], native = evidence(event, `native parity artifact ${index}`), golden = entry.deterministic_parity[index], prefix = `runs/${tuple}/parity/${index}`;
     await materializeArtifact(output, `${prefix}/input`, native.sourceRasterPath, record.input_png_sha256);
-    await materializeArtifact(output, `${prefix}/native-preview`, native.previewPngPath, record.native_preview_png_sha256);
-    await materializeArtifact(output, `${prefix}/upstream-svg`, golden.upstream_svg, record.upstream_svg_sha256);
-    await materializeArtifact(output, `${prefix}/upstream-preview`, golden.upstream_preview_png, record.upstream_preview_png_sha256);
+    await materializeArtifact(output, `${prefix}/native-transcript`, native.providerTranscriptPath, record.native_provider_transcript_sha256);
+    if (record.native_outcome === "accepted") {
+      await materializeArtifact(output, `${prefix}/native-preview`, native.previewPngPath, record.native_preview_png_sha256);
+      await materializeArtifact(output, `${prefix}/upstream-svg`, golden.upstream_svg, record.upstream_svg_sha256);
+      await materializeArtifact(output, `${prefix}/upstream-preview`, golden.upstream_preview_png, record.upstream_preview_png_sha256);
+    } else {
+      await materializeArtifact(output, `${prefix}/upstream-raw-svg`, golden.upstream_raw_svg, record.upstream_raw_svg_sha256);
+      if (record.native_rejection_stage === "sanitizer") await materializeArtifact(output, `${prefix}/native-rejected-svg`, native.rejectedSvgPath, record.native_raw_svg_sha256);
+      if (record.upstream_rejection_stage === "sanitizer") {
+        await materializeArtifact(output, `${prefix}/upstream-sanitizer-stdout`, golden.upstream_sanitizer_stdout, record.upstream_sanitizer_stdout_sha256);
+        await materializeArtifact(output, `${prefix}/upstream-sanitizer-stderr`, golden.upstream_sanitizer_stderr, record.upstream_sanitizer_stderr_sha256);
+      }
+    }
   }
 }
 async function materializePromptArtifacts(output, bundle, events, suites) {
@@ -219,8 +229,7 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   if (parityMetrics.size !== 20) die("metric script did not emit 20 unique deterministic parity facts");
   const parity = events.deterministic_parity.map((event, case_index) => {
     const native = evidence(event, `native parity ${case_index}`), golden = entry.deterministic_parity[case_index], fact = parityMetrics.get(event.case_id);
-    if (!Number.isInteger(event.seed) || native.sourceRasterSha256 !== golden.input_png_sha256 || typeof native.previewPngSha256 !== "string" || typeof fact?.rendered_ssim !== "number") die("invalid upstream parity event");
-    return { case_index, seed: event.seed, input_png_sha256: native.sourceRasterSha256, native_preview_png_sha256: native.previewPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
+    return assembleParityRecord(case_index, event.seed, native, golden, fact);
   });
   const lifecycle = Object.fromEntries(events.lifecycle.map((event) => {
     if (event.operation === "unload") return ["unload", event.observation?.status === "succeeded" && event.observation?.exited === true];
@@ -235,7 +244,18 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   const [backend, tier] = tuple.split(":"), expectedNativeBackend = backend === "candle-cuda" ? "candle" : "mlx";
   const expectedModel = tier === "1b" ? "starvector_1b" : "starvector_8b";
   if (identity.backend !== expectedNativeBackend || identity.modelId !== expectedModel) die("terminal evidence backend/model does not match this tuple");
-  return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, upstream_reference: entry.upstream_reference, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
+  return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { contract_version: 2, case_count: 20, upstream_reference: entry.upstream_reference, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
+}
+
+export function assembleParityRecord(case_index, seed, native, golden, fact) {
+  if (!Number.isInteger(seed) || native.sourceRasterSha256 !== golden.input_png_sha256 || typeof native.providerTranscriptSha256 !== "string" || !fact || fact.native_outcome !== fact.upstream_outcome || fact.upstream_outcome !== golden.upstream_outcome) die("invalid upstream parity event");
+  const common = { case_index, seed, input_png_sha256: native.sourceRasterSha256, native_outcome: fact.native_outcome, upstream_outcome: fact.upstream_outcome, native_provider_transcript_sha256: native.providerTranscriptSha256 };
+  if (fact.native_outcome === "accepted") {
+    if (typeof native.previewPngSha256 !== "string" || typeof fact.rendered_ssim !== "number") die("accepted upstream parity event lacks render evidence");
+    return { ...common, native_preview_png_sha256: native.previewPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
+  }
+  if (fact.rendered_ssim !== null || !["sanitizer", "generation_limit"].includes(fact.native_rejection_stage) || fact.native_rejection_stage !== fact.upstream_rejection_stage || fact.native_rejection_code !== fact.upstream_rejection_code) die("rejected upstream parity event lacks matching typed reason");
+  return { ...common, native_preview_png_sha256: null, upstream_svg_sha256: null, upstream_preview_png_sha256: null, rendered_ssim: null, native_rejection_stage: fact.native_rejection_stage, native_rejection_code: fact.native_rejection_code, native_rejection_reason: fact.native_rejection_reason, native_raw_svg_sha256: fact.native_rejection_stage === "sanitizer" ? native.rejectedSvgSha256 : null, upstream_rejection_stage: fact.upstream_rejection_stage, upstream_rejection_code: fact.upstream_rejection_code, upstream_rejection_reason: fact.upstream_rejection_reason, upstream_raw_svg_sha256: golden.upstream_raw_svg_sha256, upstream_sanitizer_stdout_sha256: fact.upstream_rejection_stage === "sanitizer" ? golden.upstream_sanitizer_stdout_sha256 : null, upstream_sanitizer_stderr_sha256: fact.upstream_rejection_stage === "sanitizer" ? golden.upstream_sanitizer_stderr_sha256 : null };
 }
 
 async function liveRuntime(output, tuple, events, observation, service) {

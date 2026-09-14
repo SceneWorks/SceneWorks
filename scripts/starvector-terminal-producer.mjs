@@ -6,7 +6,7 @@ import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/
 import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { INFERENCE_REVISION, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { bindRecoveryLineage, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
@@ -40,11 +40,16 @@ export async function inventory(root, digestFile = fileSha256) {
 }
 
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
-export async function verifyInferenceCheckout(inferenceRoot) {
+export async function verifyInferenceCheckout(inferenceRoot, contract) {
   if (!inferenceRoot) die("pinned inference checkout required");
+  if (contract?.receipt_schema !== RECEIPT_SCHEMA || contract?.receipt_schema_sha256 !== RECEIPT_SCHEMA_SHA256) die("selected outcome-parity receipt profile is missing or drifted");
   if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== INFERENCE_REVISION) die("inference checkout is not the exact terminal-contract revision");
   if (await git(inferenceRoot, ["status", "--porcelain"])) die("inference checkout must be clean");
-  for (const item of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) try { await stat(path.join(inferenceRoot, item)); } catch { die(`missing pinned inference contract ${item}`); }
+  for (const item of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs", contract.receipt_schema]) {
+    const info = await lstat(path.join(inferenceRoot, item)).catch(() => null);
+    if (!info?.isFile() || info.isSymbolicLink()) die(`missing pinned inference contract ${item}`);
+  }
+  if (await fileSha256(path.join(inferenceRoot, contract.receipt_schema)) !== contract.receipt_schema_sha256) die("selected outcome-parity receipt profile digest mismatch");
   return path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
 }
 
@@ -223,7 +228,7 @@ async function verifyProductService(output, sceneWorksRoot, permanentPin, tuple)
 
 export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output, tuple }) {
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
-  await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
+  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   if (!weightsRoot || !metricsRoot) die("pre-provisioned weights and metrics roots required; network acquisition is forbidden");
   await stat(leaseHelper).catch(() => die("current-tree fs2 lease helper is missing"));
   return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin, tuple), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
@@ -330,7 +335,7 @@ export async function consolidateCanonicalArtifacts(receipt, corpus, validator, 
 export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin, syntheticFixture = false }) {
   const { plan } = await readPlanAndLock(planPath);
   validateTerminalDispatchInputs(plan, permanentPin, campaignRunId);
-  await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
+  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   const rows = await readdir(evidenceRoot, { recursive: true });
   const rawFiles = rows.filter((name) => name.endsWith("raw-results.json"));
   const suiteFiles = rows.filter((name) => name.endsWith("terminal-suites.json"));
@@ -362,7 +367,7 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   receipt.artifact_manifest = manifest; receipt.producer.artifact_manifest_sha256 = manifest.aggregate_sha256;
   await mkdir(output, { recursive: true }); const receiptPath = path.join(output, "terminal-receipt.json"); await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
   const validatorPath = path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
-  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision, ...(syntheticFixture ? [] : ["--evidence-root", path.join(output, "canonical-evidence")])]);
+  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision, ...(syntheticFixture ? [] : ["--evidence-root", path.join(output, "canonical-evidence"), "--profile-schema", path.join(inferenceRoot, plan.inference_contract.receipt_schema), "--profile-sha256", plan.inference_contract.receipt_schema_sha256])]);
   await writeFile(path.join(output, "terminal-artifacts.json"), JSON.stringify(await inventory(syntheticFixture ? evidenceRoot : path.join(output, "canonical-evidence")), null, 2) + "\n");
   return receipt;
 }

@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
-import { INFERENCE_REVISION, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, assertTerminalPinPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
@@ -184,9 +184,12 @@ async function validatePublishedCheckout(destination, revision) {
     die("published inference checkout is not exact and clean");
   }
   if (head !== revision || dirty) die("published inference checkout is not exact and clean");
-  for (const relative of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) {
+  const closure = ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"];
+  if (revision === INFERENCE_REVISION) closure.push(RECEIPT_SCHEMA);
+  for (const relative of closure) {
     const info = await lstat(path.join(destination, relative)).catch(() => null); if (!info?.isFile() || info.isSymbolicLink()) die(`inference checkout lacks ${relative}`);
   }
+  if (revision === INFERENCE_REVISION && await fileSha256(path.join(destination, RECEIPT_SCHEMA)) !== RECEIPT_SCHEMA_SHA256) die("published inference checkout outcome-parity receipt profile digest mismatch");
   return head;
 }
 

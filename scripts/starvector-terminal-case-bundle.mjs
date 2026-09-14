@@ -47,7 +47,11 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
         const entry = tuples[`${backend}:${tier}`];
         entry.upstream_reference = upstream.upstream_reference;
         entry.upstream_paths = { config: upstream.config_path, processor: upstream.processor_path, transcript: upstream.transcript_path };
-        entry.deterministic_parity = entry.deterministic_parity.map((item, i) => ({ ...item, upstream_svg: upstream.cases[i].upstream_svg, upstream_svg_sha256: upstream.cases[i].upstream_svg_sha256, upstream_preview_png: upstream.cases[i].upstream_preview_png, upstream_preview_png_sha256: upstream.cases[i].upstream_preview_png_sha256 }));
+        entry.deterministic_parity = entry.deterministic_parity.map((item, i) => {
+          const reference = upstream.cases[i];
+          if (reference.outcome === "accepted") return { ...item, upstream_outcome: "accepted", upstream_svg: reference.upstream_svg, upstream_svg_sha256: reference.upstream_svg_sha256, upstream_preview_png: reference.upstream_preview_png, upstream_preview_png_sha256: reference.upstream_preview_png_sha256 };
+          return { ...item, upstream_outcome: "rejected", upstream_rejection_stage: reference.rejection_stage, upstream_rejection_code: reference.rejection_code, upstream_rejection_reason: reference.rejection_reason, upstream_raw_svg: reference.upstream_raw_svg, upstream_raw_svg_sha256: reference.upstream_raw_svg_sha256, ...(reference.rejection_stage === "sanitizer" ? { upstream_sanitizer_stdout: reference.sanitizer_stdout, upstream_sanitizer_stdout_sha256: reference.sanitizer_stdout_sha256, upstream_sanitizer_stderr: reference.sanitizer_stderr, upstream_sanitizer_stderr_sha256: reference.sanitizer_stderr_sha256 } : {}) };
+        });
       }
     }
   }

@@ -218,10 +218,48 @@ class OracleTests(unittest.TestCase):
             _, observed = oracle.generate(wrapper, row, torch.device('cpu'))
             self.assertEqual(observed['prefix_length'], 19)
             self.assertEqual(observed['generated_tokens'], 3)
+            self.assertEqual(observed['finish_reason'], 'complete')
             self.assertEqual(wrapper.output_length, 3)
             with patch.object(oracle.time, 'monotonic', side_effect=[0.0] + [1000.0]*100):
-                with self.assertRaisesRegex(ValueError, 'case wall-time budget'):
-                    oracle.generate(wrapper, row, torch.device('cpu'))
+                _, deadline_observed = oracle.generate(wrapper, row, torch.device('cpu'))
+            self.assertEqual(deadline_observed['finish_reason'], 'wall_time_limit')
+
+    def test_root_aware_boundaries_match_native_complete_root_precedence(self):
+        raw = '<svg><path d="M0 0"/></svg>'
+        byte_limit = len(raw.encode())
+        exact = oracle.bounded_completion(raw, 3, 120.0, 120.0, byte_limit)
+        self.assertEqual(exact, {'complete_root': True, 'completion_tokens': 3,
+                                'completion_bytes': byte_limit, 'completion_end': len(raw)})
+        complete, reason = oracle.classify_generation(raw, {
+            'generated_tokens': 3, 'complete_root': True, 'completion_tokens': 3,
+            'completion_bytes': byte_limit, 'deadline_exceeded': True,
+            'byte_exceeded': True}, 3, byte_limit)
+        self.assertEqual((complete, reason), (raw, 'complete'))
+        for text, observed, expected in [
+            ('<svg>', {'generated_tokens': 3}, 'token_limit'),
+            ('<svg>' + ('x' * 20), {'generated_tokens': 2, 'byte_exceeded': True}, 'byte_limit'),
+            ('<svg>', {'generated_tokens': 2, 'deadline_exceeded': True}, 'wall_time_limit'),
+        ]:
+            with self.subTest(expected=expected):
+                _, reason = oracle.classify_generation(text, observed, 3, 10)
+                self.assertEqual(reason, expected)
+        # Natural EOS is not accepted as a complete root. It is sent to the
+        # sanitizer, which supplies the normalized malformed_svg decision.
+        incomplete, reason = oracle.classify_generation('<svg>', {'generated_tokens': 1}, 3, 10)
+        self.assertEqual((incomplete, reason), ('<svg>', 'complete'))
+
+    def test_complete_svg_prefix_is_quote_comment_and_nesting_aware(self):
+        for value, expected in [
+            (' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>', ' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>'),
+            ('<svg/>tail', None),
+            ('<!-- prefix --><svg/>', None),
+            ('<svg><g></svg>', None),
+            ('<svg><g/>', None),
+            ('noise<svg/>', None),
+        ]:
+            with self.subTest(value=value):
+                end = oracle.complete_svg_prefix(value)
+                self.assertEqual(None if end is None else value[:end], expected)
 
     def test_upstream_renderer_uses_comparison_canvas_preserves_raw_and_error(self):
         raw = self.root / 'raw.svg'; original = '<svg viewBox="0 0 80 80"><path fill-rule="evenodd"/></svg>'
@@ -310,11 +348,14 @@ class OracleTests(unittest.TestCase):
             rendered.mkdir()
             (rendered / 'canonical.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
             (rendered / 'preview.png').write_bytes(b'preview')
-        with patch.object(oracle, 'generate', side_effect=lambda unused_model, row, unused_device: ('<svg id="%s"><!-- en dash – --></svg>' % row['case_index'], {'generated_tokens': row['case_index']})), \
+        with patch.object(oracle, 'generate', side_effect=lambda unused_model, row, unused_device: ('<svg id="%s"><!-- en dash – --></svg>' % row['case_index'], {'generated_tokens': row['case_index'], 'generated_bytes': 32, 'finish_reason': 'complete'})), \
              patch.object(oracle, 'render_upstream_svg', side_effect=render), \
              patch.dict(oracle.sys.modules, {'PIL': fake_pil}):
             cases, rejections = oracle.collect_cases(SimpleNamespace(sanitizer='sanitizer'), {'rows': rows}, object(), object(), output, tier_root, events.append)
-        self.assertEqual(len(cases), 19)
+        self.assertEqual(len(cases), 20)
+        self.assertEqual(sum(case['outcome'] == 'accepted' for case in cases), 19)
+        self.assertEqual(cases[2]['outcome'], 'rejected')
+        self.assertEqual(cases[2]['rejection_stage'], 'sanitizer')
         self.assertEqual([item['case_index'] for item in rejections], [2])
         self.assertEqual([event['event'] for event in events].count('case_started'), 20)
         self.assertEqual([event['event'] for event in events].count('case_rejected'), 1)
@@ -334,6 +375,27 @@ class OracleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differs from transcript'):
             oracle.verify_collected_rejections(output, '1b', rows)
 
+    def test_generation_limit_is_retained_as_a_rejected_case_without_rendering(self):
+        row = {'case_index': 0, 'source_case_index': 0, 'seed': 0,
+               'input_png_sha256': hashlib.sha256(b'input').hexdigest()}
+        output = self.root / 'output'; tier_root = output / 'upstream-1b'
+        tier_root.mkdir(parents=True)
+        events = []
+        with patch.object(oracle, 'generate', return_value=(
+                '<svg>', {'generated_tokens': 7933, 'generated_bytes': 5,
+                          'finish_reason': 'token_limit'})), \
+             patch.object(oracle, 'render_upstream_svg') as render:
+            cases, rejections = oracle.collect_cases(
+                SimpleNamespace(sanitizer='sanitizer'), {'rows': [row]}, object(), object(),
+                output, tier_root, events.append)
+        render.assert_not_called()
+        self.assertEqual(cases, rejections)
+        self.assertEqual(cases[0]['outcome'], 'rejected')
+        self.assertEqual(cases[0]['rejection_stage'], 'generation_limit')
+        self.assertEqual(cases[0]['rejection_code'], 'token_limit')
+        self.assertTrue((tier_root / 'case-00/raw.svg').is_file())
+        self.assertEqual(events[-1]['event'], 'case_rejected')
+
     def test_non_rejection_renderer_failure_stops_case_collection_immediately(self):
         rows = [{'case_index': index, 'source_case_index': index, 'seed': index,
                  'input_png_sha256': hashlib.sha256(str(index).encode()).hexdigest()}
@@ -347,14 +409,15 @@ class OracleTests(unittest.TestCase):
                 (raw_path.parent / 'sanitizer.stderr.log').write_text('')
                 raise oracle.SvgCaseRejected(case_index, {'outcome': 'rejected', 'error_code': 'invalid SVG'})
             raise ValueError('sanitizer process failed')
-        with patch.object(oracle, 'generate', return_value=('<svg/>', {})), \
+        with patch.object(oracle, 'generate', return_value=('<svg/>', {'generated_tokens': 1, 'generated_bytes': 6, 'finish_reason': 'complete'})), \
              patch.object(oracle, 'render_upstream_svg', side_effect=render):
             with self.assertRaisesRegex(ValueError, 'sanitizer process failed'):
                 oracle.collect_cases(SimpleNamespace(sanitizer='sanitizer'), {'rows': rows}, object(), object(), output, tier_root, lambda unused: None, cases, rejections)
         self.assertTrue((tier_root / 'case-00/raw.svg').is_file())
         self.assertTrue((tier_root / 'case-01/raw.svg').is_file())
         self.assertFalse((tier_root / 'case-02').exists())
-        self.assertEqual(cases, [])
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]['outcome'], 'rejected')
         self.assertEqual([item['case_index'] for item in rejections], [0])
 
     def rows(self):
