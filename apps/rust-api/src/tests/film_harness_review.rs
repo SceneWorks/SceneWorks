@@ -191,6 +191,87 @@ fn the_shipped_review_plan_and_labeled_sets_validate_against_the_fixture_plan() 
     }
 }
 
+/// EVERY labeled set checked into `config/film-harness/review-eval/` parses and validates against
+/// the review plan it declares (sc-22715 adversarial review).
+///
+/// The test above names two files by hand, so the two evaluation sets added by this story — and
+/// any set added later — were checked in with nothing loading them: a typo, a question id that
+/// stopped existing, or a frame path that climbs out of the media root would have been found by
+/// the first person who ran `review-eval`, months later. The set is the DIRECTORY, and the count
+/// is asserted so an enumeration that silently finds nothing cannot pass.
+#[test]
+fn every_checked_in_labeled_set_parses_and_validates_against_the_plan_it_declares() {
+    let dir = PathBuf::from(EVAL_SET)
+        .parent()
+        .expect("the review-eval directory")
+        .to_path_buf();
+    let mut sets: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("{} does not read: {error}", dir.display()))
+        .map(|entry| entry.expect("directory entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonc"))
+        .collect();
+    sets.sort();
+    let names: Vec<String> = sets
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    for required in [
+        "evaluation-2026-09-14-planner-takes.jsonc",
+        "evaluation-2026-09-14-takes.jsonc",
+        "labels.jsonc",
+        "real-takes.jsonc",
+    ] {
+        assert!(
+            names.iter().any(|name| name == required),
+            "{required} is checked in but the enumeration did not reach it: {names:?}"
+        );
+    }
+
+    for path in &sets {
+        let set: EvalSet = parse_eval_set(&std::fs::read_to_string(path).expect("the set reads"))
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        // Each set names its OWN review plan, relative to the document — the same resolution
+        // `review-eval` does — so a set written against a different plan is still checked against
+        // the questions it actually scores.
+        let plan_path = path
+            .parent()
+            .expect("the set's directory")
+            .join(&set.review_plan);
+        let plan_text = std::fs::read_to_string(&plan_path).unwrap_or_else(|error| {
+            panic!(
+                "{}: its reviewPlan {:?} does not read ({}): {error}",
+                path.display(),
+                set.review_plan,
+                plan_path.display()
+            )
+        });
+        let plan = parse_review_plan(&plan_text)
+            .unwrap_or_else(|error| panic!("{}: {error}", plan_path.display()));
+        let findings = validate_eval_set(&set, &plan);
+        assert!(findings.is_empty(), "{}: {findings:#?}", path.display());
+        // A labeled frame is a NAME under the set's media root, never a path of its own; the
+        // frames themselves live outside the repository for the evaluation sets, so this is the
+        // part of "the set is usable" that can be asserted without the media.
+        for case in &set.cases {
+            for frame in case.frames.iter().chain(case.adjacent_frames.iter()) {
+                assert!(
+                    sceneworks_core::film_review::unsafe_media_path(&frame.file).is_none(),
+                    "{}: case {:?} names frame {:?}, which is not a plain name under the set's \
+                     mediaRoot",
+                    path.display(),
+                    case.id,
+                    frame.file
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn the_checked_in_labeled_frames_match_the_generator_byte_for_byte() {
     let set_path = PathBuf::from(EVAL_SET);

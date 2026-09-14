@@ -1588,3 +1588,334 @@ fn both_ffmpeg_reachable_helpers_fall_back_to_the_path_probe_when_the_override_i
     );
     assert_eq!(FAKE_REFINE_PEAK_BYTES, 9_000_000_000);
 }
+
+// ---------------------------------------------------------------------------------------------
+// sc-22715 evaluation finding — a replacement dropped every dialogue line from the sequence
+// ---------------------------------------------------------------------------------------------
+
+/// `replace-take` re-assembled the timeline without adopting the run's sound assets, so the merge
+/// re-derived an EMPTY dialogue track over the saved one and every line the run had placed was
+/// gone from the sequence and the next export (seen on the 2026-09-14 evaluation film: three lines
+/// after the run, none after the first `request-repair`). The beds only survived because a bed
+/// track with no asset is skipped and then carried over as a track the harness does not own.
+///
+/// The sound-carrying fixture pack; SH020 places the courier's line at +1.2 s. The editor turns
+/// that line down before the replacement, which also exercises the Step-0 merge rule.
+#[tokio::test]
+async fn a_replacement_keeps_the_dialogue_lines_the_run_placed() {
+    let harness = Harness::start(true, fast(&["SH010", "SH020"])).await;
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let lines = items_of(&saved, "track_dialogue");
+    assert_eq!(lines.len(), 1, "SH020's line is placed by the run: {saved}");
+    let line_id = lines[0]["id"].as_str().expect("item id").to_owned();
+
+    // The editor turns the line down and gives it fades.
+    let mut edited = saved.clone();
+    let line = edited["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .iter_mut()
+        .find(|track| track["id"] == json!("track_dialogue"))
+        .expect("dialogue track")["items"]
+        .as_array_mut()
+        .expect("items")
+        .iter_mut()
+        .find(|item| item["id"] == json!(line_id))
+        .expect("the line");
+    line["volume"] = json!(0.4);
+    line["fadeInSeconds"] = json!(0.25);
+    line["fadeOutSeconds"] = json!(0.5);
+    let (status, body) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({ "timeline": edited }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH020",
+        "the courier is the wrong person",
+    )
+    .await
+    .expect("replacement runs");
+    assert_eq!(after.outcome, RunOutcome::Completed, "{}", summary(&after));
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let lines = items_of(&saved, "track_dialogue");
+    let kept = lines
+        .iter()
+        .find(|item| item["id"] == json!(line_id))
+        .unwrap_or_else(|| {
+            panic!("the replacement dropped SH020's dialogue line from the sequence: {saved}")
+        });
+    let sh020_start = picture_item(&saved, "SH020")["timelineStart"]
+        .as_f64()
+        .expect("start");
+    assert!(
+        close(kept["timelineStart"].as_f64().unwrap(), sh020_start + 1.2),
+        "the line still sits at its shot's start plus its offset: {kept}"
+    );
+    assert_eq!(
+        kept["assetId"],
+        json!(
+            record
+                .sound
+                .iter()
+                .find(|clip| clip.role == "courier_line")
+                .expect("the line's clip")
+                .asset_id
+        ),
+        "the clip is the one the run imported, adopted rather than re-uploaded: {kept}"
+    );
+    assert_eq!(
+        kept["volume"],
+        json!(0.4),
+        "the editor's volume survives: {kept}"
+    );
+    assert_eq!(kept["fadeInSeconds"], json!(0.25));
+    assert_eq!(kept["fadeOutSeconds"], json!(0.5));
+    assert_eq!(
+        after.sound.len(),
+        record.sound.len(),
+        "the replacement adopted the clips instead of importing them again: {}",
+        summary(&after)
+    );
+    for track_id in ["track_ambience", "track_music"] {
+        assert_eq!(
+            items_of(&saved, track_id).len(),
+            1,
+            "{track_id} still carries its bed: {saved}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-22715 adversarial review — a replacement on one shot changed another shot's line, and the
+// whole run's verdict
+// ---------------------------------------------------------------------------------------------
+
+/// A run of SH050 + SH060 — the two shots of the shipped plan that both carry a dialogue line —
+/// with SH050's take rejected by hand afterwards. The run itself completed; the rejection is a
+/// human decision taken over a finished film, which is what the 2026-09-14 evaluation did.
+async fn completed_run_with_sh050_rejected() -> (Harness, RunRecord) {
+    let harness = Harness::start(true, fast(&["SH050", "SH060"])).await;
+    let options = harness.options(
+        harness.fixture_plan(),
+        harness.fixture_pack(),
+        Some(&["SH050", "SH060"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    review::decide_take(
+        &harness.out_dir(),
+        "SH050",
+        Decision::Reject,
+        "a different room from SH040",
+    )
+    .expect("the rejection records");
+    (harness, record)
+}
+
+/// A shot whose take was rejected keeps its LINE as long as it keeps its place in the cut
+/// (sc-22715 adversarial review).
+///
+/// The picture track is MERGED onto the saved sequence, so a rejected shot's item stays and the
+/// shot is still on screen. The audio tracks were re-derived from `selected_takes()`, which no
+/// longer names that shot — so the next re-assembly, triggered by a replacement on a completely
+/// different shot, silently dropped its dialogue. The evaluation film lost SH050's line to a
+/// `replace-take` on SH040 that way (`run.json.v1` three lines, `v6` two), and the delivered MP4
+/// is permanently missing it while SH050 itself plays at 19.67–24.83 s.
+#[tokio::test]
+async fn a_rejected_shots_line_survives_a_replacement_on_another_shot() {
+    let (harness, record) = completed_run_with_sh050_rejected().await;
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let placed: Vec<String> = items_of(&before, "track_dialogue")
+        .iter()
+        .map(|item| item["filmHarness"]["shotId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        placed,
+        vec!["SH050".to_owned(), "SH060".to_owned()],
+        "the run places a line for each of the two shots that declare one: {before}"
+    );
+
+    // A replacement for the OTHER shot. Nothing about SH050 is named anywhere in this call.
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH060",
+        "the recipient is wrong",
+    )
+    .await
+    .expect("the replacement runs");
+
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let kept: Vec<String> = items_of(&saved, "track_dialogue")
+        .iter()
+        .map(|item| item["filmHarness"]["shotId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        kept,
+        vec!["SH050".to_owned(), "SH060".to_owned()],
+        "a replacement on SH060 dropped SH050's line even though SH050 is still in the cut: \
+         {saved}"
+    );
+    // The line is still against its own beat, which is the only thing that makes keeping it worth
+    // anything: SH050's clip sits at its shot's start plus the plan's 2.6 s offset.
+    let sh050_start = picture_item(&saved, "SH050")["timelineStart"]
+        .as_f64()
+        .expect("start");
+    let items = items_of(&saved, "track_dialogue");
+    let line = items
+        .iter()
+        .find(|item| item["filmHarness"]["shotId"] == json!("SH050"))
+        .expect("SH050's line");
+    assert!(
+        close(line["timelineStart"].as_f64().unwrap(), sh050_start + 2.6),
+        "SH050's line still sits against its beat: {line}"
+    );
+    assert_eq!(
+        after.shot("SH050").unwrap().selected_attempt,
+        None,
+        "keeping the line must not quietly re-select the take the human rejected: {}",
+        summary(&after)
+    );
+}
+
+/// A replacement decides ONE shot; it does not re-open the verdict the run reached (sc-22715
+/// adversarial review).
+///
+/// `finish_replacement` fell through to `Session::finish`, whose `all_rendered` is computed over
+/// EVERY selected shot — and a `reject-take` leaves exactly one shot with no selection. So a
+/// successful replacement of an unrelated shot re-derived the run's outcome and turned `completed`
+/// into `failed` / `attempts_exhausted` / `resumable: false`. The evaluation's final record reads
+/// that way while its own snapshots v1–v5 read `completed`; the replacement that flipped it was on
+/// SH040 and never touched SH050's state at all.
+#[tokio::test]
+async fn a_replacement_does_not_re_judge_the_run_it_was_asked_about() {
+    let (harness, record) = completed_run_with_sh050_rejected().await;
+    let mut resume_options = harness.resume_options();
+    resume_options.export = false;
+    let after = film_harness::replace_take(
+        &harness.transport,
+        &resume_options,
+        "SH060",
+        "the recipient is wrong",
+    )
+    .await
+    .expect("the replacement runs");
+
+    assert_eq!(
+        after.outcome,
+        RunOutcome::Completed,
+        "a replacement on SH060 re-judged the run over SH050's rejected take: {}",
+        summary(&after)
+    );
+    assert!(
+        after.stop.is_none(),
+        "a completed run gains no stop from a replacement that succeeded: {}",
+        summary(&after)
+    );
+    assert_eq!(
+        after.shot("SH050").unwrap().selected_attempt,
+        None,
+        "SH050's own state is untouched: {}",
+        summary(&after)
+    );
+    assert_eq!(after.shot("SH050").unwrap().outcome, ShotOutcome::Rendered);
+    assert_eq!(
+        after.shot("SH060").unwrap().selected_attempt,
+        Some(2),
+        "SH060 is the shot this invocation decided: {}",
+        summary(&after)
+    );
+    // The verdict standing does not mean the MP4 does. Two separate acts moved the sequence out
+    // from under it — the rejection and the replacement — and neither may leave the export
+    // claiming to be current; that flag is the ONLY thing that stops `completed` from reading as
+    // "there is a finished film matching this record".
+    assert!(
+        after.export.as_ref().is_some_and(|export| export.stale),
+        "the export the run made no longer matches the sequence: {}",
+        summary(&after)
+    );
+    assert_eq!(after.state, RunState::Finished, "{}", summary(&after));
+    // The record on disk says the same thing the returned value does.
+    let persisted = harness_record(&harness);
+    assert_eq!(persisted.outcome, RunOutcome::Completed);
+    assert!(persisted.stop.is_none(), "{}", summary(&persisted));
+    let _ = record;
+}
+
+/// Rejecting a take says, in the record, that the shot stays in the cut carrying it (sc-22715
+/// adversarial review).
+///
+/// The failed-replacement path already writes that note. The reject path left the shot `rendered`
+/// with `selectedAttempt: null` and nothing anywhere saying that the timeline and the exported MP4
+/// still show the take the human threw away — which is exactly what a reader of the evaluation's
+/// record could not tell about SH050.
+#[tokio::test]
+async fn rejecting_a_take_records_that_the_shot_stays_in_the_cut_carrying_it() {
+    let (harness, _) = completed_run_with_sh050_rejected().await;
+    let record = harness_record(&harness);
+    let note = record
+        .decisions
+        .iter()
+        .filter(|decision| decision.shot_id.as_deref() == Some("SH050"))
+        .find(|decision| decision.detail.contains("REJECTED take"))
+        .unwrap_or_else(|| {
+            panic!(
+                "nothing in the record says SH050 stays in the sequence carrying the take that \
+                 was rejected: {:#?}",
+                record.decisions
+            )
+        });
+    assert!(
+        note.detail.contains("stays in the sequence")
+            && note.detail.contains("replace-take --shot SH050"),
+        "the note has to say what the cut shows AND what changes it: {}",
+        note.detail
+    );
+}

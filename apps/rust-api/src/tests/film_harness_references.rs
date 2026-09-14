@@ -36,13 +36,16 @@ use crate::tests::film_harness::{Harness, FIXTURE_DIR};
 /// (`a_review_that_spends_its_wall_clock_budget…` measured 0 of 6 answers instead of a partial
 /// set). One at a time keeps what this story adds to a single extra harness. It is a load bound,
 /// not shared state: these tests share nothing but the machine.
-static GENERATOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// An ASYNC mutex, held across the whole test: a `std::sync::MutexGuard` across an await is
+/// `clippy::await_holding_lock`, and the lock is genuinely held across every await here. Each test
+/// has its own current-thread runtime, which a `tokio::sync::Mutex` is indifferent to — the waker
+/// that releases a waiter is scheduled on whichever runtime is polling it.
+static GENERATOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Take [`GENERATOR_LOCK`] for the rest of the test.
-fn serialized() -> std::sync::MutexGuard<'static, ()> {
-    GENERATOR_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+async fn serialized() -> tokio::sync::MutexGuard<'static, ()> {
+    GENERATOR_LOCK.lock().await
 }
 
 /// The shipped spec, rendered with the shipped model id against the in-process API.
@@ -115,7 +118,7 @@ fn assert_nothing_published(options: &MakeReferencesOptions) {
 
 #[tokio::test]
 async fn make_references_writes_a_pack_the_courier_plan_validates() {
-    let _serial = serialized();
+    let _serial = serialized().await;
     let harness = Harness::start(true, Vec::new()).await;
     let options = options(&harness, shipped_spec(), "generated-pack");
     let build = make_references(&harness.transport, &options)
@@ -236,7 +239,7 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
 
 #[tokio::test]
 async fn the_generated_flag_reaches_the_imported_assets_provenance() {
-    let _serial = serialized();
+    let _serial = serialized().await;
     let harness = Harness::start(true, Vec::new()).await;
     let options = options(&harness, shipped_spec(), "generated-pack");
     let build = make_references(&harness.transport, &options)
@@ -314,7 +317,7 @@ fn pack_entry_is_generated(pack: &ReferencePack, role: &str) -> bool {
 /// runs beside the rest of the film-harness tests, some of which are timing sensitive.
 #[tokio::test]
 async fn every_mid_run_failure_is_refused_by_name_and_publishes_nothing() {
-    let _serial = serialized();
+    let _serial = serialized().await;
     let harness = Harness::start(true, Vec::new()).await;
 
     // (1) A role with no prompt: refused before a single job.
@@ -407,7 +410,7 @@ fn image_jobs(harness: &Harness) -> usize {
 
 #[tokio::test]
 async fn the_catalog_gates_are_checked_before_the_first_render() {
-    let _serial = serialized();
+    let _serial = serialized().await;
     let harness = Harness::start(true, Vec::new()).await;
 
     // A model the catalog does not hold.
