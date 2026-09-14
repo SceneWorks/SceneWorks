@@ -3736,14 +3736,23 @@ impl Session<'_> {
         // every pass exactly as a re-layout after an edit re-derives them; an item on one of these
         // tracks that the harness did NOT place — the editor's own — is carried over untouched,
         // as is the track's own fader (`gain` / `muted`), which a person may have moved.
+        //
+        // Derived from `order` — the shots the merged PICTURE holds — and not from
+        // `selected_takes()` (sc-22715). The two are not the same set: the picture is merged onto
+        // the saved sequence, so a shot whose take was rejected (`reject-take`, or a replacement
+        // that produced nothing) keeps its item and stays in the cut, while its selection is gone.
+        // Deriving the lines from the selection dropped exactly those shots' dialogue on the next
+        // re-assembly — the 2026-09-14 evaluation's own film lost SH050's line to a `replace-take`
+        // on SH040, and the line is not the harness's to delete while the shot it belongs to is
+        // still on screen. A line whose shot HAS left the cut is still dropped, by
+        // `relayout_timeline`, which is where "is this shot in the sequence" is actually known.
         let mut dialogue_items = Vec::new();
-        for SelectedTake { shot_id, .. } in &takes {
-            let shot = self
-                .plan
-                .shots
-                .iter()
-                .find(|shot| &shot.id == shot_id)
-                .expect("selected takes come from the plan");
+        for shot_id in &order {
+            let Some(shot) = self.plan.shots.iter().find(|shot| &shot.id == shot_id) else {
+                // An item the harness placed for a shot the plan no longer names. Its picture item
+                // is carried over untouched above; there is no plan clip to derive a line from.
+                continue;
+            };
             let Some(clip) = &shot.dialogue_clip else {
                 continue;
             };
@@ -4159,11 +4168,19 @@ impl Session<'_> {
     /// the `resume` that was going to render them. A replacement decides one shot's outcome and
     /// nothing else: when the run carried a resumable stop and other selected shots are still
     /// outstanding, that stop is left exactly where it was.
+    ///
+    /// The same rule holds for a run that had NO stop, which is to say one that `completed`
+    /// (sc-22715). `all_rendered` is false the moment any selected shot has no selection — a
+    /// `reject-take` leaves exactly that — so classifying through [`Session::finish`] turned a
+    /// completed run into `failed` / `attempts_exhausted` because a DIFFERENT shot was replaced.
+    /// That is the `edit_timeline` rule stated for the generation side: a replacement is not a
+    /// run, and a verdict the run reached is not re-opened by one. The evaluation film's own
+    /// record read `failed` for exactly this reason while its snapshots read `completed`.
     fn finish_replacement(
         &mut self,
         export_ok: bool,
         replaced_shot_id: &str,
-        prior: Option<(RunOutcome, RunStop)>,
+        prior: (RunOutcome, Option<RunStop>),
     ) -> Result<(), HarnessError> {
         let outstanding: Vec<String> = self
             .record
@@ -4173,15 +4190,24 @@ impl Session<'_> {
             .filter(|shot| self.is_selected(&shot.shot_id) && shot.selected_attempt.is_none())
             .map(|shot| shot.shot_id.clone())
             .collect();
+        // Did THIS replacement land a take on the shot it was asked about? That, and not the state
+        // of every other shot, is what this invocation decided.
+        let replacement_succeeded = self
+            .record
+            .shots
+            .iter()
+            .find(|shot| shot.shot_id == replaced_shot_id)
+            .is_some_and(|shot| shot.selected_attempt.is_some());
         // An `export_failed` stop is about an export this replacement did not redo (no
         // `--export`): the run still has no MP4, so the stop — and the `resume` that retries the
         // export — must survive too (sc-22715).
         let export_still_owed = !self.export
             && prior
+                .1
                 .as_ref()
-                .is_some_and(|(_, stop)| stop.resumable && stop.reason == "export_failed");
+                .is_some_and(|stop| stop.resumable && stop.reason == "export_failed");
         match prior {
-            Some((outcome, stop))
+            (outcome, Some(stop))
                 if stop.resumable && (!outstanding.is_empty() || export_still_owed) =>
             {
                 self.note_decision(
@@ -4206,6 +4232,41 @@ impl Session<'_> {
                 self.stop = None;
                 self.record.outcome = outcome;
                 self.record.stop = Some(stop);
+                self.record.state = RunState::Finished;
+                self.record.finished_at = Some(utc_now());
+                self.persist()
+            }
+            // The run reached its verdict with no stop of its own — it COMPLETED — and this
+            // replacement landed. `finish` would re-derive that verdict from every selected shot,
+            // so a shot whose take a human rejected flips the whole run to `attempts_exhausted`
+            // because another shot was replaced. Only the export moves: it no longer matches the
+            // sequence, which `replace_take` already recorded as `stale`.
+            (RunOutcome::Completed, None) if replacement_succeeded && self.stop.is_none() => {
+                if export_ok {
+                    self.note_decision(
+                        "replace_take",
+                        Some(replaced_shot_id),
+                        format!(
+                            "the run's own outcome (completed) is left in place: this replacement \
+                             decided shot {replaced_shot_id} and no other shot's state was \
+                             re-judged"
+                        ),
+                    );
+                    self.record.outcome = RunOutcome::Completed;
+                    self.record.stop = None;
+                } else {
+                    // The take landed and the re-export did not: that, and only that, is what
+                    // this invocation failed at — `attempts_exhausted` would name a different
+                    // shot's state as the reason and refuse the `resume` that retries the export.
+                    self.record.outcome = RunOutcome::Failed;
+                    self.record.stop = Some(RunStop {
+                        reason: "export_failed".to_owned(),
+                        detail: "the replacement landed but its re-export did not complete; \
+                                 `film-harness resume` retries the export"
+                            .to_owned(),
+                        resumable: true,
+                    });
+                }
                 self.record.state = RunState::Finished;
                 self.record.finished_at = Some(utc_now());
                 self.persist()
@@ -4736,12 +4797,10 @@ pub async fn replace_take(
     let mut session = session_from(transport, options, continued, started, None);
     // What the RUN said before this replacement: a replacement is scoped to one shot and must not
     // re-classify the run, so a resumable stop (a cancel, a crash, a failed export) is restored by
-    // `finish_replacement` when other selected shots are still outstanding.
-    let prior_stop = session
-        .record
-        .stop
-        .clone()
-        .map(|stop| (session.record.outcome, stop));
+    // `finish_replacement` when other selected shots are still outstanding — and a run that
+    // finished with no stop at all (`completed`) keeps that verdict, which is why the OUTCOME is
+    // carried here even when there is no stop beside it (sc-22715).
+    let prior_verdict = (session.record.outcome, session.record.stop.clone());
     session.record.state = RunState::Running;
     session.record.stop = None;
     session.record.finished_at = None;
@@ -4854,17 +4913,19 @@ pub async fn replace_take(
             export.stale = true;
         }
         session.persist()?;
-        // Re-hydrate the clips before re-assembling. `assemble_timeline` derives the sound tracks
-        // from `sound_assets`, and `merge_harness_audio_track` keeps only the items the harness does
-        // NOT own — so re-assembling with an empty map does not leave the saved dialogue and bed
-        // items alone, it DELETES them, and the re-export comes back with picture and no sound (the
-        // phase-1 evaluation's finding #2). `ensure_sound` here adopts every clip the record already
-        // names, including every line already spoken: it uploads nothing and speaks nothing.
+        // The re-assembly re-derives the harness's own dialogue and bed items from the plan and
+        // needs the sound assets to place them (sc-22715 evaluation). Without this the merge
+        // re-derived an EMPTY dialogue track over the saved one and every line the run had placed
+        // was dropped from the sequence — the beds only survived because a bed track with no
+        // asset is skipped and then kept as "not the harness's". `ensure_sound` adopts the clips
+        // the record already names — including every line this run SPOKE (sc-23404) — so it
+        // uploads nothing and speaks nothing on this path.
         session.ensure_sound().await?;
         // A clip that could not be re-hydrated (its file gone from the pack, a re-synthesis that
-        // failed) leaves the session's map short, and re-assembling from a short map is exactly the
-        // deletion this call exists to prevent. Leave the saved timeline alone and let the stop say
-        // so: the sequence keeps the sound it has, and the replacement's take is still recorded.
+        // failed, no live TTS worker) leaves the session's map short, and re-assembling from a
+        // short map is exactly the deletion the call above exists to prevent. Leave the saved
+        // timeline alone and let the stop say so: the sequence keeps the sound it has, and the
+        // replacement's take is still recorded.
         if session.stop.is_none() {
             // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
             session.assemble_timeline().await?;
@@ -4903,7 +4964,7 @@ pub async fn replace_take(
     } else {
         replaced
     };
-    session.finish_replacement(export_ok, shot_id, prior_stop)?;
+    session.finish_replacement(export_ok, shot_id, prior_verdict)?;
     Ok(session.record)
 }
 
@@ -5564,6 +5625,89 @@ mod unit_tests {
         assert!(persisted_picture_items(&extra, "track_main", &intended).is_none());
     }
 
+    #[test]
+    fn a_re_derived_harness_audio_item_keeps_the_editors_volume_and_fades() {
+        let harness_item =
+            |id: &str, shot: Option<&str>, volume: f64, fade_in: f64, fade_out: f64| {
+                json!({
+                    "id": id, "trackId": "track_dialogue", "assetId": "asset_line", "type": "audio",
+                    "sourceIn": 0.0, "sourceOut": 2.0, "timelineStart": 0.0, "timelineEnd": 2.0,
+                    "volume": volume, "fadeInSeconds": fade_in, "fadeOutSeconds": fade_out,
+                    HARNESS_KEY: harness_block(ROLE_DIALOGUE, "run_0123456789ab", shot, 1.2),
+                })
+            };
+        // The saved sequence: the editor turned SH020's line down and gave it fades, left
+        // SH050's line alone, and placed one clip of their own on the same track.
+        let saved = json!({ "tracks": [{
+            "id": "track_dialogue", "name": "Dialogue", "kind": "audio", "role": "dialogue",
+            "gain": 0.7, "muted": false,
+            "items": [
+                harness_item("item_line_sh020", Some("SH020"), 0.4, 0.25, 0.5),
+                harness_item("item_line_sh050", Some("SH050"), 1.0, 0.0, 0.0),
+                { "id": "item_editor", "trackId": "track_dialogue", "assetId": "asset_foreign",
+                  "type": "audio", "sourceIn": 0.0, "sourceOut": 1.0,
+                  "timelineStart": 3.0, "timelineEnd": 4.0, "volume": 0.9 },
+            ],
+        }] });
+        let tracks = saved["tracks"].as_array().cloned().unwrap();
+        // A later pass re-derives every harness item from the plan — at the plan's gain, with the
+        // plan's fades — and this time SH060 has a take, so its line appears for the first time.
+        let fresh = json!({
+            "id": "track_dialogue", "name": "Dialogue", "kind": "audio", "role": "dialogue",
+            "gain": 1.0, "muted": false,
+            "items": [
+                harness_item("item_line_sh020", Some("SH020"), 1.0, 0.0, 0.0),
+                harness_item("item_line_sh050", Some("SH050"), 1.0, 0.0, 0.0),
+                harness_item("item_line_sh060", Some("SH060"), 0.8, 0.0, 0.4),
+            ],
+        });
+        let merged = merge_harness_audio_track(&tracks, fresh);
+        let items = merged["items"].as_array().unwrap();
+        let by_id = |id: &str| {
+            items
+                .iter()
+                .find(|item| item["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("{id} is on the merged track"))
+        };
+        let sh020 = by_id("item_line_sh020");
+        assert_eq!(
+            sh020["volume"],
+            json!(0.4),
+            "the editor's volume survives the pass"
+        );
+        assert_eq!(sh020["fadeInSeconds"], json!(0.25));
+        assert_eq!(sh020["fadeOutSeconds"], json!(0.5));
+        assert_eq!(by_id("item_line_sh050")["volume"], json!(1.0));
+        let sh060 = by_id("item_line_sh060");
+        assert_eq!(
+            sh060["volume"],
+            json!(0.8),
+            "an item with no saved counterpart is the fresh one"
+        );
+        assert_eq!(sh060["fadeOutSeconds"], json!(0.4));
+        assert_eq!(
+            by_id("item_editor")["volume"],
+            json!(0.9),
+            "the editor's own clip is kept"
+        );
+        assert_eq!(items.len(), 4);
+        assert_eq!(merged["gain"], json!(0.7), "the saved fader wins");
+        // A bed carries no shot id: it matches its saved counterpart on the role alone.
+        let bed = |volume: f64| {
+            json!({ "id": "track_music", "kind": "audio", "role": "music", "gain": 0.2,
+                "items": [{ "id": "item_music", "type": "audio", "volume": volume,
+                    "fadeInSeconds": 2.0, "fadeOutSeconds": 3.0,
+                    HARNESS_KEY: harness_block(ROLE_MUSIC, "run_0123456789ab", None, 0.0) }] })
+        };
+        let merged_bed = merge_harness_audio_track(&[bed(0.5)], bed(1.0));
+        assert_eq!(merged_bed["items"][0]["volume"], json!(0.5));
+        // With no saved track at all, the fresh one is used as is.
+        assert_eq!(
+            merge_harness_audio_track(&[], bed(1.0))["items"][0]["volume"],
+            json!(1.0)
+        );
+    }
+
     // `tier_maps_to_the_shared_mlx_quantize_convention` moved to `sceneworks_core::film_compile`
     // with `mlx_quantize_for_tier` itself, which now builds every video job body (sc-22713).
 
@@ -5925,7 +6069,17 @@ fn audio_track(id: &str, name: &str, role: &str, bus: &SoundBus, items: Vec<Valu
 /// The saved track wins on everything a person may have changed — its fader (`gain`, `muted`),
 /// its name, and every item the harness did NOT place (no `filmHarness.role`); the harness's own
 /// items are the fresh ones, because they are re-derived from the plan on every pass exactly as
-/// `relayout_timeline` re-places them. With no saved track the fresh one is used as is.
+/// `relayout_timeline` re-places them. A fresh item that has a saved counterpart — the same
+/// `filmHarness.role` and `shotId` — keeps that item's `volume`, `fadeInSeconds` and
+/// `fadeOutSeconds`, which are the editor's per-item controls and were being reset to the plan's
+/// values on every resume and replacement (sc-22715). With no saved track the fresh one is used
+/// as is.
+///
+/// Dropping the saved harness items is only safe because the fresh set is derived from the shots
+/// the merged PICTURE holds, not from the selection: a saved harness item whose shot is still in
+/// the cut has a fresh counterpart here, and one whose shot has left the cut is meant to go. When
+/// the fresh set came from `selected_takes()` instead, a shot that kept its picture item but lost
+/// its selection (a rejected take) had neither — and its line vanished from the sequence.
 fn merge_harness_audio_track(existing_tracks: &[Value], fresh: Value) -> Value {
     let id = fresh.get("id").and_then(Value::as_str).unwrap_or_default();
     let Some(saved) = existing_tracks
@@ -5934,18 +6088,37 @@ fn merge_harness_audio_track(existing_tracks: &[Value], fresh: Value) -> Value {
     else {
         return fresh;
     };
+    let saved_items: Vec<Value> = saved
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut merged = saved.clone();
     let mut items: Vec<Value> = fresh
         .get("items")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut item| {
+            let counterpart = saved_items.iter().find(|candidate| {
+                harness_str(candidate, "role").is_some()
+                    && harness_str(candidate, "role") == harness_str(&item, "role")
+                    && harness_str(candidate, "shotId") == harness_str(&item, "shotId")
+            });
+            if let Some(counterpart) = counterpart {
+                for key in ["volume", "fadeInSeconds", "fadeOutSeconds"] {
+                    if let Some(kept) = counterpart.get(key) {
+                        item[key] = kept.clone();
+                    }
+                }
+            }
+            item
+        })
+        .collect();
     items.extend(
-        saved
-            .get("items")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+        saved_items
+            .iter()
             .filter(|item| harness_str(item, "role").is_none())
             .cloned(),
     );
