@@ -430,18 +430,27 @@ async fn resolve_envelope(
     require_installed: bool,
     facts: &HostFacts,
 ) -> Result<(PlanCatalog, PlannerCapabilities), HarnessError> {
-    // The reference partition is asked for unconditionally here (sc-23402): the draft this envelope
+    // The reference partition is RESOLVED unconditionally here (sc-23402): the draft this envelope
     // is about to produce does not exist yet, so whether any shot will bind reference roles is not
-    // knowable. Resolving it now costs one catalog read and lets a draft that does bind them
-    // compile; absent, the per-shot validator names it during the repair rounds.
+    // knowable, and having the entry in hand costs one catalog read.
+    //
+    // It is NOT gated. The envelope below is built from the BASE entry alone — `modes` omits
+    // `reference_to_video` and `max_reference_images` is 0 — so a PLANNER-GENERATED draft can never
+    // bind reference roles. Planner-generated reference shots are S4's (sc-23405) scope, not this
+    // story's: do not widen the envelope here. Gating the reference partition would therefore
+    // refuse every `film-harness plan` on a host that never downloaded the 18.78 GB reference DiT,
+    // for weights the resulting text-only film could not load — and references are OPTIONAL (E1).
+    // `compile` and `run` gate it when a plan's shots actually resolve to it.
     let catalog = crate::film_harness::plan_catalog_for(transport, &brief.model.id, true).await?;
     // The SAME entry-level gate the dispatch path runs — catalog presence, video type, install
-    // state, and the route's own platform-reachability check — rather than a second copy of it.
+    // state, and the route's own platform-reachability check — rather than a second copy of it,
+    // on the BASE partition only.
     let findings = crate::film_harness::catalog_entry_findings(
         &catalog,
         brief.model.tier.as_deref(),
         require_installed,
         facts,
+        false,
     );
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
@@ -770,11 +779,17 @@ pub async fn compile_existing(
             .any(|shot| !shot.conditioning.reference_roles.is_empty()),
     )
     .await?;
+    // Compile has no shot selection: every shot of this plan is compiled, so the reference
+    // partition is gated exactly when some shot resolves to it (the same condition that decided
+    // whether to resolve it at all, above).
     let mut findings = crate::film_harness::catalog_entry_findings(
         &catalog,
         plan.model.tier.as_deref(),
         options.require_installed,
         &facts,
+        plan.shots
+            .iter()
+            .any(|shot| !shot.conditioning.reference_roles.is_empty()),
     );
     if findings.is_empty() {
         let entries = catalog

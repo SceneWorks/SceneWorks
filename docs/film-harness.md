@@ -352,14 +352,44 @@ Three documents carry the outcome, and they cannot disagree because all three re
 - the attempt record's `resolvedModelId` / `partitionReason`, and the take's `model`.
 
 Validation follows the resolution: each shot is checked against the **resolved** partition's
-declared capabilities, menus and caps, and `validate`/`run` check catalog presence, install state
-and platform reachability for **both** partitions when any shot needs the reference one. The run's
-memory preflight uses the largest `minMemoryGb` among the partitions the plan actually uses — a run
-that loads both is bounded by the larger floor. A reference shot whose partition is not in the
-catalog is refused **by name, with the shot**, never dispatched at the base checkpoint.
+declared capabilities, menus and caps. A reference shot whose partition is not in the catalog is
+refused **by name, with the shot**, never dispatched at the base checkpoint.
+
+The **install/reachability gate follows the SELECTION**, not the document. `validate`/`run` check
+catalog presence, install state and platform reachability for the reference partition only when a
+**selected** shot resolves to it, so `--shots SH020` on `plan.ref.jsonc` runs on a host that never
+downloaded the 18.78 GB reference DiT, and a `resume` gates what the record's
+`selectedShotIds` names. Plan-level validation of the document is unchanged: `--shots SH020` is
+still refused for a malformed SH010, and SH010's declared caps are still judged against the
+reference entry. `film-harness plan` gates the **base partition only** — references are optional
+input, the planner's envelope is built from the base entry alone (it cannot generate a
+reference-binding shot at all; see below), and a brief that will produce a text-only film must plan
+on a host with no reference weights.
+
+The run's memory preflight uses the largest `minMemoryGb` among the partitions the plan actually
+uses. `maxMemoryGb` bounds **one job's** observed peak and shots dispatch one job at a time, so
+both partitions are never resident together: each must fit on its own, and the largest declared
+minimum is therefore the binding one — it is a max, not a sum.
+
+`run.json`'s `model.partitionWeights` records the manifest download row behind **each** partition
+the run dispatches on, keyed by catalog model id, so a mixed run's record names the
+`transformer_ref` files that produced its reference takes as well as the base checkpoint's.
+`model.weights` remains the declared model's own row.
 
 There are no per-shot model overrides across families: the only id resolution can ever produce is
 the declared model's own reference partition.
+
+**The planner does not generate reference shots.** `film-harness plan` builds its capability
+envelope from the base entry alone — `modes` omits `reference_to_video` and `maxReferenceImages` is
+0 — so an LLM-generated draft can never bind reference roles. Mixed-partition plans are authored by
+hand today (`plan.ref.jsonc`); teaching the planner to produce them is **sc-23405 (S4)**, not this
+story. `film-harness compile` and `film-harness run` resolve and validate hand-authored reference
+shots fully.
+
+`compiled.json` is **schema version 2** (sc-23402): its `model` field is the RESOLVED partition id
+rather than the plan's declared family model, with `partitionReason` beside it. A v1 document is
+refused by version — `unsupported compiled plan schema version 1` — and the remedy is `film-harness
+compile`, which rewrites it.
 
 `config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
 `courier` + `workshop_plate`, SH020 binds nothing — and
@@ -969,24 +999,36 @@ for SH010, the base one for SH020), so there is an extra checkpoint load between
 `run.json`'s `shots[].attempts[].resolvedModelId` to confirm which checkpoint rendered each take —
 see *Partition resolution* above.
 
-**What the 2026-09-14 runs measured (sc-23402), and the engine defect they hit.** Both runs
-dispatched SH010 as `minimax_h3_ref` / `reference_to_video` through the real route and the MLX
-worker loaded the reference checkpoint for it — the resolution, the payload and the record all
-agree. The RENDER is a different story, and it is inference-side, not harness-side:
+**What the 2026-09-14 runs measured (sc-23402), and the engine defect they hit.** Two runs on the
+dev Mac — **`run_cd7fc4be2398`** (first) and **`run_a7f6af80e28f`** (second) — with their run
+records, worker logs and `compiled.json` under
+**`~/SceneWorks/film-harness-evidence/sc-23402/`**. Both dispatched SH010 as `minimax_h3_ref` /
+`reference_to_video` through the real route and the MLX worker loaded the reference checkpoint for
+it — the resolution, the payload and the record all agree. The RENDER is a different story, and it
+is inference-side, not harness-side:
 
 - **The reference partition is far slower per denoise step.** SH020 on the base checkpoint ran at
   ~17 s/step (50 steps in ~17 min at 576x320, matching the entry's own `durationHint`). SH010 on
-  the reference partition ran at roughly **110 s/step** — about 6x — on top of a ~21 minute cold
-  load of the `transformer_ref` DiT plus the staged text encoder. `plan.ref.jsonc`'s limits are
-  sized for that; `plan.jsonc`'s 2700 s per-shot budget cuts the reference shot mid-render.
-- **The reference conditioning intermittently arrives degenerate.** The second run's SH010 was
+  the reference partition ran at roughly **110 s/step** — about 6x — on top of a **~21 minute** cold
+  load of the `transformer_ref` DiT plus the staged text encoder. Both numbers are from
+  `run_cd7fc4be2398` (`~/SceneWorks/film-harness-evidence/sc-23402/`; step timings in the worker
+  log, the load in the gap between dispatch and the first progress event).
+  `plan.ref.jsonc`'s limits are sized for that; `plan.jsonc`'s 2700 s per-shot budget cuts the
+  reference shot mid-render.
+- **The reference conditioning intermittently arrives degenerate.** `run_a7f6af80e28f`'s SH010 was
   refused by the engine before denoising: *"minimax-h3 te (ref2va token embedding): refusing to
   render from a degenerate conditioning tensor — every element is exactly zero at shape
   [1, 14801, 5120]"* (the engine's own guard, citing sc-23053, originally sc-17153). The first run
   did NOT hit it — the same plan, the same weights, the same host, denoising past step 14 — so it
-  is intermittent, which is the signature of the fresh-Metal-buffer zero-read class rather than bad
-  weights on disk. Nothing in SceneWorks can work around it: the fix is in the inference engine at
-  the pinned revision.
+  is intermittent.
+
+  **Cause: hypothesis, not a conclusion.** Intermittency on identical inputs is consistent with the
+  fresh-Metal-buffer zero-read class (see `mlx_load_eval_gpu_unimplemented_first_read_can_return_zeros`),
+  but nothing here has isolated it to that, and two runs are not a sample. It is **under
+  investigation on the inference side** on the paired branch
+  `feature/sc-23401-film-harness-phase-2`. What IS established is that the refusal comes from the
+  engine's own guard after the harness handed it a correct payload: nothing in SceneWorks can work
+  around it, and no harness change is pending on it.
 
 The harness behaved correctly through both: the first run stopped on its declared per-shot budget
 and refused to dispatch a second render beside the one still in flight, the second recorded the

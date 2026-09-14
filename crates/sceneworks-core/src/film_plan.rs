@@ -1721,9 +1721,12 @@ pub fn validate_plan_against_model(
     let mut findings = Vec::new();
     let model_id = plan.model.id.as_str();
     let entry = entries.base_entry();
-    // The budget is a RUN-level bound and a run loads whichever partitions its shots need, so it is
-    // checked against the largest declared minimum among the partitions this plan actually uses —
-    // not against the declared model's alone.
+    // `limits.maxMemoryGb` bounds ONE JOB's observed peak (`AttemptRecord::peak_memory_gb`), and
+    // shots dispatch one job at a time — a run never has two partitions resident at once. So the
+    // budget has to clear the LARGEST declared minimum among the partitions this plan uses, not
+    // their sum: every partition must fit on its own, and the largest is the binding one. Checking
+    // the declared model's alone would let a plan whose reference shots need more sail past
+    // preflight and blow the budget mid-run.
     let binding = entries
         .partitions_used(plan)
         .into_iter()
@@ -2109,9 +2112,17 @@ pub struct ModelRecord {
     /// Backend label the worker reported on the first completed take (`mlx` / `cuda` / ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_observed: Option<String>,
-    /// Primary weights download for the requested tier, as the manifest declares it.
+    /// Primary weights download for the requested tier, as the manifest declares it. The DECLARED
+    /// model's own row — see `partition_weights` for what a mixed run actually loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Value>,
+    /// The primary weights download for the requested tier of EVERY partition this run dispatches
+    /// on, keyed by catalog model id (sc-23402 review). On a split family the reference partition's
+    /// `transformer_ref` rows are a second 18.78 GB download that `weights` above never named, so a
+    /// mixed run's record could not say which files produced its reference takes. A run that uses
+    /// one partition carries one entry, and it is the same row as `weights`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partition_weights: BTreeMap<String, Value>,
     pub hardware: HardwareRecord,
 }
 
@@ -3134,7 +3145,7 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_budget_is_checked_against_the_largest_partition_the_plan_uses() {
+    fn the_memory_budget_must_clear_every_partition_so_the_largest_minimum_binds() {
         let mut value = mixed_plan_json();
         value["limits"]["maxMemoryGb"] = json!(70);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
@@ -3155,7 +3166,8 @@ mod tests {
             findings.iter().any(|m| m.contains("limits.maxMemoryGb")
                 && m.contains("minimax_h3_ref")
                 && m.contains("80")),
-            "the run loads both partitions, so the larger floor binds: {findings:?}"
+            "the budget bounds ONE job's peak and each partition must fit on its own, so the \
+             larger of the two minimums binds: {findings:?}"
         );
     }
 

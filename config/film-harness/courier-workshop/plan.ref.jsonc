@@ -12,8 +12,9 @@
   //
   // References are OPTIONAL input: SH020 binds none and is never refused for it. Everything else
   // matches plan.jsonc — 24 fps, 576x320, the 5.1667s clip length — so the two plans are
-  // comparable shot for shot. `maxMemoryGb` is the same 96: both partitions declare
-  // `mlx.minMemoryGb: 64`, and a run that loads both is still bounded by the larger of the two.
+  // comparable shot for shot. `maxMemoryGb` is the same 96: it bounds ONE job's observed peak and
+  // shots dispatch one at a time, so each partition has to fit on its own and the larger of the
+  // two declared `mlx.minMemoryGb` floors (both 64 here) is what must clear — a max, not a sum.
   //
   // The pack's plates are the deterministic placeholders `film-harness fixture-images` writes, so
   // the reference conditioning here proves the PLUMBING (the right checkpoint, the right payload,

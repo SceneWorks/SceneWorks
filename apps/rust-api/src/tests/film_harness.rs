@@ -1782,6 +1782,32 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
     assert!(attempt("SH010")["partitionReason"]
         .as_str()
         .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+
+    // sc-23402 review: the record names the WEIGHTS behind each partition it dispatched on, not
+    // only the declared model's row — a mixed run loads a second 18.78 GB `transformer_ref`
+    // download and nothing recorded which files produced the reference take.
+    let weights = &on_disk["model"]["partitionWeights"];
+    let partitions: Vec<&str> = weights
+        .as_object()
+        .expect("partitionWeights")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        partitions,
+        vec!["minimax_h3", "minimax_h3_ref"],
+        "both partitions this run loaded: {weights}"
+    );
+    let files = |partition: &str| -> String { weights[partition]["files"].to_string() };
+    assert!(files("minimax_h3").contains("q4/transformer/"), "{weights}");
+    assert!(
+        files("minimax_h3_ref").contains("q4/transformer_ref/"),
+        "the reference partition's own rows, not a copy of the base's: {weights}"
+    );
+    assert_eq!(
+        on_disk["model"]["weights"], weights["minimax_h3"],
+        "`weights` stays the DECLARED model's row"
+    );
 }
 
 /// sc-23402 AC1, the refusals: too many roles for the RESOLVED partition, and a
@@ -1843,6 +1869,124 @@ async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
         "{text:?}"
     );
     assert!(harness.jobs().await.is_empty());
+}
+
+/// A catalog rewrite that reports `minimax_h3` INSTALLED and leaves `minimax_h3_ref` exactly as
+/// the host serves it — missing, since no weights are on disk under the test's data dir.
+///
+/// That split is the whole subject of the install-gate tests below: the base checkpoint downloaded,
+/// the separate 18.78 GB reference DiT not. Without the rewrite both partitions read `missing` and
+/// the base's own refusal would mask whatever the reference partition's gate did.
+fn only_the_base_partition_is_installed(body: &mut Value) {
+    let Some(entries) = body.as_array_mut() else {
+        return;
+    };
+    for entry in entries {
+        if entry.get("id").and_then(Value::as_str) != Some("minimax_h3") {
+            continue;
+        }
+        entry["installState"] = json!("installed");
+        if let Some(variants) = entry.get_mut("variants").and_then(Value::as_array_mut) {
+            for variant in variants {
+                variant["installed"] = json!(true);
+                variant["installState"] = json!("installed");
+            }
+        }
+    }
+}
+
+/// sc-23402 review. The install/reachability gate runs on the RESOLVED reference partition too, and
+/// names it: `plan.ref.jsonc`'s SH010 needs `minimax_h3_ref`, which is a second download with its
+/// own install state. Shaped like the base install-gate assertion in
+/// `a_plan_is_refused_when_the_host_cannot_run_it`, but driven from the mixed fixture.
+#[tokio::test]
+async fn the_reference_partitions_install_state_is_gated_and_named() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-ref-install-gate");
+    options.require_installed = true;
+
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the reference partition is not installed");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "the refusal must NAME the partition that is missing: {findings:?}"
+    );
+    // And it must not blame the base checkpoint, which this host does have.
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.message.contains("minimax_h3 tier")),
+        "{findings:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// sc-23402 review, the scope gap. The install gate follows the SELECTION: `--shots SH020` on the
+/// mixed fixture dispatches only the base checkpoint, so it must run on a host that never
+/// downloaded the reference DiT — even with `--require-installed`. The plan DOCUMENT is still
+/// validated whole (SH010's reference entry is still resolved and its caps still judged); only the
+/// weights-on-disk demand narrows.
+#[tokio::test]
+async fn a_shot_filtered_run_does_not_demand_an_unselected_partitions_weights() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH020"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-base-only");
+    options.require_installed = true;
+
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("a base-only selection runs with the reference DiT absent");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(record.selected_shot_ids, vec!["SH020".to_owned()]);
+    let selected = record
+        .shots
+        .iter()
+        .find(|shot| shot.shot_id == "SH020")
+        .expect("SH020 has a shot record");
+    assert_eq!(selected.attempts[0].resolved_model_id, "minimax_h3");
+
+    // Only the partition it actually loaded is priced into the record's weights.
+    let model = record.model.as_ref().expect("a model record");
+    let partitions: Vec<&String> = model.partition_weights.keys().collect();
+    assert_eq!(partitions, vec!["minimax_h3"], "{partitions:?}");
+
+    // Selecting the reference shot instead DOES demand it — same plan, same host, same gate.
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH010"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-reference");
+    options.require_installed = true;
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the selected shot needs the reference partition");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "{findings:?}"
+    );
 }
 
 /// `GET /api/v1/jobs/{id}`, for the assertions above.
@@ -4014,6 +4158,79 @@ async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
     );
 }
 
+/// sc-23402 review. A run record written by a PRE-STORY build carries no `resolvedModelId` and no
+/// `partitionReason`; `#[serde(default)]` reads them back as `""`.
+///
+/// The reconcile/adopt paths cloned that empty string straight onto the take they imported, so a
+/// phase-1 run directory resumed on this build recorded its adopted take with `model: ""` — losing
+/// the only statement of which checkpoint produced the clip. The fallback is the shot's own
+/// resolved partition (what the first controller would have written), and the attempt row is
+/// backfilled so the record self-heals on the resume that touched it. The mixed fixture is the
+/// fixture that can tell the fix apart from `plan.model.id`: SH010 resolves to `minimax_h3_ref`.
+#[tokio::test]
+async fn an_adopted_attempt_without_a_recorded_partition_falls_back_and_backfills() {
+    let harness = Harness::start(true, vec![]).await;
+    // Die right after the video job POST: the API holds the job, the record does not know its id,
+    // so the resume ADOPTS it through `reconcile_shot` rather than polling one it dispatched.
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+        .on_post_route("/api/v1/video/jobs");
+    let options = harness.options(
+        harness.mixed_partition_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+
+    // Rewrite the record the way a pre-story build wrote it: the two keys absent entirely.
+    let path = harness.out_dir().join("run.json");
+    let mut on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("record on disk"))
+            .expect("record parses");
+    for shot in on_disk["shots"].as_array_mut().expect("shots") {
+        for attempt in shot["attempts"].as_array_mut().expect("attempts") {
+            let attempt = attempt.as_object_mut().expect("attempt");
+            attempt.remove("resolvedModelId");
+            attempt.remove("partitionReason");
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&on_disk).unwrap()).unwrap();
+    let stripped = film_harness::read_run_record(&harness.out_dir()).expect("record re-reads");
+    let attempt = &stripped.shot("SH010").expect("SH010").attempts[0];
+    assert!(
+        attempt.resolved_model_id.is_empty() && attempt.job_id.is_none(),
+        "the fields really are absent and the job id was never recorded: {attempt:?}"
+    );
+
+    // Let the render settle so the resume adopts a COMPLETED job and imports its take.
+    wait_for_settled_shot(&harness.app, "SH010").await;
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("the resume adopts the in-flight job");
+    let attempt = &resumed.shot("SH010").expect("SH010").attempts[0];
+    let take = attempt.take.as_ref().unwrap_or_else(|| {
+        panic!("the adopted attempt has no take\n{}", summary(&resumed));
+    });
+    // `take_from_result` prefers the asset recipe's own `model` and falls back to the string the
+    // adopt path hands it, so this asserts the two agree — the fake worker's recipe carries the id.
+    // The ATTEMPT ROW below is the assertion that pins the fallback: it is written from nothing but
+    // the adopt path's value, and it is what a reader (and the next resume) reads.
+    assert_eq!(
+        take.model, "minimax_h3_ref",
+        "the adopted take must name the partition that rendered it, not \"\""
+    );
+    assert_eq!(
+        attempt.resolved_model_id, "minimax_h3_ref",
+        "and the attempt row is backfilled"
+    );
+    assert!(
+        attempt.partition_reason.contains("minimax_h3_ref"),
+        "{}",
+        attempt.partition_reason
+    );
+}
+
 /// `replace-take` decides ONE shot's outcome. Closing the run through the whole-run classifier
 /// overwrote a resumable stop with `attempts_exhausted` / `resumable: false`, which permanently
 /// blocks the `resume` that was going to render the remaining shots.
@@ -5487,7 +5704,11 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
     )
     .expect("compiled.json parses");
-    assert_eq!(compiled["schemaVersion"], 1);
+    assert_eq!(
+        compiled["schemaVersion"],
+        sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
+        "sc-23402 bumped this to 2: `model` is the RESOLVED partition id"
+    );
     assert_eq!(compiled["planId"], "courier-workshop-planned");
     assert_eq!(compiled["model"]["fps"], 24);
     let requests = compiled["requests"].as_array().expect("requests");
@@ -5560,6 +5781,71 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         assert!(request.contains(beat), "{beat} missing from the request");
     }
     assert!(request.contains("workshop_plate (plate)"), "{request}");
+}
+
+/// sc-23402 review, E1. `film-harness plan` gates the BASE partition only.
+///
+/// The story's first cut resolved the reference partition AND ran the entry-level gate on it for
+/// every `plan`, so with the CLI's default `--require-installed` a brief that produces a text-only
+/// film refused with "minimax_h3_ref tier q4 is not installed on this host" — demanding an 18.78 GB
+/// download the resulting plan could never load. References are OPTIONAL input, and the planner's
+/// envelope is built from the base entry alone, so it cannot even generate a shot that would need
+/// them (that is sc-23405 / S4). The dispatch path still gates it when a plan's shots resolve to it.
+#[tokio::test]
+async fn planning_a_text_only_film_does_not_demand_the_reference_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The base checkpoint installed, the reference DiT not — the state the gate has to tolerate.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let mut options = planner_options(&harness, "planned-require-installed");
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a text-only film plans with the reference partition absent");
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "the planner's envelope cannot produce a reference-binding shot (sc-23405 owns that)"
+    );
+    // Every compiled request stays on the base partition, so nothing here would load the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The base partition's own install state is still gated: uninstall it and the SAME planner
+    // call refuses, naming it. The gate did not go away, it narrowed to what a plan can load.
+    let strict = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |_| {});
+    let mut options = planner_options(&harness, "planned-base-missing");
+    options.require_installed = true;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let error = film_planner::generate(&strict, &planner_llm(&harness), &options)
+        .await
+        .expect_err("the base checkpoint is not installed either");
+    let findings = findings_of(error);
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("minimax_h3") && m.contains("not installed")),
+        "{findings:?}"
+    );
 }
 
 #[tokio::test]

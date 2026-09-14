@@ -24,7 +24,14 @@ use crate::film_plan::{
 use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 1;
+///
+/// **2** (sc-23402): `CompiledRequest::model` is the RESOLVED partition id rather than the plan's
+/// declared family model, and `partitionReason` says why. The document's semantics changed, so a v1
+/// document is refused BY VERSION. Without the bump `partitionReason`'s `#[serde(default)]` would
+/// let a v1 document parse with an empty reason and then fail [`request_differences`] as
+/// hand-edited, which blames the operator for a schema migration. The remedy either way is
+/// `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 2;
 
 /// How far apart one shot's successive attempts are seeded (sc-22715).
 ///
@@ -487,7 +494,8 @@ impl CompiledPlan {
                 "compiled.schemaVersion",
                 format!(
                     "unsupported compiled plan schema version {} (this build reads \
-                     {COMPILED_PLAN_SCHEMA_VERSION})",
+                     {COMPILED_PLAN_SCHEMA_VERSION}); re-run `film-harness compile` to rewrite \
+                     these requests",
                     self.schema_version
                 ),
             ));
@@ -1134,6 +1142,61 @@ mod tests {
             .staleness_findings(&plan, "abc123def456")
             .iter()
             .any(|finding| finding.field == "compiled.planId"));
+    }
+
+    /// sc-23402 review. A `compiled.json` written by a PRE-STORY build is refused by SCHEMA
+    /// VERSION, not blamed on the operator as a hand edit.
+    ///
+    /// Such a document has no `partitionReason` key at all. `#[serde(default)]` reads it back as
+    /// `""`, which `request_differences` would report as `compiled.partitionReason` — "the
+    /// compiled request asks for …, but the plan says …", a tampering message — so a phase-1 run
+    /// directory could no longer be resumed and the refusal named the wrong cause. The version
+    /// bump to 2 is what makes the first finding the true one, and it names the remedy.
+    #[test]
+    fn a_pre_story_compiled_document_is_refused_by_schema_version_not_as_tampered() {
+        let plan = parse_plan(&plan_text()).unwrap();
+        let entry = entry();
+        let entries = ModelEntries::single("minimax_h3", &entry);
+
+        // Exactly what a v1 document on disk deserializes to: version 1, and the key absent.
+        let mut v1 = compiled(BTreeMap::new());
+        v1.schema_version = 1;
+        for request in &mut v1.requests {
+            request.partition_reason = String::new();
+        }
+        let round_tripped: CompiledPlan =
+            serde_json::from_value(serde_json::to_value(&v1).unwrap()).unwrap();
+        assert_eq!(round_tripped.schema_version, 1);
+        assert!(round_tripped.requests[0].partition_reason.is_empty());
+
+        let findings = round_tripped.staleness_findings(&plan, "abc123def456");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].field, "compiled.schemaVersion", "{findings:?}");
+        assert!(
+            findings[0].message.contains("schema version 1")
+                && findings[0].message.contains("film-harness compile"),
+            "the refusal must name the version AND the remedy: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "compiled.partitionReason"),
+            "a schema migration must never be reported as a hand edit: {findings:?}"
+        );
+
+        // And this is the finding the bump replaced: at the CURRENT version the same empty
+        // `partitionReason` is (correctly) a tampering report, which is why v1 had to be refused
+        // by version rather than left to fall through to conformance.
+        let mut current = round_tripped;
+        current.schema_version = COMPILED_PLAN_SCHEMA_VERSION;
+        assert!(current.staleness_findings(&plan, "abc123def456").is_empty());
+        assert!(
+            current
+                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .iter()
+                .any(|finding| finding.field == "compiled.partitionReason"),
+            "without the bump a v1 document lands here instead"
+        );
     }
 
     #[test]

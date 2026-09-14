@@ -1097,10 +1097,15 @@ impl PlanCatalog {
     }
 }
 
-/// The entry-level gate — catalog presence, video type, install state, platform reachability — run
-/// on EVERY partition this catalog holds (sc-23402). The reference DiT is a separate 18.78 GB
-/// download with its own install state, and a run that discovers it uninstalled at dispatch has
-/// already spent the base checkpoint's load.
+/// The entry-level gate — catalog presence, video type, install state, platform reachability.
+///
+/// The base partition is always gated. The reference partition is gated only when
+/// `gate_reference` says THIS invocation will load it (sc-23402): the reference DiT is a separate
+/// 18.78 GB download with its own install state, so a run that discovers it uninstalled at
+/// dispatch has already spent the base checkpoint's load — but references are OPTIONAL (E1), and a
+/// caller that will never load those weights must not be asked to have them on disk. The planner
+/// passes `false` (no draft exists yet, and its envelope cannot produce a reference shot at all),
+/// and `validate`/`run` pass whether a SELECTED shot resolves to it.
 ///
 /// A partition the catalog does not serve at all is deliberately NOT reported here: the per-shot
 /// validator names it together with the shot that needs it, which is the actionable form.
@@ -1109,6 +1114,7 @@ pub(crate) fn catalog_entry_findings(
     tier: Option<&str>,
     require_installed: bool,
     facts: &HostFacts,
+    gate_reference: bool,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = model_entry_findings(
         &catalog.model_id,
@@ -1117,6 +1123,9 @@ pub(crate) fn catalog_entry_findings(
         require_installed,
         facts,
     );
+    if !gate_reference {
+        return findings;
+    }
     if let (Some(reference_id), Some(reference)) =
         (catalog.reference_id.as_deref(), catalog.reference.as_ref())
     {
@@ -1129,6 +1138,23 @@ pub(crate) fn catalog_entry_findings(
         ));
     }
     findings
+}
+
+/// Whether some SELECTED shot resolves to the family's reference partition — which is what decides
+/// whether that partition's install state and platform reachability are gated (sc-23402 review).
+///
+/// Plan-level validation of the DOCUMENT stays whole-plan: a `--shots SH020` run is still refused
+/// for a malformed SH010, and the reference entry is still resolved so SH010's declared caps can be
+/// judged. Only the install gate follows the selection, because only the selected shots are
+/// dispatched and only their partitions are ever loaded.
+fn selection_needs_reference(plan: &ProductionPlan, selection: Option<&[String]>) -> bool {
+    plan.shots
+        .iter()
+        .filter(|shot| match selection {
+            Some(ids) => ids.iter().any(|id| id == &shot.id),
+            None => true,
+        })
+        .any(|shot| !shot.conditioning.reference_roles.is_empty())
 }
 
 /// Resolve the catalog entries a plan or brief on `model_id` may dispatch as, against a bare
@@ -1241,6 +1267,38 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
         "variant": row.get("variant"),
         "files": row.get("files"),
     }))
+}
+
+/// [`primary_weights`] for EVERY partition the SELECTED shots resolve to, keyed by catalog model id
+/// (sc-23402 review).
+///
+/// `ModelRecord::weights` names the declared model's download row only, so on a mixed run nothing
+/// recorded the `transformer_ref` rows that produced the reference takes. Keyed by partition so a
+/// reader can pair a take's `model` with the files behind it. A partition the catalog does not
+/// serve contributes no entry — the run is already refused for it by name.
+fn partition_weights(
+    plan: &ProductionPlan,
+    entries: &ModelEntries<'_>,
+    tier: Option<&str>,
+    selection: &[String],
+) -> BTreeMap<String, Value> {
+    let mut weights = BTreeMap::new();
+    let selected = ProductionPlan {
+        shots: plan
+            .shots
+            .iter()
+            .filter(|shot| selection.iter().any(|id| id == &shot.id))
+            .cloned()
+            .collect(),
+        ..plan.clone()
+    };
+    for partition in entries.partitions_used(&selected) {
+        let (id, entry) = entries.resolve_shot_partition_entry(&partition);
+        if let Some(row) = entry.and_then(|entry| primary_weights(entry, tier)) {
+            weights.insert(id.to_owned(), row);
+        }
+    }
+    weights
 }
 
 /// The compiled requests this run dispatches: the document beside the plan when there is one, else
@@ -1526,7 +1584,13 @@ pub async fn validate(
         // model checks cannot run before it is known.
         let facts = discover_host(&client).await?;
         let catalog = resolve_plan_catalog(&client, &plan).await?;
-        let mut findings = model_findings(&plan, &catalog, options.require_installed, &facts);
+        let mut findings = model_findings(
+            &plan,
+            &catalog,
+            options.require_installed,
+            &facts,
+            options.shot_ids.as_deref(),
+        );
         if findings.is_empty() {
             findings.extend(host_findings(&plan, &facts, options.export));
         }
@@ -1720,12 +1784,14 @@ fn model_findings(
     catalog: &PlanCatalog,
     require_installed: bool,
     facts: &HostFacts,
+    selection: Option<&[String]>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = catalog_entry_findings(
         catalog,
         plan.model.tier.as_deref(),
         require_installed,
         facts,
+        selection_needs_reference(plan, selection),
     );
     let Some(entries) = catalog.entries() else {
         return findings;
@@ -1805,15 +1871,19 @@ impl Prepared {
 
 /// Resolve the catalog entry and the host facts and judge the plan against both. `Ok(Err(findings))`
 /// is a refusal: the caller writes a `rejected` record and creates nothing.
+///
+/// `selection` is the shots THIS controller will dispatch (`None` = the whole plan). It scopes the
+/// reference partition's install gate only — the plan itself is still judged whole (sc-23402).
 async fn prepare(
     client: &Client<'_>,
     plan: &ProductionPlan,
     export: bool,
     require_installed: bool,
+    selection: Option<&[String]>,
 ) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
     let facts = discover_host(client).await?;
     let catalog = resolve_plan_catalog(client, plan).await?;
-    let mut findings = model_findings(plan, &catalog, require_installed, &facts);
+    let mut findings = model_findings(plan, &catalog, require_installed, &facts, selection);
     if findings.is_empty() {
         findings.extend(host_findings(plan, &facts, export));
     }
@@ -1952,6 +2022,35 @@ impl Session<'_> {
             Some(request) => (request.model.clone(), request.partition_reason.clone()),
             None => (self.plan.model.id.clone(), String::new()),
         }
+    }
+
+    /// The partition one RECORDED attempt dispatched as, for the take it produced.
+    ///
+    /// A run record written before sc-23402 carries no `resolvedModelId` at all, and
+    /// `#[serde(default)]` reads that as `""` — so a resume that adopted such an attempt used to
+    /// record its take with `model: ""`, losing the only statement of which checkpoint made it.
+    /// An empty value falls back to this shot's resolved partition, which is exactly what the
+    /// first controller would have written, and the attempt row is BACKFILLED so the record
+    /// self-heals on the resume that touched it rather than staying blank forever.
+    fn dispatched_model_for(
+        &mut self,
+        shot_id: &str,
+        shot_index: usize,
+        attempt_index: usize,
+    ) -> String {
+        let recorded = self.record.shots[shot_index].attempts[attempt_index]
+            .resolved_model_id
+            .clone();
+        if !recorded.is_empty() {
+            return recorded;
+        }
+        let (model, reason) = self.resolved_partition(shot_id);
+        let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+        attempt.resolved_model_id = model.clone();
+        if attempt.partition_reason.is_empty() {
+            attempt.partition_reason = reason;
+        }
+        model
     }
 
     /// Total AUTOMATIC wall-clock this run has consumed, across every controller that has held it.
@@ -2879,9 +2978,7 @@ impl Session<'_> {
         let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
         // The take names the partition that actually rendered it, not the plan's declared family
         // model (sc-23402).
-        let dispatched_model = self.record.shots[shot_index].attempts[attempt_index]
-            .resolved_model_id
-            .clone();
+        let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
             .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
             .flatten();
@@ -3077,9 +3174,7 @@ impl Session<'_> {
             };
             let view = self.client.get_job(&job_id).await?;
             let terminal = view.is_terminal() && view.is_settled();
-            let dispatched_model = self.record.shots[shot_index].attempts[attempt_index]
-                .resolved_model_id
-                .clone();
+            let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
             let take = (terminal && view.status == "completed")
                 .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
                 .flatten();
@@ -4082,7 +4177,15 @@ pub async fn run_with_control(
         }
         Err(other) => return Err(other),
     };
-    let prepared = match prepare(&client, &plan, options.export, options.require_installed).await? {
+    let prepared = match prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        options.shot_ids.as_deref(),
+    )
+    .await?
+    {
         Ok(prepared) => prepared,
         Err(findings) => {
             let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
@@ -4140,6 +4243,12 @@ pub async fn run_with_control(
         lane: lane.manifest_key().to_owned(),
         backend_observed: None,
         weights: primary_weights(prepared.base_entry(), plan.model.tier.as_deref()),
+        partition_weights: partition_weights(
+            &plan,
+            &prepared.entries(),
+            plan.model.tier.as_deref(),
+            record.selected_shot_ids.as_slice(),
+        ),
         hardware: HardwareRecord {
             platform: prepared.facts.platform_or_local().to_owned(),
             // The host-capabilities route reports no arch, so this process's arch is the truth only
@@ -4256,9 +4365,17 @@ async fn continue_run(
         transport,
         control: &options.control,
     };
-    let prepared = prepare(&client, &plan, options.export, options.require_installed)
-        .await?
-        .map_err(HarnessError::Validation)?;
+    // A resume dispatches exactly the shots the first controller selected, so the reference
+    // partition's install gate follows the RECORD's selection, not the whole plan (sc-23402).
+    let prepared = prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        Some(&record.selected_shot_ids),
+    )
+    .await?
+    .map_err(HarnessError::Validation)?;
     // The requests the run was dispatching. A record that named a compiled document is held to it,
     // hash and all — re-reading the file the run started from is what keeps a resume from
     // dispatching an edited `compiled.json` under the takes the first controller already made, the

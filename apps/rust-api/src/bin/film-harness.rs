@@ -126,7 +126,9 @@ OPTIONS (run):
   --out DIR              Run record directory (default film-harness-runs/<utc-timestamp>)
   --poll-seconds N       Job polling cadence in seconds (default 5)
   --no-export            Skip the timeline assembly and MP4 export
-  --skip-install-check   Do not refuse a model/tier the catalog reports as not installed
+  --skip-install-check   Do not refuse a model/tier the catalog reports as not installed.
+                         The check covers the reference partition only when a SELECTED shot
+                         resolves to it, so --shots on a text-only selection never demands it.
 
 EDIT OPTIONS (trim / reorder / swap-take):
   --run RUN.json         The run record to edit. It names the project and the timeline, and is
