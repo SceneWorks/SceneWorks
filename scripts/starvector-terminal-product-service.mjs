@@ -426,7 +426,10 @@ export async function startProductService({ root, output, permanentPin, url, wei
     // identity without rewriting receipts or downloading anything.
     const relocation = await relocateProductServiceLibrary(url, hfHome);
     assertRunning();
-    const selectedWorker = await waitForTerminalProductWorker(url, tuple, workerId, assertRunning);
+    // The post-relocation model inventory performs verified filesystem identity work. Keep one
+    // bounded request alive long enough to finish: abort-and-retry would leave overlapping server
+    // scans even though the client no longer waits for them.
+    const selectedWorker = await assertTerminalProductWorkerReady(url, tuple, workerId, { timeoutMs: 180_000 });
     if (gpuBinding.backend === "candle") {
       const current = await probeTerminalCuda(gpuBinding.uuid, { expectedUuid: gpuBinding.uuid });
       if (current.index !== selectedWorker.gpu_id || current.name !== selectedWorker.gpu_name) die("registered worker and selected physical GPU differ");
