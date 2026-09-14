@@ -94,13 +94,13 @@ and writes a `references.jsonc`. No new job type, no new model, no new route.
 
 | Field | Meaning |
 | --- | --- |
-| `model.id` / `model.tier` | Catalog model and quant tier (`krea_2_turbo` q8 by default; `krea_2_raw` is the undistilled 52-step base). `--model` / `--tier` override them. |
+| `model.id` / `model.tier` | Catalog model and quant tier (`krea_2_turbo` q8 by default; `krea_2_raw` is the undistilled 52-step base). `--model` / `--tier` override them. The tier must be one the catalog entry declares, checked whether or not the install gate is on. |
 | `model.mode` | `text_to_image`, the only mode a spec generates from — an edit needs a source asset a spec has not got. |
 | `model.resolution` | `"WxH"` for every role, defaulting to the model's own declared default. Refused unless the model's declared resolution menu admits it. |
 | `model.negativePrompt` | Optional, per-spec. **Refused** for a model whose entry declares `image.supportsNegativePrompt: false` — Krea 2 Turbo is CFG-free and the engine never forwards one, so a spec that declares one is stopped rather than rendered against text the model never saw. |
-| `limits.maxJobSeconds` | Wall clock for ONE job. The first job of a run also pays for loading the weights. |
+| `limits.maxJobSeconds` | Wall clock for ONE job, 1–86400. The first job of a run also pays for loading the weights. |
 | `limits.maxAttemptsPerRole` | Attempts per role, counting the first (1–5). |
-| `limits.maxMemoryGb` | Checked against the host's reported memory before dispatch, and against each job's `peakMemoryBytes` (the metrics route, the same signal a video run reads) after it. Over budget stops the run — a retry would re-render at the same cost. |
+| `limits.maxMemoryGb` | Checked before dispatch against the host's reported memory **and** against the model's declared `<lane>.minMemoryGb`, and against each job's `peakMemoryBytes` (the metrics route, the same signal a video run reads) after it. Over budget stops the run — a retry would re-render at the same cost. |
 | `seedBase` | Role `n` renders at `seedBase + n`, so re-running a spec asks for the same images. A role may name its own `seed`. |
 | `references[]` | `role`, `kind`, `file`, `description` and the **required** `prompt` (plus optional `negativePrompt`, `seed`, `resolution`). A role with no prompt is refused by name before anything is dispatched. |
 | `inherit` | Roles copied verbatim from an existing pack (`pack`, `references[]`), plus its `sound` — so the written pack validates against the same plan the source pack did. |
@@ -142,21 +142,47 @@ provenance with no flag).
 
 ### Refusals, and why `--out` is never half-written
 
-Every file is written into a hidden sibling of `--out` (`.<name>.make-references-pending`) and the
-directory is renamed into place only once the last plate has landed and the document has been
-written and re-validated against its own files. A refusal, a failed job, a timeout, an over-budget
-peak or a Ctrl-C removes it, so `--out` either holds a complete pack or does not exist. An existing
-non-empty `--out` is refused unless `--force` is passed, and even then the published pack is
-replaced only at the rename.
+Every file is written into a hidden sibling of `--out`
+(`.<name>.make-references-pending.<runId>`) and the directory is renamed into place only once the
+last plate has landed and the document has been written and re-validated against its own files. A
+refusal, a failed job, a timeout, an over-budget peak or a Ctrl-C removes it, so `--out` either
+holds a complete pack or does not exist. The pending directory is named after **this run**, so two
+runs against the same `--out` write into different directories instead of destroying each other's
+in-flight work.
+
+Publishing replaces a pack by **renaming**, never by removing one and hoping:
+
+1. the pack already at `--out` (if any) is renamed aside to `.<name>.make-references-replaced.<runId>`,
+2. the pending directory is renamed onto `--out`,
+3. the displaced pack is removed.
+
+A failure at step 2 renames the displaced pack back, so a publish that cannot complete does not
+cost you the pack it was replacing. The window in which `--out` does not name a complete pack is the
+one rename between steps 1 and 2.
+
+An existing non-empty `--out` is refused unless `--force` is passed — and `--force` replaces a
+**pack**, not whatever `--out` happens to name. It is refused unless the directory holds a readable
+`references.jsonc` and every other top-level entry is one that pack's own `file` paths declare
+(`references/`, `sound/`); the refusal names the stray entry and removes nothing. Pointed at a plan
+directory — `--out config/film-harness/courier-workshop --force` — it refuses rather than taking
+`plan.jsonc`, `brief.jsonc`, `review.jsonc` and the spec it is reading with it.
 
 Refused before the first render: a spec that does not validate (a role with no prompt names the
-role), an inherited role the source pack does not hold, a model that is not in the catalog / not an
-image model / does not declare the mode / is not installed (`--skip-install-check` turns the last
-one off), a negative prompt the model does not take, a geometry the model does not declare, a
-memory budget over the host's memory, and no live worker advertising `image_generate`.
+role; `maxJobSeconds` must be 1–86400 and `maxAttemptsPerRole` 1–5), an inherited role the source
+pack does not hold, a model that is not in the catalog / not an image model / does not declare the
+mode / is not installed (`--skip-install-check` turns the last one off), a tier the catalog entry
+does not declare (`--tier q6` would otherwise render q4 and record `"q6"`), a negative prompt the
+model does not take, a geometry the model does not declare, a memory budget over the host's memory
+**or below the model's own declared `<lane>.minMemoryGb`** (krea_2_turbo declares 48 GB on `mlx`; a
+budget under it clears every other gate, pays a full render and only then refuses on the observed
+peak), and no live worker advertising `image_generate`.
 
 Refused during: a job that fails, a job that overruns `maxJobSeconds` (cancelled through the API),
-a job whose asset the API never publishes, and a peak over `maxMemoryGb`. Each names the role.
+a job whose asset the API never publishes, and a peak over `maxMemoryGb`. Each names the role. A job
+that overruns and whose **cancel is not honoured** — still running after the grace — stops the run
+outright rather than retrying: the render is still on the GPU, and the spec declared one memory
+budget, so no second plate may be dispatched beside it. That is the same halt the video run takes
+(`cancel_not_honoured`).
 
 ### The real GPU run (the courier fixtures)
 

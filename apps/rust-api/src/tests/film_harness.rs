@@ -221,6 +221,10 @@ pub(crate) struct WorkerScript {
     /// sc-23403: roles whose `image_generate` job hangs until it is cancelled, so a test can spend
     /// the spec's own `maxJobSeconds` on one.
     pub(crate) image_hangs: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs and IGNORES `cancelRequested` — the image
+    /// lane's [`VideoBehavior::HangIgnoringCancel`]. A render still on the GPU after the cancel
+    /// grace is the one state in which no further plate may be dispatched beside it.
+    pub(crate) image_ignores_cancel: Vec<String>,
     /// sc-23403: peak the fake image worker reports in its metrics block, as a percentage of host
     /// memory. `None` reports the ordinary small peak.
     pub(crate) image_peak_pct: Option<f64>,
@@ -603,11 +607,12 @@ async fn run_fake_image_job(
         .as_str()
         .unwrap_or("")
         .to_owned();
-    let (fails, hangs, peak_pct) = {
+    let (fails, hangs, ignores_cancel, peak_pct) = {
         let script = script.lock();
         (
             script.image_fails.contains(&role),
             script.image_hangs.contains(&role),
+            script.image_ignores_cancel.contains(&role),
             script.image_peak_pct,
         )
     };
@@ -623,6 +628,23 @@ async fn run_fake_image_job(
         )
         .await;
         return;
+    }
+    if ignores_cancel {
+        // A render that keeps the GPU past the cancel grace — the image lane's
+        // `VideoBehavior::HangIgnoringCancel`. The job stays `running` forever, so the generator
+        // must refuse rather than dispatch a second plate beside a render it cannot stop.
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "running", "stage": "generating", "progress": 0.2,
+                "message": "fake plate, wedged", "workerId": WORKER_ID, "backend": "mlx"
+            }),
+        )
+        .await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
     if hangs {
         loop {

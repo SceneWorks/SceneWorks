@@ -2344,15 +2344,20 @@ impl Session<'_> {
             }
         });
         if let Some(generation) = reference.generation.as_ref() {
-            if let Some(block) = provenance
+            // A provenance block that cannot be serialized is a refusal, not a `null`: the whole
+            // point of `generated` is that the answer survives the pack document, and an asset
+            // stamped `"generation": null` would say the plate came from nowhere.
+            let block = serde_json::to_value(generation).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot serialize the generation provenance for reference {:?}: {error}",
+                    reference.role
+                ))
+            })?;
+            provenance
                 .get_mut("filmHarness")
                 .and_then(Value::as_object_mut)
-            {
-                block.insert(
-                    "generation".to_owned(),
-                    serde_json::to_value(generation).unwrap_or(Value::Null),
-                );
-            }
+                .expect("the provenance literal has a filmHarness object")
+                .insert("generation".to_owned(), block);
         }
         let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
         let route = format!("/api/v1/projects/{project_id}/assets");

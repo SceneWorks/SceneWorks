@@ -14,10 +14,13 @@
 //!   attempts per role, and the memory budget checked against the host before dispatch and against
 //!   each job's `peakMemoryBytes` after it — the same metrics route the video run reads.
 //! * **A pack is published or it does not exist.** Every file is written into a temporary
-//!   directory beside `--out` and the directory is renamed into place only once the last plate has
-//!   landed and the document has been written. A refusal, a failed job, a timeout or an interrupt
-//!   removes the temporary directory, so `--out` is never a half-written pack a later `validate`
-//!   would have to reason about.
+//!   directory beside `--out`, named after THIS run so two runs cannot share it, and the directory
+//!   is renamed into place only once the last plate has landed and the document has been written. A
+//!   refusal, a failed job, a timeout or an interrupt removes the temporary directory, so `--out` is
+//!   never a half-written pack a later `validate` would have to reason about. A `--force`
+//!   replacement renames the old pack aside, renames the new one in, and only then removes the old
+//!   one — and `--force` is refused outright on a directory that is not a pack, so it can never be
+//!   pointed at the plan directory and take `plan.jsonc` with it.
 //! * **Provenance rides with the plate.** Every generated entry carries `generated: true` plus the
 //!   model, tier, backend, prompt, negative prompt, seed, job id, asset id and sha256 it came from,
 //!   and [`super::Session::import_reference`] carries the same block onto the imported asset. The
@@ -53,11 +56,17 @@ pub const REFERENCE_PACK_FILE: &str = "references.jsonc";
 /// The worker capability an image job needs somebody live to advertise.
 pub const IMAGE_CAPABILITY: &str = "image_generate";
 
-/// The route one plate is rendered through.
-pub const IMAGE_ROUTE: &str = "POST /api/v1/image/jobs";
+/// The route one plate is rendered through. Every dispatch in this module POSTs to it and to
+/// nothing else — a generator that grew a second route would stop being a generator.
+pub const IMAGE_ROUTE: &str = "/api/v1/image/jobs";
 
-/// Suffix of the directory a run writes into before it is renamed onto `--out`.
-const PENDING_SUFFIX: &str = "make-references-pending";
+/// Infix of the directory a run writes into before it is renamed onto `--out`. The run id follows
+/// it, so two runs against the same `--out` cannot land in the same pending directory.
+const PENDING_INFIX: &str = "make-references-pending";
+
+/// Infix of the directory the OLD pack is renamed aside to while a `--force` publish swaps the new
+/// one in, so the published pack is replaced at a rename and never by a removal.
+const REPLACED_INFIX: &str = "make-references-replaced";
 
 /// Everything a `make-references` run needs beyond the transport.
 #[derive(Debug, Clone)]
@@ -169,6 +178,7 @@ pub async fn make_references(
     let entry = model_entry_for(transport, &model_id).await?;
     let facts = host_facts_for(transport).await?;
     let mut findings = model_findings(&spec, &model_id, tier.as_deref(), entry.as_ref(), options);
+    let lane = facts.lane();
     // Geometry per role, which is also the last thing that can be answered without a render.
     let mut geometry: BTreeMap<String, (u32, u32)> = BTreeMap::new();
     if let Some(entry) = entry.as_ref() {
@@ -184,12 +194,23 @@ pub async fn make_references(
             }
         }
     }
-    findings.extend(host_findings(&spec, &facts, transport).await?);
+    findings.extend(host_findings(&spec, &facts, entry.as_ref(), lane, transport).await?);
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
 
-    let pending = pending_dir(&options.out_dir, options.force)?;
+    // The run id is minted here, not inside the render, because the PENDING DIRECTORY is named
+    // after it: two runs against the same `--out` must not land in one directory and destroy each
+    // other's in-flight work.
+    let run_id = format!(
+        "makerefs-{}-{}",
+        utc_now()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let pending = pending_dir(&options.out_dir, &run_id, options.force)?;
     let result = generate_into(
         transport,
         options,
@@ -202,6 +223,7 @@ pub async fn make_references(
             geometry,
         },
         &pending,
+        &run_id,
         started,
     )
     .await;
@@ -347,6 +369,30 @@ fn model_findings(
             ),
         ));
     }
+    // The TIER, against the catalog entry's own variant list — independently of the install gate,
+    // because `mlx_quantize_for_tier` maps anything it does not recognise to q4. A `--tier q6` that
+    // reached dispatch would render q4 while the pack's provenance recorded "q6", which is a lie
+    // that survives the run.
+    if let Some(tier) = tier {
+        if let Some(variants) = entry.get("variants").and_then(Value::as_array) {
+            let declared: Vec<&str> = variants
+                .iter()
+                .filter_map(|variant| variant.get("variant").and_then(Value::as_str))
+                .collect();
+            if !declared.contains(&tier) {
+                findings.push(PlanDiagnostic::plan(
+                    "referenceSpec.model.tier",
+                    format!(
+                        "{model_id} does not declare tier {tier:?}; its tiers are {}",
+                        match declared.is_empty() {
+                            true => "none".to_owned(),
+                            false => declared.join(", "),
+                        }
+                    ),
+                ));
+            }
+        }
+    }
     if options.require_installed && !model_tier_installed(entry, tier) {
         findings.push(PlanDiagnostic::plan(
             "referenceSpec.model.tier",
@@ -384,11 +430,17 @@ fn model_findings(
     findings
 }
 
-/// Findings about the HOST: somebody live to claim an image job, and enough memory for the budget
-/// the spec declared.
+/// Findings about the HOST: somebody live to claim an image job, and a memory budget that is both
+/// inside what the host reports AND at or above what the model declares it needs on this lane.
+///
+/// Both halves matter. A budget over the host's memory can never be met; a budget under the
+/// model's own `<lane>.minMemoryGb` clears every pre-dispatch gate, pays a full GPU render, and
+/// only then refuses on the observed peak — which is the expensive way to learn it.
 async fn host_findings(
     spec: &ReferenceSpec,
     facts: &super::HostFacts,
+    entry: Option<&JsonObject<String, Value>>,
+    lane: film_plan::ModelLane,
     transport: &dyn ApiTransport,
 ) -> Result<Vec<PlanDiagnostic>, HarnessError> {
     let mut findings = Vec::new();
@@ -418,6 +470,23 @@ async fn host_findings(
             "no registered worker reports host memory, so the memory budget cannot be checked \
              before dispatch",
         )),
+    }
+    if let Some(minimum) = entry.and_then(|entry| film_plan::model_min_memory_gb(entry, lane)) {
+        if spec.limits.max_memory_gb < minimum {
+            findings.push(PlanDiagnostic::plan(
+                "referenceSpec.limits.maxMemoryGb",
+                format!(
+                    "budget {} GB is below {}'s declared {}.minMemoryGb of {minimum} GB, so every \
+                     plate would be rendered and then refused on its observed peak",
+                    spec.limits.max_memory_gb,
+                    entry
+                        .and_then(|entry| entry.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("the model"),
+                    lane.manifest_key()
+                ),
+            ));
+        }
     }
     Ok(findings)
 }
@@ -475,36 +544,99 @@ fn resolve_geometry(
 }
 
 /// The directory a run writes into before publishing. A sibling of `--out`, so the publish is a
-/// rename on one filesystem rather than a copy.
-fn pending_dir(out_dir: &Path, force: bool) -> Result<PathBuf, HarnessError> {
-    if !force && out_dir.exists() {
+/// rename on one filesystem rather than a copy, and named after THIS run, so two runs against the
+/// same `--out` cannot write into one directory.
+fn pending_dir(out_dir: &Path, run_id: &str, force: bool) -> Result<PathBuf, HarnessError> {
+    if out_dir.exists() {
         let occupied = std::fs::read_dir(out_dir)
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(true);
         if occupied {
-            return Err(HarnessError::Refused(format!(
-                "{} already exists and is not empty; pass --force to replace it, or pick another \
-                 --out",
-                out_dir.display()
-            )));
+            match force {
+                false => {
+                    return Err(HarnessError::Refused(format!(
+                        "{} already exists and is not empty; pass --force to replace it, or pick \
+                         another --out",
+                        out_dir.display()
+                    )))
+                }
+                // `--force` replaces a PACK. It is not a licence to remove whatever `--out` names:
+                // pointed at the plan directory it would otherwise take plan.jsonc, brief.jsonc and
+                // the spec itself with it.
+                true => assert_replaceable_pack(out_dir)?,
+            }
         }
     }
-    let name = out_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("references");
+    let name = pack_dir_name(out_dir);
     let parent = out_dir
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&parent)?;
-    let pending = parent.join(format!(".{name}.{PENDING_SUFFIX}"));
+    let pending = parent.join(format!(".{name}.{PENDING_INFIX}.{run_id}"));
     if pending.exists() {
-        std::fs::remove_dir_all(&pending)?;
+        // The run id is unique to this run, so an existing one is another process's in-flight work
+        // and not ours to remove.
+        return Err(HarnessError::Refused(format!(
+            "{} already exists; another run is writing it",
+            pending.display()
+        )));
     }
     std::fs::create_dir_all(&pending)?;
     Ok(pending)
+}
+
+/// The `--out` directory's own name, for the hidden siblings that are named after it.
+fn pack_dir_name(out_dir: &Path) -> &str {
+    out_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("references")
+}
+
+/// Refuse `--force` unless `out_dir` really is a reference pack: it holds a readable
+/// [`REFERENCE_PACK_FILE`], and every other top-level entry is one the pack's own `file` paths
+/// declare. The refusal names the stray entry, because the useful answer to "why not" is which file
+/// would have been destroyed.
+fn assert_replaceable_pack(out_dir: &Path) -> Result<(), HarnessError> {
+    let pack_path = out_dir.join(REFERENCE_PACK_FILE);
+    let refuse = |detail: String| {
+        HarnessError::Refused(format!(
+            "--force replaces a reference pack, and {} is not one: {detail}. Point --out at a pack \
+             directory (or at a new one); nothing was removed",
+            out_dir.display()
+        ))
+    };
+    if !pack_path.is_file() {
+        return Err(refuse(format!("it holds no {REFERENCE_PACK_FILE}")));
+    }
+    let pack = film_plan::read_reference_pack_file(&pack_path).map_err(|finding| {
+        refuse(format!(
+            "{REFERENCE_PACK_FILE} does not parse ({})",
+            finding.message
+        ))
+    })?;
+    // The top-level segment of every path the pack declares — `references/courier.png` declares
+    // `references`. Anything else at the top level is not part of this pack.
+    let declared: std::collections::BTreeSet<&str> = pack
+        .references
+        .iter()
+        .map(|entry| entry.file.as_str())
+        .chain(pack.sound.iter().map(|entry| entry.file.as_str()))
+        .filter_map(|file| file.split('/').next())
+        .collect();
+    for entry in std::fs::read_dir(out_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == REFERENCE_PACK_FILE || declared.contains(name.as_str()) {
+            continue;
+        }
+        return Err(refuse(format!(
+            "it holds {name}, which the pack in it does not declare"
+        )));
+    }
+    Ok(())
 }
 
 /// Render every role into `pending`, copy the inherited files, write the document, and rename the
@@ -518,20 +650,14 @@ async fn generate_into(
     inherited: &Inherited,
     resolved: &Resolved,
     pending: &Path,
+    run_id: &str,
     started: Instant,
 ) -> Result<ReferencePackBuild, HarnessError> {
     let client = Client {
         transport,
         control: &options.control,
     };
-    let run_id = format!(
-        "makerefs-{}",
-        utc_now()
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .collect::<String>()
-    );
-    let project_id = ensure_project(&client, options, spec, &run_id).await?;
+    let project_id = ensure_project(&client, options, spec, run_id).await?;
     let mut entries = Vec::new();
     let mut plates = Vec::new();
     for (index, role) in spec.references.iter().enumerate() {
@@ -548,7 +674,7 @@ async fn generate_into(
             spec,
             resolved,
             &project_id,
-            &run_id,
+            run_id,
             role,
             seed,
             (width, height),
@@ -617,11 +743,37 @@ async fn generate_into(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    // Publish. Only now does `--out` exist at all (or, with --force, change).
-    if options.out_dir.exists() {
-        std::fs::remove_dir_all(&options.out_dir)?;
+    // Publish. Only now does `--out` exist at all (or, with --force, change) — and a --force
+    // replacement is a rename of the old pack ASIDE, a rename of the new one IN, and only then a
+    // removal of the old one. The window in which `--out` does not name a complete pack is the one
+    // rename between the two, not the whole removal of the pack that was there.
+    let replaced = match options.out_dir.exists() {
+        false => None,
+        true => {
+            let aside = options.out_dir.with_file_name(format!(
+                ".{}.{REPLACED_INFIX}.{run_id}",
+                pack_dir_name(&options.out_dir)
+            ));
+            std::fs::rename(&options.out_dir, &aside)?;
+            Some(aside)
+        }
+    };
+    if let Err(error) = std::fs::rename(pending, &options.out_dir) {
+        // Put the pack that was there back: a failed publish must not have cost the user the pack
+        // it was replacing.
+        if let Some(aside) = replaced.as_ref() {
+            let _ = std::fs::rename(aside, &options.out_dir);
+        }
+        return Err(error.into());
     }
-    std::fs::rename(pending, &options.out_dir)?;
+    if let Some(aside) = replaced.as_ref() {
+        // The new pack is ALREADY published at this point, so an error here is reported against a
+        // complete `--out`: what it says is that the displaced pack is still on disk under the
+        // path in the message and wants removing by hand. It is an error rather than a shrug
+        // because a `--force` that silently leaves the old pack behind is how a directory fills up
+        // with packs nobody knows the provenance of.
+        std::fs::remove_dir_all(aside)?;
+    }
     Ok(ReferencePackBuild {
         pack_path: options.out_dir.join(REFERENCE_PACK_FILE),
         pack,
@@ -695,9 +847,7 @@ async fn render_role(
             (width, height),
             attempt,
         );
-        let response = client
-            .expect_ok("POST", "/api/v1/image/jobs", Some(body))
-            .await?;
+        let response = client.expect_ok("POST", IMAGE_ROUTE, Some(body)).await?;
         let job_id = response
             .get("id")
             .and_then(Value::as_str)
@@ -719,12 +869,27 @@ async fn render_role(
                 },
             )
             .await?;
+        // Whether the cancel `wait_for_job` posted was actually honoured. `wait_for_job` returns
+        // the last view it observed whether or not the job went terminal, so a job still running
+        // after the grace is a render in flight that nothing here can stop.
+        let cancel_honoured = view.is_terminal();
         match stop {
             PollStop::Terminal if view.status == "completed" => {}
             PollStop::Operator => {
                 return Err(HarnessError::Refused(format!(
                     "canceled while role {:?} was rendering (job {job_id}); nothing was published",
                     role.role
+                )))
+            }
+            // The same halt the video run takes (`cancel_not_honoured`): the next attempt may NOT
+            // go out beside a render still on the GPU. The spec declared ONE memory budget, and two
+            // renders in flight is exactly what it is there to prevent.
+            PollStop::ShotBudget | PollStop::RunBudget if !cancel_honoured => {
+                return Err(HarnessError::Refused(format!(
+                    "role {:?}'s job {job_id} was still {} after the cancel grace, so a render is \
+                     in flight that nothing here can stop; no further dispatch and nothing was \
+                     published",
+                    role.role, view.status
                 )))
             }
             PollStop::ShotBudget | PollStop::RunBudget => {
@@ -1002,16 +1167,51 @@ mod unit_tests {
         assert!(!is_safe_media_path(""));
     }
 
+    /// A minimal pack document that `read_reference_pack_file` accepts, declaring one plate under
+    /// `references/` — so a directory holding it plus `references/` is a replaceable pack.
+    fn write_pack(dir: &Path) {
+        std::fs::create_dir_all(dir.join("references")).expect("references dir");
+        std::fs::write(dir.join("references/plate.png"), b"\x89PNG").expect("plate");
+        std::fs::write(
+            dir.join(REFERENCE_PACK_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "pack-under-test",
+                "version": 1,
+                "references": [{
+                    "role": "courier",
+                    "kind": "character",
+                    "file": "references/plate.png",
+                    "approved": true,
+                }],
+            }))
+            .expect("pack serializes"),
+        )
+        .expect("pack document");
+    }
+
     #[test]
-    fn the_pending_directory_is_a_hidden_sibling_of_out() {
+    fn the_pending_directory_is_a_hidden_sibling_of_out_named_after_the_run() {
         let temp = tempfile::tempdir().expect("temp dir");
         let out = temp.path().join("pack");
-        let pending = pending_dir(&out, false).expect("pending dir creates");
+        let pending = pending_dir(&out, "makerefs-run-a", false).expect("pending dir creates");
         assert_eq!(pending.parent(), Some(temp.path()));
         assert!(pending.is_dir());
         assert!(
             !out.exists(),
             "--out must not exist until the run publishes"
+        );
+        // A SECOND run against the same `--out` gets its OWN directory and leaves the first one's
+        // in-flight work alone — two concurrent runs used to share one name and remove each other.
+        std::fs::write(pending.join("plate.png"), b"in flight").expect("in-flight file");
+        let second = pending_dir(&out, "makerefs-run-b", false).expect("second pending dir");
+        assert_ne!(
+            second, pending,
+            "two runs must not share a pending directory"
+        );
+        assert!(
+            pending.join("plate.png").is_file(),
+            "the second run removed the first run's in-flight work"
         );
     }
 
@@ -1019,17 +1219,54 @@ mod unit_tests {
     fn a_non_empty_out_directory_is_refused_rather_than_overwritten() {
         let temp = tempfile::tempdir().expect("temp dir");
         let out = temp.path().join("pack");
-        std::fs::create_dir_all(&out).expect("out dir");
-        std::fs::write(out.join("references.jsonc"), "{}").expect("existing document");
-        let error = pending_dir(&out, false).expect_err("a populated --out is refused");
+        write_pack(&out);
+        let error =
+            pending_dir(&out, "makerefs-run-a", false).expect_err("a populated --out is refused");
         assert!(
             matches!(&error, HarnessError::Refused(message) if message.contains("--force")),
             "{error}"
         );
-        pending_dir(&out, true).expect("--force accepts a populated --out");
+        pending_dir(&out, "makerefs-run-b", true).expect("--force accepts a populated pack");
         assert!(
-            out.join("references.jsonc").is_file(),
+            out.join(REFERENCE_PACK_FILE).is_file(),
             "--force must not remove the published pack before the new one is ready"
         );
+    }
+
+    /// `--force` on a directory that is NOT a pack is refused by name. Pointed at the plan
+    /// directory (`--out config/film-harness/courier-workshop`) the old code removed plan.jsonc,
+    /// brief.jsonc, review.jsonc and the spec it was reading.
+    #[test]
+    fn force_is_refused_on_a_directory_that_is_not_a_reference_pack() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        // (1) A plan directory: a pack document, but beside it a plan the pack does not declare.
+        let plan_dir = temp.path().join("courier-workshop");
+        write_pack(&plan_dir);
+        std::fs::write(plan_dir.join("plan.jsonc"), "{ \"id\": \"courier\" }").expect("plan");
+        let error = pending_dir(&plan_dir, "makerefs-run-a", true)
+            .expect_err("--force on a directory holding a plan is refused");
+        assert!(
+            matches!(&error, HarnessError::Refused(message)
+                if message.contains("plan.jsonc") && message.contains("does not declare")),
+            "the refusal must name the stray entry: {error}"
+        );
+        assert!(
+            plan_dir.join("plan.jsonc").is_file() && plan_dir.join(REFERENCE_PACK_FILE).is_file(),
+            "a refused --force must remove nothing"
+        );
+
+        // (2) No pack document at all.
+        let stranger = temp.path().join("not-a-pack");
+        std::fs::create_dir_all(&stranger).expect("dir");
+        std::fs::write(stranger.join("notes.txt"), "mine").expect("file");
+        let error = pending_dir(&stranger, "makerefs-run-a", true)
+            .expect_err("--force on a directory with no pack document is refused");
+        assert!(
+            matches!(&error, HarnessError::Refused(message)
+                if message.contains(REFERENCE_PACK_FILE)),
+            "{error}"
+        );
+        assert!(stranger.join("notes.txt").is_file(), "nothing was removed");
     }
 }

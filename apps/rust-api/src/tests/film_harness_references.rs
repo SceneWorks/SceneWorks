@@ -235,6 +235,26 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
         .references
         .iter()
         .any(|entry| entry.generated));
+    // The replacement is rename-old-aside / rename-new-in / remove-old, so a finished --force
+    // leaves neither the pending directory NOR the pack it displaced beside `--out`.
+    assert_eq!(
+        hidden_siblings(&options.out_dir),
+        Vec::<String>::new(),
+        "--force left a directory beside --out"
+    );
+}
+
+/// The `.<name>.make-references-*` siblings a run creates beside `--out`, which a finished run
+/// leaves none of.
+fn hidden_siblings(out_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(out_dir.parent().expect("out has a parent"))
+        .expect("parent readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("make-references-"))
+        .collect();
+    names.sort();
+    names
 }
 
 #[tokio::test]
@@ -396,6 +416,69 @@ async fn every_mid_run_failure_is_refused_by_name_and_publishes_nothing() {
         "{error}"
     );
     assert_nothing_published(&over_memory);
+    harness.script.lock().image_peak_pct = None;
+
+    // (5) A job that overruns its budget and IGNORES the cancel — a render still on the GPU after
+    // the cancel grace. With attempts LEFT (`maxAttemptsPerRole: 2`) the retry must NOT go out
+    // beside it: the spec declared one memory budget, and two 1024² renders in flight is exactly
+    // what it is there to prevent. This is the video run's `cancel_not_honoured` halt.
+    //
+    // LAST in this test: the wedged job's fake worker never returns, so nothing after it would be
+    // claimed.
+    harness.script.lock().image_ignores_cancel = vec!["courier".to_owned()];
+    let spec = edited_spec(&harness, "wedged", |spec| {
+        spec["limits"]["maxJobSeconds"] = json!(1);
+        spec["limits"]["maxAttemptsPerRole"] = json!(2);
+    });
+    let mut wedged = options(&harness, spec, "wedged-out");
+    // Generate into a project of our own, so the count below is of the jobs this run DISPATCHED.
+    // `claimed` cannot answer it: the wedged fake worker never returns, so a second job would sit
+    // in the queue unclaimed and an unfixed run would look identical.
+    wedged.project_id = Some(new_project(&harness, "wedged-cancel").await);
+    let error = make_references(&harness.transport, &wedged)
+        .await
+        .expect_err("a cancel the worker never honoured refuses the run");
+    assert!(
+        matches!(&error, HarnessError::Refused(message)
+            if message.contains("courier") && message.contains("in flight")),
+        "the refusal must name the role and say a render is in flight: {error}"
+    );
+    assert_eq!(
+        dispatched_image_jobs(&harness, wedged.project_id.as_deref().expect("project")).await,
+        1,
+        "a second attempt was dispatched beside a render that is still on the GPU"
+    );
+    assert_nothing_published(&wedged);
+}
+
+/// An empty project for a run to generate into, so its dispatches can be counted.
+async fn new_project(harness: &Harness, name: &str) -> String {
+    let (_, project) = crate::tests::support::request(
+        harness.app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": name }),
+    )
+    .await;
+    project["id"].as_str().expect("project id").to_owned()
+}
+
+/// Image jobs the API holds for `project_id` — every one this run POSTed, claimed or not.
+async fn dispatched_image_jobs(harness: &Harness, project_id: &str) -> usize {
+    let (_, jobs) = crate::tests::support::request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs?projectId={project_id}&limit=100"),
+        Value::Null,
+    )
+    .await;
+    jobs.as_array()
+        .map(|jobs| {
+            jobs.iter()
+                .filter(|job| job["type"].as_str() == Some("image_generate"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn image_jobs(harness: &Harness) -> usize {
@@ -464,6 +547,53 @@ async fn the_catalog_gates_are_checked_before_the_first_render() {
         findings
             .iter()
             .any(|finding| finding.field.ends_with(".resolution")),
+        "{findings:#?}"
+    );
+
+    // A memory budget under the MODEL's own declared minimum for this lane. The host check alone
+    // admits it (the fake host reports 128 GB), so without this gate every plate is rendered at
+    // full cost and only then refused on its observed peak.
+    let spec = edited_spec(&harness, "under-min-memory", |spec| {
+        spec["limits"]["maxMemoryGb"] = json!(8);
+    });
+    let error = make_references(
+        &harness.transport,
+        &options(&harness, spec, "under-min-out"),
+    )
+    .await
+    .expect_err("a budget below the model's declared minimum is refused");
+    let HarnessError::Validation(findings) = &error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|finding| {
+            finding.field == "referenceSpec.limits.maxMemoryGb"
+                && finding.message.contains("minMemoryGb")
+                && finding.message.contains("krea_2_turbo")
+        }),
+        "{findings:#?}"
+    );
+
+    // A tier the catalog entry does not declare. `mlx_quantize_for_tier` maps anything it does not
+    // recognise to q4, so an admitted "q6" would render q4 and record "q6" — a lie that survives
+    // the run in the pack's provenance. Checked independently of the install gate, which this
+    // spec's options turn off.
+    let spec = edited_spec(&harness, "unknown-tier", |spec| {
+        spec["model"]["tier"] = json!("q6");
+    });
+    let error = make_references(
+        &harness.transport,
+        &options(&harness, spec, "unknown-tier-out"),
+    )
+    .await
+    .expect_err("a tier the model does not declare is refused");
+    let HarnessError::Validation(findings) = &error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|finding| {
+            finding.field == "referenceSpec.model.tier" && finding.message.contains("q6")
+        }),
         "{findings:#?}"
     );
 

@@ -1582,6 +1582,12 @@ pub const REFERENCE_SPEC_MODES: &[&str] = &["text_to_image"];
 /// Attempts one role may cost. A retry re-renders on the GPU, so the ceiling is low on purpose.
 pub const MAX_REFERENCE_SPEC_ATTEMPTS: u32 = 5;
 
+/// Wall clock ONE job may declare, in seconds (24 hours). A spec is a bounded fixture run, not a
+/// standing render: the ceiling keeps `maxJobSeconds` from being a budget in name only, and keeps
+/// the generator's `Instant::now() + Duration::from_secs(..)` deadline off the overflow that a
+/// declaration near `u64::MAX` would otherwise panic on.
+pub const MAX_REFERENCE_SPEC_JOB_SECONDS: u64 = 86_400;
+
 /// A recipe for GENERATING a reference pack's plates (sc-23403).
 ///
 /// **Test fixtures only.** In the product the user supplies the reference images; this document
@@ -1792,10 +1798,14 @@ pub fn validate_reference_spec(spec: &ReferenceSpec) -> Vec<PlanDiagnostic> {
         "referenceSpec.model.negativePrompt",
         spec.model.negative_prompt.as_deref(),
     ));
-    if spec.limits.max_job_seconds == 0 {
+    if !(1..=MAX_REFERENCE_SPEC_JOB_SECONDS).contains(&spec.limits.max_job_seconds) {
         findings.push(PlanDiagnostic::plan(
             "referenceSpec.limits.maxJobSeconds",
-            "a reference spec must declare a finite per-job budget of at least 1 second",
+            format!(
+                "a reference spec must declare a per-job budget between 1 and \
+                 {MAX_REFERENCE_SPEC_JOB_SECONDS} seconds (got {})",
+                spec.limits.max_job_seconds
+            ),
         ));
     }
     if !(1..=MAX_REFERENCE_SPEC_ATTEMPTS).contains(&spec.limits.max_attempts_per_role) {
@@ -3792,6 +3802,34 @@ mod tests {
                 "expected a finding on {field}: {findings:#?}"
             );
         }
+
+        // maxJobSeconds has a CEILING as well as a floor: a spec is a bounded fixture run, and a
+        // declaration near u64::MAX would make the generator's `Instant::now() + Duration` deadline
+        // an overflow panic rather than a budget.
+        for seconds in [MAX_REFERENCE_SPEC_JOB_SECONDS + 1, u64::MAX] {
+            let mut value = spec_json();
+            value["limits"]["maxJobSeconds"] = json!(seconds);
+            let findings = validate_reference_spec(&spec_from(value));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.field == "referenceSpec.limits.maxJobSeconds"
+                        && finding
+                            .message
+                            .contains(&MAX_REFERENCE_SPEC_JOB_SECONDS.to_string())
+                }),
+                "maxJobSeconds {seconds} was admitted: {findings:#?}"
+            );
+        }
+        // And the ceiling itself is admitted, so the range is a range and not an off-by-one.
+        let mut value = spec_json();
+        value["limits"]["maxJobSeconds"] = json!(MAX_REFERENCE_SPEC_JOB_SECONDS);
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "referenceSpec.limits.maxJobSeconds"),
+            "the ceiling itself must be admitted: {findings:#?}"
+        );
     }
 
     #[test]
