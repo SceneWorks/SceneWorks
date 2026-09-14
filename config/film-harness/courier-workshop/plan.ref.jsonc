@@ -29,9 +29,17 @@
     "fps": 24,
     "resolution": "576x320"
   },
+  // Budgeted for what THIS plan actually loads, measured on the dev Mac (sc-23402, run
+  // run_cd7fc4be2398): the reference partition's cold load — the 18.78 GB `transformer_ref` DiT
+  // plus the staged text encoder — took ~21 minutes before the first denoise step, and the
+  // reference-conditioned denoise is far slower per step than the base checkpoint's. At
+  // `plan.jsonc`'s 2700 s the reference shot was cut at roughly step 14 of 50 with a live render
+  // still in flight, which is a budget that refuses a legitimate shot rather than a runaway one.
+  // These are still finite, declared bounds — the run stops on them and says so — just ones a
+  // two-partition render fits inside.
   "limits": {
-    "maxRunSeconds": 7200,
-    "maxShotSeconds": 2700,
+    "maxRunSeconds": 28800,
+    "maxShotSeconds": 10800,
     "maxAttemptsPerShot": 1,
     "maxMemoryGb": 96
   },
