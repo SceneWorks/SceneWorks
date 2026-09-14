@@ -2179,6 +2179,16 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
                     "the reference assets ride the payload in role order"
                 );
                 assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
+                // sc-23402 short edge: this plan names none, so nothing is dispatched and the
+                // record keeps the EFFECTIVE value the engine rendered at — its own 2048.
+                assert!(
+                    job["payload"]["advanced"]
+                        .get("referenceImageShortEdge")
+                        .is_none(),
+                    "{}",
+                    job["payload"]["advanced"]
+                );
+                assert_eq!(attempt.reference_image_short_edge, Some(2048));
                 assert_eq!(
                     shot.conditioning_assets.reference_asset_ids,
                     vec![courier.asset_id.clone(), plate.asset_id.clone()]
@@ -2206,6 +2216,10 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
                 );
                 assert_eq!(attempt.resolved_model_id, "minimax_h3");
                 assert_eq!(attempt.take.as_ref().expect("take").model, "minimax_h3");
+                assert_eq!(
+                    attempt.reference_image_short_edge, None,
+                    "a base-partition attempt encodes no reference, so it records no short edge"
+                );
             }
             other => panic!("unexpected shot {other}"),
         }
@@ -2263,6 +2277,79 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
     assert_eq!(
         on_disk["model"]["weights"], weights["minimax_h3"],
         "`weights` stays the DECLARED model's row"
+    );
+}
+
+/// sc-23402 short edge. A plan that lowers `model.advanced.referenceImageShortEdge` sends it on the
+/// REFERENCE shot's `POST /api/v1/video/jobs` body and records the same number on that attempt —
+/// while the base-partition shot in the same plan dispatches and records nothing, because it encodes
+/// no reference for the knob to size. Through the real route, with the real record on disk.
+#[tokio::test]
+async fn a_lowered_reference_short_edge_rides_the_reference_shots_payload_and_record() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["advanced"] = json!({ "referenceImageShortEdge": 1536 });
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-short-edge");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        let advanced = &job["payload"]["advanced"];
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3_ref");
+                assert_eq!(
+                    advanced["referenceImageShortEdge"],
+                    json!(1536),
+                    "the route persisted the knob in the job payload: {advanced}"
+                );
+                assert_eq!(attempt.reference_image_short_edge, Some(1536));
+            }
+            "SH020" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3");
+                assert!(
+                    advanced.get("referenceImageShortEdge").is_none(),
+                    "the base partition has no reference to size: {advanced}"
+                );
+                assert_eq!(attempt.reference_image_short_edge, None);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+    }
+
+    // And on disk, where a later reader — a comparison against a 2048 run — finds it.
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(options.out_dir.join("run.json")).expect("run.json written"),
+    )
+    .expect("run.json parses");
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .map(|shot| shot["attempts"][0].clone())
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(attempt("SH010")["referenceImageShortEdge"], json!(1536));
+    assert!(
+        attempt("SH020").get("referenceImageShortEdge").is_none(),
+        "{}",
+        attempt("SH020")
     );
 }
 

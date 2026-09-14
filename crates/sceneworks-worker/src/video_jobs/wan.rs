@@ -1308,6 +1308,10 @@ pub(super) struct VideoGenInput {
     pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
     /// LTX-2.5 DFR temporal x2 refinement rounds. `None`/0 is the established plain pipeline.
     pub(super) temporal_upsample_rounds: Option<u32>,
+    /// MiniMax-H3's reference-image short edge in pixels (`advanced.referenceImageShortEdge`,
+    /// sc-23402). `None` ⇒ the engine's own default; set only by the reference-partition arms, since
+    /// it sizes a reference and a request carrying none has nothing to apply it to.
+    pub(super) reference_image_short_edge: Option<u32>,
     /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
     pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
@@ -1429,6 +1433,7 @@ impl Default for VideoGenInput {
             fps: 0,
             auto_duration: None,
             temporal_upsample_rounds: None,
+            reference_image_short_edge: None,
             use_diffusion_decoder: false,
             steps: None,
             guidance: None,
@@ -2122,6 +2127,9 @@ pub(super) fn run_loaded_video_generation(
         fps: Some(input.fps),
         auto_duration: input.auto_duration,
         temporal_upsample_rounds: input.temporal_upsample_rounds,
+        // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
+        // value never reaches here, because the parse that produced it refused it.
+        reference_image_short_edge: input.reference_image_short_edge,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,

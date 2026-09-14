@@ -565,6 +565,20 @@ Three documents carry the outcome, and they cannot disagree because all three re
   `advanced.filmHarness.partitionReason` carries the reason;
 - the attempt record's `resolvedModelId` / `partitionReason`, and the take's `model`.
 
+**The reference short edge is a plan-level knob (sc-23402).** `model.advanced.referenceImageShortEdge`
+sets the short edge, in pixels, that an image reference is *encoded* at — MiniMax-H3's own `ref2va`
+control, admitted over **1024..=2048 inclusive** and defaulting to the engine's 2048. It sizes the
+**reference**, never the render: lowering it buys reference token count (roughly quadratic in the
+short edge, so 1024 is about a quarter of 2048's tokens) at the cost of reference detail. A value
+outside the range is **refused** naming the field and the range — on the plan, before any weight is
+read, and again at the engine's own `validate` — never clamped, because a silent clamp would change
+the token budget the author measured. The knob declares once on the family and reaches only the
+shots that resolve to the **reference** partition: a base-partition shot encodes no reference, so it
+carries the field in neither its compiled request, its job body (`advanced.referenceImageShortEdge`),
+nor its attempt record. A reference attempt records the **effective** value — the plan's, or 2048
+when the plan named none — so a lowered run is comparable against a default one; a plan that names
+nothing dispatches exactly what it did before the knob existed.
+
 Validation follows the resolution: each shot is checked against the **resolved** partition's
 declared capabilities, menus and caps. A reference shot whose partition is not in the catalog is
 refused **by name, with the shot**, never dispatched at the base checkpoint.

@@ -50,7 +50,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, DispatchContext, ResolvedConditioning,
+    compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
+    ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
@@ -2144,6 +2145,16 @@ impl Session<'_> {
         }
     }
 
+    /// The EFFECTIVE reference-image short edge one shot dispatches at, or `None` for a shot that
+    /// encodes no reference (sc-23402). Read off the compiled request for the same reason
+    /// [`Session::resolved_partition`] is: the payload the route receives and the number the record
+    /// keeps are then one resolution, not two.
+    fn resolved_reference_short_edge(&self, shot_id: &str) -> Option<u32> {
+        self.compiled
+            .request(shot_id)
+            .and_then(CompiledRequest::effective_reference_image_short_edge)
+    }
+
     /// The partition one RECORDED attempt dispatched as, for the take it produced.
     ///
     /// A run record written before sc-23402 carries no `resolvedModelId` at all, and
@@ -2165,10 +2176,18 @@ impl Session<'_> {
             return recorded;
         }
         let (model, reason) = self.resolved_partition(shot_id);
+        // Backfilled with the partition, and by the same rule (sc-23402): a pre-story record has no
+        // `referenceImageShortEdge` either, and the value this shot resolves to is what the first
+        // controller would have written. A base-partition shot resolves to `None`, so the absence
+        // stays an absence rather than becoming a number that never applied.
+        let short_edge = self.resolved_reference_short_edge(shot_id);
         let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
         attempt.resolved_model_id = model.clone();
         if attempt.partition_reason.is_empty() {
             attempt.partition_reason = reason;
+        }
+        if attempt.reference_image_short_edge.is_none() {
+            attempt.reference_image_short_edge = short_edge;
         }
         model
     }
@@ -3395,11 +3414,13 @@ impl Session<'_> {
                     let number = self.record.shots[index].next_attempt_number();
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
                     let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
+                    let reference_image_short_edge = self.resolved_reference_short_edge(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
                         attempt: number,
                         idempotency_key: key,
                         resolved_model_id,
                         partition_reason,
+                        reference_image_short_edge,
                         job_id: None,
                         status: "dispatching".to_owned(),
                         started_at: utc_now(),
@@ -5295,11 +5316,13 @@ pub async fn replace_take(
     let number = session.record.shots[index].next_attempt_number();
     let key = idempotency_key(&session.record.run_id, shot_id, number);
     let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
+    let reference_image_short_edge = session.resolved_reference_short_edge(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
         idempotency_key: key,
         resolved_model_id,
         partition_reason,
+        reference_image_short_edge,
         job_id: None,
         status: "dispatching".to_owned(),
         started_at: utc_now(),
@@ -6326,6 +6349,7 @@ mod unit_tests {
             idempotency_key: "run:SH010:a1".to_owned(),
             resolved_model_id: "minimax_h3".to_owned(),
             partition_reason: String::new(),
+            reference_image_short_edge: None,
             job_id: job_id.map(str::to_owned),
             status: "dispatching".to_owned(),
             started_at: started_at.to_owned(),

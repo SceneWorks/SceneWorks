@@ -32,6 +32,7 @@ use serde_json::{json, Map, Value};
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
+    REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 // Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
@@ -299,6 +300,29 @@ pub struct PlanModel {
     pub fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// Per-family engine knobs the plan may set. Omitted by every plan that wants the engine's own
+    /// defaults, which is what a plan authored before sc-23402 is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<PlanModelAdvanced>,
+}
+
+/// The plan's opt-in engine knobs (sc-23402). Each one is a REQUEST axis, not a document axis: it
+/// rides `advanced` on the dispatched job exactly as the Video Studio's own knobs do, and a plan
+/// that names none dispatches exactly what it did before the knob existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanModelAdvanced {
+    /// The short edge an image REFERENCE is encoded at, in pixels — MiniMax-H3's `ref2va` knob
+    /// (`advanced.referenceImageShortEdge`), admitted over
+    /// [`REFERENCE_IMAGE_SHORT_EDGE_MIN`]`..=`[`REFERENCE_IMAGE_SHORT_EDGE_MAX`] inclusive and
+    /// defaulting to [`REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`].
+    ///
+    /// It sizes the reference, never the render: lowering it buys reference token count (roughly
+    /// quadratic in the short edge) at the cost of reference detail. It reaches only the shots that
+    /// resolve to the family's REFERENCE partition — a base-partition shot has no reference to
+    /// size, so the knob is not written into its request, its job body or its attempt record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
 }
 
 /// Finite limits declared BEFORE dispatch. Exceeding any of them stops new dispatch and leaves the
@@ -694,6 +718,27 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             findings.push(PlanDiagnostic::plan(
                 "model.tier",
                 format!("unknown tier {tier:?}; expected one of q4, q8, bf16"),
+            ));
+        }
+    }
+    // sc-23402. Refused, never clamped: the value is the reference TOKEN BUDGET the author asked
+    // for, so silently rendering at a different one would make the plan a false record of its own
+    // run. The same range the engine admits (gen-core's
+    // `validate_reference_image_short_edge`), refused here so a typo costs a document read rather
+    // than a 53 GB text-encoder load.
+    if let Some(edge) = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_short_edge)
+    {
+        if !(REFERENCE_IMAGE_SHORT_EDGE_MIN..=REFERENCE_IMAGE_SHORT_EDGE_MAX).contains(&edge) {
+            findings.push(PlanDiagnostic::plan(
+                "model.advanced.referenceImageShortEdge",
+                format!(
+                    "referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to \
+                     {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {edge}"
+                ),
             ));
         }
     }
@@ -2223,6 +2268,19 @@ pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
         .map(|(_, reference)| *reference)
 }
 
+/// Whether `model_id` IS a family's reference partition — the half of the split that conditions on
+/// references (sc-23402).
+///
+/// Read off the same table [`reference_partition_for`] reads, so "this request carries references"
+/// cannot be decided by one rule in the compiler and another in the recorder. It is what gates the
+/// reference-only knobs (`referenceImageShortEdge`): a base-partition request has no reference to
+/// size, so the knob must not appear on it at all.
+pub fn is_reference_partition_id(model_id: &str) -> bool {
+    REFERENCE_PARTITIONS
+        .iter()
+        .any(|(_, reference)| *reference == model_id)
+}
+
 /// Which catalog entry one shot renders through, and why.
 ///
 /// The reason is not decoration: it is written onto the compiled request, the dispatched payload's
@@ -2987,6 +3045,16 @@ pub struct AttemptRecord {
     /// Why that partition and not the other, in one sentence ([`ShotPartition::reason`]).
     #[serde(default)]
     pub partition_reason: String,
+    /// The EFFECTIVE reference-image short edge this attempt was dispatched at, in pixels — the
+    /// plan's requested value, or the engine's own default when it named none (sc-23402).
+    ///
+    /// Present only for an attempt on the family's REFERENCE partition: a base-partition attempt
+    /// encodes no reference, so recording a number for it would claim a knob that never applied.
+    /// Resolved through [`crate::video_request::effective_reference_image_short_edge`] — the local
+    /// twin of gen-core's resolver the engine itself uses — so the recorded value cannot drift from
+    /// the rendered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
@@ -3433,6 +3501,61 @@ mod tests {
 
     fn messages(findings: &[PlanDiagnostic]) -> Vec<String> {
         findings.iter().map(ToString::to_string).collect()
+    }
+
+    /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
+    /// an out-of-range value is REFUSED naming the field and the range — never clamped, since the
+    /// value is the reference token budget the author asked for.
+    #[test]
+    fn plan_refuses_a_reference_image_short_edge_outside_1024_through_2048() {
+        let with_edge = |edge: Value| -> ProductionPlan {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "referenceImageShortEdge": edge });
+            serde_json::from_value(document).expect("plan parses")
+        };
+        for admitted in [1024, 1536, 2048] {
+            assert!(
+                validate_plan_structure(&with_edge(json!(admitted))).is_empty(),
+                "{admitted} is inside the admitted range: {:?}",
+                messages(&validate_plan_structure(&with_edge(json!(admitted))))
+            );
+        }
+        for refused in [0, 1, 1023, 2049, 4096] {
+            let findings = validate_plan_structure(&with_edge(json!(refused)));
+            assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+            assert_eq!(
+                findings[0].field, "model.advanced.referenceImageShortEdge",
+                "the refusal names the field"
+            );
+            assert!(
+                findings[0].message.contains("1024")
+                    && findings[0].message.contains("2048")
+                    && findings[0].message.contains(&refused.to_string()),
+                "the refusal names the range and the value, got {:?}",
+                findings[0].message
+            );
+        }
+    }
+
+    /// A plan that names no knob is byte-for-byte the plan it was before sc-23402: the block parses
+    /// to `None` and serializes with no `advanced` key at all, so an existing plan's sha256 — which
+    /// `staleness_findings` compares — does not move.
+    #[test]
+    fn a_plan_without_the_advanced_block_is_unchanged() {
+        let plan = plan();
+        assert_eq!(plan.model.advanced, None);
+        assert!(validate_plan_structure(&plan).is_empty());
+        let round_tripped = serde_json::to_value(&plan).expect("serializes");
+        assert!(
+            round_tripped["model"].get("advanced").is_none(),
+            "an absent block must not serialize a key: {}",
+            round_tripped["model"]
+        );
+        assert!(
+            !is_reference_partition_id("minimax_h3"),
+            "the base partition is not a reference partition"
+        );
+        assert!(is_reference_partition_id("minimax_h3_ref"));
     }
 
     #[test]
@@ -4395,6 +4518,7 @@ mod tests {
             idempotency_key: format!("run_1:SH010:a{number}"),
             resolved_model_id: "minimax_h3".into(),
             partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
+            reference_image_short_edge: None,
             job_id: Some(format!("job{number}")),
             status: "completed".into(),
             started_at: "t".into(),
