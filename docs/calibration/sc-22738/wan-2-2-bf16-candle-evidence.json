@@ -1,0 +1,197 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "resolvedRevision": "b8fff7315c768468a5333511427288870b2e9635",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-09-13T11:42:55Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan-2-2-ti2v-5b",
+        "blockers": [
+          "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12029263872
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14375976960
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12029263872
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14375976960
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "requestedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 24
+          },
+          {
+            "name": "referenceCount",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan-2-2-ti2v-5b-candle-bf16-832x480-f121-fps24-seed22736",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-db5cb0e04263aef07197",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "Wan-AI/Wan2.2-TI2V-5B-Diffusers@b8fff7315c768468a5333511427288870b2e9635:bf16:f121:832x480:fps24:seed22736",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-b5fad5d3b3a5d19be791",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12029263872,
+          "allocatorBytes": 12029263872,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 12029263872,
+          "allocatorBytes": 12029263872,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 14375976960,
+          "allocatorBytes": 14375976960,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 14375976960,
+          "allocatorBytes": 14375976960,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "c126d3abb243afe5e4094059513d90b82ac7f54dd89455095d411cf99161d7ce",
+          "dirty": false,
+          "revision": "290fa1f3e7dbf2039dd7f7434cf58f3c29eec35f"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:cdeec2abb0daf0a8f7fc4c09ce342b53fafa0e6eefcf22fca69b8c58219a8195",
+          "revision": "f12c5ec8ba403e457c3bf797d0e3f3649bed812f"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

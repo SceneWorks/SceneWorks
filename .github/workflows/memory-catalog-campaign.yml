@@ -130,18 +130,12 @@ on:
         default: "1"
       probe_budget_minutes:
         description: >-
-          Per-probe wall-clock budget (--probe-budget-minutes). Empty uses the lane defaults, 165
-          minutes for a video anchor and 60 for an image one. `240` sets both lanes;
-          `video=240` (or `video=240,image=90`) raises ONE lane and leaves the other's tighter
-          backstop alone. Raise a lane when a cell reported runtime_budget_exceeded and you believe
-          it was still rendering: the reason names that lane's longest completed capture on the
-          cell's own backend and the cell it was read from, and a re-run at the same budget stops at
-          the same second. The heavy candle video cells (scail2_14b, wan_2_2_i2v_14b,
-          wan_2_2_t2v_14b -- 14B DiTs at 480p/720p) have no completed candle render on file at all,
-          so their 165 minutes is the figure to raise if one of them stops.
+          Per-capture wall-clock budget (--probe-budget-minutes). Defaults to 60 minutes for
+          both image and video captures. Investigate timed-out cells separately before explicitly
+          choosing a larger budget. A number sets both lanes; video=N or image=N overrides one.
         required: false
         type: string
-        default: ""
+        default: "60"
       instantid_weights:
         description: >-
           Absolute path on the runner to the InstantID identity bundle DIRECTORY holding
