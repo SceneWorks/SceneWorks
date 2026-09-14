@@ -122,15 +122,17 @@ test("streaming file identity propagates read failures", async () => {
   }), /stream read failed/);
 });
 
-test("provision workflow is dispatch-only and never runs a model, service, campaign, or lease", () => {
+test("provision workflow is dispatch-only and never runs a model, service, campaign, or lease", async () => {
+  const preflight = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8")).inference_preflight;
   assert.match(workflow, /^\s+workflow_dispatch:/m);
   assert.doesNotMatch(workflow, /^\s+(push|pull_request|schedule):/m);
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
-  assert.match(workflow, /default: "34589876485"/);
-  assert.match(workflow, /default: starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1/);
+  assert.ok(workflow.includes(`default: ${preflight.head_sha}`));
+  assert.ok(workflow.includes(`default: "${preflight.workflow_run_id}"`));
+  assert.ok(workflow.includes(`default: ${preflight.artifact.name}`));
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-metadata release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
@@ -169,18 +171,19 @@ test("workflow shell blocks consume untrusted dispatch inputs only through quote
 });
 
 test("provision transport accepts only the sealed current native-preflight run and artifact", async () => {
+  const preflight = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8")).inference_preflight;
   const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
-    revision: "81fda3bd5a9d5920ad9cdc62796df3305be96742",
-    workflowRunId: "34589876485",
-    artifactName: "starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1",
+    revision: preflight.head_sha,
+    workflowRunId: preflight.workflow_run_id,
+    artifactName: preflight.artifact.name,
   });
   assert.deepEqual(accepted, {
-    revision: "81fda3bd5a9d5920ad9cdc62796df3305be96742",
-    workflow_run_id: "34589876485",
-    artifact_name: "starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1",
-    workflow_run_attempt: 1,
-    artifact_id: 10195230242,
-    artifact_digest: "sha256:fa2b72a5ec5145d6fad2b2a28cd663c98a18665c2252bdbb2e225046347cc3f7",
+    revision: preflight.head_sha,
+    workflow_run_id: preflight.workflow_run_id,
+    artifact_name: preflight.artifact.name,
+    workflow_run_attempt: preflight.workflow_run_attempt,
+    artifact_id: preflight.artifact.id,
+    artifact_digest: preflight.artifact.digest,
   });
   for (const [label, mutation] of [
     ["revision", { revision: "0".repeat(40) }],
@@ -197,10 +200,11 @@ test("provision transport accepts only the sealed current native-preflight run a
 });
 
 test("live preflight artifact and run metadata must match every sealed transport identity", async () => {
+  const preflight = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8")).inference_preflight;
   const run = {
-    id: 34589876485,
-    run_attempt: 1,
-    head_sha: "81fda3bd5a9d5920ad9cdc62796df3305be96742",
+    id: Number(preflight.workflow_run_id),
+    run_attempt: preflight.workflow_run_attempt,
+    head_sha: preflight.head_sha,
     workflow_id: 312370029,
     name: "Real-weight validation",
     path: ".github/workflows/real-weights.yml",
@@ -211,14 +215,14 @@ test("live preflight artifact and run metadata must match every sealed transport
     head_repository: { id: 1299380446, full_name: "SceneWorks/inference" },
   };
   const artifact = {
-    id: 10195230242,
-    name: "starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1",
-    size_in_bytes: 6277,
-    digest: "sha256:fa2b72a5ec5145d6fad2b2a28cd663c98a18665c2252bdbb2e225046347cc3f7",
+    id: preflight.artifact.id,
+    name: preflight.artifact.name,
+    size_in_bytes: preflight.artifact.size_in_bytes,
+    digest: preflight.artifact.digest,
     expired: false,
     workflow_run: {
-      id: 34589876485,
-      head_sha: "81fda3bd5a9d5920ad9cdc62796df3305be96742",
+      id: Number(preflight.workflow_run_id),
+      head_sha: preflight.head_sha,
       repository_id: 1299380446,
       head_repository_id: 1299380446,
     },

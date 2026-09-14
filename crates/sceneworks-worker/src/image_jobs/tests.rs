@@ -26539,3 +26539,31 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         "the deference arm requires the selection to ENGAGE staged residency"
     );
 }
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn checkpoint_negative_prompt_uses_provider_capabilities() {
+    let mut descriptor = crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("Krea checkpoint descriptor");
+    let req = request(
+        json!({"projectId":"p", "model":"kreamanai_v2", "prompt":"p",
+        "negativePrompt":"  blur  "}),
+    );
+    assert!(!descriptor.capabilities.supports_negative_prompt);
+    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
+    descriptor.capabilities.supports_negative_prompt = true;
+    assert_eq!(
+        checkpoint_plan_negative_prompt(&req, &descriptor).as_deref(),
+        Some("blur")
+    );
+    let mut blank = req;
+    blank.negative_prompt = " \n ".into();
+    assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
+}

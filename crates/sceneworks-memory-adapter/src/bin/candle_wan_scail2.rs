@@ -11,8 +11,8 @@
 //!   `resident-eager` identity names.
 //! * **The artifact is per (lane, TIER).** Each Wan route ships a `SceneWorks/…-candle` rehost with
 //!   `q4` and `q8` ONLY; its dense leg is the upstream `Wan-AI/…-Diffusers` checkpoint, whose
-//!   weights sit at the snapshot ROOT rather than under a `bf16/` subtree and whose revision the
-//!   manifest does not pin. SCAIL-2 is the opposite: ONE `SceneWorks/scail2-mlx` repository, all
+//!   weights sit at the snapshot ROOT rather than under a `bf16/` subtree. T2V is pinned for
+//!   repair; TI2V/I2V resolve staged upstream revisions. SCAIL-2 uses ONE repository, all
 //!   three tiers, both lanes.
 //!
 //! Everything else is the same claim: resolve the artifact, load through `runtime_cuda::catalog()`
@@ -557,26 +557,57 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
         steps: Some(arm.steps),
         frames: Some(frames),
         fps: Some(arm.fps),
-        video_mode: Some(arm.mode.to_owned()),
+        // TI2V's standard calibrated T2V scope requires the default route selector.
+        // A14B and SCAIL2 bind their explicit modes into sealed request receipts.
+        video_mode: (arm.provider != TI2V_5B.provider).then(|| arm.mode.to_owned()),
         conditioning,
         ..Default::default()
     }
 }
 
-/// The request receipt this render will present, minted by the ENGINE's own public helper.
+/// Use sealed engine receipts for A14B/SCAIL-2. TI2V uses the standard memory contract
+/// and records the adapter revision, just like the other standard-contract capture arms.
+struct CaptureEvidence {
+    revision: String,
+    adapter_identity: Option<String>,
+}
+
 fn evidence_revision(
     arm: Arm,
     spec: &LoadSpec,
-    request: &GenerationRequest,
+    request: &mut GenerationRequest,
     selection: MemorySelection,
-) -> Result<String, String> {
+) -> Result<CaptureEvidence, String> {
     match arm.route {
-        Some(_) => {
+        Some(WanI2vRoute::Ti2v5b) => Ok(CaptureEvidence {
+            revision: format!("sc-23026-ti2v-adapter@{}", protocol::INFERENCE_PIN),
+            adapter_identity: None,
+        }),
+        Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b) => {
             let prepared = candle_gen_wan::i2v_memory_strategy::prepare(spec, arm.provider)
                 .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
-            candle_gen_wan::i2v_memory_strategy::request_evidence_revision(&prepared, request)
-                .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))
+            let contract =
+                candle_gen_wan::i2v_memory_strategy::request_contract_for_mode(&prepared, arm.mode)
+                    .map_err(|error| {
+                        format!("resolve the {} request contract: {error}", arm.provider)
+                    })?;
+            contract
+                .validate_selection(&selection)
+                .map_err(|error| format!("select the {} request memory: {error}", arm.provider))?;
+            // The receipt and configure_request both validate this explicit carrier. Derive it
+            // from the exact mode contract before minting; generation still requires admission.
+            request.memory = contract.generation_memory(&selection);
+            let revision =
+                candle_gen_wan::i2v_memory_strategy::request_evidence_revision(&prepared, request)
+                    .map_err(|error| {
+                        format!("mint the {} request receipt: {error}", arm.provider)
+                    })?;
+            Ok(CaptureEvidence {
+                revision,
+                adapter_identity: Some(prepared.adapter_identity),
+            })
         }
+        Some(_) => Err(format!("{} has no capture receipt arm", arm.provider)),
         None => {
             let evidence =
                 candle_gen_scail2::memory_strategy::structural_resident_evidence(spec)
@@ -584,6 +615,10 @@ fn evidence_revision(
             candle_gen_scail2::memory_strategy::request_evidence_revision(
                 &evidence, request, selection,
             )
+            .map(|revision| CaptureEvidence {
+                revision,
+                adapter_identity: None,
+            })
             .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))
         }
     }
@@ -596,7 +631,7 @@ fn context(
     calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
     geometry: Geometry,
-    evidence_revision: &str,
+    evidence: &CaptureEvidence,
     total_bytes: u64,
     predicted_peak_bytes: u64,
 ) -> MemoryRunContext {
@@ -617,7 +652,7 @@ fn context(
             frames: geometry.frames,
             reference_count: arm.carrier.reference_count(),
         },
-        overlay: None,
+        overlay: evidence.adapter_identity.clone(),
         budget: MemoryBudget {
             total_bytes,
             committed_bytes: 0,
@@ -626,7 +661,7 @@ fn context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: evidence_revision.to_owned(),
+        evidence_revision: evidence.revision.clone(),
     }
 }
 
@@ -750,7 +785,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let mut generation = generation_request(arm, geometry);
-    let receipt = evidence_revision(arm, &resolved.spec, &generation, selection)?;
+    let receipt = evidence_revision(arm, &resolved.spec, &mut generation, selection)?;
     let probe = |fingerprint: &str, total_bytes: u64, predicted: u64| {
         generator.memory_strategy_safety_check(&context(
             arm,
@@ -1003,6 +1038,211 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WanFixture(PathBuf);
+
+    impl Drop for WanFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn a14b_fixture(arm: Arm, tier: &str) -> (WanFixture, LoadSpec) {
+        use runtime_cuda::gen_core::wan_i2v_memory::{fixture_snapshot_root, WanI2vBackend};
+        let temporary = WanFixture(std::env::temp_dir().join(format!(
+            "sc23026-wan-{}-{}-{}", std::process::id(), arm.provider,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        let root = if tier == "bf16" {
+            fixture_snapshot_root(&temporary.0, WanI2vBackend::Candle, arm.route.unwrap())
+        } else {
+            let revision = if arm.provider == WAN_T2V_A14B_ID {
+                "da1909b66b360e1ea8cdeb3e39e40dca172cfa32"
+            } else {
+                "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0"
+            };
+            temporary
+                .0
+                .join(format!(
+                    "models--{}",
+                    arm.packed.repository.replace('/', "--")
+                ))
+                .join("snapshots")
+                .join(revision)
+                .join(tier)
+        };
+        std::fs::create_dir_all(root.join("tokenizer")).unwrap();
+        std::fs::write(root.join("model_index.json"), "{}").unwrap();
+        std::fs::write(root.join("tokenizer/tokenizer.json"), "{}").unwrap();
+        for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
+            let dir = root.join(component);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), "{}").unwrap();
+            let packed = tier != "bf16" && component.starts_with("transformer");
+            let width = if tier == "q4" { 8 } else { 16 };
+            let packed_bytes = 2 * width * 4;
+            let (header, bytes) = if packed {
+                std::fs::write(
+                    dir.join("quantize_config.json"),
+                    format!(
+                        "{{\"bits\":{},\"quantization\":{{\"group_size\":64}}}}",
+                        if tier == "q4" { 4 } else { 8 }
+                    ),
+                )
+                .unwrap();
+                (
+                    json!({
+                        "proj.weight": {"dtype":"U32","shape":[2,width],"data_offsets":[0,packed_bytes]},
+                        "proj.scales": {"dtype":"F32","shape":[2,1],"data_offsets":[packed_bytes,packed_bytes+8]},
+                        "proj.biases": {"dtype":"F32","shape":[2,1],"data_offsets":[packed_bytes+8,packed_bytes+16]}
+                    }),
+                    packed_bytes + 16,
+                )
+            } else {
+                (
+                    json!({"weight":{"dtype":"F32","shape":[2,64],"data_offsets":[0,512]}}),
+                    512,
+                )
+            };
+            let mut header = serde_json::to_vec(&header).unwrap();
+            while !header.len().is_multiple_of(8) {
+                header.push(b' ');
+            }
+            let mut file = (header.len() as u64).to_le_bytes().to_vec();
+            file.extend(header);
+            file.resize(file.len() + bytes, 0);
+            std::fs::write(dir.join("model.safetensors"), file).unwrap();
+        }
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+            .with_resolved_route(arm.provider)
+            .with_offload_policy(arm.offload_policy);
+        spec.quantize = numeric_tier(tier).unwrap().quant;
+        candle_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut spec, arm.provider).unwrap();
+        (temporary, spec)
+    }
+
+    #[test]
+    fn both_a14b_capture_receipts_enter_the_real_scope_and_reject_crossed_requests() {
+        use candle_gen_wan::i2v_memory_strategy as wan;
+        for arm in [T2V_A14B, I2V_A14B] {
+            for tier in ["bf16", "q4", "q8"] {
+                let (_temporary, spec) = a14b_fixture(arm, tier);
+                let prepared = wan::prepare(&spec, arm.provider).unwrap();
+                let geometry = Geometry {
+                    width: 1280,
+                    height: 720,
+                    frames: 77,
+                };
+                let selection = MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    parameters: MemoryStrategyParameters::default(),
+                    tier: numeric_tier(tier).unwrap(),
+                };
+                let mut request = generation_request(arm, geometry);
+                assert!(request.memory.is_none());
+                let receipt = evidence_revision(arm, &spec, &mut request, selection).unwrap();
+                assert!(request.memory.is_some());
+                let calibration = prepared.contract.calibration.as_ref().unwrap();
+                let context = context(
+                    arm,
+                    selection,
+                    calibration,
+                    &calibration.fingerprint,
+                    geometry,
+                    &receipt,
+                    u64::MAX,
+                    1,
+                );
+                assert!(matches!(
+                    wan::safety_check(&prepared, &context),
+                    MemorySafetyDecision::Accept
+                ));
+                let mut crossed = context.clone();
+                crossed.overlay = None;
+                assert!(matches!(
+                    wan::safety_check(&prepared, &crossed),
+                    MemorySafetyDecision::Reject { .. }
+                ));
+                let mut scope =
+                    wan::begin_request(&prepared, candle_gen::candle_core::Device::Cpu, &context)
+                        .unwrap()
+                        .unwrap();
+                scope.configure_request(&mut request).unwrap();
+                wan::validate_active_request(&prepared, &request).unwrap();
+                let mut crossed = request.clone();
+                crossed.prompt.push_str(" changed after admission");
+                assert!(wan::validate_active_request(&prepared, &crossed).is_err());
+                drop(scope);
+                assert!(wan::validate_active_request(&prepared, &request).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ti2v_evidence_does_not_open_the_a14b_receipt_inventory() {
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("absent-ti2v-fixture")));
+        let mut request = GenerationRequest::default();
+        for tier in ["bf16", "q4", "q8"] {
+            let selection = MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: MemoryStrategyParameters::default(),
+                tier: numeric_tier(tier).unwrap(),
+            };
+            assert_eq!(
+                evidence_revision(TI2V_5B, &spec, &mut request, selection)
+                    .unwrap()
+                    .revision,
+                format!("sc-23026-ti2v-adapter@{}", protocol::INFERENCE_PIN)
+            );
+            for arm in [T2V_A14B, I2V_A14B] {
+                assert!(evidence_revision(arm, &spec, &mut request, selection).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn ti2v_capture_request_enters_the_provider_scope_at_every_tier() {
+        let catalog = runtime_cuda::catalog().unwrap();
+        let registry = catalog.media();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|entry| entry.provider_id == TI2V_5B.provider)
+            .unwrap();
+        let behavior = registry
+            .memory_behavior_registrations()
+            .find(|entry| entry.provider_id == TI2V_5B.provider)
+            .unwrap();
+        for tier in ["bf16", "q4", "q8"] {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("absent-ti2v-fixture")))
+                .with_offload_policy(TI2V_5B.offload_policy);
+            spec.quantize = numeric_tier(tier).unwrap().quant;
+            let contract = (fixture.contract)(&spec).unwrap();
+            let fixtures =
+                (behavior.valid_fixtures)(&spec, &contract, MemoryStrategy::StagedResidency)
+                    .unwrap();
+            assert!(!fixtures.is_empty());
+            for fixture in fixtures {
+                let mut context = fixture.context;
+                context.selection.strategy = MemoryStrategy::Resident;
+                let geometry = Geometry {
+                    width: context.geometry.width,
+                    height: context.geometry.height,
+                    frames: context.geometry.frames,
+                };
+                let mut scope = (behavior.begin_request)(&spec, &contract, &context)
+                    .unwrap()
+                    .unwrap();
+                let mut request = generation_request(TI2V_5B, geometry);
+                scope.configure_request(&mut request).unwrap();
+                request.video_mode = Some(TI2V_5B.mode.to_owned());
+                assert!(scope
+                    .configure_request(&mut request)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("video_mode"));
+            }
+        }
+    }
 
     /// Only the A14B routes seal a receipt before the load; TI2V-5B and SCAIL-2 load unprepared,
     /// exactly as production loads them (sc-22738). Mutation that fails this: guarding the

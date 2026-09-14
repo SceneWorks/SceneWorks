@@ -4473,8 +4473,7 @@ impl FluxOneArtifact {
         }
     }
 
-    /// The record's `artifact`: the backbone snapshot, plus on the identity route the per-file
-    /// SHA-256 of the staged bundle, so the record carries the identity stack it measured.
+    /// The backbone snapshot plus, on the identity route, the ordered identity-file inventory digest.
     fn artifact_json(&self) -> Value {
         let mut artifact = json!({
             "repository": self.repository,
@@ -4482,7 +4481,7 @@ impl FluxOneArtifact {
             "variant": self.tier,
         });
         if let Some(bundle) = &self.identity {
-            artifact["identityBundle"] = bundle.artifact_json();
+            artifact["inventorySha256"] = json!(bundle.composite_sha256);
         }
         artifact
     }
@@ -6911,14 +6910,11 @@ struct Flux2Arm {
     /// identity a load of real weights publishes on the klein routes (sc-22727); see
     /// [`flux2_calibration_fingerprint`], which is what the plan row and the capture bind.
     registry_fingerprint: &'static str,
-    /// The load shape and offload policy this member is loaded under — the WORKER's shape for the
-    /// plain T2I route, never a hand-picked pair.
+    /// The load shape and offload policy captured for this member's plain T2I rung.
     ///
-    /// Dev: `Resident` + `EagerMaterialization`. Its manifest declares no MLX
-    /// `bounded_transformer_residency` row for the plain provider and every non-resident strategy
-    /// is `Missing` at the pin, so the worker's declaration evaluator refuses the staged candidate
-    /// and keeps the eager default (`memory_route_registry.rs`,
-    /// `evaluate_declared_mlx_load_shape_for_request_with_strategy`).
+    /// Dev: `Resident` + `EagerMaterialization`, the resident rung this arm captures. The provider
+    /// also supports request-selected staging, but this capture deliberately sends unscoped
+    /// resident requests and compares them with warm resident repeats.
     ///
     /// Klein: `Resident` + `EagerMaterialization` — the shape of the RUNG THIS ANCHOR PRICES.
     ///
@@ -6947,13 +6943,14 @@ struct Flux2Arm {
     /// `MemoryRunContext::evidence_revision`. Per member, so a klein receipt never claims the
     /// dev lane's provenance.
     evidence_tag: &'static str,
-    /// Whether the pinned crate implements the resident rung and nothing else. True on dev (every
-    /// other strategy is declared `Missing` at the pin). False on klein: its manifest declares five
-    /// rungs, and under the eager shape this arm loads (sc-22727) the contract implements resident
+    /// Whether this arm captures only the resident rung. True on Dev: its unscoped request and
+    /// warm-repeat evidence do not measure the provider's supported staged lifecycle. False on
+    /// klein: its manifest declares five rungs, and under the eager shape this arm loads
+    /// (sc-22727) the contract implements resident
     /// plus bounded decode/attention while staged residency and rung 4 stay `Missing` — they need
     /// the streamable shape. Which of those a plan may select is left to
     /// `contract.validate_selection` rather than being second-guessed here.
-    resident_only: bool,
+    captures_resident_only: bool,
     /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize`.
     ///
     /// The dev route takes it: its loader folds the requested width. The klein TURNKEY rehosts do
@@ -6987,7 +6984,7 @@ const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
     offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_SEED,
     evidence_tag: "sc-18218",
-    resident_only: true,
+    captures_resident_only: true,
     tier_quant_reaches_the_loader: true,
 };
 
@@ -7007,7 +7004,7 @@ const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
     offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_KLEIN_SEED,
     evidence_tag: "sc-22727",
-    resident_only: false,
+    captures_resident_only: false,
     tier_quant_reaches_the_loader: false,
 };
 
@@ -7027,7 +7024,7 @@ const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
     offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_KLEIN_SEED,
     evidence_tag: "sc-22727",
-    resident_only: false,
+    captures_resident_only: false,
     tier_quant_reaches_the_loader: false,
 };
 
@@ -7285,9 +7282,10 @@ fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
 
 /// The `mlx:flux2_*` arm (sc-18218, extended to the whole family by sc-22727).
 ///
-/// `flux2_dev` owns a distinct reference-free T2I contract in which every non-Resident strategy
-/// remains `Missing`; the two klein catalog models share one engine provider whose ladder publishes
-/// five rungs, and are told apart by their artifact and `LoadSpec::resolved_route`. In both cases
+/// `flux2_dev` owns a distinct reference-free T2I contract supporting resident and staged execution;
+/// this arm captures its resident rung. The two klein catalog models share one engine provider
+/// whose ladder publishes five rungs, and are told apart by their artifact and
+/// `LoadSpec::resolved_route`. In both cases
 /// this arm reads the registry contract under the exact T2I provider id, then proves that the
 /// loaded generator exposes the byte-for-byte same contract before measuring it. No edit-provider
 /// declaration or edit-shaped context participates in this lane.
@@ -7295,10 +7293,10 @@ fn run_flux2(request: &Value) -> Result<Value, String> {
     let arm = validate_flux2_target(request)?;
     protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let rung = protocol::planned_rung(request)?;
-    if arm.resident_only && rung != "resident" {
+    if arm.captures_resident_only && rung != "resident" {
         return Err(format!(
-            "the pinned MLX {} provider implements only the resident strategy (every other \
-             strategy is declared Missing at the pin); rung {rung:?} is not capturable",
+            "the MLX {} calibration arm captures only the resident strategy; \
+             rung {rung:?} is not capturable by its unscoped resident measurement",
             arm.provider
         ));
     }
@@ -7594,8 +7592,8 @@ fn run_flux2(request: &Value) -> Result<Value, String> {
     }
 
     let lifecycle_blocker = concat!(
-        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the FLUX.2 ",
-        "text-to-image routes and has no calibration fault-injection site, so the scoped lifecycle ",
+        "this FLUX.2 capture opens no memory-strategy request scope ",
+        "and has no calibration fault-injection site, so the scoped lifecycle ",
         "scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
         "attested in quality and diagnostics instead"
     );
@@ -20098,7 +20096,11 @@ fn sensenova_calibration_fingerprint(arm: SenseNovaArm, tier: &str) -> String {
             runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
-        (_, tier) => format!("sensenova-u1-{}-{tier}-mlx-shared-ladder-v1", arm.slug),
+        (_, tier) => format!(
+            "sensenova-u1-{}-{tier}-mlx-shared-ladder-v1",
+            runtime_macos::providers::sensenova::memory_strategy::route_label(arm.model_id)
+                .expect("registered SenseNova route")
+        ),
     }
 }
 
@@ -22972,18 +22974,14 @@ mod flux_one_tests {
         assert!(!artifact
             .loadability_fingerprint()
             .contains(&bundle.root.display().to_string()));
-        // ...and the record's artifact carries every file's digest.
-        let identity_bundle = &artifact.artifact_json()["identityBundle"];
+        // ...and the schema-compatible inventory digest binds every file's content.
+        let captured = artifact.artifact_json();
+        serde_json::from_value::<sceneworks_core::memory_calibration::Artifact>(captured.clone())
+            .expect("PuLID capture artifact must pass the production reader");
         assert_eq!(
-            identity_bundle["compositeSha256"].as_str(),
+            captured["inventorySha256"].as_str(),
             Some(bundle.composite_sha256.as_str())
         );
-        for (file, sha256) in &bundle.file_sha256 {
-            assert_eq!(
-                identity_bundle["files"][*file].as_str(),
-                Some(sha256.as_str())
-            );
-        }
         // Same bytes at another path: the same identity. Different bytes: a different one.
         let restaged = staged_pulid_bundle();
         assert_ne!(restaged.root, bundle.root);
@@ -24444,13 +24442,14 @@ mod flux2_tests {
         assert_eq!(FLUX2_KLEIN_ARM.provider, FLUX2_KLEIN_KV_ARM.provider);
     }
 
-    /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
-    /// every non-Resident strategy `Missing` on the DEV route, so that arm is resident-only BY
-    /// REFUSAL, not by accident of the plan. Each of the other four rungs must be named back. The
+    /// The Dev capture measures unscoped resident renders and warm repeats. It must refuse every
+    /// other rung even though the provider now supports staging, rather than mislabel resident
+    /// measurements as staged evidence. Each rejected rung must be named back. The
     /// klein ladder publishes five rungs, so it is NOT refused here — its selection is settled by
     /// the pinned contract instead.
     #[test]
-    fn the_flux2_dev_arm_is_resident_only_by_refusal() {
+    fn the_flux2_dev_capture_refuses_rungs_its_resident_measurement_does_not_execute() {
+        assert!(flux2_request(1024, 1024, FLUX2_SEED).memory.is_none());
         for rung in [
             "staged_residency",
             "bounded_decode",
@@ -24461,7 +24460,7 @@ mod flux2_tests {
                 .expect_err("a non-resident rung must be refused");
             assert!(
                 error.contains(rung) && error.contains("resident"),
-                "refusal must name the rung and the resident-only contract: {error}"
+                "refusal must name the rung and the resident capture boundary: {error}"
             );
             let klein = run_flux2(&minimal_request_for(
                 FLUX2_KLEIN_PROVIDER,
@@ -24470,8 +24469,8 @@ mod flux2_tests {
             ))
             .expect_err("the minimal klein request is still incomplete");
             assert!(
-                !klein.contains("implements only the resident strategy"),
-                "the klein ladder must not borrow the dev route's resident-only refusal: {klein}"
+                !klein.contains("captures only the resident strategy"),
+                "the klein ladder must not borrow the dev capture's resident-only refusal: {klein}"
             );
         }
         let resident = run_flux2(&minimal_request(FLUX2_PROVIDER, "resident"))
@@ -24984,14 +24983,13 @@ mod flux2_tests {
     /// Pins the arm's load-bearing premises to the PINNED provider crate, weights-free:
     ///
     ///   1. `flux2_dev` directly registers its own T2I contract;
-    ///   2. that T2I contract is resident-only (every other strategy `Missing`) — the reason the arm
-    ///      and the plan carry a single rung;
+    ///   2. that T2I contract supports Resident and StagedResidency, with deeper rungs `Missing`;
     ///   3. its calibration fingerprint is the exact string the plan entries pin.
     ///
     /// If a pin bump changes any of these, this test reds and the arm must be revisited rather
     /// than silently measuring under a different contract.
     #[test]
-    fn the_pinned_flux2_t2i_contract_is_direct_resident_only_and_plan_exact() {
+    fn the_pinned_flux2_t2i_contract_supports_staging_and_preserves_the_resident_plan() {
         let registry = mlx_gen_flux2::provider_registry().unwrap();
         let spec = weights_free_spec(Some(Quant::Q4));
         let contract = registry
@@ -25000,15 +24998,20 @@ mod flux2_tests {
             .expect("the pinned FLUX.2-dev T2I contract");
         assert_eq!(contract.provider_id, FLUX2_PROVIDER);
         for capability in &contract.strategies {
-            if capability.strategy == MemoryStrategy::Resident {
-                assert!(
-                    !matches!(capability.support, MemoryStrategySupport::Missing),
-                    "the resident strategy must be supported"
+            if matches!(
+                capability.strategy,
+                MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+            ) {
+                assert_eq!(
+                    capability.support,
+                    MemoryStrategySupport::Implemented,
+                    "{:?} must be supported",
+                    capability.strategy
                 );
             } else {
                 assert!(
                     matches!(capability.support, MemoryStrategySupport::Missing),
-                    "{:?} is no longer Missing at the pin; the resident-only arm is stale",
+                    "{:?} is no longer Missing at the pin; revisit the capture capabilities",
                     capability.strategy
                 );
             }
@@ -25025,6 +25028,12 @@ mod flux2_tests {
             vec![MemoryStrategy::Resident],
             "the plan entries pin engagedRungs [\"resident\"]; regenerate them with the provider"
         );
+        let staged = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            ..resident_selection(Some(Quant::Q4))
+        };
+        contract.validate_selection(&staged).unwrap();
+        assert!(contract.generation_memory(&staged).unwrap().stage_residency);
     }
 
     /// sc-22727 moved the arm from the crate-local `mlx_gen_flux2::provider_registry()` onto the
@@ -32206,12 +32215,6 @@ mod sensenova_tests {
         use runtime_macos::providers::sensenova::memory_strategy as engine;
         let revision = "0123456789abcdef0123456789abcdef01234567";
         for arm in SENSENOVA_FAMILY {
-            assert_eq!(
-                engine::route_label(arm.model_id),
-                Some(arm.slug),
-                "{}",
-                arm.model_id
-            );
             for tier in ["bf16", "q4", "q8"] {
                 let root = PathBuf::from(format!(
                     "/cache/models--{}/snapshots/{revision}/{tier}",

@@ -6,17 +6,17 @@ on:
       inference_revision:
         description: Exact merged inference commit that produced the preflight bundle.
         required: true
-        default: 81fda3bd5a9d5920ad9cdc62796df3305be96742
+        default: fff98b05b31e24423c517f05553d1379bf24fc3a
         type: string
       inference_preflight_run_id:
         description: Completed SceneWorks/inference workflow run containing the full preflight bundle.
         required: true
-        default: "34589876485"
+        default: "34831152006"
         type: string
       inference_preflight_artifact:
         description: Exact sealed artifact name containing the two inventories, four hooks, and preflight index.
         required: true
-        default: starvector-terminal-preflight-81fda3bd5a9d5920ad9cdc62796df3305be96742-34589876485-1
+        default: starvector-terminal-preflight-fff98b05b31e24423c517f05553d1379bf24fc3a-34831152006-1
         type: string
       mac_app_data_source:
         description: Absolute macOS source for existing SceneWorks-produced install receipts/app data.

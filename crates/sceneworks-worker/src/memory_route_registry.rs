@@ -1558,6 +1558,11 @@ fn mlx_request_implementation_matches(
     requires_request_context: bool,
 ) -> Result<bool, ()> {
     let implementation_object = implementation.as_object().ok_or(())?;
+    // This pass evaluates BTR declarations. Legacy Resident inventory rows need no request
+    // contexts, and staged declarations are validated separately if no BTR row applies.
+    if implementation_rung(implementation_object)? != "bounded_transformer_residency" {
+        return Ok(false);
+    }
     if implementation_object.get("requestContexts").is_none() {
         if requires_request_context {
             return Err(());
@@ -6297,6 +6302,91 @@ mod tests {
             Some(MemoryRouteMode::ImageToImage),
             "Dev owns the same public reference alias, but must opt into it explicitly"
         );
+    }
+
+    #[test]
+    fn shipped_flux2_dev_staging_survives_legacy_resident_inventory_rows() {
+        let manifest = shipped_model("flux2_dev");
+        let evaluate =
+            |manifest: &JsonObject<String, Value>, tier: MemoryRouteTier, accept: bool| {
+                evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                    "flux2_dev",
+                    Some(tier.as_str()),
+                    Some(MemoryRouteMode::TextToImage),
+                    manifest,
+                    spec(tier, MemoryRouteLoadProfile::Plain).with_resolved_route("flux2_dev"),
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |candidate, strategy| {
+                        assert_eq!(strategy, MemoryStrategy::StagedResidency);
+                        assert_eq!(candidate.offload_policy, OffloadPolicy::Sequential);
+                        assert_eq!(candidate.load_shape, LoadShape::EagerMaterialization);
+                        accept
+                    },
+                )
+            };
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            let selected = evaluate(&manifest, tier, true);
+            assert_eq!(
+                selected.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible
+            );
+            assert_eq!(selected.load_shape, LoadShape::EagerMaterialization);
+            assert_eq!(selected.offload_policy, OffloadPolicy::Sequential);
+            assert_eq!(
+                evaluate(&manifest, tier, false).load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+        for mutation in ["missing", "malformed", "duplicate"] {
+            let mut invalid = manifest.clone();
+            let rows = invalid["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .unwrap();
+            let index = rows
+                .iter()
+                .position(|row| {
+                    row["rung"] == "staged_residency" && row.get("runtimeProvider").is_none()
+                })
+                .unwrap();
+            match mutation {
+                "missing" => {
+                    rows[index]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("requestContexts");
+                }
+                "malformed" => rows[index]["requestContexts"] = serde_json::json!({}),
+                _ => rows.push(rows[index].clone()),
+            }
+            let refused = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                "flux2_dev",
+                Some("bf16"),
+                Some(MemoryRouteMode::TextToImage),
+                &invalid,
+                spec(MemoryRouteTier::Bf16, MemoryRouteLoadProfile::Plain)
+                    .with_resolved_route("flux2_dev"),
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_, _| panic!("{mutation}: invalid declarations must not reach the provider"),
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
     }
 
     #[test]

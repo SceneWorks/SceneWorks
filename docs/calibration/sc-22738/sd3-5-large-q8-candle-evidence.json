@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/sd3.5-large-mlx",
+        "resolvedRevision": "0cf819d00d30d296cee58e02c59b0daa5b8ede89",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "capturedAt": "2026-09-12T09:21:23Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:sd3_5_large-five-rung-reference",
+        "blockers": [
+          "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14256439296
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 21808283648
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14224982016
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 21808283648
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-sd3-5-large-q8-1024-seed16402-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-95815ae6e59526077de9",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/sd3.5-large-mlx@0cf819d00d30d296cee58e02c59b0daa5b8ede89:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-972340f72f20f8df563a",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 14256439296,
+          "allocatorBytes": 14256439296,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 14224982016,
+          "allocatorBytes": 14224982016,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 21808283648,
+          "allocatorBytes": 21808283648,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 21808283648,
+          "allocatorBytes": 21808283648,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "ce0c417cfdeaa00e0e90550e360324a567058590b688d2673392c347063054c6",
+          "dirty": false,
+          "revision": "8fb95eb05cee4cf1e482aa050874fae98ccb3f78"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:12c7dbe6a219b588cf570a871cccad6121a34e97b1506730575f52b6b9dccd11",
+          "revision": "c67260424deca367afb511c91bd8ad539a4f86c1"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22730 anchor capture measures exact per-phase memory and strategy identity for the Candle SD3.5 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle SD3.5 Large base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "sd3_5_large",
+        "overlay": "none",
+        "provider": "sd3_5_large",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

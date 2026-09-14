@@ -2870,19 +2870,13 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. The FETCH-side helper
-/// for [`ensure_boogu_tier_present`] (which non-default tier to pull on demand): `<=0` → `<variant>-bf16/`
-/// (dense full precision), `1..=4` → `<variant>-q4/` (packed Q4, sc-8513), anything else → `None` (the
-/// default `<variant>/` packed Q8 ships in the catalog download). Returns the subfolder name relative to
-/// the turnkey root. The LOAD-side resolver [`boogu_model_subdir`] no longer shares this: as of sc-10777 it
-/// routes its default through the floor-aware [`preferred_tier`] (so a floored default clamps up to
-/// `mlx.minQualityTier`, capped by installed), while this fetch helper stays keyed on the explicit pick
-/// only — no shipping Boogu model declares a floor, so the two still agree for every current model.
-fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
+/// Requested Boogu download subfolder. Even the default Q8 variant can be absent when only
+/// a sibling variant is installed. The load-side resolver separately chooses among complete tiers.
+fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> String {
     match bits {
-        Some(b) if b <= 0 => Some(format!("{variant}-bf16")),
-        Some(b) if b <= 4 => Some(format!("{variant}-q4")),
-        _ => None,
+        Some(b) if b <= 0 => format!("{variant}-bf16"),
+        Some(b) if b <= 4 => format!("{variant}-q4"),
+        _ => variant.to_owned(),
     }
 }
 
@@ -3165,20 +3159,10 @@ async fn fetch_krea_convrot_base(
     .map(|_| ())
 }
 
-/// On-demand fetch of a non-default Boogu tier subfolder (sc-6568 / sc-8513). The catalog download
-/// pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into another tier
-/// ([`boogu_tier_subdir`]: `<=0` → `<variant>-bf16/` dense, `1..=4` → `<variant>-q4/` packed) and that
-/// subfolder isn't present yet, pull just its files into the HF cache so [`boogu_model_subdir`]
-/// resolves it. No-op when the Q8 default is requested, the model isn't Boogu, the turnkey snapshot
-/// isn't downloaded yet (`boogu_model_subdir` then falls back to Q8 / surfaces the load error), or the
-/// tier subfolder is already complete. Fails loud on a real download error — fast, before any compute;
-/// a tier that isn't published yet stays absent so the request falls back to Q8. Mirrors
-/// [`crate::video_jobs::ensure_ltx_q8_present`].
-///
-/// sc-9607 (epic 9083): also runs on the candle lane (off-Mac) — `generate_candle_stream` calls it
-/// before snapshot resolution, so Windows/Linux users get the SAME on-demand `-q4/-bf16` fetch as
-/// macOS. Previously `#[cfg(target_os = "macos")]`, so off-Mac only the shipped Q8 `base/` default was
-/// installable and a non-default tier silently fell back to Q8.
+/// Ensure the requested Boogu variant/tier is complete in the shared snapshot before loading.
+/// Base, Turbo and Edit share a repository but have separate component directories. Even Q8
+/// may need fetching when only a sibling variant has been installed. Reuse the native cache
+/// downloader for missing or partial tiers, then check tokenizer and component-weight presence.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3196,10 +3180,7 @@ async fn ensure_boogu_tier_present(
         _ => return Ok(()),
     };
     let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
-    let Some(tier) = boogu_tier_subdir(variant, bits) else {
-        // Q8 default ships in the catalog download — nothing to fetch.
-        return Ok(());
-    };
+    let tier = boogu_tier_subdir(variant, bits);
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
     };
@@ -3221,16 +3202,11 @@ async fn ensure_boogu_tier_present(
         return Ok(());
     }
     let tier_dir = root.as_ref().map(|root| root.join(&tier));
-    // Present already (packed single-file q4 OR sharded-dense bf16 `.index.json`) → no fetch.
-    if tier_dir.as_ref().is_some_and(|tier_dir| {
-        tier_dir
-            .join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-            || tier_dir
-                .join("transformer/diffusion_pytorch_model.safetensors.index.json")
-                .is_file()
-    })
-    {
+    // Base, Turbo and Edit share a repository, but installation of a sibling is not proof
+    // that this variant exists. Repair missing default tiers and incomplete non-default tiers.
+    if tier_dir.as_ref().is_some_and(|dir| {
+        sceneworks_core::mlx_tier_completeness::boogu_tier_complete(dir)
+    }) {
         return Ok(());
     }
     // The tier subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
@@ -3242,8 +3218,23 @@ async fn ensure_boogu_tier_present(
     let revision =
         turnkey_tier_revision(&repo, model.default_repo(), BOOGU_MLX_TURNKEY_REVISION);
     crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files)
-    .await
-    .map(|_| ())
+    .await?;
+    let installed = if repo == model.default_repo() {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir, &repo, BOOGU_MLX_TURNKEY_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, &repo)
+    };
+    if !installed.as_ref().is_some_and(|root| {
+        sceneworks_core::mlx_tier_completeness::boogu_tier_complete(&root.join(&tier))
+    }) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{}: downloaded Boogu tier {tier} is incomplete; expected transformer, mllm tokenizer/weights, and VAE",
+            request.model,
+        )));
+    }
+    Ok(())
 }
 
 /// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
@@ -13684,18 +13675,19 @@ mod boogu_tier_tests {
     use super::*;
 
     #[test]
+    fn every_variant_has_a_default_download_tier() {
+        for variant in ["base", "turbo", "edit"] {
+            assert_eq!(boogu_tier_subdir(variant, None), variant);
+            assert_eq!(boogu_tier_subdir(variant, Some(8)), variant);
+        }
+    }
+
+    #[test]
     fn tier_subdir_selects_by_quant_bits() {
-        // Q8 default (no opt-in / a >4 request) → None (the `<variant>/` folder ships in the catalog
-        // download). 1..=4 → packed q4; <=0 → dense bf16. Consistent with krea/ideogram (sc-8513).
-        assert_eq!(boogu_tier_subdir("base", None), None);
-        assert_eq!(boogu_tier_subdir("base", Some(8)), None);
-        assert_eq!(boogu_tier_subdir("base", Some(4)), Some("base-q4".to_owned()));
-        assert_eq!(boogu_tier_subdir("turbo", Some(2)), Some("turbo-q4".to_owned()));
-        assert_eq!(boogu_tier_subdir("edit", Some(0)), Some("edit-bf16".to_owned()));
-        assert_eq!(
-            boogu_tier_subdir("base", Some(-1)),
-            Some("base-bf16".to_owned())
-        );
+        assert_eq!(boogu_tier_subdir("base", Some(4)), "base-q4");
+        assert_eq!(boogu_tier_subdir("turbo", Some(2)), "turbo-q4");
+        assert_eq!(boogu_tier_subdir("edit", Some(0)), "edit-bf16");
+        assert_eq!(boogu_tier_subdir("base", Some(-1)), "base-bf16");
     }
 }
 

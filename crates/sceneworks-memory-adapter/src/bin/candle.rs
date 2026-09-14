@@ -3645,6 +3645,13 @@ fn mage_generation_request(
 fn five_rung_evidence_revision(provider: &str) -> String {
     if matches!(provider, SANA_ID | SANA_SPRINT_ID) {
         runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else if matches!(
+        provider,
+        SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID
+    ) {
+        runtime_cuda::providers::sd3::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+    } else if provider == KOLORS_ID {
+        runtime_cuda::providers::kolors::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else {
         format!(
             "{}@{}",
@@ -3732,10 +3739,10 @@ impl PulidFluxBinding {
         )
     }
 
-    /// The record's `artifact`: the backbone snapshot plus every bundle file's digest.
+    /// The backbone snapshot plus the content digest of the ordered identity-file inventory.
     fn artifact_json(&self) -> Value {
         let mut artifact = artifact(&self.repository, &self.revision, self.tier);
-        artifact["identityBundle"] = self.bundle.artifact_json();
+        artifact["inventorySha256"] = json!(self.bundle.composite_sha256);
         artifact
     }
 }
@@ -4266,7 +4273,8 @@ fn sensenova_candle_arm(request: &Value) -> Result<SenseNovaCandleArm, String> {
 fn sensenova_candle_calibration_fingerprint(arm: SenseNovaCandleArm, tier: &str) -> String {
     format!(
         "sensenova-u1-{}-{tier}-candle-request-memory-ladder-v1",
-        arm.slug
+        runtime_cuda::providers::sensenova::memory_strategy::route_label(arm.model_id)
+            .expect("registered SenseNova route")
     )
 }
 
@@ -6996,9 +7004,24 @@ const QWEN_EDIT_ID: &str = "qwen_image_edit";
 /// captures of one anchor are the same request.
 const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
 /// The production true-CFG guidance the worker resolves for the multi-step edit path
-/// (`resolve_qwen_edit_guidance`, manifest `variationStrength.default`). Ignored on the Lightning
-/// path, which the engine forces CFG-off.
+/// (`resolve_qwen_edit_guidance`, manifest `variationStrength.default`). Lightning requires 1.0
+/// explicitly: the engine rejects other guidance values rather than overriding them.
 const QWEN_EDIT_GUIDANCE: f32 = 4.0;
+
+fn qwen_edit_generation_recipe(arm: QwenEditArm) -> QwenEditRequest {
+    QwenEditRequest {
+        prompt: QWEN_EDIT_PROMPT.to_owned(),
+        negative: String::new(),
+        steps: arm.steps,
+        guidance: if arm.lightning {
+            1.0
+        } else {
+            QWEN_EDIT_GUIDANCE
+        },
+        lightning: arm.lightning,
+        ..Default::default()
+    }
+}
 
 fn qwen_edit_arm(request: &Value) -> Result<QwenEditArm, String> {
     let planned = protocol::planned(request)?;
@@ -7337,14 +7360,9 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
     vram.end_load(load_sample);
 
     let generation = QwenEditRequest {
-        prompt: QWEN_EDIT_PROMPT.to_owned(),
-        negative: String::new(),
         width,
         height,
-        steps: arm.steps,
-        guidance: QWEN_EDIT_GUIDANCE,
         seed,
-        lightning: arm.lightning,
         stage_residency,
         memory: Some(GenerationMemory {
             stage_residency,
@@ -7357,7 +7375,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
             transformer_window_size: selection.parameters.transformer_window_size,
             ..Default::default()
         }),
-        ..Default::default()
+        ..qwen_edit_generation_recipe(arm)
     };
     let references = [qwen_edit_reference(width, height)];
 
@@ -8134,6 +8152,70 @@ fn main() {
 #[cfg(test)]
 mod sdxl_family_tests {
     use super::*;
+
+    #[test]
+    fn kolors_capture_revision_passes_real_provider_admission() {
+        use runtime_cuda::providers::kolors::memory_strategy as kolors;
+        for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+            let mut spec = LoadSpec::new(WeightsSource::Dir("/__unused_kolors_fixture__".into()));
+            spec.quantize = quant;
+            let contract = kolors::weights_free_contract(&spec).unwrap();
+            let fixtures = kolors::registered_valid_fixtures(
+                &spec,
+                &contract,
+                MemoryStrategy::StagedResidency,
+            )
+            .unwrap();
+            assert!(!fixtures.is_empty());
+            for fixture in fixtures {
+                let mut context = fixture.context;
+                context.evidence_revision = five_rung_evidence_revision(KOLORS_ID);
+                assert!(matches!(
+                    kolors::registered_safety_check(&spec, &contract, &context),
+                    MemorySafetyDecision::Accept
+                ));
+                context.evidence_revision = format!("sc-22732@{}", protocol::INFERENCE_PIN);
+                assert!(matches!(
+                    kolors::registered_safety_check(&spec, &contract, &context),
+                    MemorySafetyDecision::Reject { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn sd3_capture_revision_passes_real_provider_admission() {
+        use runtime_cuda::providers::sd3::memory_strategy as sd3;
+
+        for provider in [SD3_5_LARGE_ID, SD3_5_LARGE_TURBO_ID, SD3_5_MEDIUM_ID] {
+            for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+                let mut spec = LoadSpec::new(WeightsSource::Dir("/__unused_sd3_fixture__".into()));
+                spec.quantize = quant;
+                let contract = sd3::weights_free_contract(provider, &spec).unwrap();
+                let fixtures = sd3::registered_valid_fixture(
+                    &spec,
+                    &contract,
+                    MemoryStrategy::StagedResidency,
+                )
+                .unwrap();
+                assert!(!fixtures.is_empty());
+                for fixture in fixtures {
+                    let exact = fixture.load_spec.as_ref().unwrap();
+                    let mut context = fixture.context;
+                    context.evidence_revision = five_rung_evidence_revision(provider);
+                    assert!(matches!(
+                        sd3::registered_safety_check(exact, &contract, &context),
+                        MemorySafetyDecision::Accept
+                    ));
+                    context.evidence_revision = format!("sc-22730@{}", protocol::INFERENCE_PIN);
+                    assert!(matches!(
+                        sd3::registered_safety_check(exact, &contract, &context),
+                        MemorySafetyDecision::Reject { .. }
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn sana_requests_carry_the_providers_evidence_token() {
@@ -9259,6 +9341,21 @@ mod tests {
 
     const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
 
+    #[test]
+    fn qwen_edit_generation_uses_the_lightning_recipe_only_for_the_distilled_arm() {
+        let lightning = qwen_edit_generation_recipe(QWEN_EDIT_LIGHTNING_ARM);
+        assert!(lightning.lightning);
+        assert_eq!(lightning.steps, 4);
+        assert_eq!(lightning.guidance, 1.0);
+        assert!(lightning.negative.is_empty());
+
+        let base = qwen_edit_generation_recipe(QWEN_EDIT_ARM);
+        assert!(!base.lightning);
+        assert_eq!(base.steps, 2);
+        assert_eq!(base.guidance, 4.0);
+        assert_eq!(base.prompt, lightning.prompt);
+    }
+
     fn qwen_edit_scratch_dir(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -10252,17 +10349,15 @@ mod tests {
                 .loadability_fingerprint()
                 .contains(&bundle.root.display().to_string()));
             let artifact = binding.artifact_json();
+            serde_json::from_value::<sceneworks_core::memory_calibration::Artifact>(
+                artifact.clone(),
+            )
+            .expect("PuLID capture artifact must pass the production reader");
             assert_eq!(artifact["variant"].as_str(), Some(tier));
             assert_eq!(
-                artifact["identityBundle"]["compositeSha256"].as_str(),
+                artifact["inventorySha256"].as_str(),
                 Some(bundle.composite_sha256.as_str())
             );
-            for (file, sha256) in &bundle.file_sha256 {
-                assert_eq!(
-                    artifact["identityBundle"]["files"][*file].as_str(),
-                    Some(sha256.as_str())
-                );
-            }
         }
         // A fixture naming the five-rung seed is refused: PuLID renders at FLUX1_SEED.
         let mut wrong_seed = pulid_case("q4");

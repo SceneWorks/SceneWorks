@@ -1,0 +1,196 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/scail2-mlx",
+        "resolvedRevision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "scail2-14b-q8-candle-resident-eager-v1",
+      "capturedAt": "2026-09-11T00:40:50Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:scail2-14b",
+        "blockers": [
+          "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 67650977792
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 67692920832
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 67642589184
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 67692920832
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 77
+          },
+          {
+            "name": "requestedFrames",
+            "unit": "count",
+            "value": 77
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 16
+          },
+          {
+            "name": "referenceCount",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "scail2-14b-candle-q8-832x480-f77-fps16-seed22736",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-bb4ca06550046e7ffbb8",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3:q8:f77:832x480:fps16:seed22736",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-0733e2259cc409acf699",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 67650977792,
+          "allocatorBytes": 67650977792,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 67642589184,
+          "allocatorBytes": 67642589184,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 67692920832,
+          "allocatorBytes": 67692920832,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 67692920832,
+          "allocatorBytes": 67692920832,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "af09ff9ed50802247a44291bc70df7581c0324f1f3982607880ac7aed8bd1881",
+          "dirty": false,
+          "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:40502f2543569b6aadeffd827063c526b0b3b8b5d81965efb29dcfeb3c52b7de",
+          "revision": "a81829b5905c45eff182327520261f24e8ff17ec"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle SCAIL-2 character-animation path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 77,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "animation",
+        "modelId": "scail2_14b",
+        "overlay": "none",
+        "provider": "scail2_14b",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

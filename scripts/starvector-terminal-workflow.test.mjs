@@ -1,3 +1,4 @@
+import { INFERENCE_REVISION } from "./starvector-terminal-campaign.mjs";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,7 +18,7 @@ const readiness = await readFile(".github/workflows/starvector-terminal-readines
 const producer = await readFile("scripts/starvector-terminal-producer.mjs", "utf8");
 const route = await readFile("scripts/starvector-terminal-route.mjs", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const pin = "81fda3bd5a9d5920ad9cdc62796df3305be96742";
+const pin = INFERENCE_REVISION;
 const execFile = promisify(execFileCallback);
 const productServiceSupported = process.platform === "darwin" || process.platform === "win32";
 

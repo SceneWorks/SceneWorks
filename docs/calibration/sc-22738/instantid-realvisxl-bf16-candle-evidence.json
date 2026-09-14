@@ -1,0 +1,195 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/realvisxl-mlx",
+        "resolvedRevision": "e40202d63baef826c7df95a639a811698c1178d2",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "instantid-candle-staged-conditioning-v1",
+      "capturedAt": "2026-09-12T02:15:34Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:instantid-identity-ladder",
+        "blockers": [
+          "the pinned candle-gen-instantid provider is a bespoke crate with no registered generator, no calibration error injection and no synchronized request scope, so the runtime-complete sweep and the fault-injection lifecycle scenarios are not executable at this pin"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preLoadDeviceUsed",
+            "unit": "bytes",
+            "value": 395313152
+          },
+          {
+            "name": "loadDevicePeakDelta",
+            "unit": "bytes",
+            "value": 513802240
+          },
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 16206790656
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 16206790656
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 10099884032
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 16206790656
+          },
+          {
+            "name": "loadShapeEager",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "instantid-realvisxl-candle-bf16-1024-seed18381-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-b111a1550a875c71f558",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:bf16+identity:652323851dae158cd8080731950371bace144d1ed13fc03bf06935b6fe596ab7",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ded67c5832fb1a6e6569",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 16206790656,
+          "allocatorBytes": 16206790656,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 10099884032,
+          "allocatorBytes": 10099884032,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 16206790656,
+          "allocatorBytes": 16206790656,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 16206790656,
+          "allocatorBytes": 16206790656,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 16206790656,
+        "decode": 10099884032,
+        "denoise": 16206790656,
+        "overall": 16206790656
+      },
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "823b40da28cd7143b4eb2883a008ce537cd7741cd58a56ba8790020cf0ca980b",
+          "dirty": false,
+          "revision": "8fb95eb05cee4cf1e482aa050874fae98ccb3f78"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:23eae36959cf4d38702382d3bb3e27d461fc6edbc2ac9e953222ea69192295d5",
+          "revision": "a2addd22e3e3687783978d0942b92aeb0491b7e6"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 16206790656,
+          "name": "exact_fit",
+          "predictedBytes": 16206790656,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned candle-gen-instantid provider is a bespoke crate with no registered generator, no calibration error injection and no synchronized request scope, so the runtime-complete sweep and the fault-injection lifecycle scenarios are not executable at this pin",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned candle-gen-instantid provider is a bespoke crate with no registered generator, no calibration error injection and no synchronized request scope, so the runtime-complete sweep and the fault-injection lifecycle scenarios are not executable at this pin",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned candle-gen-instantid provider is a bespoke crate with no registered generator, no calibration error injection and no synchronized request scope, so the runtime-complete sweep and the fault-injection lifecycle scenarios are not executable at this pin",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the identity overlay is the declared target and its overlay key is the provider's own artifact-bound `overlay_key()`",
+          "result": "passed"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "character_image",
+        "modelId": "instantid_realvisxl",
+        "overlay": "identity",
+        "provider": "instantid",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}
