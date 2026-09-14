@@ -38,6 +38,23 @@ function workflowStep(job, name) {
   return job.slice(at, next === -1 ? undefined : next);
 }
 
+test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
+  const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
+  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-scaffold");
+  const fetchName = "Fetch the pinned inference source for the anchor-closure suite";
+  const fetch = workflowStep(publish, fetchName);
+  const shellBody = (step) => step.split("\n").filter((line) => /^ {10}\S|^ {12}/.test(line)).join("\n");
+  assert.equal(shellBody(fetch), shellBody(workflowStep(scaffold, fetchName)));
+  const validation = workflowStep(publish, "Validate scaffold and RunPod publication contracts");
+  assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
+  assert.ok(validation.includes("npm run check"));
+  assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
+  const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
+  assert.ok(dependencies.includes("npm ci --ignore-scripts"));
+  assert.ok(publish.indexOf(dependencies) < publish.indexOf(fetch));
+  assert.match(publish.slice(0, publish.indexOf(validation)), /components: rustfmt/);
+});
+
 function pullRequestTrigger(workflow) {
   const onStart = workflow.indexOf("on:\n");
   const jobsStart = workflow.indexOf("\njobs:\n", onStart);

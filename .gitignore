@@ -301,3 +301,9 @@ build.bat
 # harness derives each record's `dirty` flag from `git status --porcelain`, which counts untracked
 # paths, and complete evidence from a dirty repository is rejected outright.
 .tmp/
+
+# film-harness run records (sc-22710) default here
+film-harness-runs/
+
+# film-harness review-eval results (sc-22714) default here
+film-harness-review-eval/

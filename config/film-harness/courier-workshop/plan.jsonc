@@ -1,0 +1,151 @@
+{
+  // Courier / workshop / red parcel — the benchmark fixture for the local filmmaking harness
+  // (epic 22708, sc-22710). Six shots cover the whole narrative; the two-shot smoke renders
+  // SH010 + SH020 (`--shots SH010,SH020`). Schema: crates/sceneworks-core/src/film_plan.rs.
+  //
+  // Model: MiniMax-H3 on the MLX lane, q4 tier. Every value below is on the model's declared
+  // menus (config/manifests/builtin.models.jsonc `minimax_h3`): 24 fps only, fourteen fixed clip
+  // lengths from 5.1667s, and the 576x320 canvas — the cheapest one, ~14 min per 5.17s clip
+  // against ~2 h at the default 1344x768. Keyframe modes take a first (and last) frame; the base
+  // checkpoint has no reference conditioning, so no shot here lists referenceRoles.
+  //
+  // `dependsOn` (schema 2, sc-22711) declares what each shot carries forward. Every edge here is
+  // `continuity`: the shot's startState IS the previous shot's endState, so replacing an earlier
+  // shot's selected take is a reason to LOOK at the later ones, never a reason to re-render them.
+  // (A `conditioning` edge means the conditioning itself came out of another shot's selected take —
+  // last-frame chaining. No shot here does that: the keyframe shots condition on the approved
+  // `workshop_plate` from the reference pack, which no take can change.)
+  "schemaVersion": 2,
+  "id": "courier-workshop",
+  "version": 1,
+  "title": "Courier at the Workshop",
+  "synopsis": "A courier enters a cluttered workshop carrying a red parcel, sets it on the workbench and leaves; the recipient comes in, finds the parcel and opens it.",
+  "model": {
+    "id": "minimax_h3",
+    "tier": "q4",
+    "fps": 24,
+    "resolution": "576x320"
+  },
+  "limits": {
+    "maxRunSeconds": 7200,
+    "maxShotSeconds": 2700,
+    "maxAttemptsPerShot": 1,
+    "maxMemoryGb": 96
+  },
+  // Sound (sc-22712). Three independently controlled buses: dialogue placed per shot, ambience and
+  // music placed ONCE across the whole sequence so they play straight through the cuts.
+  //
+  // `generatedAudio: "mute"` is the run-level policy for the takes' own audio, and it is what
+  // stops a model that spoke the line and the placed dialogue clip from both landing in the mix.
+  // A shot may override it with `"generatedAudio": "include"`; nothing else turns it on.
+  "sound": {
+    "generatedAudio": "mute",
+    "dialogue": { "gain": 1.0, "muted": false },
+    "ambience": {
+      "role": "workshop_room_tone",
+      "gain": 0.35,
+      "fadeInSeconds": 1.0,
+      "fadeOutSeconds": 1.5
+    },
+    "music": {
+      "role": "main_theme",
+      "gain": 0.2,
+      "startSeconds": 0.0,
+      "fadeInSeconds": 2.0,
+      "fadeOutSeconds": 3.0
+    }
+  },
+  "shots": [
+    {
+      "id": "SH010",
+      "beat": "Establish the empty workshop; the door opens.",
+      "framing": "wide static, eye level, door camera-left, workbench centre",
+      "prompt": "A quiet, cluttered woodworking workshop in warm late-afternoon light. Tools hang on pegboard, sawdust on a long wooden workbench in the centre of frame, a closed door on the left. After a beat the door opens and a courier in a blue jacket steps into the doorway holding a small bright red parcel. Static wide shot, natural light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, door closed, workbench clear.",
+      "endState": "Door open, courier standing in the doorway holding the red parcel, workbench still clear.",
+      "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 22710,
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH020",
+      "beat": "The courier crosses to the workbench with the parcel.",
+      "framing": "medium, slow push-in following the courier to the bench",
+      "prompt": "Starting from this view of the workshop, a courier in a blue jacket walks in from the left carrying a small bright red parcel with both hands and approaches the wooden workbench in the centre. Warm late-afternoon light, sawdust in the air, natural handheld feel, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier in the doorway with the red parcel.",
+      "endState": "Courier standing at the workbench, parcel still in hand.",
+      "dialogue": "Courier: \"Delivery — I'll leave it on the bench.\"",
+      // Placed against SH020 so the two-shot smoke (`--shots SH010,SH020`) exercises all three
+      // buses: a line inside the second shot, with both beds running continuously under the cut.
+      "dialogueClip": { "role": "courier_line", "offsetSeconds": 1.2, "gain": 1.0 },
+      "sound": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone.",
+      "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
+      "seed": 22711,
+      "dependsOn": [{ "shotId": "SH010", "kind": "continuity", "note": "The courier and the parcel enter in SH010; SH020 starts from that doorway." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH030",
+      "beat": "The courier places the red parcel on the workbench.",
+      "framing": "close on the workbench surface, hands and parcel",
+      "prompt": "Close-up on a wooden workbench dusted with sawdust. Two hands in the sleeves of a blue courier jacket lower a small bright red parcel onto the bench and let go, then withdraw out of frame. Warm late-afternoon light, shallow depth of field, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Parcel in the courier's hands above the bench.",
+      "endState": "Red parcel resting on the workbench, hands gone.",
+      "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 22712,
+      "dependsOn": [{ "shotId": "SH020", "kind": "continuity", "note": "SH030 starts with the parcel in the hands SH020 brought to the bench." }],
+      "continuityRoles": ["workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH040",
+      "beat": "The courier leaves; the parcel stays.",
+      "framing": "wide static, same setup as SH010",
+      "prompt": "Starting from this view of the workshop with a small bright red parcel resting on the wooden workbench, a courier in a blue jacket walks away from the bench toward the door on the left, steps out and pulls the door closed behind them. The parcel stays on the bench. Static wide shot, warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier at the bench, red parcel on the bench.",
+      "endState": "Door closed, workshop empty except for the red parcel on the bench.",
+      "sound": "Footsteps receding, door creak and latch, then room tone.",
+      "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
+      "seed": 22713,
+      "dependsOn": [{ "shotId": "SH030", "kind": "continuity", "note": "SH040 starts from the parcel SH030 left resting on the workbench." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH050",
+      "beat": "The recipient enters and notices the parcel.",
+      "framing": "medium, recipient enters camera-left, bench centre",
+      "prompt": "A woman in a grey work apron with rolled sleeves enters a cluttered woodworking workshop through the door on the left, wiping her hands on a rag. She stops as she notices a small bright red parcel sitting on the wooden workbench in the centre and walks toward it. Warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, red parcel on the bench, door closed.",
+      "endState": "Recipient standing at the bench looking down at the parcel.",
+      "dialogue": "Recipient (quietly): \"Huh. That's not mine.\"",
+      "dialogueClip": { "role": "recipient_line", "offsetSeconds": 2.6, "gain": 1.0 },
+      "sound": "Door opening, footsteps, a rag dropped on the bench, room tone.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 22714,
+      "dependsOn": [{ "shotId": "SH040", "kind": "continuity", "note": "SH050 starts from the empty workshop SH040 closed the door on." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "recipient", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH060",
+      "beat": "The recipient opens the parcel.",
+      "framing": "close on hands and parcel, slight high angle",
+      "prompt": "Close-up on a small bright red parcel on a sawdust-covered wooden workbench. A woman's hands with a grey apron sleeve tear the tape, fold back the flaps and lift the lid, and a soft warm glow from inside lights her fingers. Shallow depth of field, warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Sealed red parcel on the bench, recipient's hands entering frame.",
+      "endState": "Parcel open, flaps folded back, hands resting on the bench beside it.",
+      "dialogue": "Recipient (whisper): \"Oh.\"",
+      "dialogueClip": { "role": "recipient_line", "offsetSeconds": 3.0, "gain": 0.8, "fadeOutSeconds": 0.4 },
+      "sound": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 22715,
+      "dependsOn": [{ "shotId": "SH050", "kind": "continuity", "note": "SH060 opens the parcel SH050 found sealed on the bench." }],
+      "continuityRoles": ["workbench_table", "recipient", "red_parcel", "house_style"]
+    }
+  ]
+}

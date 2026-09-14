@@ -254,12 +254,19 @@ export function EditorScreen() {
       id: `track_audio_${crypto.randomUUID().replaceAll("-", "")}`,
       name: `Audio ${count + 1}`,
       kind: "audio",
+      // Mirrors project_store.rs `default_timeline_tracks` (sc-22712). The server defaults both if
+      // they are absent; writing them keeps the shape the client saves identical to the one it
+      // reads back, so a round trip through the editor never looks like a change.
+      role: "sound",
+      gain: 1,
       locked: false,
       muted: false,
       items: [],
     };
     commit({ ...activeTimeline, tracks: [...activeTimeline.tracks, newTrack] });
-    setTimelineNotice("Audio track added. Note: audio isn't mixed into exports yet (tracked for the backend audit).");
+    // sc-22712 wired the export's audio mix: every non-muted audio track is now mixed into the MP4
+    // at its own gain. Placing clips on the track from the editor is still sc-12807's scope.
+    setTimelineNotice("Audio track added. Non-muted audio tracks are mixed into the MP4 export.");
   }
 
   function removeSelectedItem() {

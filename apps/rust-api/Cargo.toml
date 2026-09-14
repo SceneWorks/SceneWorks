@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+# A second binary (`film-harness`, sc-22710) lives beside the API; keep `cargo run -p
+# sceneworks-rust-api` resolving to the API itself.
+default-run = "sceneworks-rust-api"
 
 [dependencies]
 axum = { version = "0.7", features = ["multipart"] }

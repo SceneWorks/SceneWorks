@@ -55,6 +55,7 @@ const DECLARED_BINARY_EXTENSIONS = [
   ".rgb",
   ".safetensors",
   ".ttf",
+  ".wav",
   ".webm",
   ".webp",
   ".woff",

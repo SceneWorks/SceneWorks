@@ -1,0 +1,82 @@
+{
+  // The REAL-media labeled set (epic 22708, sc-22714): the two MiniMax-H3 takes the sc-22710 smoke
+  // rendered, hand-labeled frame by frame. This is the set to point a real vision model at — the
+  // `labels.jsonc` beside it is placeholder media for the deterministic CPU tests.
+  //
+  // The media is NOT in this repository (the takes are ~1 MB of MP4 and ~1.6 MB of PNG). It lives
+  // in the run evidence directory `mediaRoot` names; override with
+  // `film-harness review-eval --set … --media-root DIR`. A frame that is not on this host is a
+  // refusal, not a silent skip, so an evaluation can never quietly score nothing.
+  //
+  // The labels below are what a person sees in those frames, written after looking at each one.
+  // Two of them are deliberately uncomfortable and are the point of running this set:
+  //
+  //   * SH020's first frame is the `workshop_plate` CONDITIONING PLATE — a flat brown placeholder
+  //     with no content at all. Every `frames: "all"` question about it is therefore either a
+  //     mismatch (nothing is there) or unobserved (nothing can be told). That is a true fact about
+  //     this take, not a reviewer error.
+  //   * SH020's room is a DIFFERENT workshop from SH010's: a lumber/joinery shop with a stone-ish
+  //     slab bench, not the panelled workshop with the pegboard of hand tools and the long wooden
+  //     bench. The cut is discontinuous, so `sh020_cut` is labeled `mismatch`.
+  //
+  // v2 (after the first real-weights smoke): `sh020_location` was labeled `unobserved` on the
+  // assumption that a flat plate can only produce silence. It does not — the model answered "No,
+  // the room in this frame is not a cluttered woodworking workshop… a plain, empty space", which
+  // is a correct and decisive CONTRADICTION. The label is now `mismatch`, which is what a correct
+  // reviewer should report; the old label was the thing at fault, not the model.
+  //
+  // `adjacentFrames` is what makes `sh020_cut` scorable at all: the cut question compares SH020's
+  // last frame against SH010's last frame. Without it there is no neighbour and the question is
+  // skipped rather than answered from one side.
+  "schemaVersion": 1,
+  "id": "courier-review-eval-real",
+  "version": 2,
+  "description": "Hand labels for the two real MiniMax-H3 takes from the sc-22710 smoke (576x320, 5.17s, 24 fps).",
+  "mediaRoot": "~/SceneWorks/film-harness-evidence/sc-22710/smoke-20260913T210136Z/frames",
+  "reviewPlan": "../courier-workshop/review.jsonc",
+
+  "cases": [
+    {
+      "id": "real_sh010",
+      "shotId": "SH010",
+      "label": "correct",
+      "description": "Empty panelled workshop, pegboard of tools, long wooden bench centre. The door opens and a courier in a dark blue jacket steps into the doorway holding a bright red parcel; the bench stays clear. This take does what the plan asked for.",
+      "frames": [
+        { "file": "sh010_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh010_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh010_3.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh010_location": "match",
+        "sh010_courier": "match",
+        "sh010_courier_jacket": "match",
+        "sh010_parcel": "match",
+        "sh010_parcel_custody": "match",
+        "sh010_action": "match"
+      }
+    },
+    {
+      "id": "real_sh020",
+      "shotId": "SH020",
+      "label": "plate_first_frame_and_cut_discontinuity",
+      "description": "Frame 1 is the flat workshop_plate placeholder the shot was conditioned on — no room, no person, no parcel. Frames 2 and 3 show a courier in a blue jacket and grey beanie holding the red parcel at a bench, but in a DIFFERENT workshop from SH010.",
+      "frames": [
+        { "file": "sh020_1.png", "timestampSeconds": 0.41 },
+        { "file": "sh020_2.png", "timestampSeconds": 2.58 },
+        { "file": "sh020_3.png", "timestampSeconds": 4.86 }
+      ],
+      "adjacentFrames": [
+        { "file": "sh010_3.png", "timestampSeconds": 4.86 }
+      ],
+      "expected": {
+        "sh020_location": "mismatch",
+        "sh020_courier": "mismatch",
+        "sh020_courier_jacket": "unobserved",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "match",
+        "sh020_action": "match",
+        "sh020_cut": "mismatch"
+      }
+    }
+  ]
+}

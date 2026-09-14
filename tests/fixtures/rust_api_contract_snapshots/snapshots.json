@@ -4636,28 +4636,34 @@
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [],
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],
@@ -4676,13 +4682,17 @@
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [
           {
             "assetId": "asset_fixture",
             "currentVersionAssetId": "asset_fixture",
             "displayName": "Still",
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
             "fit": "fit",
+            "generatedAudio": "mute",
             "id": "item-1",
             "sourceIn": 0.0,
             "sourceOut": 1.0,
@@ -4711,23 +4721,28 @@
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],
@@ -4837,13 +4852,17 @@
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [
           {
             "assetId": "asset_fixture",
             "currentVersionAssetId": "asset_fixture",
             "displayName": "Still",
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
             "fit": "fit",
+            "generatedAudio": "mute",
             "id": "item-1",
             "sourceIn": 0.0,
             "sourceOut": 1.0,
@@ -4872,23 +4891,28 @@
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],

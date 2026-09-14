@@ -4303,22 +4303,59 @@ fn reindex_project_path(
     Ok(counts)
 }
 
+/// Every aspect ratio a timeline may declare, with the frame it renders at. One declaration
+/// (sc-22710): a caller that must CHOOSE a ratio for footage of some other shape — the film
+/// harness picks one before it creates a timeline — reads this list rather than hand-copying it
+/// and drifting into a 400 here.
+pub const TIMELINE_ASPECT_RATIOS: &[(&str, u32, u32)] = &[
+    ("16:9", 1280, 720),
+    ("9:16", 720, 1280),
+    ("1:1", 1024, 1024),
+];
+
 fn timeline_dimensions(aspect_ratio: &str) -> ProjectStoreResult<(u32, u32)> {
-    match aspect_ratio {
-        "16:9" => Ok((1280, 720)),
-        "9:16" => Ok((720, 1280)),
-        "1:1" => Ok((1024, 1024)),
-        _ => Err(ProjectStoreError::BadRequest(
-            "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
-        )),
+    TIMELINE_ASPECT_RATIOS
+        .iter()
+        .find(|(name, _, _)| *name == aspect_ratio)
+        .map(|(_, width, height)| (*width, *height))
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest(
+                "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
+            )
+        })
+}
+
+/// Roles a timeline track may declare. `kind` says how a track is rendered (picture, overlay,
+/// mixed audio); `role` says what it CARRIES, which is what lets dialogue, ambience and music be
+/// three independently gained and muted buses rather than one undifferentiated "Audio" lane
+/// (sc-22712). The exporter mixes every non-muted `kind: "audio"` track regardless of role — role
+/// is descriptive, never a routing switch — so an unrecognised bed still reaches the MP4.
+pub const TIMELINE_TRACK_ROLES: &[&str] = &[
+    "picture", "overlay", "dialogue", "ambience", "music", "sfx", "sound",
+];
+
+/// What a picture item's own (generated) audio does in the mix. Defaults to `mute`, which is the
+/// only default that cannot silently double a placed dialogue clip (sc-22712): a generated take
+/// whose model spoke the line and a recorded dialogue clip for the same beat would otherwise both
+/// land in the mix, and nothing in the timeline would say which one the editor meant.
+pub const TIMELINE_GENERATED_AUDIO: &[&str] = &["include", "mute"];
+
+/// The role a track's `kind` implies when a document does not declare one. Keeps every timeline
+/// written before sc-22712 loading unchanged: its three default tracks become picture / overlay /
+/// sound, and `sound` is mixed exactly like a named bed.
+fn default_track_role(kind: &str) -> &'static str {
+    match kind {
+        "overlay" => "overlay",
+        "audio" => "sound",
+        _ => "picture",
     }
 }
 
 fn default_timeline_tracks() -> Value {
     json!([
-        {"id": "track_main", "name": "Main", "kind": "video", "locked": false, "muted": false, "items": []},
-        {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": []},
-        {"id": "track_audio", "name": "Audio", "kind": "audio", "locked": false, "muted": false, "items": []}
+        {"id": "track_main", "name": "Main", "kind": "video", "role": "picture", "locked": false, "muted": false, "gain": 1.0, "items": []},
+        {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "role": "overlay", "locked": false, "muted": false, "gain": 1.0, "items": []},
+        {"id": "track_audio", "name": "Audio", "kind": "audio", "role": "sound", "locked": false, "muted": false, "gain": 1.0, "items": []}
     ])
 }
 
@@ -4390,6 +4427,7 @@ fn validate_timeline_track(track: &mut Value) -> ProjectStoreResult<()> {
     required_str(track, "id")?;
     required_str(track, "name")?;
     validate_enum(track, "kind", &["video", "overlay", "audio"])?;
+    let kind = required_str(track, "kind")?.to_owned();
     let object = track.as_object_mut().ok_or_else(|| {
         ProjectStoreError::BadRequest("Timeline track must be an object".to_owned())
     })?;
@@ -4399,11 +4437,27 @@ fn validate_timeline_track(track: &mut Value) -> ProjectStoreResult<()> {
     object
         .entry("muted".to_owned())
         .or_insert_with(|| Value::Bool(false));
+    // sc-22712: `gain` is the track's bus fader, and `role` names the bus. Both are defaulted from
+    // what the document already says, so a timeline saved before this existed round-trips to the
+    // same audible result (unity gain, role implied by kind) rather than being rejected or muted.
+    object
+        .entry("gain".to_owned())
+        .or_insert_with(|| json!(1.0));
+    if !object.contains_key("role") || object.get("role") == Some(&Value::Null) {
+        let role = default_track_role(&kind);
+        object.insert("role".to_owned(), Value::String(role.to_owned()));
+    }
     object
         .entry("items".to_owned())
         .or_insert_with(|| json!([]));
     validate_bool(track, "locked")?;
     validate_bool(track, "muted")?;
+    validate_enum(track, "role", TIMELINE_TRACK_ROLES)?;
+    let gain = validate_f64_range(track, "gain", 0.0, 4.0)?;
+    track
+        .as_object_mut()
+        .expect("checked above")
+        .insert("gain".to_owned(), json!(gain));
     let items = track
         .get_mut("items")
         .and_then(Value::as_array_mut)
@@ -4451,6 +4505,21 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     object
         .entry("volume".to_owned())
         .or_insert_with(|| json!(1.0));
+    // sc-22712. `fadeInSeconds`/`fadeOutSeconds` are AUDIO fades, measured from the item's own
+    // ends, and are what lets a continuous bed come up under the first cut and away under the last
+    // without being chopped into per-shot pieces. They are deliberately separate from
+    // `transitionIn`/`transitionOut`, which are picture transitions with their own vocabulary.
+    object
+        .entry("fadeInSeconds".to_owned())
+        .or_insert_with(|| json!(0.0));
+    object
+        .entry("fadeOutSeconds".to_owned())
+        .or_insert_with(|| json!(0.0));
+    // A picture item's own audio track is MUTED unless the document says otherwise. See
+    // `TIMELINE_GENERATED_AUDIO`: this default is the doubling guard, so it must stay `mute`.
+    object
+        .entry("generatedAudio".to_owned())
+        .or_insert_with(|| Value::String("mute".to_owned()));
     object
         .entry("versionAssetIds".to_owned())
         .or_insert_with(|| json!([]));
@@ -4467,6 +4536,9 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     let speed = validate_f64_range(item, "speed", 0.1, 8.0)?;
     validate_enum(item, "fit", &["fit", "fill", "stretch"])?;
     let volume = validate_f64_range(item, "volume", 0.0, 2.0)?;
+    let fade_in = validate_f64_range(item, "fadeInSeconds", 0.0, 60.0)?;
+    let fade_out = validate_f64_range(item, "fadeOutSeconds", 0.0, 60.0)?;
+    validate_enum(item, "generatedAudio", TIMELINE_GENERATED_AUDIO)?;
     let object = item.as_object_mut().ok_or_else(|| {
         ProjectStoreError::BadRequest("Timeline item must be an object".to_owned())
     })?;
@@ -4476,6 +4548,8 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     object.insert("timelineEnd".to_owned(), json!(timeline_end));
     object.insert("speed".to_owned(), json!(speed));
     object.insert("volume".to_owned(), json!(volume));
+    object.insert("fadeInSeconds".to_owned(), json!(fade_in));
+    object.insert("fadeOutSeconds".to_owned(), json!(fade_out));
     object
         .entry("transitionIn".to_owned())
         .or_insert(Value::Null);
@@ -5542,15 +5616,17 @@ fn normalize_image_upload(
 }
 
 /// Normalize an audio upload to the canonical PCM-16 RIFF/WAVE the product can actually read back
-/// (sc-18650), ALWAYS — there is no pass-through branch.
+/// (sc-18650), ALWAYS — there is no pass-through branch HERE.
 ///
 /// The rule is deliberately unlike [`normalize_image_upload`]'s, where an already-decodable PNG or
 /// JPEG is stored byte-for-byte. Audio has exactly one reader,
 /// `sceneworks_worker::audio_jobs::read_wav_pcm16`, and it accepts exactly one encoding, so
 /// "already supported" is a much narrower set than "already audio": a 24-bit WAV, a float WAV, or a
-/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Sniffing for that narrow set and
-/// branching would mean the conversion path only ran for some inputs — the shape of latent bug this
-/// story exists to remove — for a saving of one ffmpeg pass on a file measured in megabytes.
+/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Every upload therefore goes
+/// through `transcode_to_wav_pcm16`; the ONE encoding that converter copies through unchanged
+/// (`media_convert::is_canonical_pcm16_wav`, sc-22715) is exactly the reader's own acceptance
+/// rule, decided inside the converter rather than by a sniff here, so the stored file is the
+/// canonical one on every path and a host with no ffmpeg can still import a file that already is.
 ///
 /// A conversion failure is a `BadRequest`: the caller named a file that is not decodable audio (or
 /// carries no audio stream), which is a fact about the upload, not about the host. The one host-shaped
@@ -12765,6 +12841,150 @@ mod tests {
         assert_eq!(
             found.relative_path,
             "timelines/main.sceneworks.timeline.json"
+        );
+    }
+
+    /// A timeline saved before sc-22712 existed still loads, still round-trips, and still sounds
+    /// the same.
+    ///
+    /// The new fields are `gain` and `role` on a track and `fadeInSeconds` / `fadeOutSeconds` /
+    /// `generatedAudio` on an item. None of them can be REQUIRED, because every timeline already on
+    /// disk lacks all five — a validator that rejected them would make the editor unable to open
+    /// the user's own projects, and one that defaulted `gain` to anything but unity would change
+    /// what an untouched project sounds like. So the check here is not "the keys appear": it is
+    /// that the values they appear with are the ones that mean "nothing has changed".
+    #[test]
+    fn a_timeline_saved_before_gain_and_fades_existed_still_round_trips_at_unity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Legacy").expect("project creates");
+        let created = store
+            .create_timeline(&project.id, "Old cut", "16:9", 24)
+            .expect("timeline creates");
+        let timeline_id = created["id"].as_str().expect("timeline id").to_owned();
+
+        // Exactly the shape the store wrote before this story: three tracks with `locked`/`muted`
+        // and no `role`/`gain`, and an item with no fades and no generated-audio policy.
+        let legacy = json!({
+            "id": timeline_id,
+            "projectId": project.id,
+            "name": "Old cut",
+            "aspectRatio": "16:9",
+            "width": 1280,
+            "height": 720,
+            "fps": 24,
+            "duration": 0.0,
+            "tracks": [
+                {"id": "track_main", "name": "Main", "kind": "video", "locked": false, "muted": false, "items": [{
+                    "id": "item_abcdef0123456789abcdef0123456789",
+                    "trackId": "track_main",
+                    "assetId": "asset_legacy",
+                    "displayName": "Legacy clip",
+                    "type": "video",
+                    "sourceIn": 0.0,
+                    "sourceOut": 4.0,
+                    "timelineStart": 0.0,
+                    "timelineEnd": 4.0,
+                    "speed": 1.0,
+                    "fit": "fit",
+                    "volume": 1.0
+                }]},
+                {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": []},
+                {"id": "track_audio", "name": "Audio", "kind": "audio", "locked": true, "muted": true, "items": []}
+            ],
+            "transitions": []
+        });
+        let saved = store
+            .save_timeline(&project.id, legacy)
+            .expect("a pre-sc-22712 timeline still saves");
+
+        let tracks = saved["tracks"].as_array().expect("tracks");
+        assert_eq!(tracks.len(), 3);
+        // Role is inferred from what the document already said, and gain defaults to unity — so a
+        // timeline nobody has touched sounds exactly as it did.
+        assert_eq!(tracks[0]["role"], json!("picture"));
+        assert_eq!(tracks[1]["role"], json!("overlay"));
+        assert_eq!(tracks[2]["role"], json!("sound"));
+        for track in tracks {
+            assert_eq!(
+                track["gain"],
+                json!(1.0),
+                "an untouched track must default to unity gain: {track}"
+            );
+        }
+        // The flags the document DID carry are untouched.
+        assert_eq!(tracks[2]["locked"], json!(true));
+        assert_eq!(tracks[2]["muted"], json!(true));
+
+        let item = &tracks[0]["items"][0];
+        assert_eq!(item["fadeInSeconds"], json!(0.0));
+        assert_eq!(item["fadeOutSeconds"], json!(0.0));
+        assert_eq!(
+            item["generatedAudio"],
+            json!("mute"),
+            "the default cannot be `include`: a legacy picture item whose clip happens to carry \
+             audio would start being mixed into exports that never had it"
+        );
+        // Nothing else about the item moved.
+        assert_eq!(item["assetId"], json!("asset_legacy"));
+        assert_eq!(item["sourceOut"], json!(4.0));
+        assert_eq!(item["timelineEnd"], json!(4.0));
+        assert_eq!(saved["duration"], json!(4.0));
+
+        // And it round-trips: saving what was read back changes nothing.
+        let again = store
+            .save_timeline(&project.id, saved.clone())
+            .expect("the defaulted document saves again");
+        for key in ["tracks", "duration", "fps", "aspectRatio"] {
+            assert_eq!(again[key], saved[key], "{key} is not stable across a save");
+        }
+    }
+
+    /// The new fields are validated, not merely defaulted.
+    #[test]
+    fn track_gain_and_item_generated_audio_are_range_checked() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Ranges").expect("project creates");
+        let created = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .expect("timeline creates");
+
+        let with = |mutate: &dyn Fn(&mut Value)| {
+            let mut timeline = created.clone();
+            mutate(&mut timeline);
+            store.save_timeline(&project.id, timeline)
+        };
+
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(9.0)).is_err(),
+            "a gain of 9 is 19 dB of boost and is refused"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(-1.0)).is_err(),
+            "a negative gain is refused"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["role"] = json!("foley")).is_err(),
+            "an unknown track role is refused rather than silently kept"
+        );
+        assert!(
+            with(&|timeline| {
+                timeline["tracks"][0]["items"] = json!([{
+                    "id": "item_abcdef0123456789abcdef0123456789",
+                    "trackId": "track_main",
+                    "assetId": "asset_x",
+                    "displayName": "Clip",
+                    "generatedAudio": "maybe"
+                }]);
+            })
+            .is_err(),
+            "`generatedAudio` takes include|mute and nothing else — a third spelling would be a \
+             policy nobody implemented"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(2.5)).is_ok(),
+            "a legitimate boost inside the range is accepted"
         );
     }
 
