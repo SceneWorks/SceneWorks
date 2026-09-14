@@ -428,13 +428,12 @@ target/release/film-harness review-eval \
   --api http://127.0.0.1:8000
 ```
 
-Twenty-odd `image_vqa` calls over the checked frames of the two takes. **Measured on real weights**
-(sc-22714 smoke, SenseNova-U1-8B on MLX): **2 m 19 s** end to end — the first call pays the cold
-bf16 load at **38 s**, every call after it runs in **~3 s**, well inside the review plan's
-`maxAnswerSeconds: 180`. Budget five minutes, not half an hour. The worker logs
-`image_pipeline_load_*` once per call, which reads as a reload; only the first one costs anything
-(the model stays resident in `refine_model_cache`), so do not size the budget off that log line.
-Outputs, all under `--out`:
+Twenty-four `image_vqa` calls over the checked frames of the two takes. **Measured on real weights**
+(sc-22714, SenseNova-U1-8B on MLX): **1 m 55 s** end to end — the first call pays the cold bf16 load
+at **42 s**, the median call is **3.1 s**, well inside the review plan's `maxAnswerSeconds: 180`.
+Budget five minutes, not half an hour. The worker logs `image_pipeline_load_*` once per call, which
+reads as a reload; only the first one costs anything (the model stays resident in
+`refine_model_cache`), so do not size the budget off that log line. Outputs, all under `--out`:
 
 | file | what it holds |
 | --- | --- |
@@ -442,18 +441,34 @@ Outputs, all under `--out`:
 | `review-eval.txt` | the printed report, ending with the assistive notice |
 | `real_sh010.observed.json`, `real_sh020.observed.json` | every question, answer, confidence and flag, with the frames cited |
 
-Two labels are deliberately hard, and the report saying so is the point. SH020's first frame is the
-flat conditioning plate, so its `frames: "all"` questions are honestly mismatch or unobserved.
-`sh020_cut` is labeled `mismatch` because SH020 renders a visibly different workshop from SH010 —
-the first smoke reported that as a clean cut and the evaluation correctly counted a **miss**, which
-is what prompted the comparative cut question (*The review plan* above): the same closed question
-now goes to both sides of the cut and the answers are compared, so a different room is a different
-answer.
+**What it actually reports**, measured: 13 scored, 11 correct, 3 detections, 1 miss, 1 false alarm,
+0 abstentions, **0 overclaims**. Two of those are deliberately hard and are the point of the set:
 
-The API needs a **fresh data dir**. A dir seeded from an earlier run carries that run's worker row,
-and a row still advertising `image_vqa` with `status: "offline"` is not a worker that will answer
-anything. `review` and `review-eval` now refuse on exactly that (naming the stale row), rather than
-queuing questions nobody claims and recording every one as unobserved.
+- **`sh010_courier_jacket` is a false alarm.** The courier's jacket is dark navy in a dim doorway
+  and the model answers `black`, which the question lists as a contradiction. A costume reviewer
+  that cannot separate navy from black in low light is a real limitation of this reviewer, and the
+  label stays `match`. Re-tuning a label to match what the model said would make the set worthless.
+- **`sh020_parcel` is a miss.** SH020's first frame is the flat conditioning plate, which contains
+  no parcel; the correct answer is `none` and the model answers `unclear`. Abstaining where a fault
+  exists is a miss, and the label stays `mismatch`.
+
+`sh020_cut` is labeled `mismatch` because SH020 renders a visibly different workshop from SH010.
+The FIRST real-weights run reported that as a clean cut and the evaluation correctly counted a
+**miss** — which is what prompted the comparative cut question (*The review plan* above). It is now
+a detection, in the model's own words: `this take reads "no", the take it cuts from reads "yes"`.
+
+The API's data dir needs the model's **download receipts and no stale worker rows**, and those pull
+in opposite directions:
+
+- a dir seeded whole from an earlier run carries that run's worker row, and a row still advertising
+  `image_vqa` with `status: "offline"` is not a worker that will answer anything;
+- an entirely empty dir has no download receipt for `sensenova_u1_8b`, whose weights ship as
+  per-tier subdirectories with no config at the snapshot root — so the loader dies on the first
+  question with *"cannot bind numeric tier"*, after the review has already created a project.
+
+Carry `data/models/` (the receipts) and leave `data/cache/` out. Both failure modes are refused up
+front and named: `review` and `review-eval` require a worker whose status is `idle` or `busy`, and
+require the catalog to report the model installed.
 
 ## Validation before dispatch
 

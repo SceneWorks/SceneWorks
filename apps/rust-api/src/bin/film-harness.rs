@@ -689,9 +689,11 @@ async fn review_command(args: &[String]) -> ExitCode {
     };
     let signal = spawn_interrupt_handler(options.control.clone());
     let vision = VqaVision::new(&transport, options.poll_interval, options.control.clone());
-    if let Err(error) = vision.preflight().await {
-        signal.abort();
-        return report_error(error);
+    for check in [vision.preflight().await, vision.preflight_model().await] {
+        if let Err(error) = check {
+            signal.abort();
+            return report_error(error);
+        }
     }
     let result = review::review(&transport, &options, &vision).await;
     signal.abort();
@@ -783,9 +785,14 @@ async fn review_eval_command(args: &[String]) -> ExitCode {
     let scripted_backend = ScriptedVision::new();
     let vqa_backend = VqaVision::new(&transport, options.poll_interval, options.control.clone());
     if !scripted {
-        if let Err(error) = vqa_backend.preflight().await {
-            signal.abort();
-            return report_error(error);
+        for check in [
+            vqa_backend.preflight().await,
+            vqa_backend.preflight_model().await,
+        ] {
+            if let Err(error) = check {
+                signal.abort();
+                return report_error(error);
+            }
         }
     }
     let vision: &dyn review::ReviewVision = if scripted {

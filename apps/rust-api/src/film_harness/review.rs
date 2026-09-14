@@ -228,7 +228,47 @@ impl<'a> VqaVision<'a> {
         Err(HarnessError::Refused(format!(
             "no live registered worker advertises image_vqa{detail}, so {VQA_MODEL_ID} cannot \
              answer anything; start the GPU worker (SCENEWORKS_WORKER_ONLY=1) and wait for it to \
-             register, or use a fresh data dir if a stale row is shadowing it"
+             register, or clear a stale worker row that is shadowing it"
+        )))
+    }
+
+    /// Refuse before the first question unless the catalog reports the understanding model
+    /// installed on this host.
+    ///
+    /// Also not decoration: the weights ship as PER-TIER subdirectories with no config at the
+    /// snapshot root, and the tier is bound by the DOWNLOAD RECEIPT in the data dir — so a host
+    /// with the model in its Hugging Face cache but no receipt fails inside the loader
+    /// ("cannot bind numeric tier without .../config.json") on the first question, after the
+    /// review has already created a project and imported frames. Catching it here costs one
+    /// request and says what to do.
+    pub async fn preflight_model(&self) -> Result<(), HarnessError> {
+        let catalog = self
+            .client()
+            .expect_ok("GET", "/api/v1/models", None)
+            .await?;
+        let Some(entry) = catalog
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(self.model.as_str()))
+        else {
+            return Err(HarnessError::Refused(format!(
+                "{} is not in this API's model catalog, so no question can be answered",
+                self.model
+            )));
+        };
+        if entry.get("installState").and_then(Value::as_str) == Some("installed") {
+            return Ok(());
+        }
+        Err(HarnessError::Refused(format!(
+            "{} is not installed on this host (catalog installState is {:?}); download it in the \
+             Model Manager, or point --api at an API whose data dir holds its download receipt — \
+             the weights ship as per-tier subdirectories and the receipt is what binds the tier",
+            self.model,
+            entry
+                .get("installState")
+                .and_then(Value::as_str)
+                .unwrap_or("absent")
         )))
     }
 }

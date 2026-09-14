@@ -727,7 +727,7 @@ struct Clause {
 /// of the person).
 fn clauses_of(answer: &str) -> Vec<Clause> {
     answer
-        .split(|c| matches!(c, '.' | ';' | '!' | '?' | '\n'))
+        .split(['.', ';', '!', '?', '\n'])
         .map(|clause| Clause {
             words: clause
                 .split(|c: char| !(c.is_alphanumeric() || c == '\''))
